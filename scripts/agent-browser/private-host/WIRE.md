@@ -36,17 +36,24 @@ Actions:
 - `tab_open`: optional `url`; `tab_list`; `tab_switch`, `tab_close`: `tab_id`.
   Only explicitly created task tabs are listed or addressable. IDs remain
   monotonic through a human takeover restart. Closed targets fail `tab_gone`.
-- `inspect_reference`: `tab_id`, `ref`. Returns `url`, `origin`, `documentId`,
+- `inspect_reference`: `tab_id`, `ref`. Returns `url`, `origin`, `documentId`, `metadataId`,
   `backendNodeId`, and `element` containing strings `tag`, `inputType`, `role`,
   `name`, `id`, `label`, `autocomplete`, and booleans `inForm`, `contentEditable`.
   `name` is the HTML name attribute; `label` is the accessible caption.
-  No field value is included.
+  No field value is included. Free metadata is sanitized against the coherent
+  field inventory. `metadataId` is a random private-cache revision, reused only
+  while the original metadata and inspection facts remain unchanged. It is not
+  a digest of field content. Original metadata stays private to the host.
 - `guarded_action`: `tab_id`, `ref`, `operation`, full `expected` inspection,
   optional `text` or `key`. Supported operations are `click`, `fill`, `press`.
   Press currently supports Enter, Space, Escape, Backspace and Delete; other keys
   fail definitively before dispatch. The exact node, document, origin and
   metadata are rechecked in an isolated-world DOM task immediately before the
-  semantic effect. Focus is followed by another check before typing/key events.
+  semantic effect. The full expected revision and original metadata are checked,
+  including when redaction makes two different captions look identical. Focus
+  is followed by another check before typing/key events. Password, code and
+  payment criteria apply to every interaction, including clicks on text inputs
+  with password autocomplete tokens; approval cannot override this refusal.
   This uses DOM events, whose `isTrusted` is false; sites requiring trusted input
   need a human interaction. No role/name recovery, generic selectors, JavaScript,
   CDP, cookies, arbitrary browser arguments or file upload API is exposed.
@@ -58,16 +65,29 @@ Actions:
   kills/reaps the entire owned group/Job on completion or cancellation.
 
 References are random opaque IDs minted per snapshot and bound in memory to a
-single tab, exact main-frame id, loader id, document root and backend node. AX values are stripped before
-formatting, editable DOM descendants are masked, and field contents are removed
-from computed accessible names. Private snapshots do not annotate the page or
-recurse into frames. Screenshots pause virtual time/animations, collect geometry
-through CDP including closed shadow roots, and paint every input, textarea,
-select, editable region and iframe before encoding. Unreadable geometry fails
-closed. The parent owns profile leases, lifecycle cancellation, grants, approvals,
+single tab, exact main-frame id, loader id, document root and backend node.
+Snapshot and inspection observations freeze the page lifecycle while the native
+field inventory and accessibility data are collected. AX values and editable
+descendants are also derived from each raw AX response before any formatting.
+Lifecycle scheduling is restored before the synchronous final guard and effect,
+so ordinary network handlers retain their normal behavior. Private snapshots do
+not annotate the page or recurse into frames.
+
+Screenshots freeze lifecycle tasks and pause virtual time/animations. Native DOM
+layout and text-fragment bounds cover controls, inherited editable descendants,
+closed shadow content, pseudo elements and iframes. Overflow outside an editable
+ancestor's own box is covered independently. Native geometry and the viewport
+are reread before emission. Unsupported text shadows, filters, reflections,
+transforms, strokes or emphasis that cannot be bounded fail closed rather than
+producing an image. Every scheduler restoration is attempted on every path;
+failure closes the browser and returns a terminal unknown result so the parent
+invalidates the task. The parent owns profile leases, lifecycle cancellation, grants, approvals,
 network policy, artifacts and resume authorization.
 
 Native macOS and Windows acceptance remains separate from the synthetic Linux
 fixture. `private-host-smoke.py` accepts the exact host and Chrome paths and
 writes real receipts/screenshots; it uses only a run-owned profile and a local
 proxy which rejects every hostname except `fixture.invalid`.
+The source-only `cdp_fixture.py` relay is not shipped. Its real HTTP image latch
+exercises mutation between inventory and AX without adding a production hook or
+injecting any CDP command.

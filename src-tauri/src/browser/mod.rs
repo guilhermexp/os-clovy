@@ -20,6 +20,12 @@ fn map_error(e: EngineError) -> AppError {
     AppError::new(e.code, e.message)
 }
 struct Transport(Arc<AgentBrowserTransport>);
+
+#[cfg(test)]
+pub(crate) fn test_transport(config: EngineConfig) -> Arc<dyn BrowserTransport> {
+    Arc::new(Transport(AgentBrowserTransport::new(config)))
+}
+
 impl BrowserTransport for Transport {
     fn reserve_session(&self, id: &str) -> Result<(), AppError> {
         self.0.reserve(id).map_err(map_error)

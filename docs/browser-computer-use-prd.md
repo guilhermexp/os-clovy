@@ -100,12 +100,29 @@ origin, document, backend node and element facts immediately before input.
 A replaced same-name element is stale, never recovered by role or name.
 These operations are not additional model-facing tools.
 
+Field inventory and AX observations share a frozen page lifecycle boundary;
+the native inventory includes closed shadow roots and inherited editable
+content. Image masks cover native editable-subtree layout/text geometry,
+including overflow and pseudo-elements, and reject unsupported paint geometry.
+The page is restored before dispatching an event. Failed restoration terminates
+the task rather than leaving a frozen page advertised as usable.
+Inspection exposes value-redacted metadata and an opaque random `metadataId`
+revision. Exact original facts remain private in the reference cache, so two
+different raw labels that both display as redacted cannot share approval.
+The revision changes when those facts change; no raw field content or
+guessable digest of it is published.
+
 The native broker owns grants, session leases, reference expiry, network
-policy, artifact roots, consequential-action approvals and lifecycle. The
+policy, artifact roots, input approvals and lifecycle. The
 central approval broker is the only approval authority. Approvals require
-post-wait owner/tab/document revalidation. Each consequential action uses the
-central approval card; there is no browser-specific always-allow or site-wide
-approval. Approval never authorizes sensitive input.
+post-wait owner/tab/document revalidation. Every click, fill and key press uses
+the central approval card: page labels, element roles and absence of known
+consequential words cannot prove that an event handler is harmless. The card
+shows a capped, quoted label from the inspected element as untrusted page text,
+along with its origin. No field value or proposed input text is displayed.
+There is no browser-specific always-allow or site-wide approval. Approval never
+authorizes interaction with sensitive fields, including a password displayed
+as text through current-password or new-password autocomplete.
 Transport failure after dispatch returns an uncertain outcome, without retry
 or a fabricated success verification. Stop or shutdown cancels startup and
 in-flight work and reaps both daemon and browser processes before releasing
@@ -115,7 +132,8 @@ the persistent profile lease. Only ephemeral profiles are deleted.
 
 A routine needs its own explicit browsing grant and bound routine/run identity.
 It uses an anonymous ephemeral profile, never the attended login profile.
-Consequential actions remain blocked because nobody is present to approve.
+Clicks, fills and key presses remain blocked because nobody is present to
+approve them. Reads and explicit public-page navigation retain their grants.
 Public destination resolution, validation and DNS/IP pinning remain enforced,
 including redirects and subresources. Private, loopback, link-local and
 non-HTTP destinations remain denied. The connection proxy does not inspect

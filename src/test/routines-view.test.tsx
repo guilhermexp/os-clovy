@@ -802,7 +802,10 @@ describe("RoutinesView detail", () => {
     await openDetail("Morning summary");
 
     expect(
-      await screen.findByText(/browse public pages with a separate anonymous profile/i),
+      await screen.findByText(/read and navigate public pages with a separate anonymous profile/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/saved logins and interaction with page controls are unavailable/i),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("switch", { name: "Allow browser use for this routine" }),

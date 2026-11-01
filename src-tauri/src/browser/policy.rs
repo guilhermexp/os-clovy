@@ -61,45 +61,23 @@ pub enum ManagedAction<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionClass {
-    Routine,
     Consequential,
     SensitiveField,
 }
 
-/// Classify a managed-browser action from element semantics. The page never
-/// decides whether an action is allowed, and its descriptive text is never
-/// included in a refusal.
+/// Page-authored metadata cannot establish that input has no outward effect:
+/// click, input and key handlers can all mutate arbitrary application state.
+/// Every agent interaction therefore asks the central approval broker unless
+/// the field is human-only, which approval cannot override. Read/navigation
+/// tools do not enter this input classifier and retain their existing grants.
 pub fn classify_managed_action(
-    action: ManagedAction<'_>,
+    _action: ManagedAction<'_>,
     element: &InteractiveElement,
 ) -> ActionClass {
-    if matches!(action, ManagedAction::Fill | ManagedAction::Press(_))
-        && is_sensitive_field(element)
-    {
+    if is_sensitive_field(element) {
         return ActionClass::SensitiveField;
     }
-
-    let activates = match action {
-        ManagedAction::Click => true,
-        ManagedAction::Fill => false,
-        ManagedAction::Press(key) => matches!(key, "Enter" | " " | "Space" | "Spacebar"),
-    };
-    if !activates {
-        return ActionClass::Routine;
-    }
-
-    let tag = element.tag.to_ascii_lowercase();
-    let input_type = element.input_type.to_ascii_lowercase();
-    let semantic_submit = matches!(input_type.as_str(), "submit" | "image")
-        || (tag == "button" && element.in_form && input_type != "button")
-        || (matches!(action, ManagedAction::Press("Enter"))
-            && element.in_form
-            && matches!(tag.as_str(), "input" | "textarea" | "select"));
-    if semantic_submit || contains_consequential_term(element) {
-        ActionClass::Consequential
-    } else {
-        ActionClass::Routine
-    }
+    ActionClass::Consequential
 }
 
 pub fn is_sensitive_field(element: &InteractiveElement) -> bool {
@@ -141,16 +119,6 @@ pub fn is_sensitive_field(element: &InteractiveElement) -> bool {
             "valid through",
             "cvv",
             "cvc",
-        ],
-    )
-}
-
-fn contains_consequential_term(element: &InteractiveElement) -> bool {
-    contains_term(
-        element,
-        &[
-            "submit", "send", "publish", "purchase", "buy", "checkout", "pay", "payment", "order",
-            "delete", "remove", "confirm", "save",
         ],
     )
 }
@@ -1005,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_action_classification_covers_consequential_and_routine_actions() {
+    fn page_metadata_cannot_exempt_input_from_central_approval() {
         let submit = InteractiveElement {
             tag: "button".into(),
             in_form: true,
@@ -1035,11 +1003,11 @@ mod tests {
         };
         assert_eq!(
             classify_managed_action(ManagedAction::Click, &link),
-            ActionClass::Routine
+            ActionClass::Consequential
         );
         assert_eq!(
             classify_managed_action(ManagedAction::Press("Escape"), &submit),
-            ActionClass::Routine
+            ActionClass::Consequential
         );
         let form_input = InteractiveElement {
             tag: "input".into(),
@@ -1054,8 +1022,12 @@ mod tests {
     }
 
     #[test]
-    fn managed_action_classification_covers_every_consequential_term_class() {
+    fn neutral_and_localized_labels_need_approval_just_like_outward_labels() {
         for label in [
+            "Continue",
+            "Continuar",
+            "下一步",
+            "",
             "Submit application",
             "Send message",
             "Publish post",
@@ -1081,11 +1053,23 @@ mod tests {
     }
 
     #[test]
-    fn managed_text_input_classification_blocks_sensitive_fields_only() {
+    fn sensitive_fields_are_human_only_for_every_input_operation() {
         for sensitive in [
             InteractiveElement {
                 tag: "input".into(),
                 input_type: "password".into(),
+                ..InteractiveElement::default()
+            },
+            InteractiveElement {
+                tag: "input".into(),
+                input_type: "text".into(),
+                autocomplete: "section-login current-password webauthn".into(),
+                ..InteractiveElement::default()
+            },
+            InteractiveElement {
+                tag: "input".into(),
+                input_type: "text".into(),
+                autocomplete: "section-signup new-password".into(),
                 ..InteractiveElement::default()
             },
             InteractiveElement {
@@ -1130,6 +1114,10 @@ mod tests {
             },
         ] {
             assert_eq!(
+                classify_managed_action(ManagedAction::Click, &sensitive),
+                ActionClass::SensitiveField
+            );
+            assert_eq!(
                 classify_managed_action(ManagedAction::Fill, &sensitive),
                 ActionClass::SensitiveField
             );
@@ -1145,11 +1133,11 @@ mod tests {
         };
         assert_eq!(
             classify_managed_action(ManagedAction::Fill, &ordinary),
-            ActionClass::Routine
+            ActionClass::Consequential
         );
         assert_eq!(
             classify_managed_action(ManagedAction::Press("a"), &ordinary),
-            ActionClass::Routine
+            ActionClass::Consequential
         );
     }
 

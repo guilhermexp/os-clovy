@@ -121,6 +121,7 @@ struct Inspection {
     url: String,
     origin: String,
     document_id: String,
+    metadata_id: String,
     backend_node_id: i64,
     element: InteractiveElement,
 }
@@ -484,14 +485,14 @@ impl BrowserBroker {
                             call_id: Some(uuid::Uuid::new_v4().to_string()),
                             kind: ApprovalKind::Approval {
                                 title: "Use the browser".into(),
-                                description: "Clovy will perform one consequential action on the inspected page.".into(),
+                                description: "Clovy will interact with the inspected page. The page can attach effects to any click, field change or key.".into(),
                                 arguments: json!({
                                     "session_id": id,
                                     "tab_id": integer(&arguments, "tab_id")?,
                                     "operation": tool,
                                     "origin": expected.origin,
                                 }),
-                                preview: None,
+                                preview: Some(browser_action_preview(tool, &expected)),
                             },
                         },
                     ).await.map_err(|d| err(d.code(), d.message()))?;
@@ -504,7 +505,6 @@ impl BrowserBroker {
                     operation_guard = Some(operation.lock().await);
                     self.revalidate(&owner, Some(&id)).await?;
                 }
-                ActionClass::Routine => {}
             }
             arguments["expected"] = serde_json::to_value(expected).map_err(|_| unavailable())?;
         }
@@ -741,6 +741,28 @@ impl BrowserBroker {
         t.resume_control(id).await?;
         Ok(())
     }
+}
+
+/// Only inspected, already value-redacted element facts may enter a card.
+/// Page text remains explicitly untrusted and quoted, never an instruction
+/// authored by Clovy. Input text, values, name/id and full URLs are excluded.
+fn browser_action_preview(tool: &str, expected: &Inspection) -> String {
+    fn text(value: &str, limit: usize) -> String {
+        value
+            .chars()
+            .filter(|c| {
+                !c.is_control() && !matches!(*c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            })
+            .take(limit)
+            .collect()
+    }
+    format!(
+        "Untrusted page element label: {}\nElement tag: {}; role: {}; operation: {tool}\nOrigin: {}",
+        json!(text(&expected.element.label, 128)),
+        json!(text(&expected.element.tag, 32)),
+        json!(text(&expected.element.role, 32)),
+        text(&expected.origin, 256),
+    )
 }
 fn string<'a>(v: &'a Value, key: &str) -> Result<&'a str, AppError> {
     v.get(key)

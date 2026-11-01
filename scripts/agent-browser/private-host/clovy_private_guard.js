@@ -1,4 +1,15 @@
-function _clovyGuard(doc, documentId, backendNodeId, expected, operation, text, key) {
+function _clovyGuard(
+  doc,
+  documentId,
+  backendNodeId,
+  expected,
+  operation,
+  text,
+  key,
+  expectedRaw,
+  redactedValues,
+  metadataId,
+) {
   if (!this.isConnected || this.ownerDocument !== doc || doc !== document)
     return { error: "stale_reference" };
 
@@ -39,9 +50,9 @@ function _clovyGuard(doc, documentId, backendNodeId, expected, operation, text, 
     this.getAttribute("title") ||
     (["input", "textarea", "select"].includes(tag) || this.isContentEditable
       ? ""
-      : safeText(this).trim().slice(0, 1000));
+      : safeText(this).trim());
   const name = this.getAttribute("name") || "";
-  const element = {
+  const rawElement = {
     tag,
     inputType,
     role,
@@ -52,14 +63,30 @@ function _clovyGuard(doc, documentId, backendNodeId, expected, operation, text, 
     inForm: !!(this.form || this.closest("form")),
     contentEditable: this.isContentEditable,
   };
+  const redact = (value) => {
+    let safe = value;
+    for (const secret of redactedValues || []) {
+      if (secret) safe = safe.split(secret).join("[redacted]");
+    }
+    return safe;
+  };
+  const element = {
+    ...rawElement,
+    name: redact(rawElement.name),
+    id: redact(rawElement.id),
+    label: redact(rawElement.label).slice(0, 1000),
+    role: redact(rawElement.role),
+    autocomplete: redact(rawElement.autocomplete),
+  };
   const inspection = {
     url: location.href,
     origin: location.origin,
     documentId,
+    metadataId,
     backendNodeId,
     element,
   };
-  if (!expected) return { inspection };
+  if (!expected) return { inspection, rawElement };
   const equal = (a, b) =>
     a === b ||
     (a &&
@@ -68,19 +95,70 @@ function _clovyGuard(doc, documentId, backendNodeId, expected, operation, text, 
       typeof b === "object" &&
       Object.keys(a).length === Object.keys(b).length &&
       Object.keys(a).every((k) => equal(a[k], b[k])));
-  if (!equal(inspection, expected)) return { error: "stale_reference" };
-  // Password, one-time codes and payment details are human-only, including click/press.
+  if (!equal(inspection, expected) || !equal(rawElement, expectedRaw))
+    return { error: "stale_reference" };
+  // Keep the effective human-only criteria aligned with browser/policy.rs.
+  // Classify ORIGINAL facts, before value-derived metadata is redacted.
+  const asciiLower = (value) => value.replace(/[A-Z]/g, (c) => c.toLowerCase());
+  const sensitiveText = asciiLower(
+    [rawElement.name, rawElement.id, label, rawElement.role].join(" "),
+  ).replace(/[_-]/g, " ");
+  const sensitiveTerms = [
+    "password",
+    "passcode",
+    "one time code",
+    "one-time code",
+    "otp",
+    "verification code",
+    "authentication code",
+    "auth code",
+    "2fa code",
+    "2 fa code",
+    "mfa code",
+    "two factor code",
+    "security code",
+    "card number",
+    "credit card",
+    "expiration",
+    "expiry",
+    "exp date",
+    "exp month",
+    "exp year",
+    "mm/yy",
+    "mm / yy",
+    "valid thru",
+    "valid through",
+    "cvv",
+    "cvc",
+  ];
   if (
     inputType === "password" ||
-    /(^|\s)(one-time-code|cc-[^\s]+)(\s|$)/i.test(element.autocomplete) ||
-    /(?:password|passcode|otp|verification.?code|card.?number|cvv|cvc)/i.test(
-      [element.name, element.id, label].join(" "),
-    )
+    asciiLower(rawElement.autocomplete)
+      .split(/\s+/)
+      .some(
+        (token) =>
+          token.includes("password") || token === "one-time-code" || token.startsWith("cc-"),
+      ) ||
+    sensitiveTerms.some((term) => sensitiveText.includes(term))
   )
     return { error: "sensitive_field" };
   const verify = () => {
-    const check = _clovyGuard.call(this, doc, documentId, backendNodeId, null, null, null, null);
-    return check.inspection && equal(check.inspection, expected);
+    const check = _clovyGuard.call(
+      this,
+      doc,
+      documentId,
+      backendNodeId,
+      null,
+      null,
+      null,
+      null,
+      null,
+      redactedValues,
+      metadataId,
+    );
+    return (
+      check.inspection && equal(check.inspection, expected) && equal(check.rawElement, expectedRaw)
+    );
   };
   if (operation === "click") {
     this.click();

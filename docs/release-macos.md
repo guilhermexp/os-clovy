@@ -167,3 +167,10 @@ creation cannot make a release browser-ready. Validate the prepared resources
 with `pnpm browser:prepare -- --release --check` (and the matching `--target`
 for a universal release). macOS signature/notarization and live persistent-login
 acceptance must be performed on a Mac; Linux preparation does not prove them.
+
+Signing does not change Chromium's native Safe Storage namespace. The current
+pinned source/packaging does not establish the required `-dev` Keychain service
+for persistent development/proof runs. Keep those runs blocked before launch
+until a supported namespace integration is reviewed and qualified; changing
+only the bundle id/profile path or using persistent mock/basic crypto does not
+meet that boundary. See the development runbook's pinned-browser section.

@@ -41,3 +41,44 @@ metadata and per-file inventories make each prepared artifact reviewable.
 Preparation is a build/dev/release step; runtime never installs a CLI or
 downloads a browser. Native macOS/Windows signing, credential-store behavior
 and both CLI walkthroughs require their own platform evidence.
+
+## 2026-11-01 addendum: page metadata cannot exempt input from approval
+
+The review confirmed that the inherited keyword classifier could silently
+authorize a neutral or localized button whose handler deletes or publishes.
+This is an inherited policy gap, not a regression introduced by the private
+host. Every click, fill and key press now asks the central approval broker;
+field-change and key handlers can have effects just like click handlers.
+Page labels identify the target in a capped, quoted, explicitly untrusted
+preview, but cannot supply authorization. Sensitive controls remain human-only,
+including password autocomplete on a text input. Reads and explicit navigation
+retain their existing grants. Unattended routines therefore keep reading and
+navigating but cannot perform agent input without a person. This accepts more
+attended approval cards rather than treating page-authored semantics as proof
+of harmlessness; there is no browser-specific bypass or new approval surface.
+
+The same source audit found that pinned CFT uses Chromium's default native
+Safe Storage namespace. Current re-sign-only packaging does not establish a
+`-dev` Keychain service. Persistent macOS development/proof launch stays blocked
+until a supported namespace integration is chosen and qualified with the owner.
+This is an explicit unresolved native boundary, not permission to use mock/basic
+crypto, touch an existing owner's item or assume a profile/bundle rename changes
+the credential service. Anonymous fixture evidence does not qualify that custody.
+
+## 2026-11-01 addendum: coherent redaction and exact private metadata
+
+An inventory taken before AX can miss a changed or newly inserted field. Native
+field inventory and AX observation therefore share a frozen lifecycle boundary;
+AX redaction also derives field values from the same raw response before
+removing them. Native layout/text geometry covers inherited editable overflow,
+closed shadow trees and pseudo-elements. Unsupported editable paint fails
+closed instead of returning an unverified image. Every pause is restored, or
+the task becomes terminal/unknown and is reaped. Mutation dispatch runs after
+restoration with the exact synchronous element guard.
+
+Sanitized labels can collide even when original metadata changes. Original
+facts remain only in the private per-reference cache; the wire carries an
+opaque random metadata revision, reused only while those facts are unchanged.
+This preserves the approval binding without publishing a low-entropy secret
+digest that could be guessed offline. This is an internal typed-wire extension,
+not another model-facing operation or authority grant.

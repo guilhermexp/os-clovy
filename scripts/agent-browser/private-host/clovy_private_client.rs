@@ -159,12 +159,12 @@ impl CdpClient {
             if msg.error.is_some() {
                 Err("CDP command rejected")
             } else {
-                Ok(redact_response(
+                redact_response(
                     method,
                     msg.result.unwrap_or(Value::Null),
                     &self.redacted_nodes.lock().unwrap(),
                     &self.redacted_values.lock().unwrap(),
-                ))
+                )
             }
         })
         .await;
@@ -240,53 +240,139 @@ impl InspectProxyHandle {
     }
 }
 
-// AX values can contain secrets even when password controls themselves are masked.
-// Strip all values and editable names, including cross-origin iframe AX subtrees.
+// Sanitize one complete AX response before any upstream snapshot caller sees it.
+// Raw values and editable descendants come from this response, never only a prior DOM inventory.
 fn redact_response(
     method: &str,
     mut v: Value,
     redacted: &HashSet<i64>,
-    values: &[String],
-) -> Value {
-    if method.starts_with("Accessibility.") {
-        if let Some(nodes) = v.get_mut("nodes").and_then(Value::as_array_mut) {
-            for n in nodes {
-                let role = n["role"]["value"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                if n["backendDOMNodeId"]
-                    .as_i64()
-                    .is_some_and(|id| redacted.contains(&id))
-                {
-                    n["name"] = json!({"type":"computedString","value":"[redacted]"});
-                    n.as_object_mut().map(|m| m.remove("description"));
-                }
-                for key in ["name", "description"] {
-                    if let Some(text) = n
-                        .get_mut(key)
-                        .and_then(|v| v.get_mut("value"))
-                        .and_then(|v| v.as_str())
-                        .map(str::to_owned)
-                    {
-                        let mut safe = text;
-                        for secret in values {
-                            if !secret.is_empty() {
-                                safe = safe.replace(secret, "[redacted]");
-                            }
-                        }
-                        n[key]["value"] = json!(safe);
-                    }
-                }
-                n.as_object_mut().map(|m| m.remove("value"));
-                if matches!(
-                    role.as_str(),
-                    "textbox" | "searchbox" | "combobox" | "spinbutton"
-                ) {
-                    n.as_object_mut().map(|m| m.remove("description"));
-                }
+    inventory: &[String],
+) -> Result<Value, &'static str> {
+    if !method.starts_with("Accessibility.")
+        || matches!(method, "Accessibility.enable" | "Accessibility.disable")
+    {
+        return Ok(v);
+    }
+    let nodes = v
+        .get_mut("nodes")
+        .and_then(Value::as_array_mut)
+        .ok_or("redaction_failed")?;
+    let mut values = inventory.to_vec();
+    let mut private_children = HashSet::<String>::new();
+    for node in nodes.iter() {
+        if let Some(value) = node["value"]["value"].as_str().filter(|v| !v.is_empty()) {
+            values.push(value.to_owned());
+            let trimmed = value.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+            if !trimmed.is_empty() && trimmed != value {
+                values.push(trimmed.to_owned());
+            }
+            let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !normalized.is_empty() && normalized != value {
+                values.push(normalized);
+            }
+        }
+        let editable = node["properties"].as_array().is_some_and(|props| {
+            props.iter().any(|p| {
+                p["name"] == "editable"
+                    && (p["value"]["value"].as_bool() == Some(true)
+                        || matches!(p["value"]["value"].as_str(), Some("plaintext" | "richtext")))
+            })
+        });
+        let field = matches!(
+            node["role"]["value"].as_str(),
+            Some("textbox" | "searchbox" | "combobox" | "spinbutton")
+        );
+        if editable || field {
+            for child in node["childIds"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                private_children.insert(child.to_owned());
             }
         }
     }
-    v
+    values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    values.dedup();
+    if values.len() > 4000 || values.iter().map(String::len).sum::<usize>() > 8 * 1024 * 1024 {
+        return Err("redaction_failed");
+    }
+    loop {
+        let count = private_children.len();
+        for node in nodes.iter() {
+            if node["nodeId"]
+                .as_str()
+                .is_some_and(|id| private_children.contains(id))
+            {
+                for child in node["childIds"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
+                    private_children.insert(child.to_owned());
+                }
+            }
+        }
+        if count == private_children.len() {
+            break;
+        }
+    }
+    for node in nodes {
+        let private = node["backendDOMNodeId"]
+            .as_i64()
+            .is_some_and(|id| redacted.contains(&id))
+            || node["nodeId"]
+                .as_str()
+                .is_some_and(|id| private_children.contains(id));
+        for key in ["name", "description"] {
+            if let Some(text) = node[key]["value"].as_str() {
+                let mut safe = if private {
+                    "[redacted]".to_owned()
+                } else {
+                    text.to_owned()
+                };
+                for value in &values {
+                    safe = safe.replace(value, "[redacted]");
+                }
+                // Drop AX computed-name sources too: they can retain raw field content.
+                node[key] = json!({"type":"computedString", "value":safe});
+            } else if let Some(object) = node.as_object_mut() {
+                object.remove(key);
+            }
+        }
+        if let Some(object) = node.as_object_mut() {
+            object.remove("value");
+        }
+    }
+    Ok(v)
+}
+
+#[cfg(test)]
+mod private_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn ax_current_and_new_field_values_redact_names_without_stale_inventory() {
+        let raw = json!({"nodes":[
+            {"nodeId":"1","role":{"value":"textbox"},"name":{"value":"private-B","sources":[{"value":"private-B"}]},"value":{"value":"private-B"}},
+            {"nodeId":"2","role":{"value":"textbox"},"name":{"value":"Fresh field"},"value":{"value":"new-C"},"childIds":["3"]},
+            {"nodeId":"3","role":{"value":"StaticText"},"name":{"value":"new-C"}},
+            {"nodeId":"4","role":{"value":"button"},"name":{"value":"Query"}},
+            {"nodeId":"5","role":{"value":"button"},"name":{"value":"Copied new-C"}}
+        ]});
+        let safe = redact_response(
+            "Accessibility.getFullAXTree",
+            raw,
+            &HashSet::new(),
+            &["old-A".into()],
+        )
+        .unwrap();
+        let encoded = safe.to_string();
+        assert!(!encoded.contains("private-B") && !encoded.contains("new-C"));
+        assert_eq!(safe["nodes"][1]["name"]["value"], "Fresh field");
+        assert_eq!(safe["nodes"][3]["name"]["value"], "Query");
+        assert_eq!(safe["nodes"][4]["name"]["value"], "Copied [redacted]");
+    }
 }

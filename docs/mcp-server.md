@@ -163,7 +163,7 @@ CLI turn gets (15 minutes, `chat_engine::policy::CLI_TOOL_TIMEOUT`, checked at
 compile time). A clarification (`request_clarification`) is the same item
 with `kind: "clarification"`, `question`, and `choices`; the answer is the
 tool's result.
-Browser use asks this same broker for consequential actions. Its session
+Browser use asks this same broker for every click, fill and key press. Its session
 controls manage takeover, resume and Stop; they do not issue approvals.
 
 ## The relay while Clovy is unreachable
@@ -243,7 +243,7 @@ routines), or `Claude turns`. A `Claude turns` tool is listed for Claude Code
 itself, not for the model: every Claude turn with Clovy's server, attended or
 not, gets `--disallowedTools mcp__clovy__<tool>` (`chat_engine::policy`). "Broker" says what the call asks first: `yes`
 (an approval card for every call), `clarification` (a question card), `conditional`
-(the central broker for consequential browser actions), or `no`. In an
+(the central broker for browser input actions), or `no`. In an
 unattended turn every `yes` and `clarification` answers
 `unattended_requires_approval` without a card.
 
@@ -286,8 +286,8 @@ unattended turn every `yes` and `clarification` answers
 
 Browser use requires a host-bound conversation/run. A routine must additionally
 resolve to its persisted routine run and hold a current dedicated browsing
-grant; it receives an anonymous profile and cannot perform consequential
-actions. Attended consequential actions use the central approval broker,
+grant; it receives an anonymous profile and cannot click, fill or press keys.
+Attended input actions use the central approval broker regardless of page labels,
 then revalidate the owner and exact element identity. Passwords, verification
 codes and payment details require human takeover in the dedicated browser;
 capture and input remain paused until explicit resume. Stop and turn-token

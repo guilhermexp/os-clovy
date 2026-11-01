@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentRuntimeEvent, AgentSessionDto } from "../lib/agent-runtime-contract";
+import { applyInterfaceLocale } from "../i18n/locale";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -1732,6 +1733,88 @@ describe("AgentWorkspace runtime wiring", () => {
     );
     expect(await screen.findByText("Approved once")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["en", "Deny", "Denied"],
+    ["pt-BR", "Negar", "Negado"],
+  ] as const)("shows concrete untrusted browser targets before the real decision callback in %s", async (locale, denyLabel, deniedLabel) => {
+    applyInterfaceLocale(locale);
+    try {
+      const preview = (label: string) =>
+        `click Untrusted page element label: ${JSON.stringify(label)}\nElement tag: "button"; role: "button"; operation: click\nOrigin: https://mail.example.com`;
+      const event = (label: string, id: string, sequence: number): AgentRuntimeEvent => ({
+        protocolVersion: 1,
+        eventId: `browser-event-${id}`,
+        sessionId: session.id,
+        runId: "run-browser",
+        sequence,
+        method: "interruption.requested",
+        data: {
+          itemId: `browser-item-${id}`,
+          interruption: {
+            id,
+            kind: "approval",
+            engine: "cli",
+            sessionId: session.id,
+            runId: "run-browser",
+            status: "pending",
+            createdAt: "2026-11-01T00:00:00Z",
+            toolName: "click",
+            title: "Use the browser",
+            description: "Clovy will perform one consequential action on the inspected page.",
+            command: preview(label),
+            allowAlways: false,
+          },
+        },
+      });
+      render(<AgentWorkspace initialSession={session} />);
+      await screen.findByText("Earlier answer");
+      act(() => {
+        mocks.runtimeListener?.({ payload: event("Delete draft", "delete-draft", 2) });
+        mocks.runtimeListener?.({ payload: event("Delete account", "delete-account", 3) });
+      });
+      const draftPreview = await screen.findByText(preview("Delete draft"), {
+        exact: true,
+        normalizer: (text) => text,
+      });
+      const accountPreview = await screen.findByText(preview("Delete account"), {
+        exact: true,
+        normalizer: (text) => text,
+      });
+      // Concrete targets are visible while both choices are live, without opening Details.
+      expect(draftPreview).toBeVisible();
+      expect(accountPreview).toBeVisible();
+      expect(draftPreview.tagName).toBe("PRE");
+      expect(accountPreview.tagName).toBe("PRE");
+      const draftCard = draftPreview.closest("article");
+      const accountCard = accountPreview.closest("article");
+      if (!draftCard || !accountCard) throw new Error("Missing central browser approval cards");
+      expect(draftCard).not.toBe(accountCard);
+      expect(within(draftCard).getByRole("button", { name: denyLabel })).toBeEnabled();
+      expect(within(accountCard).getByRole("button", { name: denyLabel })).toBeEnabled();
+      await userEvent.click(within(accountCard).getByRole("button", { name: denyLabel }));
+      await waitFor(() =>
+        expect(mocks.invoke).toHaveBeenCalledWith("resolve_agent_interruption", {
+          request: {
+            runId: "run-browser",
+            interruptionId: "delete-account",
+            resolution: { kind: "approval", choice: "deny" },
+          },
+        }),
+      );
+      expect(await screen.findByText(deniedLabel)).toBeInTheDocument();
+      expect(within(draftCard).getByRole("button", { name: denyLabel })).toBeEnabled();
+      const decisions = mocks.invoke.mock.calls.filter(
+        ([command]) => command === "resolve_agent_interruption",
+      );
+      expect(decisions).toHaveLength(1);
+      expect(mocks.invoke.mock.calls.some(([command]) => command === "start_agent_run")).toBe(
+        false,
+      );
+    } finally {
+      act(() => applyInterfaceLocale("en"));
+    }
   });
 
   it("keeps an approval retryable when interruption resolution fails", async () => {

@@ -349,8 +349,9 @@ browser through a private agent-browser host. Attended tasks use an exclusive
 persistent profile with logins separate from the user's usual browser.
 Routines use anonymous ephemeral profiles and their own public-web grants.
 Every tab and reference belongs to one conversation/run; Stop ends control
-and processes while retaining the attended profile. Consequential actions use
-the central approval broker. Background is the default; human takeover opens
+and processes while retaining the attended profile. Clicks, fills and key
+presses use the central approval broker because page metadata cannot prove an
+input event harmless. Background is the default; human takeover opens
 the dedicated browser visibly and suspends agent capture/input until resume.
 _Avoid_: web browsing (that is `june_web` search/fetch), browser toolset
 (the upstream runtime feature Clovy does not expose).
@@ -834,7 +835,7 @@ session, waits up to 10 minutes for one decision, and turns denial, expiry,
 or cancellation into the tool's error (`user_denied`, `approval_timed_out`,
 `run_cancelled`). Unattended turns are refused without a card
 (`unattended_requires_approval`). Browser use asks this same broker for
-consequential actions; its separate session controls only manage human takeover,
+all click, fill and key-press actions; its separate session controls only manage human takeover,
 resume and Stop.
 See [docs/mcp-server.md](docs/mcp-server.md#approval-broker).
 _Avoid_: permission prompt (that is the CLI's own; claude's is routed to the

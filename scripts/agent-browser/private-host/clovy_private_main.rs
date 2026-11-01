@@ -102,6 +102,22 @@ enum Operation {
     #[serde(rename = "shutdown")]
     Shutdown,
 }
+#[derive(Clone)]
+struct PrivateReference {
+    tab: u32,
+    node: i64,
+    root: i64,
+    document: String,
+    // Never emitted: original metadata keeps exact guards even after value redaction.
+    metadata: Option<(Value, Value)>,
+}
+struct GuardTarget {
+    entry: PrivateReference,
+    client: std::sync::Arc<CdpClient>,
+    session: String,
+    object: String,
+    root: String,
+}
 struct Host {
     browser: Option<BrowserManager>,
     chrome: Option<clovy_private_launch::Chrome>,
@@ -109,7 +125,7 @@ struct Host {
     suspended: bool,
     tabs: HashMap<u32, (u32, String)>,
     next_tab: u32,
-    refs: HashMap<String, (u32, i64, i64, String)>,
+    refs: HashMap<String, PrivateReference>,
 }
 impl Host {
     fn new() -> Self {
@@ -147,7 +163,7 @@ impl Host {
             .is_some_and(|ts| ts.iter().any(|t| t["targetId"] == target))
         {
             self.tabs.remove(&tab);
-            self.refs.retain(|_, (t, _, _, _)| *t != tab);
+            self.refs.retain(|_, entry| entry.tab != tab);
             return Err("tab_gone".into());
         }
         // Never use ensure_page / revive-and-replace paths on a private operation.
@@ -184,20 +200,14 @@ impl Host {
         let browser = self.browser()?;
         document_identity(&browser.client, browser.active_session_id()?).await
     }
-    async fn inspect_guard(
-        &mut self,
-        tab: u32,
-        reference: &str,
-        expected: Option<Value>,
-        operation: Option<&str>,
-        text: Option<&str>,
-        key: Option<&str>,
-    ) -> Result<Value, String> {
-        let (t, node, doc, document_id) = self
+    async fn guard_target(&mut self, tab: u32, reference: &str) -> Result<GuardTarget, String> {
+        let entry = self
             .refs
             .get(reference.trim_start_matches('@'))
             .cloned()
             .ok_or("stale_reference")?;
+        let (t, node, doc, document_id) =
+            (entry.tab, entry.node, entry.root, entry.document.clone());
         if t != tab {
             return Err("stale_reference".into());
         }
@@ -245,15 +255,131 @@ impl Host {
         if document_identity(&b.client, sid).await? != (doc, document_id.clone()) {
             return Err("stale_reference".into());
         }
-        let r=b.client.send_command("Runtime.callFunctionOn",Some(json!({"objectId":object,"functionDeclaration":include_str!("clovy_private_guard.js"),"arguments":[{"objectId":root},{"value":document_id},{"value":node},{"value":expected},{"value":operation},{"value":text},{"value":key}],"returnByValue":true})),Some(sid)).await?;
+        Ok(GuardTarget {
+            entry,
+            client: b.client.clone(),
+            session: sid.to_owned(),
+            object: object.to_owned(),
+            root: root.to_owned(),
+        })
+    }
+    async fn inspect_guard(
+        &mut self,
+        tab: u32,
+        reference: &str,
+        expected: Option<Value>,
+        operation: Option<&str>,
+        text: Option<&str>,
+        key: Option<&str>,
+        remember: bool,
+    ) -> Result<Value, String> {
+        self.select(tab).await?;
+        let b = self.browser()?;
+        let client = b.client.clone();
+        let sid = b.active_session_id()?.to_owned();
+        let frozen = client
+            .send_command(
+                "Page.setWebLifecycleState",
+                Some(json!({"state":"frozen"})),
+                Some(&sid),
+            )
+            .await;
+        let result = if frozen.is_ok() {
+            self.inspect_frozen(tab, reference, expected.as_ref(), remember)
+                .await
+        } else {
+            Err("redaction_failed".to_owned())
+        };
+        let restored = client
+            .send_command(
+                "Page.setWebLifecycleState",
+                Some(json!({"state":"active"})),
+                Some(&sid),
+            )
+            .await;
+        if restored.is_err() {
+            self.close().await;
+            return Err("effect_unknown".into());
+        }
+        let (inspection, values) = result?;
+        let Some(operation) = operation else {
+            return Ok(inspection);
+        };
+        // Restore ordinary page/network scheduling before the one atomic guard+effect.
+        // No metadata is emitted from the effect; exact raw metadata stays privately bound.
+        let target = self.guard_target(tab, reference).await?;
+        let (saved, saved_raw) = target.entry.metadata.as_ref().ok_or("stale_reference")?;
+        if expected.as_ref() != Some(saved) {
+            return Err("stale_reference".into());
+        }
+        let r=target.client.send_command("Runtime.callFunctionOn",Some(json!({"objectId":target.object,"functionDeclaration":include_str!("clovy_private_guard.js"),"arguments":[{"objectId":target.root},{"value":target.entry.document},{"value":target.entry.node},{"value":saved},{"value":operation},{"value":text},{"value":key},{"value":saved_raw},{"value":values},{"value":saved["metadataId"]}],"returnByValue":true})),Some(&target.session)).await?;
         if r.get("exceptionDetails").is_some() {
             return Err("guard_execution_failed".into());
         }
-        let value = r["result"]["value"].clone();
+        let value = &r["result"]["value"];
         if let Some(error) = value["error"].as_str() {
             return Err(error.into());
         }
         Ok(value["inspection"].clone())
+    }
+    async fn inspect_frozen(
+        &mut self,
+        tab: u32,
+        reference: &str,
+        expected: Option<&Value>,
+        remember: bool,
+    ) -> Result<(Value, Vec<String>), String> {
+        let target = self.guard_target(tab, reference).await?;
+        let values = privacy_inventory(&target.client, &target.session, false)
+            .await?
+            .values;
+        let probe=target.client.send_command("Runtime.callFunctionOn",Some(json!({"objectId":target.object,"functionDeclaration":include_str!("clovy_private_guard.js"),"arguments":[{"objectId":target.root},{"value":target.entry.document},{"value":target.entry.node},{"value":null},{"value":null},{"value":null},{"value":null},{"value":null},{"value":values},{"value":null}],"returnByValue":true})),Some(&target.session)).await?;
+        if probe.get("exceptionDetails").is_some() {
+            return Err("guard_execution_failed".into());
+        }
+        let observed = &probe["result"]["value"];
+        if let Some(error) = observed["error"].as_str() {
+            return Err(error.into());
+        }
+        let mut inspection = observed
+            .get("inspection")
+            .cloned()
+            .ok_or("guard_execution_failed")?;
+        let raw = observed
+            .get("rawElement")
+            .cloned()
+            .ok_or("guard_execution_failed")?;
+        // An opaque revision does not expose a digest oracle for low-entropy field metadata.
+        // Reuse only unchanged raw facts and inspection core; another inspection of new
+        // facts changes the revision and invalidates an older pending approval.
+        let revision = target
+            .entry
+            .metadata
+            .as_ref()
+            .filter(|(prior, prior_raw)| {
+                let mut core = prior.clone();
+                core["metadataId"] = Value::Null;
+                prior_raw == &raw && core == inspection
+            })
+            .and_then(|(prior, _)| prior["metadataId"].as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+        inspection["metadataId"] = json!(revision);
+        if remember {
+            self.refs
+                .get_mut(reference.trim_start_matches('@'))
+                .ok_or("stale_reference")?
+                .metadata = Some((inspection.clone(), raw));
+        } else {
+            let (saved, saved_raw) = target.entry.metadata.as_ref().ok_or("stale_reference")?;
+            if saved != &inspection
+                || saved_raw != &raw
+                || expected.is_some_and(|expected| expected != saved)
+            {
+                return Err("stale_reference".into());
+            }
+        }
+        Ok((inspection, values))
     }
     async fn execute(&mut self, op: Operation, attempted: &mut bool) -> Result<Value, String> {
         match op {
@@ -359,13 +485,13 @@ impl Host {
                         }
                         b.remove_page_by_target_id(&target);
                         self.tabs.remove(&tab_id);
-                        self.refs.retain(|_, (t, _, _, _)| *t != tab_id);
+                        self.refs.retain(|_, entry| entry.tab != tab_id);
                         Ok(json!({"closed":true,"tabId":tab_id}))
                     }
                     Operation::Navigate { tab_id, url } => {
                         validate_url(&url)?;
                         self.select(tab_id).await?;
-                        self.refs.retain(|_, (t, _, _, _)| *t != tab_id);
+                        self.refs.retain(|_, entry| entry.tab != tab_id);
                         *attempted = true;
                         self.browser()?
                             .navigate(&url, WaitUntil::DomContentLoaded)
@@ -393,7 +519,7 @@ impl Host {
                         let entry = h["entries"][i as usize - 1]["id"]
                             .as_i64()
                             .ok_or("history_unavailable")?;
-                        self.refs.retain(|_, (t, _, _, _)| *t != tab_id);
+                        self.refs.retain(|_, entry| entry.tab != tab_id);
                         let b = self.browser()?;
                         let mut lifecycle = b.client.subscribe();
                         *attempted = true;
@@ -407,54 +533,7 @@ impl Host {
                         wait_history(b, &sid, entry, &mut lifecycle).await?;
                         Ok(json!({"url":b.get_url().await?,"tabId":tab_id}))
                     }
-                    Operation::Snapshot { tab_id } => {
-                        self.select(tab_id).await?;
-                        self.refs.retain(|_, (t, _, _, _)| *t != tab_id);
-                        let (doc, document_id) = self.document().await?;
-                        let b = self.browser()?;
-                        let sid = b.active_session_id()?.to_owned();
-                        let (redactions, values) = redaction_nodes(&b.client, &sid).await?;
-                        b.client.set_redacted_nodes(redactions, values);
-                        let mut refs = RefMap::new();
-                        let mut snapshot = take_snapshot(
-                            &b.client,
-                            &sid,
-                            &SnapshotOptions {
-                                selector: None,
-                                interactive: false,
-                                compact: false,
-                                depth: Some(30),
-                                urls: false,
-                            },
-                            &mut refs,
-                            None,
-                            &HashMap::new(),
-                        )
-                        .await?;
-                        let url = b.get_url().await?;
-                        if self.document().await? != (doc, document_id.clone()) {
-                            return Err("stale_reference".into());
-                        }
-                        let mut substitutions = Vec::new();
-                        for (old, entry) in refs.entries_sorted() {
-                            let reference = uuid::Uuid::new_v4().simple().to_string();
-                            if entry.frame_id.is_none() {
-                                if let Some(node) = entry.backend_node_id {
-                                    self.refs.insert(
-                                        reference.clone(),
-                                        (tab_id, node, doc, document_id.clone()),
-                                    );
-                                }
-                            }
-                            substitutions.push((old, reference));
-                        }
-                        substitutions.sort_by_key(|(old, _)| std::cmp::Reverse(old.len()));
-                        for (old, new) in substitutions {
-                            snapshot =
-                                snapshot.replace(&format!("ref={old}]"), &format!("ref={new}]"));
-                        }
-                        Ok(json!({"snapshot":snapshot,"url":url,"tabId":tab_id}))
-                    }
+                    Operation::Snapshot { tab_id } => self.snapshot(tab_id).await,
                     Operation::Screenshot { tab_id } => {
                         self.select(tab_id).await?;
                         let document = self.document().await?;
@@ -462,7 +541,7 @@ impl Host {
                         if url != "about:blank" {
                             validate_url(&url)?;
                         }
-                        let mut captured = self.screenshot().await?;
+                        let mut captured = self.screenshot(&document, &url).await?;
                         if self.document().await? != document
                             || self.browser()?.get_url().await? != url
                         {
@@ -473,7 +552,7 @@ impl Host {
                         Ok(captured)
                     }
                     Operation::Inspect { tab_id, reference } => {
-                        self.inspect_guard(tab_id, &reference, None, None, None, None)
+                        self.inspect_guard(tab_id, &reference, None, None, None, None, true)
                             .await
                     }
                     Operation::Guarded {
@@ -492,7 +571,7 @@ impl Host {
                         }
                         // Preflight rejects stale metadata without claiming an effect was attempted.
                         let observed = self
-                            .inspect_guard(tab_id, &reference, None, None, None, None)
+                            .inspect_guard(tab_id, &reference, None, None, None, None, false)
                             .await?;
                         if observed != expected {
                             return Err("stale_reference".into());
@@ -517,6 +596,7 @@ impl Host {
                                 Some(&operation),
                                 text.as_deref(),
                                 key.as_deref(),
+                                false,
                             )
                             .await
                         {
@@ -543,29 +623,110 @@ impl Host {
             }
         }
     }
-    async fn screenshot(&mut self) -> Result<Value, String> {
-        use base64::Engine;
+    async fn snapshot(&mut self, tab_id: u32) -> Result<Value, String> {
+        self.select(tab_id).await?;
+        self.refs.retain(|_, entry| entry.tab != tab_id);
+        let b = self.browser()?;
+        let client = b.client.clone();
+        let sid = b.active_session_id()?.to_owned();
+        let frozen = client
+            .send_command(
+                "Page.setWebLifecycleState",
+                Some(json!({"state":"frozen"})),
+                Some(&sid),
+            )
+            .await;
+        let result = if frozen.is_ok() {
+            self.snapshot_frozen(tab_id).await
+        } else {
+            Err("redaction_failed".to_owned())
+        };
+        let restored = client
+            .send_command(
+                "Page.setWebLifecycleState",
+                Some(json!({"state":"active"})),
+                Some(&sid),
+            )
+            .await;
+        if restored.is_err() {
+            self.close().await;
+            return Err("effect_unknown".into());
+        }
+        result
+    }
+    async fn snapshot_frozen(&mut self, tab_id: u32) -> Result<Value, String> {
+        let (doc, document_id) = self.document().await?;
         let b = self.browser()?;
         let sid = b.active_session_id()?.to_owned();
-        // CDP geometry cannot be spoofed by page prototype overrides, including closed shadow roots.
-        b.client
-            .send_command_no_params("Animation.enable", Some(&sid))
-            .await?;
-        b.client
+        let (redactions, values) = redaction_nodes(&b.client, &sid).await?;
+        b.client.set_redacted_nodes(redactions, values);
+        let mut refs = RefMap::new();
+        let mut snapshot = take_snapshot(
+            &b.client,
+            &sid,
+            &SnapshotOptions {
+                selector: None,
+                interactive: false,
+                compact: false,
+                depth: Some(30),
+                urls: false,
+            },
+            &mut refs,
+            None,
+            &HashMap::new(),
+        )
+        .await?;
+        let url = b.get_url().await?;
+        if self.document().await? != (doc, document_id.clone()) {
+            return Err("stale_reference".into());
+        }
+        let mut substitutions = Vec::new();
+        for (old, entry) in refs.entries_sorted() {
+            let reference = uuid::Uuid::new_v4().simple().to_string();
+            if entry.frame_id.is_none() {
+                if let Some(node) = entry.backend_node_id {
+                    self.refs.insert(
+                        reference.clone(),
+                        PrivateReference {
+                            tab: tab_id,
+                            node,
+                            root: doc,
+                            document: document_id.clone(),
+                            metadata: None,
+                        },
+                    );
+                }
+            }
+            substitutions.push((old, reference));
+        }
+        substitutions.sort_by_key(|(old, _)| std::cmp::Reverse(old.len()));
+        for (old, new) in substitutions {
+            snapshot = snapshot.replace(&format!("ref={old}]"), &format!("ref={new}]"));
+        }
+        Ok(json!({"snapshot":snapshot,"url":url,"tabId":tab_id}))
+    }
+    async fn screenshot(
+        &mut self,
+        expected_document: &(i64, String),
+        expected_url: &str,
+    ) -> Result<Value, String> {
+        use base64::Engine;
+        let b = self.browser()?;
+        let client = b.client.clone();
+        let sid = b.active_session_id()?.to_owned();
+        let frozen = client
             .send_command(
-                "Animation.setPlaybackRate",
-                Some(json!({"playbackRate":0})),
+                "Page.setWebLifecycleState",
+                Some(json!({"state":"frozen"})),
                 Some(&sid),
             )
-            .await?;
-        b.client
-            .send_command(
-                "Emulation.setVirtualTimePolicy",
-                Some(json!({"policy":"pause"})),
-                Some(&sid),
-            )
-            .await?;
+            .await;
         let capture=async {
+            if frozen.is_err(){return Err("redaction_failed".into());}
+            if &document_identity(&client,&sid).await?!=expected_document||b.get_url().await?!=expected_url{return Err("stale_reference".into());}
+            client.send_command_no_params("Animation.enable",Some(&sid)).await?;
+            client.send_command("Animation.setPlaybackRate",Some(json!({"playbackRate":0})),Some(&sid)).await?;
+            client.send_command("Emulation.setVirtualTimePolicy",Some(json!({"policy":"pause"})),Some(&sid)).await?;
             let boxes=redaction_boxes(&b.client,&sid).await?;
             let metrics=b.client.send_command_no_params("Page.getLayoutMetrics",Some(&sid)).await?;
             let viewport=&metrics["cssVisualViewport"];
@@ -582,22 +743,32 @@ impl Host {
             if let Some(boxes)=boxes.as_array(){for rect in boxes {let x=((rect[0].as_f64().unwrap_or(0.0)-32.0)*sx).floor().max(0.0) as u32;let y=((rect[1].as_f64().unwrap_or(0.0)-32.0)*sy).floor().max(0.0) as u32;let right=((rect[0].as_f64().unwrap_or(0.0)+rect[2].as_f64().unwrap_or(0.0)+32.0)*sx).ceil().max(0.0) as u32;let bottom=((rect[1].as_f64().unwrap_or(0.0)+rect[3].as_f64().unwrap_or(0.0)+32.0)*sy).ceil().max(0.0) as u32;for yy in y..bottom.min(img.height()){for xx in x..right.min(img.width()){img.put_pixel(xx,yy,image::Rgba([24,24,24,255]));}}}}
             let mut output=std::io::Cursor::new(Vec::new());img.write_to(&mut output,image::ImageFormat::Png).map_err(|_|"screenshot_encoding")?;Ok::<_,String>(json!({"base64":base64::engine::general_purpose::STANDARD.encode(output.into_inner())}))
         }.await;
-        let _ = b
-            .client
+        // Always restore every potentially changed scheduler, including setup errors.
+        let virtual_restored = client
             .send_command(
                 "Emulation.setVirtualTimePolicy",
                 Some(json!({"policy":"advance"})),
                 Some(&sid),
             )
             .await;
-        let _ = b
-            .client
+        let animation_restored = client
             .send_command(
                 "Animation.setPlaybackRate",
                 Some(json!({"playbackRate":1})),
                 Some(&sid),
             )
             .await;
+        let active_restored = client
+            .send_command(
+                "Page.setWebLifecycleState",
+                Some(json!({"state":"active"})),
+                Some(&sid),
+            )
+            .await;
+        if virtual_restored.is_err() || animation_restored.is_err() || active_restored.is_err() {
+            self.close().await;
+            return Err("effect_unknown".into());
+        }
         capture
     }
 }
@@ -638,178 +809,391 @@ async fn wait_history(
         }
     }).await.map_err(|_|"history_timeout".to_string())?
 }
-async fn redaction_boxes(client: &CdpClient, sid: &str) -> Result<Value, String> {
-    client
-        .send_command_no_params("DOM.enable", Some(sid))
-        .await?;
-    let tree = client
+struct PrivacyInventory {
+    nodes: std::collections::HashSet<i64>,
+    values: Vec<String>,
+    boxes: Value,
+}
+
+// Native capture flattens DOM/shadow/pseudo nodes and obtains layout/text bounds in
+// one renderer observation. No page-overridable geometry or stale field getter is used.
+async fn privacy_inventory(
+    client: &CdpClient,
+    sid: &str,
+    geometry: bool,
+) -> Result<PrivacyInventory, String> {
+    use std::collections::{HashMap, HashSet};
+    let snapshot = client
         .send_command(
-            "DOM.getFlattenedDocument",
-            Some(json!({"depth":-1,"pierce":true})),
+            "DOMSnapshot.captureSnapshot",
+            Some(json!({
+                "computedStyles":["-webkit-user-modify","text-shadow","filter","backdrop-filter","-webkit-box-reflect","transform","translate","rotate","scale","-webkit-text-stroke-width","text-emphasis-style"],
+                "includeDOMRects":true
+            })),
             Some(sid),
         )
         .await?;
-    let nodes = tree["nodes"].as_array().ok_or("redaction_failed")?;
+    let strings = snapshot["strings"].as_array().ok_or("redaction_failed")?;
+    let string = |v: &Value| -> Result<&str, String> {
+        let index = v.as_u64().ok_or("redaction_failed")? as usize;
+        strings
+            .get(index)
+            .and_then(Value::as_str)
+            .ok_or_else(|| "redaction_failed".into())
+    };
+    let tree = client
+        .send_command_no_params("Page.getFrameTree", Some(sid))
+        .await?;
+    let main_frame = tree["frameTree"]["frame"]["id"]
+        .as_str()
+        .ok_or("redaction_failed")?;
+    let documents = snapshot["documents"].as_array().ok_or("redaction_failed")?;
+    let mut private = HashSet::new();
+    let mut values = Vec::new();
     let mut boxes = Vec::new();
-    for n in nodes {
-        let tag = n["nodeName"].as_str().unwrap_or("").to_ascii_lowercase();
-        let attrs = n["attributes"].as_array();
-        let editable = attrs.is_some_and(|a| {
-            a.chunks_exact(2)
-                .any(|p| p[0] == "contenteditable" && p[1] != "false")
-        });
-        if !editable && !matches!(tag.as_str(), "input" | "textarea" | "select" | "iframe") {
+    let mut total_nodes = 0usize;
+    let mut value_bytes = 0usize;
+    let mut add_value = |value: &str| -> Result<(), String> {
+        if value.is_empty() {
+            return Ok(());
+        }
+        value_bytes = value_bytes.saturating_add(value.len());
+        if value.len() > 1024 * 1024 || value_bytes > 8 * 1024 * 1024 || values.len() >= 4000 {
+            return Err("redaction_failed".into());
+        }
+        values.push(value.to_owned());
+        let trimmed = value.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+        if !trimmed.is_empty() && trimmed != value {
+            values.push(trimmed.to_owned());
+        }
+        let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized != value && !normalized.is_empty() {
+            values.push(normalized);
+        }
+        Ok(())
+    };
+    let mut found_main = false;
+    for document in documents {
+        let is_main = string(&document["frameId"])? == main_frame;
+        found_main |= is_main;
+        let nodes = &document["nodes"];
+        let names = nodes["nodeName"].as_array().ok_or("redaction_failed")?;
+        let n = names.len();
+        total_nodes = total_nodes.saturating_add(n);
+        if total_nodes > 50_000 {
+            return Err("redaction_failed".into());
+        }
+        let parents = nodes["parentIndex"]
+            .as_array()
+            .filter(|v| v.len() == n)
+            .ok_or("redaction_failed")?;
+        let backend = nodes["backendNodeId"]
+            .as_array()
+            .filter(|v| v.len() == n)
+            .ok_or("redaction_failed")?;
+        let attrs = nodes["attributes"]
+            .as_array()
+            .filter(|v| v.len() == n)
+            .ok_or("redaction_failed")?;
+        let node_values = nodes["nodeValue"]
+            .as_array()
+            .filter(|v| v.len() == n)
+            .ok_or("redaction_failed")?;
+        let node_types = nodes["nodeType"]
+            .as_array()
+            .filter(|v| v.len() == n)
+            .ok_or("redaction_failed")?;
+        let layout = &document["layout"];
+        let indexes = layout["nodeIndex"].as_array().ok_or("redaction_failed")?;
+        let bounds = layout["bounds"]
+            .as_array()
+            .filter(|v| v.len() == indexes.len())
+            .ok_or("redaction_failed")?;
+        let styles = layout["styles"]
+            .as_array()
+            .filter(|v| v.len() == indexes.len())
+            .ok_or("redaction_failed")?;
+        let layout_text = layout["text"]
+            .as_array()
+            .filter(|v| v.len() == indexes.len())
+            .ok_or("redaction_failed")?;
+        let mut editable = vec![false; n];
+        let mut control = vec![false; n];
+        let mut control_root = vec![false; n];
+        let mut value_field = vec![false; n];
+        let mut iframe = vec![false; n];
+        let mut owner = vec![None; n];
+        let mut paint_effect = vec![false; n];
+        for i in 0..n {
+            let tag = string(&names[i])?.to_ascii_lowercase();
+            control_root[i] = matches!(tag.as_str(), "input" | "textarea" | "select");
+            control[i] = control_root[i];
+            iframe[i] = tag == "iframe";
+            let attributes = attrs[i].as_array().ok_or("redaction_failed")?;
+            if attributes.len() % 2 != 0 {
+                return Err("redaction_failed".into());
+            }
+            let input_type = attributes
+                .chunks_exact(2)
+                .find_map(|pair| {
+                    if string(&pair[0])
+                        .ok()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("type"))
+                    {
+                        string(&pair[1]).ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or("text")
+                .to_ascii_lowercase();
+            value_field[i] = tag == "textarea"
+                || (tag == "input"
+                    && !matches!(
+                        input_type.as_str(),
+                        "button" | "submit" | "reset" | "checkbox" | "radio" | "image"
+                    ));
+            for pair in attributes.chunks_exact(2) {
+                if string(&pair[0])?.eq_ignore_ascii_case("contenteditable")
+                    && !string(&pair[1])?.eq_ignore_ascii_case("false")
+                {
+                    editable[i] = true;
+                }
+            }
+        }
+        for (li, index) in indexes.iter().enumerate() {
+            let i = index
+                .as_u64()
+                .filter(|i| (*i as usize) < n)
+                .ok_or("redaction_failed")? as usize;
+            let css = styles[li].as_array().ok_or("redaction_failed")?;
+            if css.is_empty() && node_types[i].as_u64() == Some(9) {
+                continue;
+            }
+            if css.len() != 11 {
+                return Err("redaction_failed".into());
+            }
+            paint_effect[i] =
+                css.iter()
+                    .enumerate()
+                    .skip(1)
+                    .any(|(index, value)| match string(value) {
+                        Ok(value) => {
+                            if index == 9 {
+                                !value.is_empty()
+                                    && value.trim_end_matches("px").parse::<f64>().ok() != Some(0.0)
+                            } else {
+                                value != "none" && !value.is_empty()
+                            }
+                        }
+                        Err(_) => true,
+                    });
+            // Effective native editability covers inherited/design-mode and shadow layout.
+            let modify = string(&css[0])?;
+            if !matches!(modify, "read-only" | "none" | "") && !control_root[i] {
+                editable[i] = true;
+            }
+        }
+        for i in 0..n {
+            let parent = parents[i].as_i64().ok_or("redaction_failed")?;
+            if parent >= 0 {
+                let parent = parent as usize;
+                if parent >= i {
+                    return Err("redaction_failed".into());
+                }
+                editable[i] = editable[i] || editable[parent];
+                control[i] = control[i] || control[parent];
+                owner[i] = owner[parent];
+                paint_effect[i] = paint_effect[i] || paint_effect[parent];
+            }
+            if editable[i] && owner[i].is_none() {
+                owner[i] = Some(i);
+            }
+            if editable[i] || (control[i] && !control_root[i]) {
+                private.insert(backend[i].as_i64().ok_or("redaction_failed")?);
+            }
+        }
+        for property in ["inputValue", "textValue"] {
+            if nodes.get(property).is_none() {
+                continue;
+            }
+            let indices = nodes[property]["index"]
+                .as_array()
+                .ok_or("redaction_failed")?;
+            let content = nodes[property]["value"]
+                .as_array()
+                .filter(|v| v.len() == indices.len())
+                .ok_or("redaction_failed")?;
+            for (index, content) in indices.iter().zip(content) {
+                let i = index
+                    .as_u64()
+                    .filter(|i| (*i as usize) < n)
+                    .ok_or("redaction_failed")? as usize;
+                if value_field[i] {
+                    add_value(string(content)?)?;
+                }
+            }
+        }
+        for (li, index) in indexes.iter().enumerate() {
+            let index = index.as_u64().ok_or("redaction_failed")? as usize;
+            if editable[index] || (control[index] && !control_root[index]) {
+                let index = layout_text[li]
+                    .as_i64()
+                    .filter(|i| *i >= -1)
+                    .ok_or("redaction_failed")?;
+                if index >= 0 {
+                    add_value(string(&layout_text[li])?)?;
+                }
+            }
+        }
+        let mut selected = HashSet::new();
+        if let Some(option) = nodes.get("optionSelected") {
+            for index in option["index"].as_array().ok_or("redaction_failed")? {
+                let index = index
+                    .as_u64()
+                    .filter(|i| (*i as usize) < n)
+                    .ok_or("redaction_failed")? as usize;
+                selected.insert(index);
+                let attributes = attrs[index].as_array().ok_or("redaction_failed")?;
+                for pair in attributes.chunks_exact(2) {
+                    if string(&pair[0])?.eq_ignore_ascii_case("value") {
+                        add_value(string(&pair[1])?)?;
+                    }
+                }
+            }
+        }
+        let mut selected_owner = vec![None; n];
+        let mut selected_text = HashMap::<usize, String>::new();
+        for i in 0..n {
+            if let Some(parent) = parents[i].as_i64().filter(|p| *p >= 0) {
+                selected_owner[i] = selected_owner[parent as usize];
+            }
+            if selected.contains(&i) {
+                selected_owner[i] = Some(i);
+            }
+            if matches!(node_types[i].as_u64(), Some(3 | 4)) {
+                if let Some(root) = selected_owner[i] {
+                    let text = string(&node_values[i])?;
+                    let joined = selected_text.entry(root).or_default();
+                    if joined.len().saturating_add(text.len()) > 1024 * 1024 {
+                        return Err("redaction_failed".into());
+                    }
+                    joined.push_str(text);
+                }
+            }
+        }
+        for text in selected_text.values() {
+            add_value(text)?;
+        }
+        let mut editable_text = HashMap::<usize, String>::new();
+        for i in 0..n {
+            if matches!(node_types[i].as_u64(), Some(3 | 4)) {
+                if let Some(root) = owner[i] {
+                    let text = string(&node_values[i])?;
+                    add_value(text)?;
+                    let joined = editable_text.entry(root).or_default();
+                    if joined.len().saturating_add(text.len()) > 1024 * 1024 {
+                        return Err("redaction_failed".into());
+                    }
+                    joined.push_str(text);
+                }
+            }
+        }
+        for text in editable_text.values() {
+            add_value(text)?;
+        }
+        if !geometry || !is_main {
             continue;
         }
-        let id = n["backendNodeId"].as_i64().ok_or("redaction_failed")?;
-        let quads = client
-            .send_command(
-                "DOM.getContentQuads",
-                Some(json!({"backendNodeId":id})),
-                Some(sid),
-            )
-            .await?;
-        for quad in quads["quads"].as_array().ok_or("redaction_failed")? {
-            let q = quad.as_array().ok_or("redaction_failed")?;
-            if q.len() != 8 {
-                return Err("redaction_failed".into());
-            }
-            let xs: Vec<_> = q.iter().step_by(2).filter_map(Value::as_f64).collect();
-            let ys: Vec<_> = q
+        let scroll_x = document["scrollOffsetX"]
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .ok_or("redaction_failed")?;
+        let scroll_y = document["scrollOffsetY"]
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .ok_or("redaction_failed")?;
+        let mut protected_layout = vec![false; indexes.len()];
+        let mut add_box = |rect: &Value| -> Result<(), String> {
+            let rect = rect
+                .as_array()
+                .filter(|r| r.len() == 4)
+                .ok_or("redaction_failed")?;
+            let r = rect
                 .iter()
-                .skip(1)
-                .step_by(2)
-                .filter_map(Value::as_f64)
-                .collect();
-            if xs.len() != 4 || ys.len() != 4 {
+                .map(|v| {
+                    v.as_f64()
+                        .filter(|v| v.is_finite())
+                        .ok_or_else(|| "redaction_failed".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if r[2] < 0.0 || r[3] < 0.0 {
                 return Err("redaction_failed".into());
             }
-            let x = xs.iter().copied().fold(f64::INFINITY, f64::min) - 3.0;
-            let y = ys.iter().copied().fold(f64::INFINITY, f64::min) - 3.0;
-            let right = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max) + 3.0;
-            let bottom = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max) + 3.0;
-            boxes.push(json!([x, y, right - x, bottom - y]));
+            if r[2] > 0.0 && r[3] > 0.0 {
+                boxes.push(json!([
+                    r[0] - scroll_x - 3.0,
+                    r[1] - scroll_y - 3.0,
+                    r[2] + 6.0,
+                    r[3] + 6.0
+                ]));
+            }
+            Ok(())
+        };
+        for (li, index) in indexes.iter().enumerate() {
+            let i = index.as_u64().ok_or("redaction_failed")? as usize;
+            protected_layout[li] = editable[i] || control[i] || iframe[i];
+            if !protected_layout[li] {
+                continue;
+            }
+            // Paint effects can extend glyphs beyond native layout bounds; do not guess.
+            if paint_effect[i] {
+                return Err("redaction_failed".into());
+            }
+            add_box(&bounds[li])?;
+        }
+        let text_boxes = &document["textBoxes"];
+        let text_layout = text_boxes["layoutIndex"]
+            .as_array()
+            .ok_or("redaction_failed")?;
+        let text_bounds = text_boxes["bounds"]
+            .as_array()
+            .filter(|v| v.len() == text_layout.len())
+            .ok_or("redaction_failed")?;
+        for (index, bounds) in text_layout.iter().zip(text_bounds) {
+            let i = index
+                .as_u64()
+                .filter(|i| (*i as usize) < protected_layout.len())
+                .ok_or("redaction_failed")? as usize;
+            if protected_layout[i] {
+                add_box(bounds)?;
+            }
         }
     }
-    Ok(json!(boxes))
+    if !found_main {
+        return Err("redaction_failed".into());
+    }
+    drop(add_value);
+    values.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    values.dedup();
+    if boxes.len() > 20_000 {
+        return Err("redaction_failed".into());
+    }
+    Ok(PrivacyInventory {
+        nodes: private,
+        values,
+        boxes: json!(boxes),
+    })
+}
+async fn redaction_boxes(client: &CdpClient, sid: &str) -> Result<Value, String> {
+    Ok(privacy_inventory(client, sid, true).await?.boxes)
 }
 async fn redaction_nodes(
     client: &CdpClient,
     sid: &str,
 ) -> Result<(std::collections::HashSet<i64>, Vec<String>), String> {
-    use std::collections::HashSet;
-    client
-        .send_command_no_params("DOM.enable", Some(sid))
-        .await?;
-    let tree = client
-        .send_command(
-            "DOM.getFlattenedDocument",
-            Some(json!({"depth":-1,"pierce":true})),
-            Some(sid),
-        )
-        .await?;
-    let nodes = tree["nodes"].as_array().ok_or("redaction_failed")?;
-    let mut blocked = HashSet::new();
-    let mut redact = HashSet::new();
-    for n in nodes {
-        let attrs = n["attributes"].as_array();
-        let editable = attrs.is_some_and(|a| {
-            a.chunks_exact(2)
-                .any(|p| p[0] == "contenteditable" && p[1] != "false")
-        });
-        if editable {
-            if let Some(id) = n["nodeId"].as_i64() {
-                blocked.insert(id);
-            }
-        }
-    }
-    loop {
-        let before = blocked.len();
-        for n in nodes {
-            if n["parentId"].as_i64().is_some_and(|p| blocked.contains(&p)) {
-                if let Some(id) = n["nodeId"].as_i64() {
-                    blocked.insert(id);
-                }
-            }
-        }
-        if before == blocked.len() {
-            break;
-        }
-    }
-    for n in nodes {
-        if n["nodeId"].as_i64().is_some_and(|id| blocked.contains(&id)) {
-            if let Some(backend) = n["backendNodeId"].as_i64() {
-                redact.insert(backend);
-            }
-        }
-    }
-    let tree = client
-        .send_command_no_params("Page.getFrameTree", Some(sid))
-        .await?;
-    let frame = tree["frameTree"]["frame"]["id"]
-        .as_str()
-        .ok_or("redaction_failed")?;
-    let world=client.send_command("Page.createIsolatedWorld",Some(json!({"frameId":frame,"worldName":"clovy-private-guard","grantUniveralAccess":false})),Some(sid)).await?;
-    let context = world["executionContextId"]
-        .as_i64()
-        .ok_or("redaction_failed")?;
-    let mut values = Vec::new();
-    let mut inspected = 0;
-    let mut value_bytes = 0usize;
-    for n in nodes {
-        let tag = n["nodeName"].as_str().unwrap_or("").to_ascii_lowercase();
-        let attrs = n["attributes"].as_array();
-        let editable = attrs.is_some_and(|a| {
-            a.chunks_exact(2)
-                .any(|p| p[0] == "contenteditable" && p[1] != "false")
-        });
-        if !editable && !matches!(tag.as_str(), "input" | "textarea" | "select") {
-            continue;
-        }
-        inspected += 1;
-        if inspected > 2000 {
-            return Err("redaction_failed".into());
-        }
-        let id = n["backendNodeId"].as_i64().ok_or("redaction_failed")?;
-        let obj = client
-            .send_command(
-                "DOM.resolveNode",
-                Some(json!({"backendNodeId":id,"executionContextId":context})),
-                Some(sid),
-            )
-            .await?;
-        let object = obj["object"]["objectId"]
-            .as_str()
-            .ok_or("redaction_failed")?;
-        let result=client.send_command("Runtime.callFunctionOn",Some(json!({"objectId":object,"functionDeclaration":"function(){if(this.tagName==='INPUT'&&['button','submit','reset','checkbox','radio','image'].includes(this.type))return '';return typeof this.value==='string'?this.value:(this.textContent||'');}","returnByValue":true})),Some(sid)).await?;
-        if result.get("exceptionDetails").is_some() {
-            return Err("redaction_failed".into());
-        }
-        let value = result["result"]["value"]
-            .as_str()
-            .ok_or("redaction_failed")?;
-        if !value.is_empty() {
-            value_bytes = value_bytes.saturating_add(value.len());
-            if value.len() > 1024 * 1024 || value_bytes > 8 * 1024 * 1024 {
-                return Err("redaction_failed".into());
-            }
-            values.push(value.to_owned());
-            let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-            if normalized != value && !normalized.is_empty() {
-                values.push(normalized);
-            }
-        }
-        let _ = client
-            .send_command(
-                "Runtime.releaseObject",
-                Some(json!({"objectId":object})),
-                Some(sid),
-            )
-            .await;
-    }
-    values.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    values.dedup();
-    Ok((redact, values))
+    let inventory = privacy_inventory(client, sid, false).await?;
+    Ok((inventory.nodes, inventory.values))
 }
 fn host_error_code(code: &str) -> &'static str {
     // Upstream diagnostics may contain URLs and page text. They never cross the private wire.
@@ -945,6 +1329,15 @@ async fn run() -> Result<(), String> {
         let result = tokio::select! {result=host.execute(request.op,&mut attempted)=>result,_=term.recv()=>{host.close().await;return Ok(());}};
         #[cfg(not(unix))]
         let result = host.execute(request.op, &mut attempted).await;
+        // A failed lifecycle restoration poisons this browser task even on a read.
+        // The supervisor must reap the slot and invalidate every advertised handle.
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|code| code == "effect_unknown")
+        {
+            attempted = true;
+        }
         if result.is_err() && attempted {
             host.refs.clear();
         }

@@ -28,6 +28,7 @@ struct FakeTransport {
     sessions: Mutex<HashSet<String>>,
     suspended: Mutex<HashSet<String>>,
     actions: AtomicUsize,
+    network_failure: Mutex<Option<bool>>,
     after_action: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
@@ -39,6 +40,7 @@ impl FakeTransport {
             sessions: Mutex::default(),
             suspended: Mutex::default(),
             actions: AtomicUsize::new(0),
+            network_failure: Mutex::new(None),
             after_action: Mutex::new(None),
         })
     }
@@ -57,6 +59,7 @@ impl FakeTransport {
             "url": "https://mail.example.com/compose",
             "origin": "https://mail.example.com",
             "documentId": "document-1",
+            "metadataId": "metadata-1",
             "backendNodeId": 42,
         })
     }
@@ -120,7 +123,16 @@ impl BrowserTransport for FakeTransport {
                     if arguments["expected"] != self.inspection() {
                         return Err(AppError::new("browser_stale_reference", "Target changed"));
                     }
+                    if *self.network_failure.lock().unwrap() == Some(false) {
+                        return Err(AppError::new(
+                            "browser_network_blocked",
+                            "Public web scope required",
+                        ));
+                    }
                     self.actions.fetch_add(1, Ordering::SeqCst);
+                    if *self.network_failure.lock().unwrap() == Some(true) {
+                        return Err(AppError::new("browser_outcome_unknown", "Post-delivery validation failed: browser_network_blocked. Do not repeat the operation."));
+                    }
                     if let Some(callback) = self.after_action.lock().unwrap().clone() {
                         callback();
                     }
@@ -339,6 +351,20 @@ async fn routine_dispatch_uses_its_own_bound_grant_and_rechecks_persisted_revoca
         .call(&ctx, "snapshot", &json!({"session_id":session,"tab_id":7}))
         .await
         .unwrap();
+    assert_eq!(
+        rig.group()
+            .call(
+                &ctx,
+                "click",
+                &json!({"session_id":session,"tab_id":7,"ref":"e0:n1"})
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "unattended_requires_approval"
+    );
+    assert_eq!(rig.transport.actions(), 0);
+    assert!(rig.approvals.requests().is_empty());
     let before = rig.transport.calls();
     repos
         .set_routine_browser_grant(&RoutineBrowserGrantRecord {
@@ -407,7 +433,7 @@ async fn hostile_fields_and_new_run_in_same_conversation_never_reach_transport()
 
 #[tokio::test]
 async fn revocation_after_delivery_is_unknown_and_old_handles_cannot_replay() {
-    let rig = Rig::new("Next", []).await;
+    let rig = Rig::new("Next", [Scripted::Approve]).await;
     let owner = rig.approvals.turn(CliKind::Claude, true).await;
     let ctx = rig.ctx(Some(&owner));
     let session = open_session(&rig, &ctx).await;
@@ -489,7 +515,8 @@ async fn consequential_click_uses_one_central_card_and_dispatches_once() {
 
 #[tokio::test]
 async fn declined_central_approval_never_dispatches_the_action() {
-    let rig = Rig::new("Send", [Scripted::Deny]).await;
+    // A neutral label outside a form proves nothing about its onclick handler.
+    let rig = Rig::new("Continue", [Scripted::Deny]).await;
     let chat = rig.approvals.turn(CliKind::Codex, true).await;
     let ctx = rig.ctx(Some(&chat));
     let session_id = open_session(&rig, &ctx).await;
@@ -505,6 +532,100 @@ async fn declined_central_approval_never_dispatches_the_action() {
     assert_eq!(error.code, "user_denied");
     assert_eq!(rig.transport.actions(), 0);
     assert_eq!(rig.approvals.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn approval_cards_identify_the_inspected_target_without_input_values() {
+    for label in ["Delete draft", "Delete account", "\u{202e}Continue\n"] {
+        let rig = Rig::new(label, [Scripted::Deny]).await;
+        let chat = rig.approvals.turn(CliKind::Claude, true).await;
+        let ctx = rig.ctx(Some(&chat));
+        let session = open_session(&rig, &ctx).await;
+        let error = rig
+            .group()
+            .call(
+                &ctx,
+                "click",
+                &json!({"session_id":session,"tab_id":7,"ref":"e0:n1"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "user_denied");
+        assert_eq!(rig.transport.actions(), 0);
+        let requests = rig.approvals.requests();
+        assert_eq!(requests.len(), 1);
+        let command = requests[0]["command"].as_str().unwrap();
+        assert!(command.contains("Untrusted page element label:"));
+        assert!(command.contains(label.trim_matches(|c| matches!(c, '\u{202e}' | '\n'))));
+        assert!(command.contains("Origin: https://mail.example.com"));
+        assert!(!command.contains('\u{202e}'));
+    }
+    let rig = Rig::new(&"x".repeat(500), [Scripted::Deny]).await;
+    let chat = rig.approvals.turn(CliKind::Claude, true).await;
+    let ctx = rig.ctx(Some(&chat));
+    let session = open_session(&rig, &ctx).await;
+    let _ = rig.group().call(&ctx, "fill", &json!({"session_id":session,"tab_id":7,"ref":"e0:n1","text":"synthetic value excluded from approval"})).await.unwrap_err();
+    let command = rig.approvals.requests()[0]["command"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(command.contains(&"x".repeat(128)));
+    assert!(!command.contains(&"x".repeat(129)));
+    assert!(!command.contains("synthetic value excluded"));
+    assert_eq!(rig.transport.actions(), 0);
+}
+
+#[tokio::test]
+async fn transport_delivery_disposition_survives_network_validation_in_the_ledger() {
+    // The actual engine/resolver/browser race is exercised by adapter-smoke.
+    // This consumer test checks its error contract through MCP, central
+    // approval, durable ledger and handle invalidation, without fake native deps.
+    for delivered in [false, true] {
+        let rig = Rig::new("Continue", [Scripted::Approve]).await;
+        let chat = rig.approvals.turn(CliKind::Claude, true).await;
+        let ctx = rig.ctx(Some(&chat));
+        let session = open_session(&rig, &ctx).await;
+        *rig.transport.network_failure.lock().unwrap() = Some(delivered);
+        let args = json!({"session_id":session,"tab_id":7,"ref":"e0:n1"});
+        let error = rig.group().call(&ctx, "click", &args).await.unwrap_err();
+        let expected_code = if delivered {
+            "browser_outcome_unknown"
+        } else {
+            "browser_network_blocked"
+        };
+        assert_eq!(error.code, expected_code);
+        assert_eq!(rig.transport.actions(), usize::from(delivered));
+        let outcomes = Repositories::new(rig.approvals.pool().clone())
+            .browser_action_outcomes_for_session(&session)
+            .await
+            .unwrap();
+        let outcome = outcomes
+            .iter()
+            .find(|outcome| outcome.operation == "click")
+            .unwrap();
+        assert_eq!(
+            outcome.result_kind,
+            if delivered {
+                "transport_error"
+            } else {
+                "refused"
+            }
+        );
+        assert!(!outcome.outcome_verified);
+        if delivered {
+            assert!(error.message.contains("browser_network_blocked"));
+            assert!(error.message.contains("Do not repeat"));
+            assert_eq!(
+                rig.group()
+                    .call(&ctx, "click", &args)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "browser_session_not_found"
+            );
+            assert_eq!(rig.transport.actions(), 1);
+        }
+    }
 }
 
 #[tokio::test]
@@ -574,6 +695,39 @@ async fn sensitive_input_is_refused_before_central_approval_or_input_dispatch() 
     let session_id = open_session(&rig, &ctx).await;
     let error = rig.group().call(&ctx, "fill", &json!({ "session_id": session_id, "tab_id": 7, "ref": "e0:n1", "text": "synthetic-only" })).await.unwrap_err();
     assert_eq!(error.code, "browser_human_takeover_required");
+    assert_eq!(rig.transport.actions(), 0);
+    assert!(rig.approvals.requests().is_empty());
+}
+
+#[tokio::test]
+async fn shown_password_click_never_reaches_approval_or_page_handlers() {
+    let rig = Rig::with_element(
+        InteractiveElement {
+            tag: "input".into(),
+            input_type: "text".into(),
+            autocomplete: "section-login current-password webauthn".into(),
+            ..InteractiveElement::default()
+        },
+        [],
+    )
+    .await;
+    let owner = rig.approvals.turn(CliKind::Claude, true).await;
+    let ctx = rig.ctx(Some(&owner));
+    let session = open_session(&rig, &ctx).await;
+    for (tool, extra) in [
+        ("click", json!({})),
+        ("fill", json!({"text":"synthetic"})),
+        ("press", json!({"key":"Enter"})),
+    ] {
+        let mut args = json!({"session_id":session,"tab_id":7,"ref":"e0:n1"});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert_eq!(
+            rig.group().call(&ctx, tool, &args).await.unwrap_err().code,
+            "browser_human_takeover_required"
+        );
+    }
     assert_eq!(rig.transport.actions(), 0);
     assert!(rig.approvals.requests().is_empty());
 }
@@ -649,4 +803,146 @@ async fn screenshot_reaches_the_cli_as_an_image_block() {
     let listed = crate::mcp_server::protocol::tool_result(&listed);
     assert_eq!(listed["content"].as_array().unwrap().len(), 1);
     assert_eq!(listed["content"][0]["type"], "text");
+}
+
+/// Real engine + real production adapter + central approval + MCP consumer.
+/// Run on a supported native host with current prepared resources. The profile
+/// is anonymous/run-owned so this proof never asks for a native login key.
+#[tokio::test]
+#[ignore = "requires supported desktop target and CLOVY_BROWSER_TEST_RESOURCES"]
+async fn real_page_neutral_handler_waits_for_the_central_approval_decision() {
+    use crate::browser::{engine::EngineConfig, policy::Resolver};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct LocalFixture;
+    impl Resolver for LocalFixture {
+        fn resolve<'a>(
+            &'a self,
+            host: &'a str,
+            port: u16,
+        ) -> crate::browser::BoxFuture<'a, std::io::Result<Vec<std::net::SocketAddr>>> {
+            Box::pin(async move {
+                if host != "fixture.invalid" {
+                    return Err(std::io::Error::other("Fixture denies external network"));
+                }
+                Ok(vec![std::net::SocketAddr::from(([127, 0, 0, 1], port))])
+            })
+        }
+    }
+    let resources = std::path::PathBuf::from(
+        std::env::var_os("CLOVY_BROWSER_TEST_RESOURCES").expect("prepared browser resource root"),
+    );
+    assert!(resources.is_absolute());
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!(
+        "http://fixture.invalid:{}",
+        listener.local_addr().unwrap().port()
+    );
+    let effects = Arc::new(AtomicUsize::new(0));
+    let counter = effects.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let counter = counter.clone();
+            tokio::spawn(async move {
+                let mut bytes = Vec::new();
+                let mut buffer = [0; 4096];
+                while !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    if count == 0 {
+                        return;
+                    }
+                    bytes.extend_from_slice(&buffer[..count]);
+                    assert!(bytes.len() <= 32768);
+                }
+                if bytes.starts_with(b"POST /effect ") {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+                let page = r#"<!doctype html><title>Approval fixture</title><h1>Public context</h1><button type="button" onclick="const request=new XMLHttpRequest(); request.open('POST','/effect',false); request.send();">Continue</button>"#;
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", page.len(), page);
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    let flag = dir.path().join("browser-access");
+    std::fs::write(&flag, b"1").unwrap();
+    let mut config = EngineConfig::production(resources, dir.path().join("owned-profile"), false);
+    config.policy.allow_loopback = true;
+    config.resolver = Arc::new(LocalFixture);
+    let browser = Arc::new(BrowserBroker::default());
+    browser.set_access_flag_path(flag);
+    browser.configure_transport(
+        BrowserTransportKind::Attended,
+        crate::browser::test_transport(config),
+        dir.path().join("images"),
+        dir.path().join("artifacts"),
+    );
+    let approvals = TestBroker::new([Scripted::Deny, Scripted::Approve]).await;
+    browser.configure_outcome_repository(Repositories::new(approvals.pool().clone()));
+    let turn = approvals.turn(CliKind::Claude, true).await;
+    let data = McpData {
+        notes: approvals.pool().clone(),
+        profile: "default".into(),
+        memory_enabled: false,
+        activity: ActivityAccess::Off,
+        now: chrono::Utc::now(),
+    };
+    let ctx = ToolCtx {
+        data: &data,
+        app: None,
+        binding: Some(&turn),
+        broker: Some(approvals.broker()),
+    };
+    let group = BrowserTools::with_broker(browser.clone());
+    let started = group.call(&ctx, "start_session", &json!({})).await.unwrap();
+    let session = started["sessionId"].as_str().unwrap();
+    let tab = started["tabId"].as_i64().unwrap();
+    group
+        .call(
+            &ctx,
+            "navigate",
+            &json!({"session_id":session,"tab_id":tab,"url":origin}),
+        )
+        .await
+        .unwrap();
+    let snapshot = group
+        .call(
+            &ctx,
+            "snapshot",
+            &json!({"session_id":session,"tab_id":tab}),
+        )
+        .await
+        .unwrap();
+    assert!(snapshot["snapshot"]
+        .as_str()
+        .unwrap()
+        .contains("Public context"));
+    assert!(approvals.requests().is_empty());
+    let target = snapshot["snapshot"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .find(|line| line.contains("button \"Continue\"") && line.contains("ref="))
+        .unwrap()
+        .split("ref=")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    let args = json!({"session_id":session,"tab_id":tab,"ref":target});
+    let denied = group.call(&ctx, "click", &args).await;
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
+    assert_eq!(denied.unwrap_err().code, "user_denied");
+    assert_eq!(approvals.requests().len(), 1);
+    group.call(&ctx, "click", &args).await.unwrap();
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    assert_eq!(approvals.requests().len(), 2);
+    assert!(approvals.requests()[0]["command"]
+        .as_str()
+        .unwrap()
+        .contains("Untrusted page element label: \"Continue\""));
+    browser.stop_session(session).unwrap();
+    server.abort();
 }

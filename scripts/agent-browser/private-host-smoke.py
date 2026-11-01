@@ -4,15 +4,17 @@ Usage: python3 private-host-smoke.py HOST_BINARY PINNED_CHROME EVIDENCE_DIR
 The private proxy answers fixture.invalid locally and rejects every other host.
 """
 import base64, http.server, json, os, pathlib, re, secrets, select, shutil, signal, subprocess, sys, tempfile, threading, time, urllib.parse, struct, zlib
-binary,chrome,evidence=map(pathlib.Path,sys.argv[1:])
+binary,chrome,evidence=map(pathlib.Path,sys.argv[1:4])
+regressions_only = sys.argv[4:] == ["--privacy-regressions-only"]
+assert not sys.argv[4:] or regressions_only
 evidence.mkdir(parents=True,exist_ok=True)
-def masked_pixels(png):
+def decoded_png(png):
     offset=8;packed=b''
     while offset<len(png):
         length=struct.unpack('>I',png[offset:offset+4])[0];kind=png[offset+4:offset+8];data=png[offset+8:offset+8+length];offset+=length+12
         if kind==b'IHDR':width,height,depth,color,_,_,interlace=struct.unpack('>IIBBBBB',data);assert (depth,color,interlace)==(8,6,0)
         if kind==b'IDAT':packed+=data
-    raw=zlib.decompress(packed);stride=width*4;prev=bytearray(stride);offset=0;count=0
+    raw=zlib.decompress(packed);stride=width*4;prev=bytearray(stride);offset=0;rows=[]
     def paeth(a,b,c):
         p=a+b-c;pa,pb,pc=abs(p-a),abs(p-b),abs(p-c)
         return a if pa<=pb and pa<=pc else b if pb<=pc else c
@@ -22,8 +24,14 @@ def masked_pixels(png):
             a=row[i-4] if i>=4 else 0;b=prev[i];c=prev[i-4] if i>=4 else 0
             add=0 if mode==0 else a if mode==1 else b if mode==2 else (a+b)//2 if mode==3 else paeth(a,b,c)
             row[i]=(row[i]+add)&255
-        count+=sum(row[i:i+4]==b'\x18\x18\x18\xff' for i in range(0,stride,4));prev=row
-    return count
+        rows.append(bytes(row));prev=row
+    return width,height,rows
+def masked_pixels(png):
+    return sum(row[i:i+4]==b'\x18\x18\x18\xff' for row in decoded_png(png)[2] for i in range(0,len(row),4))
+def region_counts(decoded,rect):
+    width,height,rows=decoded;x,y,w,h=rect
+    pixels=[rows[yy][xx*4:xx*4+4] for yy in range(y,min(y+h,height)) for xx in range(x,min(x+w,width))]
+    return {'masked':sum(p==b'\x18\x18\x18\xff' for p in pixels),'black':sum(p==b'\0\0\0\xff' for p in pixels),'pixels':len(pixels)}
 page='''<!doctype html><title>Private host fixture</title><h1>Fixture</h1>
 <form id="fixture-form" action="http://fixture.invalid/submitted"><label for="query">Query</label><input id="query" name="query"><button type="submit">Submit</button></form><input form="fixture-form" aria-label="External form" name="associated">
 <input aria-label="Readonly" readonly value="synthetic-readonly-secret" oninput="document.getElementById('result').textContent='readonly mutated'">
@@ -33,12 +41,37 @@ page='''<!doctype html><title>Private host fixture</title><h1>Fixture</h1>
 <button id="save" onclick="document.getElementById('result').textContent='saved'">Save</button>
 <button onclick="document.getElementById('save').outerHTML='<button id=save>Save</button>'">Replace</button>
 <div id="result"></div><span id="buy-label">Buy</span><button aria-label="Search" aria-labelledby="buy-label"><span aria-hidden="true">+</span></button><a href="http://fixture.invalid/two">Second page</a>'''
+privacy_overflow="""<!doctype html><title>Overflow privacy fixture</title><style>
+#editor{position:fixed;left:1050px;top:650px;width:20px;height:20px}#child{position:fixed;left:600px;top:300px;white-space:nowrap}#editor::after{content:'synthetic-pseudo-secret';position:fixed;left:600px;top:360px;white-space:nowrap}#context{position:fixed;left:600px;top:500px}
+</style><div id=editor contenteditable=true><span id=child>synthetic-overflow-secret</span><span id=closed></span></div><p id=context>Public context remains readable</p><input aria-label='Normal control' value='normal-secret' style='position:fixed;left:100px;top:180px'>
+<script>document.getElementById('closed').attachShadow({mode:'closed'}).innerHTML='<span style="position:fixed;left:600px;top:420px;white-space:nowrap">synthetic-closed-secret</span>'</script>"""
+privacy_passwords="""<!doctype html><title>Password token fixture</title><output id=events>Events:0</output><script>function record(){const e=document.getElementById('events');e.textContent='Events:'+(+e.textContent.split(':')[1]+1)}</script>
+<input aria-label='Shown one' autocomplete='section-account current-password' onclick='record()' onfocus='record()' oninput='record()' onkeydown='record()'><input aria-label='Shown two' autocomplete='section-user new-password' onclick='record()' onfocus='record()' oninput='record()' onkeydown='record()'><input aria-label='Neutral three' id='billing_expiry' onclick='record()' onfocus='record()' oninput='record()' onkeydown='record()'><input aria-label='Neutral four' role='authentication-code' onclick='record()' onfocus='record()' oninput='record()' onkeydown='record()'><button onclick='record()'>Ordinary action</button>"""
+privacy_race="""<!doctype html><title>Race privacy fixture</title><h1>Race fixture</h1><input data-race id='RACE_SECRET_A' name='RACE_SECRET_A' aria-label='RACE_SECRET_A' value='RACE_SECRET_A' onkeydown="document.getElementById('edited').textContent='Edited:1'"><input type=hidden id=hidden value='HIDDEN_SECRET_A'><button id=copy aria-label='RACE_SECRET_A'></button><button id=hidden-copy aria-label='HIDDEN_SECRET_A'></button><span id=closed></span><input aria-label='Query stable' id=ordinary value='ordinary-private-value'><output id=edited>Edited:0</output><button onclick="const e=document.querySelector('[data-race]');e.value='RACE_SECRET_C';e.id=e.name='RACE_SECRET_C';e.setAttribute('aria-label','RACE_SECRET_C')">Mutate labels</button>
+<img src='http://fixture.invalid/privacy-latch' onload="const e=document.querySelector('[data-race]');e.value='RACE_SECRET_B';e.id=e.name='RACE_SECRET_B';e.setAttribute('aria-label','RACE_SECRET_B');document.getElementById('copy').setAttribute('aria-label','RACE_SECRET_B');document.getElementById('hidden').value='HIDDEN_SECRET_B';document.getElementById('hidden-copy').setAttribute('aria-label','HIDDEN_SECRET_B');const n=document.createElement('input');n.value=n.name=n.id='NEW_SECRET_B';n.setAttribute('aria-label','NEW_SECRET_B');document.body.append(n);document.getElementById('closed').attachShadow({mode:'closed'}).innerHTML='<input value=NEW_CLOSED_SECRET_B aria-label=NEW_CLOSED_SECRET_B>';fetch('http://fixture.invalid/privacy-race-done')">"""
+long_value='LONG_PRIVATE_'+('x'*1300)
+privacy_race=privacy_race.replace("<img src=", "<input aria-label='Long field' value='"+long_value+"'><button>"+long_value+"</button><input aria-label='Spaced field' value=' SPACE_PRIVATE  VALUE '><button aria-label=' SPACE_PRIVATE  VALUE '>Spaced copy</button><img src=",1)
+race_release=threading.Event();race_done=threading.Event()
 requests=[]
 class Proxy(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         requests.append({'method':'GET','url':self.path})
         parsed=urllib.parse.urlparse(self.path)
         if parsed.hostname!='fixture.invalid':self.send_error(403);return
+        if parsed.path=='/_fixture/release':race_release.set();text='released'
+        elif parsed.path=='/_fixture/status':text='done' if race_done.is_set() else 'waiting'
+        elif parsed.path=='/privacy-race-done':race_done.set();text='done'
+        elif parsed.path=='/privacy-latch':
+            if not race_release.wait(15):self.send_error(408);return
+            data=base64.b64decode('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7')
+            self.send_response(200);self.send_header('Content-Type','image/gif');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
+        elif parsed.path=='/privacy-overflow':text=privacy_overflow
+        elif parsed.path=='/privacy-passwords':text=privacy_passwords
+        elif parsed.path=='/privacy-race':text=privacy_race
+        elif parsed.path=='/privacy-paint':text=privacy_overflow.replace('width:20px;height:20px','width:20px;height:20px;text-shadow:120px 0 black')
+        else:text=None
+        if text is not None:
+            self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(text.encode())));self.end_headers();self.wfile.write(text.encode());return
         if parsed.path=='/download':
             self.send_response(200);self.send_header('Content-Type','application/octet-stream');self.send_header('Content-Disposition','attachment; filename=clovy-should-not-save.txt');self.end_headers();self.wfile.write(b'synthetic denied download');return
         text=(page + ('<p>Persisted login</p>' if 'fixture_login=synthetic' in self.headers.get('Cookie','') else '')) if parsed.path=='/' else f'<title>Result</title><h1>{parsed.path}</h1><p>{parsed.query}</p>'
@@ -55,6 +88,10 @@ try:
         xvfb=subprocess.Popen(['Xvfb',display,'-screen','0','1280x900x24','-nolisten','tcp'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         env['DISPLAY']=display;time.sleep(.25)
         if xvfb.poll() is not None:raise RuntimeError('Owned Xvfb failed; refusing another display')
+    relay=pathlib.Path(__file__).resolve().parent/'private-host/cdp_fixture.py'
+    relay_config=profile/'relay.json';armed=profile/'race-armed'
+    relay_config.write_text(json.dumps({'chrome':str(chrome.resolve()),'proxyPort':proxy.server_port,'evidence':str(evidence.resolve()),'armed':str(armed)}))
+    relay_chrome=profile/'fixture-chrome';relay_chrome.write_text('#!/bin/sh\nexec /usr/bin/python3 '+__import__('shlex').quote(str(relay))+' '+__import__('shlex').quote(str(relay_config))+' "$@"\n');relay_chrome.chmod(0o700)
     stderr_file=(evidence/'host-stderr.txt').open('w+')
     proc=subprocess.Popen([str(binary.resolve())],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=stderr_file,text=True,bufsize=1,env=env,start_new_session=True)
     def wire(v):
@@ -76,10 +113,75 @@ try:
                 (evidence/'post-failure-observation.json').write_text(json.dumps(diagnostic,indent=2))
             raise AssertionError((action,receipt))
         return receipt.get('data',{}) if ok else receipt
+    def privacy_checks(active):
+        checks={}
+        call('navigate',tab_id=active,url='http://fixture.invalid/privacy-overflow')
+        shot=call('screenshot',tab_id=active);png=base64.b64decode(shot['base64']);(evidence/'overflow.png').write_bytes(png);decoded=decoded_png(png)
+        regions={name:region_counts(decoded,rect) for name,rect in {'inherited':(595,295,210,30),'pseudo':(595,355,210,30),'closed':(595,415,210,30),'ordinary':(95,175,210,35),'context':(595,495,230,45)}.items()}
+        (evidence/'overflow-regions.json').write_text(json.dumps(regions,indent=2))
+        for name in ['inherited','pseudo','closed','ordinary']:checks['masked_'+name]=regions[name]['masked']>regions[name]['pixels']*.8
+        checks['public_context_preserved']=regions['context']['masked']<regions['context']['pixels']*.05 and regions['context']['black']>20
+        call('navigate',tab_id=active,url='http://fixture.invalid/privacy-paint')
+        refused=call('screenshot',ok=False,tab_id=active)
+        checks['unsupported_paint_refused']=refused.get('delivery')=='not_attempted' and refused.get('error',{}).get('code')=='redaction_failed' and 'data' not in refused
+        call('navigate',tab_id=active,url='http://fixture.invalid/privacy-passwords')
+        def named_reference(snapshot,name):
+            found=re.search(r'"'+re.escape(name)+r'"[^\n]*ref=([a-f0-9]{32})',snapshot);assert found,(name,snapshot)
+            return found.group(1)
+        for name in ['Shown one','Shown two','Neutral three','Neutral four']:
+            for operation,params in [('click',{}),('fill',{'text':'forbidden synthetic'}),('press',{'key':'Enter'})]:
+                text=call('snapshot',tab_id=active)['snapshot'];reference=named_reference(text,name);expected=call('inspect_reference',tab_id=active,ref=reference)
+                denied=call('guarded_action',ok=False,tab_id=active,ref=reference,operation=operation,expected=expected,**params)
+                checks[name+'_'+operation]=denied.get('delivery')=='not_attempted' and denied.get('error',{}).get('code')=='sensitive_field'
+        current=call('snapshot',tab_id=active)['snapshot'];checks['sensitive_events_zero']='Events:0' in current
+        before_count=int(re.search(r'Events:(\d+)',current).group(1))
+        reference=named_reference(current,'Ordinary action');expected=call('inspect_reference',tab_id=active,ref=reference)
+        control=call('guarded_action',ok=False,tab_id=active,ref=reference,operation='click',expected=expected)
+        checks['ordinary_click_delivered']=control.get('delivery')=='delivered' and ('Events:'+str(before_count+1)) in call('snapshot',tab_id=active)['snapshot']
+        call('navigate',tab_id=active,url='http://fixture.invalid/privacy-race');armed.touch()
+        raced=call('snapshot',tab_id=active);(evidence/'race-snapshot.json').write_text(json.dumps(raced,indent=2))
+        secrets_in_race=['RACE_SECRET_A','RACE_SECRET_B','HIDDEN_SECRET_A','HIDDEN_SECRET_B','NEW_SECRET_B','NEW_CLOSED_SECRET_B','LONG_PRIVATE_','SPACE_PRIVATE']
+        checks['latched_snapshot_no_secret']=all(secret not in json.dumps(raced) for secret in secrets_in_race)
+        checks['latched_mutation_completed']=race_done.wait(5)
+        latch=evidence/'race-latch.json';checks['latched_before_ax']=latch.exists()
+        after=call('snapshot',tab_id=active);(evidence/'race-after.json').write_text(json.dumps(after,indent=2));checks['fresh_snapshot_no_secret']=all(secret not in json.dumps(after) for secret in secrets_in_race)
+        inspections=[];target=None
+        for reference in re.findall(r'ref=([a-f0-9]{32})',after['snapshot']):
+            observed=call('inspect_reference',ok=False,tab_id=active,ref=reference)
+            if 'data' in observed:
+                inspected=observed['data'];inspections.append(inspected)
+                if target is None and inspected['element']['tag']=='input' and inspected['element']['id']=='[redacted]':target=(reference,inspected)
+        (evidence/'race-inspections.json').write_text(json.dumps(inspections,indent=2))
+        checks['metadata_no_secret']=all(secret not in json.dumps(inspections) for secret in secrets_in_race)
+        checks['ordinary_metadata_preserved']=any(x['element']['label']=='Query stable' and x['element']['id']=='ordinary' for x in inspections)
+        ordinary=named_reference(after['snapshot'],'Query stable')
+        first_ordinary=next(x for x in inspections if x['element']['label']=='Query stable' and x['element']['id']=='ordinary')
+        second_ordinary=call('inspect_reference',tab_id=active,ref=ordinary)
+        checks['unchanged_metadata_revision_stable']=bool(first_ordinary.get('metadataId')) and first_ordinary.get('metadataId')==second_ordinary.get('metadataId')
+        ordinary_fill=call('guarded_action',ok=False,tab_id=active,ref=ordinary,operation='fill',text='allowed-control',expected=first_ordinary)
+        checks['original_expected_after_reinspect_delivered']=ordinary_fill.get('delivery')=='delivered'
+        mutate=named_reference(after['snapshot'],'Mutate labels');expected=call('inspect_reference',tab_id=active,ref=mutate)
+        call('guarded_action',tab_id=active,ref=mutate,operation='click',expected=expected)
+        if target:
+            reference,expected=target
+            overwritten=call('inspect_reference',tab_id=active,ref=reference)
+            checks['changed_metadata_revision_changes']=bool(expected.get('metadataId')) and overwritten.get('metadataId')!=expected.get('metadataId')
+            checks['redacted_metadata_collision_exercised']=overwritten['element']==expected['element']
+            stale=call('guarded_action',ok=False,tab_id=active,ref=reference,operation='press',key='Enter',expected=expected)
+            checks['redacted_metadata_change_stales']=stale.get('delivery')=='not_attempted' and stale.get('error',{}).get('code')=='stale_reference'
+        else:
+            checks['changed_metadata_revision_changes']=False;checks['redacted_metadata_collision_exercised']=False;checks['redacted_metadata_change_stales']=False
+        checks['stale_input_no_event']='Edited:0' in call('snapshot',tab_id=active)['snapshot']
+        (evidence/'privacy-results.json').write_text(json.dumps(checks,indent=2))
+        return checks
     invalid=call('eval',ok=False,script='document.body.textContent')
     assert invalid['error']['code']=='invalid_request' and invalid['delivery']=='not_attempted'
-    start=call('start',chromePath=str(chrome.resolve()),profilePath=str(profile/'browser'),proxyPort=proxy.server_port,persistent=True,headed=False)
+    start=call('start',chromePath=str(relay_chrome),profilePath=str(profile/'browser'),proxyPort=proxy.server_port,persistent=True,headed=False)
     tab=start['tabId'];assert isinstance(tab,int)
+    if regressions_only:
+        checks=privacy_checks(tab);call('shutdown');proc.wait(timeout=5)
+        print(json.dumps({'passed':all(checks.values()),'privacy':checks,'receipts':len(receipts)}))
+        raise SystemExit(0 if all(checks.values()) else 1)
     assert call('navigate',tab_id=tab,url='http://fixture.invalid/')['url']=='http://fixture.invalid/'
     snap=call('snapshot',tab_id=tab)['snapshot']
     assert all(secret not in snap for secret in ['synthetic-password-secret','synthetic-otp-secret','synthetic-card-secret','synthetic-editable-secret','synthetic-readonly-secret'])
@@ -183,6 +285,8 @@ try:
                 time.sleep(.05)
             else:raise TimeoutError('Human fixture document did not become ready')
             assert call('screenshot',tab_id=takeover['tabId'])['url']=='http://fixture.invalid/'
+    privacy=privacy_checks(takeover['tabId'] if xvfb else tab)
+    assert all(privacy.values()),privacy
     # Neither the host nor Chrome has a command socket / TCP CDP argument.
     parents={}
     for entry in pathlib.Path('/proc').iterdir():

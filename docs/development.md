@@ -324,5 +324,15 @@ The debug adapter may resolve the prepared repository resources. There is no
 runtime download or global executable lookup. Plain debug Cargo checks create
 only the empty resource directory; they do not prepare a usable browser.
 Use `pnpm browser:prepare -- --check` to verify a prepared debug resource tree.
+
+Persistent macOS browser proofs are blocked before launch until native storage
+has a supported development namespace. The pinned CFT source uses Chromium's
+default Safe Storage service/account; a separate profile directory, bundle id
+or ad-hoc signature does not establish the required `-dev` Keychain service.
+Do not launch it to discover or create an owner's item, change Keychains, or
+substitute mock/basic storage for a persistent profile. The supported namespace
+integration requires a separate owner-coordinated decision and native proof.
+Anonymous run-owned browser tests use ephemeral profiles and do not qualify
+persistent native storage or account login.
 On macOS the dev launcher signs nested Chrome code and the private executable
 with the same selected development identity as the app.

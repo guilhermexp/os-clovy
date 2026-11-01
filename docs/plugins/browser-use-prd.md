@@ -23,7 +23,8 @@ the native approval policy, and uncertain deliveries never retry automatically.
 
 Authorized routines use a separate anonymous ephemeral profile and their own
 per-routine opt-in. They never inherit attended logins or approvals, and
-consequential actions remain blocked.
+clicks, fills and key presses remain blocked. Page labels cannot prove that an
+input event is harmless; attended input uses the central approval broker.
 
 Success means a user-confirmed or broker-verifiable task outcome, clear consent,
 zero unauthorized actions, correct isolation and reliable Stop. An agent's

@@ -134,6 +134,234 @@ async fn guarded(
     args["expected"] = expected;
     call(engine, id, operation, args).await
 }
+
+const DNS_BOOTSTRAP: usize = 0;
+const DNS_PUBLIC: usize = 1;
+const DNS_PRIVATE: usize = 2;
+const DNS_FAILED: usize = 3;
+
+#[derive(Default)]
+struct NetworkControl {
+    answer: AtomicUsize,
+    effects: AtomicUsize,
+    public_validations: AtomicUsize,
+}
+struct ControlledResolver(Arc<NetworkControl>);
+impl policy::Resolver for ControlledResolver {
+    fn resolve<'a>(
+        &'a self,
+        host: &'a str,
+        port: u16,
+    ) -> browser::BoxFuture<'a, std::io::Result<Vec<std::net::SocketAddr>>> {
+        Box::pin(async move {
+            let address = match host {
+                // Only the synthetic side-effect endpoint needs a fresh
+                // connection during the click. The main document is static.
+                "effect.invalid" => [127, 0, 0, 1],
+                "fixture.invalid" => match self.0.answer.load(Ordering::SeqCst) {
+                    DNS_BOOTSTRAP => [127, 0, 0, 1],
+                    DNS_PUBLIC => {
+                        self.0.public_validations.fetch_add(1, Ordering::SeqCst);
+                        [93, 184, 216, 34]
+                    }
+                    DNS_PRIVATE => [10, 1, 2, 3],
+                    DNS_FAILED => {
+                        return Err(std::io::Error::other(
+                            "synthetic resolver detail must stay private",
+                        ));
+                    }
+                    _ => unreachable!(),
+                },
+                _ => return Err(std::io::Error::other("Fixture blocks external DNS")),
+            };
+            Ok(vec![std::net::SocketAddr::from((address, port))])
+        })
+    }
+}
+
+async fn postvalidation_fixture(
+    control: Arc<NetworkControl>,
+    after: usize,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let origin = format!("http://fixture.invalid:{port}");
+    let task = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let control = control.clone();
+            tokio::spawn(async move {
+                let mut bytes = Vec::new();
+                let mut chunk = [0; 4096];
+                loop {
+                    let count = stream.read(&mut chunk).await.unwrap_or(0);
+                    if count == 0 {
+                        return;
+                    }
+                    bytes.extend_from_slice(&chunk[..count]);
+                    if bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                        break;
+                    }
+                    assert!(bytes.len() <= 32768);
+                }
+                let request = String::from_utf8_lossy(&bytes);
+                if request.starts_with("POST /network-effect ") {
+                    control.effects.fetch_add(1, Ordering::SeqCst);
+                    // The synchronous XHR cannot return to its click handler
+                    // until this real server-side effect and DNS flip finish.
+                    control.answer.store(after, Ordering::SeqCst);
+                }
+                let page = format!(
+                    r#"<!doctype html><title>Postvalidation fixture</title>
+<link rel="icon" href="data:,">
+<h1>Postvalidation fixture</h1><button id="commit" type="button" onclick="const xhr = new XMLHttpRequest(); xhr.open('POST', 'http://effect.invalid:{port}/network-effect', false); xhr.send();">Commit fixture effect</button>"#
+                );
+                // The fixture has no main-origin subresource links. Its CSP
+                // confines page connections to the owned side-effect host.
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nAccess-Control-Allow-Origin: *\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; connect-src http://effect.invalid:{port}; img-src data:\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    page.len(), page
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (origin, task)
+}
+
+async fn postvalidation_network_proof(config: &EngineConfig, evidence: &std::path::Path) -> Value {
+    let mut receipts = Vec::new();
+    for (label, after) in [("private", DNS_PRIVATE), ("resolver_error", DNS_FAILED)] {
+        let control = Arc::new(NetworkControl::default());
+        let (origin, server) = postvalidation_fixture(control.clone(), after).await;
+        let mut isolated = config.clone();
+        isolated.persistent = false;
+        isolated.resolver = Arc::new(ControlledResolver(control.clone()));
+        let engine = AgentBrowserTransport::new(isolated.clone());
+        engine.reserve("postvalidation").unwrap();
+        let tab = call(&engine, "postvalidation", "start_session", json!({})).await["tabId"]
+            .as_i64()
+            .unwrap();
+        call(
+            &engine,
+            "postvalidation",
+            "navigate",
+            json!({"tab_id":tab,"url":origin}),
+        )
+        .await;
+        let snapshot = call(&engine, "postvalidation", "snapshot", json!({"tab_id":tab})).await;
+        let target = reference(&snapshot, "Commit fixture effect");
+        // The last pre-action inspection is accepted with a genuinely public
+        // answer, independently of the permitted loopback fixture connection.
+        control.answer.store(DNS_PUBLIC, Ordering::SeqCst);
+        let expected = call(
+            &engine,
+            "postvalidation",
+            "inspect_reference",
+            json!({"tab_id":tab,"ref":target}),
+        )
+        .await;
+        assert!(control.public_validations.load(Ordering::SeqCst) > 0);
+        assert_eq!(control.effects.load(Ordering::SeqCst), 0);
+        let args = json!({"tab_id":tab,"ref":target,"expected":expected});
+        let error = engine
+            .execute("postvalidation", "click", args.clone())
+            .await
+            .unwrap_err();
+        std::fs::write(
+            evidence.join(format!("postvalidation-{label}-observed.json")),
+            serde_json::to_vec_pretty(&json!({
+                "counter":control.effects.load(Ordering::SeqCst),
+                "code":error.code,
+                "safeMessage":error.message,
+                "publicValidationsBefore":control.public_validations.load(Ordering::SeqCst),
+                "taskClosed":engine.state("postvalidation").is_err()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(control.effects.load(Ordering::SeqCst), 1);
+        assert_eq!(error.code, "browser_outcome_unknown");
+        assert!(error.message.contains("browser_network_blocked"));
+        assert!(error.message.to_ascii_lowercase().contains("do not repeat"));
+        assert!(!error.message.contains("synthetic resolver detail"));
+        assert_eq!(
+            engine.state("postvalidation").unwrap_err().code,
+            "browser_session_closed"
+        );
+        assert_eq!(
+            engine
+                .execute("postvalidation", "click", args)
+                .await
+                .unwrap_err()
+                .code,
+            "browser_session_closed"
+        );
+        assert_eq!(control.effects.load(Ordering::SeqCst), 1);
+        receipts.push(json!({"case":format!("post-delivery-{label}"),"counter":1,"code":error.code,"safeCause":"browser_network_blocked","oldHandlesInvalid":true,"replayCounter":1}));
+        engine.shutdown();
+
+        // The same failure before navigate dispatch is a definite refusal and
+        // must neither deliver the fixture effect nor close an otherwise live task.
+        control.effects.store(0, Ordering::SeqCst);
+        let engine = AgentBrowserTransport::new(isolated.clone());
+        engine.reserve("prevalidation").unwrap();
+        let tab = call(&engine, "prevalidation", "start_session", json!({})).await["tabId"]
+            .as_i64()
+            .unwrap();
+        let error = engine
+            .execute(
+                "prevalidation",
+                "navigate",
+                json!({"tab_id":tab,"url":origin}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "browser_network_blocked");
+        assert!(engine.state("prevalidation").is_ok());
+        assert_eq!(control.effects.load(Ordering::SeqCst), 0);
+        receipts
+            .push(json!({"case":format!("pre-dispatch-{label}"),"counter":0,"code":error.code}));
+        engine.shutdown();
+
+        // Read-only responses can still refuse a bad post-check: they do not
+        // claim an uncertain mutation, but the invalid task must stop.
+        control.answer.store(DNS_BOOTSTRAP, Ordering::SeqCst);
+        let engine = AgentBrowserTransport::new(isolated);
+        engine.reserve("read-validation").unwrap();
+        let tab = call(&engine, "read-validation", "start_session", json!({})).await["tabId"]
+            .as_i64()
+            .unwrap();
+        call(
+            &engine,
+            "read-validation",
+            "navigate",
+            json!({"tab_id":tab,"url":origin}),
+        )
+        .await;
+        control.answer.store(after, Ordering::SeqCst);
+        let error = engine
+            .execute("read-validation", "snapshot", json!({"tab_id":tab}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "browser_network_blocked");
+        assert_eq!(
+            engine.state("read-validation").unwrap_err().code,
+            "browser_session_closed"
+        );
+        assert_eq!(control.effects.load(Ordering::SeqCst), 0);
+        receipts.push(json!({"case":format!("read-only-{label}"),"counter":0,"code":error.code,"oldHandlesInvalid":true}));
+        engine.shutdown();
+        server.abort();
+    }
+    let result = json!({"passed":true,"receipts":receipts});
+    std::fs::write(
+        evidence.join("postvalidation-network.json"),
+        serde_json::to_vec_pretty(&result).unwrap(),
+    )
+    .unwrap();
+    result
+}
 #[tokio::main]
 async fn main() {
     let resource = std::path::PathBuf::from(std::env::var_os("CLOVY_PROOF_RESOURCES").unwrap());
@@ -429,9 +657,10 @@ async fn main() {
     restricted.shutdown();
     server.abort();
     engine.shutdown();
-    std::fs::write(evidence.join("adapter-result.json"),json!({"passed":true,"mutations":effects.load(Ordering::SeqCst),"retainedProfile":data,"cases":["private host","real adapter","navigate","snapshot sanitized","screenshot","fill","press","back","tabs","replaced node refused","closed tab refused","profile lease","human takeover","resume","profile reopen","stop during mutation unknown no replay","cancel startup","production network guard"]}).to_string()).unwrap();
+    let postvalidation = postvalidation_network_proof(&config, &evidence).await;
+    std::fs::write(evidence.join("adapter-result.json"),json!({"passed":true,"mutations":effects.load(Ordering::SeqCst),"retainedProfile":data,"postvalidationNetwork":postvalidation,"cases":["private host","real adapter","navigate","snapshot sanitized","screenshot","fill","press","back","tabs","replaced node refused","closed tab refused","profile lease","human takeover","resume","profile reopen","stop during mutation unknown no replay","cancel startup","production network guard","post-delivery private DNS unknown","post-delivery resolver error unknown","pre-dispatch DNS refusal","read-only postvalidation refusal"]}).to_string()).unwrap();
     println!(
-        "Real adapter proof passed; one mutation, no replay. Evidence: {}",
+        "Real adapter proof passed; effect counters matched, no replay. Evidence: {}",
         evidence.display()
     );
 }

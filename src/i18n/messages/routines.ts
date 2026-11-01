@@ -104,7 +104,7 @@ export default defineMessages({
     "routines.detail.details": "Details",
     "routines.detail.browserUse": "Browser use",
     "routines.detail.browserUseDescription":
-      "Allow this routine to browse public pages with a separate anonymous profile. Saved logins are unavailable. Consequential actions stay blocked.",
+      "Allow this routine to read and navigate public pages with a separate anonymous profile. Saved logins and interaction with page controls are unavailable.",
     "routines.detail.browserUseToggle": "Allow browser use for this routine",
     "routines.detail.scriptNote":
       "This routine has an attached script ({script}) that runs outside the sandbox, so it always has full access. Switching it to Sandboxed removes the script when you save.",
@@ -262,7 +262,7 @@ export default defineMessages({
     "routines.detail.details": "Detalhes",
     "routines.detail.browserUse": "Uso do navegador",
     "routines.detail.browserUseDescription":
-      "Permita que esta rotina navegue em páginas públicas com um perfil anônimo separado. Os logins salvos ficam indisponíveis. Ações com consequências continuam bloqueadas.",
+      "Permita que esta rotina leia e navegue em páginas públicas com um perfil anônimo separado. Logins salvos e interação com controles da página ficam indisponíveis.",
     "routines.detail.browserUseToggle": "Permitir uso do navegador nesta rotina",
     "routines.detail.scriptNote":
       "Esta rotina tem um script anexado ({script}) que roda fora do sandbox, então sempre tem acesso total. Mudar para Em sandbox remove o script quando você salvar.",

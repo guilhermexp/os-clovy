@@ -46,6 +46,18 @@ fn unknown() -> EngineError {
         "The browser outcome is unknown. The operation may have happened; do not repeat it.",
     )
 }
+fn post_network_error(read_only: bool, error: EngineError) -> EngineError {
+    if read_only {
+        return error;
+    }
+    // validate_url normalizes every policy/resolver failure to this safe cause.
+    // A successful mutation response precedes this check, so reporting refusal
+    // would hide possible delivery and invite the caller to replay the effect.
+    EngineError::new(
+        "browser_outcome_unknown",
+        "The browser operation may have happened, but its post-action network validation failed (browser_network_blocked). Its task has been stopped. Do not repeat it.",
+    )
+}
 fn failed() -> EngineError {
     EngineError::new(
         "browser_start_failed",
@@ -577,11 +589,12 @@ impl AgentBrowserTransport {
             request["operation"] = json!(tool);
         }
         let data = self.request(&slot, request).await?;
+        let read_only = matches!(
+            tool,
+            "snapshot" | "screenshot" | "list_tabs" | "inspect_reference"
+        );
         if slot.suspended.load(Ordering::SeqCst) {
-            if !matches!(
-                tool,
-                "snapshot" | "screenshot" | "list_tabs" | "inspect_reference"
-            ) {
+            if !read_only {
                 // Takeover may have been requested while an operation was
                 // already being delivered. A pause is not a refusal of that
                 // effect; invalidate the task instead of inviting a replay.
@@ -605,7 +618,7 @@ impl AgentBrowserTransport {
         if let Some(raw) = data.get("url").and_then(Value::as_str) {
             if let Err(error) = self.validate_url(raw).await {
                 slot.stop();
-                return Err(error);
+                return Err(post_network_error(read_only, error));
             }
         }
         if let Some(tabs) = data.get("tabs").and_then(Value::as_array) {
@@ -613,7 +626,7 @@ impl AgentBrowserTransport {
                 if let Some(raw) = tab.get("url").and_then(Value::as_str) {
                     if let Err(error) = self.validate_url(raw).await {
                         slot.stop();
-                        return Err(error);
+                        return Err(post_network_error(read_only, error));
                     }
                 }
             }

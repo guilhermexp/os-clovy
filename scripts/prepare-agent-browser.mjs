@@ -248,6 +248,8 @@ for (const platform of platforms) {
     ),
   );
   const stage = `${destination}.preparing`;
+  if (Number(statfsSync(root).bavail) * Number(statfsSync(root).bsize) < 20 * 1024 ** 3)
+    throw new Error("Chrome extraction needs at least 20 GiB free disk space.");
   rmSync(stage, { recursive: true, force: true });
   mkdirSync(path.join(stage, "chrome"), { recursive: true });
   extract(archive, path.join(stage, "chrome"), pin.archiveRoot);
