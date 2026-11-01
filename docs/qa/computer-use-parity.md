@@ -1,5 +1,30 @@
 # Computer use parity and acceptance matrix
 
+## Agent-desktop cutover: native acceptance pending
+
+The historical evidence below covers the previous macOS driver only. It does
+not establish acceptance of agent-desktop on either platform. Run the following
+against the signed packaged candidate, with disposable fixture apps and an
+isolated Clovy profile, through both Claude Code and Codex. Record OS version,
+bundle and engine hashes, target identities, observed delivery and process
+exit evidence for each run. Do not use personal credentials or live data.
+
+| Scenario | macOS | Windows |
+| --- | --- | --- |
+| Two windows and two concurrent conversations: targets, captures, references and app authorizations remain bound to the owning run; stale references are refused | Pending | Pending |
+| Semantic background click and text insertion: observer verifies foreground app and pointer; insertion preserves existing text | Pending | Pending |
+| Physical-only click, double-click and drag: visible mode reported before dispatch, exact destination verified, scaled and negative-display coordinates exercised | Pending | Pending |
+| Exact window screenshot, accessibility tree, visual and SoM output; post-action capture failure retains action receipt without replay | Pending | Pending |
+| Sensitive password, OTP and payment fields refused, including after controls or window identity change | Pending | Pending |
+| Revoke and Stop during a pending approval and an in-flight action; no late mutation or surviving authorized child/overlay; uncertain delivery is not retried | Pending | Pending |
+| Packaged helper and engine signatures, peer identity, private transport, version and hashes verified; direct or untrusted launch refused | Pending | Pending |
+| Stage Manager shelf restoration selects the exact window in the current stage; Screen Recording and Accessibility attributed to the correct signed components | Pending | Not applicable |
+| Interactive desktop and integrity checks reject locked, secure or higher-integrity targets without elevation; HWND/PID/creation/path and Job Object teardown verified | Not applicable | Pending |
+
+If a permission or interactive session is unavailable, record the case as
+blocked. A Linux smoke test, a source inspection or a README claim is not native
+acceptance.
+
 Date: 2026-07-16
 Scope: JUN-278 phase 2, JUN-288, JUN-293, JUN-296, JUN-356
 Baseline: the attended macOS Computer Use experience documented for Codex on

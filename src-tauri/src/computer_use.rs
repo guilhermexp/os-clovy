@@ -3707,7 +3707,7 @@ async fn mutate(
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return capture(
+        let capture_result = capture(
             app,
             state,
             &json!({
@@ -3724,8 +3724,37 @@ async fn mutate(
             add_result_metadata(&mut capture, &action_id, &target.app_name);
             capture
         });
+        return Ok(combine_action_and_capture(result, capture_result));
     }
     Ok(result)
+}
+
+// Once the driver has returned an action result, a later capture cannot
+// determine whether it is safe to repeat that action. Keep its receipt even
+// when the follow-up observation fails.
+fn combine_action_and_capture(mut action: Value, capture: Result<Value, AppError>) -> Value {
+    match capture {
+        Ok(mut capture) => {
+            let key = if capture.get("structuredContent").is_some() {
+                "structuredContent"
+            } else {
+                "structured_content"
+            };
+            capture[key]["action_receipt"] = action;
+            capture
+        }
+        Err(error) => {
+            let warning = json!({
+                "capture_after_error": { "code": error.code, "message": error.message },
+                "message": "The action returned a result, but the follow-up capture failed. Do not repeat the action; inspect the target first."
+            });
+            if let Some(parts) = action.get_mut("content").and_then(Value::as_array_mut) {
+                parts.push(json!({ "type": "text", "text": warning.to_string() }));
+            }
+            action["captureAfterError"] = warning;
+            action
+        }
+    }
 }
 
 async fn recheck_after_approval(
@@ -4924,6 +4953,25 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn follow_up_capture_keeps_the_action_receipt_even_when_capture_fails() {
+        let action = mcp_text(json!({ "action_id": "one", "result": "dispatched" }));
+        let failed = combine_action_and_capture(
+            action.clone(),
+            Err(AppError::new("capture_failed", "Capture failed.")),
+        );
+        assert_eq!(failed["structuredContent"], action["structuredContent"]);
+        assert_eq!(
+            failed["captureAfterError"]["capture_after_error"]["code"],
+            "capture_failed"
+        );
+        assert!(failed["content"].to_string().contains("Do not repeat"));
+
+        let observed =
+            combine_action_and_capture(action.clone(), Ok(mcp_text(json!({ "tree": "button" }))));
+        assert_eq!(observed["structuredContent"]["action_receipt"], action);
+    }
 
     #[test]
     fn driver_prewarm_loses_to_stop_and_readiness_loss() {
