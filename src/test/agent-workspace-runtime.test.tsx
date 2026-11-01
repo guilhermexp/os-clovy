@@ -1,7 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentRuntimeEvent, AgentSessionDto } from "../lib/agent-runtime-contract";
+import type {
+  AgentRuntimeEvent,
+  AgentSessionDto,
+  AgentSkillDto,
+} from "../lib/agent-runtime-contract";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -150,6 +154,9 @@ describe("AgentWorkspace runtime wiring", () => {
             description: "Work with Clovy notes.",
             source: "managed",
             enabled: true,
+            configuredEnabled: true,
+            readable: true,
+            error: null,
             editable: true,
           },
           {
@@ -158,9 +165,12 @@ describe("AgentWorkspace runtime wiring", () => {
             description: "Disabled skill.",
             source: "managed",
             enabled: false,
+            configuredEnabled: false,
+            readable: true,
+            error: null,
             editable: true,
           },
-        ]);
+        ] satisfies AgentSkillDto[]);
       }
       if (command === "list_provider_models") {
         return Promise.resolve({

@@ -4,16 +4,19 @@ import { useRef } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useAgentSessionSync } from "../app/use-agent-session-sync";
 import type { UseAgentSessionSyncDependencies } from "../app/use-agent-session-sync-types";
-import { AgentWorkspace } from "../components/agent/AgentWorkspace";
+import { AgentWorkspace, AGENT_RUNTIME_EVENT } from "../components/agent/AgentWorkspace";
 import { Sidebar } from "../components/sidebar/Sidebar";
 import { AGENT_SESSIONS_CHANGED_EVENT, AGENT_SESSIONS_HYDRATED_EVENT } from "../lib/agent-events";
-import type { AgentSessionDto } from "../lib/agent-runtime-contract";
+import type { AgentRuntimeEvent, AgentSessionDto } from "../lib/agent-runtime-contract";
 import {
   readAgentSessionDraft,
   resetAgentSessionDraftsForTests,
   writeAgentSessionDraft,
 } from "../lib/agent-session-drafts";
-import { resetCurrentDataPartitionForTests } from "../lib/data-partition";
+import {
+  resetCurrentDataPartitionForTests,
+  setCurrentDataPartitionName,
+} from "../lib/data-partition";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -46,13 +49,16 @@ const a: AgentSessionDto = {
 const b: AgentSessionDto = { ...a, id: "b-external", title: "Created B", status: "idle" };
 type Change = { profile: string; kind: string; id?: string; deleted?: boolean };
 const nativeListeners = new Set<(event: { payload: Change }) => void>();
+const runtimeListeners = new Set<(event: { payload: AgentRuntimeEvent }) => void>();
 let persisted: AgentSessionDto[];
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((finish) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((finish, fail) => {
     resolve = finish;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 async function change(payload: Change) {
   await act(async () => {
@@ -117,9 +123,14 @@ beforeEach(() => {
   resetAgentSessionDraftsForTests();
   persisted = [a];
   nativeListeners.clear();
+  runtimeListeners.clear();
   mocks.listen.mockImplementation(async (name, callback) => {
     if (name === "clovy-data-changed") nativeListeners.add(callback);
-    return () => nativeListeners.delete(callback);
+    if (name === AGENT_RUNTIME_EVENT) runtimeListeners.add(callback);
+    return () => {
+      nativeListeners.delete(callback);
+      runtimeListeners.delete(callback);
+    };
   });
   mocks.invoke.mockImplementation(
     async (command: string, args?: { sessionId?: string; request?: { sessionId: string } }) => {
@@ -261,6 +272,184 @@ describe("external conversation mutations", () => {
     await act(async () => nativeList.resolve([a, b]));
     expect(await within(screen.getByRole("complementary")).findByText(b.title)).toBeVisible();
     expect(mocks.selected).not.toHaveBeenCalledWith(undefined);
+  });
+
+  it("publishes a post-event terminal read after the pending MCP snapshot and keeps C working", async () => {
+    const c: AgentSessionDto = { ...a, id: "c-external", title: "Running C" };
+    const doneA: AgentSessionDto = { ...a, status: "idle", updatedAt: "2026-11-01T00:01:00Z" };
+    const mcpSnapshot = deferred<AgentSessionDto[]>();
+    const terminalSnapshot = deferred<AgentSessionDto[]>();
+    const fallback = mocks.invoke.getMockImplementation();
+    const selected = vi.fn();
+    let phase: "initial" | "mcp" | "terminal" = "initial";
+    let mcpReadStarted = false;
+    let terminalReadStarted = false;
+    persisted = [a, c, b];
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "list_agent_sessions" && phase === "mcp") {
+        mcpReadStarted = true;
+        return mcpSnapshot.promise;
+      }
+      if (command === "list_agent_sessions" && phase === "terminal") {
+        terminalReadStarted = true;
+        return terminalSnapshot.promise;
+      }
+      return fallback?.(command, args);
+    });
+    writeAgentSessionDraft(a.id, "Keep A's draft");
+    writeAgentSessionDraft(c.id, "Keep C's draft");
+    writeAgentSessionDraft(b.id, "Keep the viewed conversation draft");
+    render(
+      <>
+        <Surface />
+        <div hidden>
+          <AgentWorkspace initialSession={b} onSessionSelected={selected} />
+        </div>
+      </>,
+    );
+    const sidebar = screen.getByRole("complementary");
+    const row = (session: AgentSessionDto) =>
+      within(sidebar).getByText(session.title).closest("article") as HTMLElement;
+    await waitFor(() => {
+      expect(within(row(a)).getByRole("status", { name: "Working" })).toBeVisible();
+      expect(within(row(c)).getByRole("status", { name: "Working" })).toBeVisible();
+      expect(selected).toHaveBeenLastCalledWith(b);
+    });
+
+    phase = "mcp";
+    await change({ profile: "default", kind: "conversations", id: b.id });
+    await waitFor(() => expect(mcpReadStarted).toBe(true));
+    // Native terminal persistence has completed before publishing this real
+    // runtime event. Its consumer starts the newer list read in the MCP epoch.
+    phase = "terminal";
+    persisted = [doneA, c, b];
+    const frame: AgentRuntimeEvent = {
+      protocolVersion: 1,
+      sessionId: a.id,
+      runId: "run-a",
+      sequence: 2,
+      eventId: "run-a-completed",
+      method: "run.completed",
+      data: { completedAt: doneA.updatedAt },
+    };
+    await act(async () => {
+      for (const listener of runtimeListeners) listener({ payload: frame });
+    });
+    await waitFor(() => expect(terminalReadStarted).toBe(true));
+    // The earlier MCP read still sees A working. It must not invalidate the
+    // valid terminal read that was admitted after the native mutation event.
+    await act(async () => mcpSnapshot.resolve([a, c, b]));
+    expect(within(row(a)).getByRole("status", { name: "Working" })).toBeVisible();
+    await act(async () => terminalSnapshot.resolve([doneA, c, b]));
+    expect(within(row(a)).queryByRole("status", { name: "Working" })).not.toBeInTheDocument();
+    expect(within(row(a)).getByRole("status", { name: "New reply" })).toBeVisible();
+    expect(within(row(c)).getByRole("status", { name: "Working" })).toBeVisible();
+    expect(selected).toHaveBeenLastCalledWith(b);
+    expect(mocks.selected).not.toHaveBeenCalled();
+    expect(readAgentSessionDraft(a.id)).toBe("Keep A's draft");
+    expect(readAgentSessionDraft(c.id)).toBe("Keep C's draft");
+    expect(readAgentSessionDraft(b.id)).toBe("Keep the viewed conversation draft");
+  });
+
+  it.each([
+    "resolve",
+    "reject",
+  ])("discards a foreign-partition API read that returns after default hydration (%s)", async (outcome) => {
+    // API/store fixture only: this does not claim a live profile-switch UI;
+    // native active_profile still returns the literal default partition.
+    const c: AgentSessionDto = { ...a, id: "c-partition", title: "Working C" };
+    const foreign: AgentSessionDto = {
+      ...a,
+      id: "foreign-partition",
+      title: "Foreign conversation",
+    };
+    const doneA: AgentSessionDto = { ...a, status: "idle" };
+    const nativeSnapshot = deferred<AgentSessionDto[]>();
+    const foreignRead = deferred<AgentSessionDto[]>();
+    const fallback = mocks.invoke.getMockImplementation();
+    const selected = vi.fn();
+    const changed = vi.fn();
+    let phase: "initial" | "native" | "foreign" = "initial";
+    let nativeStarted = false;
+    let foreignStarted = false;
+    persisted = [a, c, b];
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "list_session_profiles")
+        return Promise.resolve([{ sessionId: foreign.id, profile: "other" }]);
+      if (command === "list_agent_sessions" && phase === "native") {
+        nativeStarted = true;
+        return nativeSnapshot.promise;
+      }
+      if (command === "list_agent_sessions" && phase === "foreign") {
+        foreignStarted = true;
+        return foreignRead.promise;
+      }
+      if (command === "get_latest_agent_run" && phase === "foreign")
+        return Promise.resolve({
+          id: "run-partition-a",
+          sessionId: a.id,
+          status: "completed",
+          model: claude,
+          completedAt: "2026-11-01T00:01:00Z",
+        });
+      return fallback?.(command, args);
+    });
+    writeAgentSessionDraft(a.id, "Keep selected A");
+    writeAgentSessionDraft(c.id, "Keep working C");
+    render(
+      <>
+        <Surface />
+        <div hidden>
+          <AgentWorkspace initialSession={a} onSessionSelected={selected} />
+        </div>
+      </>,
+    );
+    const sidebar = screen.getByRole("complementary");
+    const row = (session: AgentSessionDto) =>
+      within(sidebar).getByText(session.title).closest("article") as HTMLElement;
+    await waitFor(() => {
+      expect(within(row(c)).getByRole("status", { name: "Working" })).toBeVisible();
+      expect(selected).toHaveBeenLastCalledWith(a);
+    });
+    phase = "native";
+    await change({ profile: "default", kind: "conversations", id: b.id });
+    await waitFor(() => expect(nativeStarted).toBe(true));
+    act(() => setCurrentDataPartitionName("other"));
+    phase = "foreign";
+    persisted = [doneA, c, b];
+    const frame: AgentRuntimeEvent = {
+      protocolVersion: 1,
+      sessionId: a.id,
+      runId: "run-partition-a",
+      sequence: 2,
+      eventId: "partition-run-completed",
+      method: "run.completed",
+      data: { completedAt: "2026-11-01T00:01:00Z" },
+    };
+    await act(async () => {
+      for (const listener of runtimeListeners) listener({ payload: frame });
+    });
+    await waitFor(() => expect(foreignStarted).toBe(true));
+    act(() => setCurrentDataPartitionName("default"));
+    await act(async () => nativeSnapshot.resolve([a, c, b]));
+    window.addEventListener(AGENT_SESSIONS_CHANGED_EVENT, changed);
+    try {
+      await act(async () => {
+        if (outcome === "resolve") foreignRead.resolve([foreign]);
+        else foreignRead.reject(new Error("Foreign partition list failed"));
+      });
+      expect(changed).not.toHaveBeenCalled();
+      expect(within(sidebar).getByText(a.title)).toBeVisible();
+      expect(within(row(c)).getByRole("status", { name: "Working" })).toBeVisible();
+      expect(within(sidebar).queryByText(foreign.title)).not.toBeInTheDocument();
+      expect(screen.queryByText("Foreign partition list failed")).not.toBeInTheDocument();
+      expect(selected.mock.calls.every(([session]) => session?.id === a.id)).toBe(true);
+      expect(mocks.selected).not.toHaveBeenCalled();
+      expect(readAgentSessionDraft(a.id)).toBe("Keep selected A");
+      expect(readAgentSessionDraft(c.id)).toBe("Keep working C");
+    } finally {
+      window.removeEventListener(AGENT_SESSIONS_CHANGED_EVENT, changed);
+    }
   });
 
   it("rejects a deleted delayed branch before replacing the source draft or selection", async () => {

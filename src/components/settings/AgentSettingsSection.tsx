@@ -54,8 +54,9 @@ export function AgentSettingsSection({
   const [skillDraft, setSkillDraft] = useState("");
   const [skillSaving, setSkillSaving] = useState(false);
   const [error, setError] = useState<string>();
-  const [mutationError, setMutationError] = useState<string>();
+  const [actionError, setActionError] = useState<string>();
   const skillsReadVersion = useRef(0);
+  const editReadVersion = useRef(0);
   const mounted = useRef(true);
   const refreshSkills = useCallback(async (eventIsCurrent: () => boolean = () => true) => {
     const version = ++skillsReadVersion.current;
@@ -89,7 +90,7 @@ export function AgentSettingsSection({
 
   function reconcileFailedSkillMutation(isCurrent: () => boolean, cause: unknown) {
     if (!isCurrent()) return;
-    setMutationError(messageFromError(cause));
+    setActionError(messageFromError(cause));
     // Installation-wide skills still reconcile after a refused mutation. Keep
     // the editable draft and mutation error independent of catalog reads.
     void refreshSkills();
@@ -100,7 +101,7 @@ export function AgentSettingsSection({
     skillsReadVersion.current += 1;
     setSkills((current) => current?.map((item) => (item.id === updated.id ? updated : item)));
     setError(undefined);
-    setMutationError(undefined);
+    setActionError(undefined);
     void refreshSkills();
   }
 
@@ -145,12 +146,20 @@ export function AgentSettingsSection({
   }
 
   async function editSkill(skill: AgentSkillDto) {
+    const version = ++editReadVersion.current;
+    const isCurrent = () => mounted.current && version === editReadVersion.current;
     try {
       const document = await readAgentSkill(skill.id);
+      if (!isCurrent()) return;
+      // A successful explicit read starts a new editor flow. Catalog repair
+      // alone never clears the previous action's failure or draft.
+      setActionError(undefined);
       setSkillDraft(document.content);
       setEditingSkill(skill);
     } catch (cause) {
-      setError(messageFromError(cause));
+      // The latest explicit action supersedes an older save/toggle failure;
+      // a background catalog response must not hide this read failure either.
+      if (isCurrent()) setActionError(messageFromError(cause));
     }
   }
 
@@ -276,11 +285,11 @@ export function AgentSettingsSection({
                     </button>
                   ) : null}
                   <Switch
-                    checked={skill.configuredEnabled ?? skill.enabled}
+                    checked={skill.configuredEnabled}
                     disabled={savingSkillId === skill.id || !skill.editable}
                     onCheckedChange={(enabled) => void changeSkill(skill, enabled)}
                     aria-label={
-                      (skill.configuredEnabled ?? skill.enabled)
+                      skill.configuredEnabled
                         ? t("settingsPanels.agent.disableSkill", { name: skill.name })
                         : t("settingsPanels.agent.enableSkill", { name: skill.name })
                     }
@@ -293,9 +302,9 @@ export function AgentSettingsSection({
             ) : null}
           </div>
         </div>
-        {mutationError || error ? (
+        {actionError || error ? (
           <p className="settings-row-error" role="alert">
-            {mutationError ?? error}
+            {actionError ?? error}
           </p>
         ) : null}
       </section>

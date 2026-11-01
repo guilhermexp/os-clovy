@@ -191,9 +191,9 @@ export type AgentSkillDto = {
   description: string;
   source: "managed" | "user_global";
   enabled: boolean;
-  configuredEnabled?: boolean;
-  readable?: boolean;
-  error?: { code: string; message: string } | null;
+  configuredEnabled: boolean;
+  readable: boolean;
+  error: { code: string; message: string } | null;
   editable: boolean;
 };
 

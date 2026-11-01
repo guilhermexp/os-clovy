@@ -624,10 +624,12 @@ export function AgentWorkspace({
   const refreshSessions = useCallback(async () => {
     const revision = ++sessionListRevisionRef.current;
     const nativeEpoch = readAgentSessionSnapshotEpoch();
+    const partition = getCurrentDataPartitionName();
     const loaded = await agentRuntimeBindings.listSessions().catch((cause) => {
       if (
         revision !== sessionListRevisionRef.current ||
-        nativeEpoch !== readAgentSessionSnapshotEpoch()
+        nativeEpoch !== readAgentSessionSnapshotEpoch() ||
+        partition !== getCurrentDataPartitionName()
       )
         return undefined;
       throw cause;
@@ -635,6 +637,7 @@ export function AgentWorkspace({
     if (
       revision !== sessionListRevisionRef.current ||
       nativeEpoch !== readAgentSessionSnapshotEpoch() ||
+      partition !== getCurrentDataPartitionName() ||
       !loaded
     )
       return undefined;
@@ -647,7 +650,8 @@ export function AgentWorkspace({
     const acceptSessionSnapshot = (event: Event) => {
       const detail = (event as CustomEvent<AgentSessionsHydratedDetail>).detail;
       if (!detail?.replaceExisting) return;
-      sessionListRevisionRef.current += 1;
+      // The native-event epoch already fences older reads. A terminal refresh
+      // started in that epoch must still publish after this snapshot arrives.
       const next = filterAgentSessionsForDataPartition(
         detail.sessions,
         detail.partitions,
