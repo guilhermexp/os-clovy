@@ -56,7 +56,7 @@ if '--fixture-no-sandbox' in sys.argv[2:]:
         if not baseline.exists() or 'FD ownership violation' not in baseline.read_text():
             raise RuntimeError('Record the exact no-CDP Chrome FD-ownership failure before using this fixture workaround.')
         fixture_flags.append('--enable-features=NetworkServiceInProcess2')
-    chrome.write_text('#!/bin/sh\nexec ' + shlex.quote(str((original / 'chrome/chrome-linux64/chrome').resolve())) + ' ' + shlex.join(fixture_flags) + ' "$@" 2>' + shlex.quote(str(evidence / 'chrome-stderr.txt')) + '\n')
+    chrome.write_text('#!/bin/sh\nexec ' + shlex.quote(str((original / 'chrome/chrome-linux64/chrome').resolve())) + ' ' + shlex.join(fixture_flags) + ' "$@" 2>>' + shlex.quote(str(evidence / 'chrome-stderr.txt')) + '\n')
     chrome.chmod(0o700)
     engine = fixture / 'clovy-agent-browser'
     if engine.exists() or engine.is_symlink():
@@ -66,7 +66,15 @@ if '--fixture-no-sandbox' in sys.argv[2:]:
     provenance['fixtureChromeFlags'] = fixture_flags
     provenance['files']['chrome/chrome-linux64/chrome']['sha256'] = hashlib.sha256(chrome.read_bytes()).hexdigest()
     (fixture / 'provenance.json').write_text(json.dumps(provenance, indent=2))
-    (evidence / 'fixture-config.json').write_text(json.dumps({'chromeFlags':fixture_flags,'originalResources':str(original),'fixtureResources':str(fixture),'networkResolver':'fixture.invalid only; every external hostname refused'},indent=2))
+    # The Linux module proof must not connect to the box owner's SecretService
+    # or desktop bus. Retain normal HOME, but point this fixture's native bus
+    # environment at a run-owned, nonexistent endpoint. This is not a native
+    # credential-store qualification and changes no product crypto flags.
+    runtime = evidence / 'fixture-runtime'
+    runtime.mkdir(mode=0o700, exist_ok=True)
+    env['XDG_RUNTIME_DIR'] = str(runtime)
+    env['DBUS_SESSION_BUS_ADDRESS'] = 'unix:abstract=clovy-proof-unavailable-' + str(os.getpid())
+    (evidence / 'fixture-config.json').write_text(json.dumps({'chromeFlags':fixture_flags,'originalResources':str(original),'fixtureResources':str(fixture),'networkResolver':'fixture.invalid only; every external hostname refused','nativeEnvironment':'run-owned unavailable bus; owner SecretService/desktop bus never inherited; native encryption remains unproven'},indent=2))
     env['CLOVY_PROOF_SANDBOX_FIXTURE'] = '1'
 env.update(CARGO_INCREMENTAL='0', CARGO_PROFILE_DEV_DEBUG='0', CARGO_PROFILE_TEST_DEBUG='0',
            CARGO_TARGET_DIR='/home/agent/projects/os-clovy-melhorias-20261101/.tmp/engine-target',

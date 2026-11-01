@@ -97,7 +97,7 @@ fn reference(snapshot: &Value, name: &str) -> String {
         .as_str()
         .unwrap()
         .lines()
-        .find(|line| line.contains(&format!("\"{name}\"")))
+        .find(|line| line.contains(&format!("\"{name}\"")) && line.contains("ref="))
         .unwrap();
     line.split("ref=")
         .nth(1)
@@ -195,6 +195,11 @@ async fn main() {
     )
     .await;
     let first = call(&engine, "task-a", "snapshot", json!({"tab_id":tab})).await;
+    std::fs::write(
+        evidence.join("first-snapshot.json"),
+        serde_json::to_vec_pretty(&first).unwrap(),
+    )
+    .unwrap();
     let query = reference(&first, "Query");
     guarded(
         &engine,

@@ -33,11 +33,13 @@
 
 ## 5. T5B — agent-browser e navegador próprio
 
-- [ ] 5.1 Integrar engine agent-browser pinada com patch downstream estreito de host privado/autenticado sem streaming/CDP público/plugins/MCP upstream. Implementar inspect_reference/guarded_action com expected document/node/origin/element exatos sem role/name fallback, sanitização e envelope de entrega; provar fixture de nó substituído e erro incerto sem replay.
+- [x] 5.1 Integrar engine agent-browser pinada com patch downstream estreito de host privado/autenticado sem streaming/CDP público/plugins/MCP upstream. Implementar inspect_reference/guarded_action com expected document/node/origin/element exatos sem role/name fallback, sanitização e envelope de entrega; provar fixture de nó substituído e erro incerto sem replay.
 - [ ] 5.2 Implementar perfil persistente exclusivo Clovy com lease único e login/takeover humano suspendendo captura/ações; rotinas usam perfis anônimos temporários com grants próprios. Supervisionar processos desde reserva/startup e preservar login após Stop, sem password-store basic/mock-keychain ou Chrome pessoal. Provar concorrência e lifecycle real na box e qualificar login nativo depois.
 - [ ] 5.3 Ligar dono conversa/run e mapeamento exato aba/ref/epoch no broker, corrigir schemas/callers fill.text/press.ref/tab_id e implementar back, remover accept_shared_tab sem alias obsoleto. Preservar políticas de rede/proxy/DNS pinning/campos sensíveis/recibos e recusar grants ausentes também no despacho; rotinas não herdam perfil assistido.
 - [ ] 5.4 Conectar transport/access flag/outcome repo/artefatos no startup e teardown ao run/Stop/shutdown, sem esperar mutex de chamada. Pin/empacotar engine e Chrome com hashes reais, atualizar UI/contratos/docs; mover production_app_data_dir compartilhado antes de retirar extensão/pareamento/shim e launcher/CDP antigos exclusivos, sem fallback.
 - [ ] 5.5 Exercitar motor real contra página sintética na box: navegar/snapshot/screenshot/click/fill/press/back/abas, nó/aba fechados, duas conversas, cancelamento startup/ação, takeover, perfil reaberto e limites de rede. Não aceitar transporte falso/catalog-only como prova; registrar separado os cenários macOS/Windows e ambos CLIs.
+
+Prova T5B na box (rodada Sol2): engine pinada atual com55recibos reais; cliente de produção/PinningProxy/motor real com18cenários, uma mutação sem replay e nenhum processo sobrevivente;26testes portáveis e Clippy estrito aprovados. Relatório: `.tmp/verify/T5B/delivery-sol-2.md`. Os itens5.2–5.5 continuam abertos para os trechos de aceite nativo, broker/MCP no app e ambos CLIs; a prova Linux não os substitui.
 
 ## 6. T6 — OAuth Vercel e origem de integrações
 

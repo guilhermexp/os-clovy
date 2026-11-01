@@ -144,7 +144,18 @@ try:
             sentinel=profile/'human-file.html';sentinel.write_text('<title>Clovy file sentinel</title><h1>Synthetic file must remain private</h1>')
             def xdotool(*arguments):
                 return subprocess.check_output(['xdotool',*arguments],env=env,text=True,timeout=5).strip()
-            window=xdotool('search','--onlyvisible','--class','Google-chrome').splitlines()[0]
+            deadline=time.monotonic()+5
+            while time.monotonic()<deadline:
+                # This DISPLAY belongs to our Xvfb process. Match the actual
+                # fixture page title rather than a browser-distribution class.
+                result=subprocess.run(['xdotool','search','--onlyvisible','--name','^Private host fixture( - .*)?$'],env=env,text=True,capture_output=True,timeout=5)
+                if result.returncode==0 and result.stdout.strip():
+                    window=result.stdout.strip().splitlines()[0]
+                    (evidence/'human-window.json').write_text(json.dumps({'display':env['DISPLAY'],'window':window,'title':xdotool('getwindowname',window)},indent=2))
+                    break
+                if result.returncode not in (0,1):result.check_returncode()
+                time.sleep(.05)
+            else:raise TimeoutError('Owned fixture window did not become visible')
             def human_url(url,title):
                 xdotool('windowfocus','--sync',window)
                 xdotool('key','--clearmodifiers','ctrl+l')
@@ -159,6 +170,18 @@ try:
             file_capture=call('screenshot',ok=False,tab_id=takeover['tabId'])
             assert file_capture['delivery']=='not_attempted' and file_capture['error']['code']=='invalid_url' and 'data' not in file_capture,file_capture
             call('suspend');human_url('http://fixture.invalid/','Private host fixture');call('resume')
+            # A title can become visible before the new document is ready.
+            # Observe readiness through bounded reads, without replaying input.
+            deadline=time.monotonic()+5
+            while time.monotonic()<deadline:
+                observation=call('snapshot',ok=False,tab_id=takeover['tabId'])
+                observed=observation.get('data',{}).get('snapshot','')
+                if 'heading "Fixture"' in observed and 'textbox "Query"' in observed:
+                    (evidence/'human-return-readiness.json').write_text(json.dumps(observation,indent=2))
+                    break
+                if observation.get('delivery')=='unknown':raise AssertionError(observation)
+                time.sleep(.05)
+            else:raise TimeoutError('Human fixture document did not become ready')
             assert call('screenshot',tab_id=takeover['tabId'])['url']=='http://fixture.invalid/'
     # Neither the host nor Chrome has a command socket / TCP CDP argument.
     parents={}
