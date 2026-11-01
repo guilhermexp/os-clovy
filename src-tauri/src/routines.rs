@@ -2866,6 +2866,7 @@ mod tests {
                 turns: None,
                 safety_mode: claimed.safety_mode,
                 attended: false,
+                surface: "routine".into(),
                 routine_tools: Some(
                     crate::chat_engine::policy::RoutineBuiltinTools::from_toolsets(
                         &claimed.enabled_toolsets,

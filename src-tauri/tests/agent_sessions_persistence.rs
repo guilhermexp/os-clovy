@@ -1,6 +1,6 @@
 use clovy_lib::agent_sessions::{
-    import_legacy_agent_state, legacy_import_completed, AgentItemPayload, AgentRepository,
-    LegacyImportOptions, MessagePayload, ToolPayload,
+    import_legacy_agent_state, legacy_import_completed, AgentApprovalMode, AgentItemPayload,
+    AgentRepository, LegacyImportOptions, MessagePayload, ToolPayload,
 };
 use clovy_lib::db::migrations::run_migrations;
 use sqlx::{query::query, row::Row};
@@ -54,10 +54,18 @@ async fn run_configuration_and_streamed_reasoning_survive_resume_and_hydration()
         )
         .await
         .expect("session");
+    repository
+        .set_approval_mode_in_profile(&session.id, "default", AgentApprovalMode::Bypass)
+        .await
+        .expect("set approval preference");
     let run = repository
         .create_run(&session.id, "private-auto", Some("medium"))
         .await
         .expect("run");
+    repository
+        .set_approval_mode_in_profile(&session.id, "default", AgentApprovalMode::Approvals)
+        .await
+        .expect("change next run preference");
     let config = serde_json::json!({
         "model": "private-auto",
         "instructions": "Unattended routine instructions",
@@ -71,7 +79,7 @@ async fn run_configuration_and_streamed_reasoning_survive_resume_and_hydration()
     repository
         .set_run_config(
             &run.id,
-            &serde_json::json!({ "instructions": "Changed after interruption" }),
+            &serde_json::json!({ "instructions": "Changed after interruption", "approvalMode": "approvals" }),
         )
         .await
         .expect("ignore later run config mutation");
@@ -84,10 +92,23 @@ async fn run_configuration_and_streamed_reasoning_survive_resume_and_hydration()
         .await
         .expect("second reasoning delta");
 
+    let stored = repository
+        .run_config(&run.id)
+        .await
+        .expect("run config")
+        .expect("stored config");
+    for (key, value) in config.as_object().unwrap() {
+        assert_eq!(&stored[key], value, "{key}");
+    }
     assert_eq!(
-        repository.run_config(&run.id).await.expect("run config"),
-        Some(config)
+        repository.get_run(&run.id).await.unwrap().approval_mode,
+        AgentApprovalMode::Bypass
     );
+    let next = repository
+        .create_run(&session.id, "private-auto", Some("medium"))
+        .await
+        .expect("next run");
+    assert_eq!(next.approval_mode, AgentApprovalMode::Approvals);
     let reasoning = repository.items(&session.id).await.expect("items");
     assert_eq!(reasoning.len(), 1);
     assert!(matches!(

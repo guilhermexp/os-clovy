@@ -7,6 +7,7 @@ export default defineMessages({
     "agent.approval.bypass": "Bypass",
     "agent.approval.current": "Current run:",
     "agent.approval.loading": "Checking",
+    "agent.approval.unsaved": "Not saved. Retry before starting the run.",
     "agent.approval.next": "Changes apply to the next run. Stop ends the current run.",
     "agent.approval.description":
       "Bypass authorizes approval requests for this conversation. Other permissions still apply.",
@@ -209,6 +210,7 @@ export default defineMessages({
     "agent.approval.bypass": "Dispensar aprovações",
     "agent.approval.current": "Execução atual:",
     "agent.approval.loading": "Verificando",
+    "agent.approval.unsaved": "Não foi salvo. Tente novamente antes de iniciar a execução.",
     "agent.approval.next": "Alterações valem na próxima execução. Parar encerra a execução atual.",
     "agent.approval.description":
       "Dispensar aprovações autoriza pedidos nesta conversa. Outras permissões continuam valendo.",
