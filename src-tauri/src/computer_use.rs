@@ -3765,7 +3765,9 @@ async fn mutate(
     revalidate_target(app, state, action, arguments, &target, epoch).await?;
     ensure_epoch_current(state, Some(epoch))?;
     ensure_task_generation_current(state, task_generation)?;
-    let mut result = driver_call(app, state, tool, driver_args, Some(epoch)).await?;
+    let mut result = driver_call(app, state, tool, driver_args, Some(epoch))
+        .await
+        .map_err(|error| action_delivery_unknown(error, &action_id))?;
     add_result_metadata(&mut result, &action_id, &target.app_name);
     if arguments
         .get("capture_after")
@@ -3792,6 +3794,22 @@ async fn mutate(
         return Ok(combine_action_and_capture(result, capture_result));
     }
     Ok(result)
+}
+
+// A transport or helper failure does not establish whether input reached the
+// target. Preserve any stronger evidence, otherwise require an observation
+// before the caller considers another mutation.
+fn action_delivery_unknown(mut error: AppError, action_id: &str) -> AppError {
+    let mut details = error.details.take().unwrap_or_else(|| json!({}));
+    if !details.is_object() {
+        details = json!({ "cause": details });
+    }
+    if details.get("disposition").is_none() {
+        details["disposition"] = json!({ "delivery": "unknown", "retry": "unknown" });
+    }
+    details["actionId"] = json!(action_id);
+    error.details = Some(details);
+    error
 }
 
 // Once the driver has returned an action result, a later capture cannot
@@ -5019,6 +5037,15 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn action_transport_failure_is_not_marked_safe_to_repeat() {
+        let error = action_delivery_unknown(AppError::new("timeout", "Timed out."), "action-1");
+        let details = error.details.unwrap();
+        assert_eq!(details["disposition"]["delivery"], "unknown");
+        assert_eq!(details["disposition"]["retry"], "unknown");
+        assert_eq!(details["actionId"], "action-1");
+    }
 
     #[test]
     fn interleaved_turns_cannot_inherit_the_other_turns_target_or_authorization() {
