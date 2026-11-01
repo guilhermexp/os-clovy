@@ -48,6 +48,42 @@ that a particular authorization includes one. Native Mac and Windows tests,
 including both CLI engines, remain required. This proposed record is not
 evidence that those prerequisites or the full lifecycle tests have passed.
 
+## 2026-11-01 addendum: custody before activation
+
+Connection activation and credential custody are separate boundaries. A grant
+can be issued before catalog discovery completes, so storing credentials only
+after a valid catalog loses custody on cancellation, timeout or rejected
+activation. Connect reserves an operation-specific reference, journals possible
+issuance before the token request, and holds the received bundle in OS storage
+before awaiting the catalog. It activates that reference only after the catalog,
+epoch and configuration checks pass. Recovery compensates the actual candidate
+or retains its reference and honest remote uncertainty. An exchange still able
+to issue a grant prevents a complete remote-cleanup claim and deletion of its
+only journal.
+
+Revocation history is bound to the affected credential reference and revision.
+A new authorized primary can be used while the earlier grant still needs
+provider revocation; successful reconnect preserves the historical warning and
+does not inherit the earlier grant's active-eligibility latch. Current-token
+revocation never clears an earlier unknown grant by implication. These records
+remain host-owned and separate from model arguments and Settings input.
+
+The previous healthy primary also remains in historical custody when a new
+grant replaces it. It is not automatically revoked during reconnect:
+[RFC 7009](https://www.rfc-editor.org/rfc/rfc7009#section-2.1) permits revocation
+of related tokens, and Clovy cannot assume the new grant has an independent
+token family. Explicit Disconnect/Delete instead reconciles every saved grant.
+Confirmation and local removal of one known superseded token clear only that
+record; they do not resolve an unknown rotated token or exchange at the same
+reference. The current grant's generation anchor remains stable across policy
+revision changes made before an authorization attempt finishes.
+
+This extends the existing JSON metadata journal without a schema migration or
+an additional credential backend. Compensation alone cannot cover a dropped
+exchange response; durable possible-issuance intent is deliberately conservative.
+It is not a new client-registration/redirect policy or evidence of provider or
+native acceptance.
+
 On 2026-11-01 public GETs and the production discovery helper confirmed the MCP
 metadata profile. Its omission of response modes permits query according to
 RFC 8414; the authorization URL explicitly requests query. This is metadata

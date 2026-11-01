@@ -426,12 +426,45 @@ action. The relay serializes only this safe diagnostic shape. CLI-owned MCP
 errors identify their observed server/tool and separate custody; this is not a
 complete inventory of inherited CLI connections. Tool-call errors with uncertain
 delivery preserve that uncertainty and never cause automatic redispatch.
+
+An unresolved revocation belongs to its affected credential reference and
+revision. Successful reconnect preserves that warning in host-owned history
+while activating a separately authorized grant. Settings shows the historical
+warning independently of the current connection's health, so successful Test,
+discovery, save or restart cannot erase it. A warning about an earlier grant
+does not make a valid new primary credential unusable. Revoking the new token
+does not discharge the earlier obligation.
+Grant generation stays stable when reconnect changes the policy revision.
+The previous primary's credentials remain in historical custody after a valid
+replacement. Clovy does not automatically revoke that token during reconnect,
+because it cannot assume independent token families; revocation can invalidate
+related tokens under [RFC 7009](https://www.rfc-editor.org/rfc/rfc7009#section-2.1).
+Explicit Disconnect or Delete reconciles those saved grants. Confirmation for
+one saved superseded token clears only its matching obligation, never an older
+unknown rotation or exchange associated with the same reference.
+
+Connect reserves an operation-owned credential reference before authorization.
+Before the actual code-exchange request, its journal records that a grant may
+be issued. The returned bundle enters the reserved secure-store reference
+before catalog discovery awaits; this temporary custody does not enable the
+connection. Only valid catalog, epoch and configuration checks can activate
+that reference. Cancellation, timeout and rejected activation compensate the
+actual received bundle, or retain its recoverable reference and an honest
+warning. An exchange with an unknown outcome cannot be reported as remotely
+revoked merely because the previous primary token's revocation returned 200.
+Recovery distinguishes live operations, possible issuance and stored candidate
+credentials; it never blindly deletes a received grant. Delete retains the
+definition while live issuance or recoverable candidate custody still needs
+cleanup. Failed attempts preserve the previous primary configuration.
+
 Custom dispatch also checks the host configuration fingerprint and the epoch
 captured during discovery, so an earlier approval cannot adopt a replacement
 endpoint, credential or local safety policy between gateway check and I/O.
-The two host-owned revocation warning flags describe health and are excluded
-from that authority fingerprint; the credential loader checks durable rotation
-uncertainty under the lifecycle gate before permitting use.
+The host-owned revocation warnings, historical records and temporary Connect
+bookkeeping are excluded from that authority fingerprint. The credential loader
+checks uncertainty affecting the current primary under the lifecycle gate before
+permitting use; auth mode, cleanup state, revision and local policy still bind
+the authority snapshot.
 The custom authority follows initialization, session waits and elicitation to
 the transport write boundary. Invalidation before dispatch sends no tool call;
 an already admitted call or lost elicitation session remains delivery-uncertain

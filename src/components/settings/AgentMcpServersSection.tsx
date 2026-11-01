@@ -92,6 +92,61 @@ function parseSecretMap(raw: string, label: string, t: TFunction): Record<string
   return value as Record<string, string>;
 }
 
+function hasOauthRevocationHistory(server: AgentMcpServerDto): boolean {
+  const history = server.metadata.oauthRevocationHistory;
+  return (
+    Object.prototype.hasOwnProperty.call(server.metadata, "oauthRevocationHistory") &&
+    !(Array.isArray(history) && history.length === 0)
+  );
+}
+
+function hasOauthConnectCleanup(server: AgentMcpServerDto): boolean {
+  if (!Object.prototype.hasOwnProperty.call(server.metadata, "oauthConnectAttempts")) return false;
+  const attempts = server.metadata.oauthConnectAttempts;
+  if (!Array.isArray(attempts)) return true;
+  const fields = ["id", "secretRef", "revision", "epoch", "phase", "superseded"];
+  const phases = [
+    "authorizing",
+    "exchange_pending",
+    "received",
+    "revocation_failed",
+    "revoked_but_local_cleanup_pending",
+  ];
+  const ids = new Set<string>();
+  const references = new Set<string>();
+  return attempts.some((attempt: unknown) => {
+    if (!attempt || typeof attempt !== "object" || Array.isArray(attempt)) return true;
+    const entry = attempt as Record<string, unknown>;
+    if (
+      Object.keys(entry).some((key) => !fields.includes(key)) ||
+      typeof entry.id !== "string" ||
+      entry.id.length === 0 ||
+      typeof entry.secretRef !== "string" ||
+      entry.secretRef.length === 0 ||
+      typeof entry.epoch !== "number" ||
+      !Number.isSafeInteger(entry.epoch) ||
+      entry.epoch < 0 ||
+      (entry.revision !== undefined &&
+        entry.revision !== null &&
+        typeof entry.revision !== "string") ||
+      (entry.superseded !== undefined && typeof entry.superseded !== "boolean") ||
+      typeof entry.phase !== "string" ||
+      !phases.includes(entry.phase) ||
+      ids.has(entry.id) ||
+      references.has(entry.secretRef) ||
+      entry.secretRef === server.secretRef
+    ) {
+      return true;
+    }
+    ids.add(entry.id);
+    references.add(entry.secretRef);
+    return (
+      entry.superseded !== true &&
+      (entry.phase === "revocation_failed" || entry.phase === "revoked_but_local_cleanup_pending")
+    );
+  });
+}
+
 function diagnosticFromError(error: unknown): AgentMcpDiagnostic | undefined {
   if (!error || typeof error !== "object" || !("details" in error)) return;
   const detail = error.details;
@@ -566,6 +621,16 @@ export function AgentMcpServersSection() {
                         ? ` · ${resultMessage || diagnostic?.message}`
                         : ""}
                     </p>
+                    {hasOauthRevocationHistory(server) ? (
+                      <p className="settings-row-description" role="note">
+                        {t("settingsPanels.mcp.revocationHistoryWarning")}
+                      </p>
+                    ) : null}
+                    {hasOauthConnectCleanup(server) ? (
+                      <p className="settings-row-description" role="note">
+                        {t("settingsPanels.mcp.connectCleanupWarning")}
+                      </p>
+                    ) : null}
                     {diagnostic ? (
                       <p className="settings-row-description" role="status">
                         {diagnosticContext(diagnostic, t)}
@@ -598,6 +663,7 @@ export function AgentMcpServersSection() {
                     {(server.metadata.legacyAuth === "oauth" || server.metadata.auth === "oauth") &&
                     (server.metadata.oauthConnected === true ||
                       server.metadata.oauthCleanupPending === true ||
+                      hasOauthConnectCleanup(server) ||
                       typeof server.metadata.oauthPendingSecretRef === "string" ||
                       typeof server.metadata.oauthRetiredSecretRef === "string") ? (
                       <button

@@ -33,6 +33,7 @@ struct Observed {
     exchange: Option<BTreeMap<String, String>>,
     methods: Vec<String>,
     callback_statuses: Vec<u16>,
+    revocations: Vec<String>,
 }
 
 struct HttpFixture {
@@ -139,6 +140,15 @@ impl HttpFixture {
                             form.get("grant_type").map(String::as_str) == Some("refresh_token");
                         seen.lock().unwrap().exchange = Some(form);
                         json!({"access_token": if refreshed { "connect-fixture-access-refreshed" } else { "connect-fixture-access" }, "refresh_token": "connect-fixture-refresh", "expires_in": 3600, "scope": "openid", "token_type": "Bearer"})
+                    }
+                    "/revoke" => {
+                        let form: BTreeMap<String, String> =
+                            url::form_urlencoded::parse(body.as_bytes())
+                                .into_owned()
+                                .collect();
+                        assert_eq!(form["token"], "connect-fixture-refresh");
+                        seen.lock().unwrap().revocations.push(form["token"].clone());
+                        Value::Null
                     }
                     "/mcp" => {
                         assert!(
@@ -703,6 +713,7 @@ async fn token_exchange_without_valid_catalog_never_marks_connection_successful(
     assert_eq!(failure.code, "agent_mcp_protocol_error");
     assert_eq!(failure.details.unwrap()["phase"], "discover");
     fixture.assert_authorization_contract();
+    assert_eq!(fixture.observed.lock().unwrap().revocations.len(), 1);
     assert_no_grant(&repository, &store, &definition).await;
     retire_server_sessions(&definition.id).await;
 }
@@ -732,6 +743,7 @@ async fn final_database_commit_failure_removes_staged_credential_and_preserves_p
     .await
     .unwrap_err();
     assert_eq!(failure.code, "agent_mcp_storage_failed");
+    assert_eq!(fixture.observed.lock().unwrap().revocations.len(), 1);
     let persisted = repository.get(&definition.id).await.unwrap();
     assert!(!persisted.enabled);
     assert_eq!(persisted.secret_ref, definition.secret_ref);

@@ -40,6 +40,12 @@ pub use error::AgentMcpError;
 #[path = "agent_mcp_oauth.rs"]
 mod oauth;
 use oauth::*;
+#[path = "agent_mcp_oauth_attempts.rs"]
+mod oauth_attempts;
+use oauth_attempts::*;
+#[path = "agent_mcp_oauth_history.rs"]
+mod oauth_history;
+use oauth_history::*;
 
 #[path = "agent_mcp_diagnostics.rs"]
 mod diagnostics;
@@ -1041,6 +1047,10 @@ fn custom_mcp_server_fingerprint(server: &McpServerDefinition) -> Result<String,
         // changes that can invalidate a catalog during a healthy refresh.
         values.remove("oauthRemoteRevocationFailed");
         values.remove("oauthRotatedRevocationUnconfirmed");
+        // These records track remote obligations and unactivated attempts;
+        // they do not change the committed primary's destination or policy.
+        values.remove("oauthRevocationHistory");
+        values.remove("oauthConnectAttempts");
     }
     let snapshot = json!({
         "id": server.id,
@@ -3682,28 +3692,9 @@ async fn recover_pending_oauth<S: McpSecretStore>(
     store: &S,
     server: &mut McpServerDefinition,
 ) -> Result<(), AgentMcpError> {
-    let Some(reference) = server
-        .metadata
-        .get("oauthPendingSecretRef")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-    else {
-        return Ok(());
-    };
-    if server.secret_ref.as_deref() == Some(&reference) {
-        return Err(AgentMcpError::Storage);
-    }
-    if store.get(&reference)?.is_some() {
-        store.delete(&reference)?;
-    }
-    let mut recovered = server.clone();
-    recovered
-        .metadata
-        .as_object_mut()
-        .ok_or(AgentMcpError::Storage)?
-        .remove("oauthPendingSecretRef");
-    repository.replace(&recovered).await?;
-    *server = recovered;
+    migrate_legacy_oauth_pending(repository, store, server).await?;
+    migrate_legacy_oauth_retired(repository, store, server).await?;
+    recover_oauth_attempts(repository, store, server, false).await?;
     Ok(())
 }
 
@@ -3781,11 +3772,14 @@ pub async fn create_agent_mcp_server(
         for key in [
             "oauthConnected",
             "oauthRevision",
+            "oauthGrantRevision",
             "oauthPendingSecretRef",
             "oauthRetiredSecretRef",
             "oauthCleanupPending",
             "oauthRemoteRevocationFailed",
             "oauthRotatedRevocationUnconfirmed",
+            "oauthRevocationHistory",
+            "oauthConnectAttempts",
         ] {
             metadata.remove(key);
         }
@@ -3891,6 +3885,28 @@ async fn update_mcp_definition<S: McpSecretStore>(
                 AgentMcpError::InvalidDefinition(
                     "The official Vercel preset requires OAuth.".into(),
                 ),
+            ));
+        }
+        if oauth_has_revocation_history(&existing) {
+            return Err(command_mcp_error(
+                &existing,
+                "disconnect",
+                AgentMcpError::OauthRevokeUnconfirmed,
+            ));
+        }
+        if existing
+            .metadata
+            .get("oauthConnectAttempts")
+            .is_some_and(|attempts| {
+                attempts
+                    .as_array()
+                    .map_or(true, |entries| !entries.is_empty())
+            })
+        {
+            return Err(command_mcp_error(
+                &existing,
+                "disconnect",
+                AgentMcpError::OauthCleanupPending,
             ));
         }
         if existing
@@ -4003,9 +4019,12 @@ async fn update_mcp_definition<S: McpSecretStore>(
             "oauthRetiredSecretRef",
             "oauthPendingSecretRef",
             "oauthRevision",
+            "oauthGrantRevision",
             "oauthConnected",
             "oauthRemoteRevocationFailed",
             "oauthRotatedRevocationUnconfirmed",
+            "oauthRevocationHistory",
+            "oauthConnectAttempts",
         ] {
             match existing.metadata.get(key) {
                 Some(value) => {
@@ -4131,6 +4150,17 @@ async fn delete_mcp_definition<S: McpSecretStore>(
     {
         return Err(AgentMcpError::ConnectionChanged);
     }
+    if current
+        .metadata
+        .get("oauthConnectAttempts")
+        .is_some_and(|entries| {
+            entries
+                .as_array()
+                .map_or(true, |entries| !entries.is_empty())
+        })
+    {
+        return Err(AgentMcpError::OauthCleanupPending);
+    }
     if let Some(reference) = current.secret_ref.as_deref() {
         store.delete(reference)?;
     }
@@ -4236,7 +4266,7 @@ async fn test_mcp_definition<S: McpSecretStore>(
 #[serde(rename_all = "camelCase")]
 pub struct OAuthDisconnectResult {
     pub server: McpServerDefinition,
-    // None means the provider did not advertise a revocation endpoint.
+    // None means no applicable outcome/remaining grant, or no revocation endpoint.
     pub remote_revoked: Option<bool>,
     pub local_cleared: bool,
 }
@@ -4303,8 +4333,43 @@ async fn disconnect_oauth<S: McpSecretStore>(
     invalidate_oauth(&lifecycle);
     let _guard = lifecycle.gate.lock().await;
     let mut server = repository.get(server_id).await?;
+    let original_primary_ref = server.secret_ref.clone();
+    let original_primary_revision = server
+        .metadata
+        .get("oauthGrantRevision")
+        .or_else(|| server.metadata.get("oauthRevision"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let known_oauth_primary = original_primary_ref.is_some()
+        && (server
+            .metadata
+            .get("oauthConnected")
+            .and_then(Value::as_bool)
+            == Some(true)
+            || (server.metadata.get("auth").and_then(Value::as_str) == Some("oauth")
+                && server.metadata.get("oauthGrantRevision").is_some())
+            || server
+                .metadata
+                .get("oauthRotatedRevocationUnconfirmed")
+                .and_then(Value::as_bool)
+                == Some(true)
+            || server
+                .metadata
+                .get("oauthRemoteRevocationFailed")
+                .and_then(Value::as_bool)
+                == Some(true));
+    let legacy_candidate_revision = server
+        .metadata
+        .get("oauthRevision")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     // Persist disabled before the network or keychain operation. A failed
     // cleanup retains its reference so the user can retry, including on restart.
+    if server.secret_ref.is_some() && server.metadata.get("oauthGrantRevision").is_none() {
+        if let Some(revision) = server.metadata.get("oauthRevision").cloned() {
+            server.metadata["oauthGrantRevision"] = revision;
+        }
+    }
     server.enabled = false;
     if let Some(metadata) = server.metadata.as_object_mut() {
         metadata.insert("oauthConnected".into(), json!(false));
@@ -4312,11 +4377,24 @@ async fn disconnect_oauth<S: McpSecretStore>(
         metadata.insert("oauthRevision".into(), json!(Uuid::new_v4().to_string()));
     }
     repository.replace(&server).await?;
-    recover_pending_oauth(repository, store, &mut server).await?;
-    let mut bundle = match server.secret_ref.as_deref() {
-        Some(reference) => store.get(reference)?.unwrap_or_default(),
-        None => McpSecretBundle::default(),
+    migrate_legacy_oauth_pending_with_revision(
+        repository,
+        store,
+        &mut server,
+        legacy_candidate_revision,
+    )
+    .await?;
+    migrate_legacy_oauth_retired(repository, store, &mut server).await?;
+    let attempt_outcome = recover_oauth_attempts(repository, store, &mut server, true).await?;
+    let historical_uncertainty = oauth_has_revocation_history(&server);
+    let stored_primary = match server.secret_ref.as_deref() {
+        Some(reference) => store.get(reference)?,
+        None => None,
     };
+    let missing_primary_custody = known_oauth_primary && stored_primary.is_none();
+    let mut bundle = stored_primary.unwrap_or_default();
+    let primary_has_grant =
+        bundle.oauth.contains_key("access_token") || bundle.oauth.contains_key("refresh_token");
     let rotation_unconfirmed = lifecycle.unconfirmed_revocation.load(Ordering::SeqCst)
         || server
             .metadata
@@ -4324,7 +4402,7 @@ async fn disconnect_oauth<S: McpSecretStore>(
             .and_then(Value::as_bool)
             == Some(true);
     let attempted_revocation = revoke_oauth_bundle(&bundle.oauth).await;
-    let remote_revoked = if rotation_unconfirmed {
+    let primary_remote_revoked = if rotation_unconfirmed || missing_primary_custody {
         Some(false)
     } else {
         attempted_revocation.or_else(|| {
@@ -4336,11 +4414,19 @@ async fn disconnect_oauth<S: McpSecretStore>(
             .then_some(false)
         })
     };
+    if missing_primary_custody || (primary_has_grant && attempted_revocation.is_none()) {
+        append_oauth_revocation_history(
+            &mut server,
+            original_primary_ref.as_deref(),
+            original_primary_revision.as_deref(),
+            "revocation_unconfirmed",
+        )?;
+    }
     let metadata = server
         .metadata
         .as_object_mut()
         .ok_or(AgentMcpError::Storage)?;
-    if remote_revoked == Some(false) {
+    if primary_remote_revoked == Some(false) {
         metadata.insert("oauthRemoteRevocationFailed".into(), json!(true));
     } else {
         metadata.remove("oauthRemoteRevocationFailed");
@@ -4380,7 +4466,17 @@ async fn disconnect_oauth<S: McpSecretStore>(
                 Ok(Some(_)) => store.delete(reference).is_ok(),
                 Err(_) => false,
             });
-    let local_cleared = primary_cleared && retired_cleared;
+    let local_cleared = primary_cleared && retired_cleared && !attempt_outcome.local_pending;
+    let remote_revoked = if historical_uncertainty || attempt_outcome.remote_uncertain {
+        Some(false)
+    } else {
+        primary_remote_revoked.or_else(|| {
+            (original_primary_ref.is_none()
+                && !primary_has_grant
+                && attempt_outcome.remote_confirmed)
+                .then_some(true)
+        })
+    };
     if primary_cleared && bundle.env.is_empty() && bundle.headers.is_empty() {
         server.secret_ref = None;
     }
@@ -4486,7 +4582,7 @@ where
             .diagnostic(server_id, None, "connect")
             .into_app_error());
     }
-    let (existing, old_bundle) = {
+    let (existing, old_bundle, context, _attempt_owner) = {
         let _guard = lifecycle.gate.lock().await;
         check_oauth_epoch(&lifecycle, epoch).map_err(app_error)?;
         let mut existing = repository.get(server_id).await.map_err(app_error)?;
@@ -4500,12 +4596,17 @@ where
         recover_pending_oauth(repository, store, &mut existing)
             .await
             .map_err(|e| command_mcp_error(&existing, "connect", e))?;
-        if oauth_cleanup_pending(&existing) {
+        if oauth_cleanup_pending(&existing) || oauth_has_pending_connect_attempts(&existing) {
             return Err(command_mcp_error(
                 &existing,
                 "connect",
                 AgentMcpError::OauthCleanupPending,
             ));
+        }
+        if existing.secret_ref.is_some() && existing.metadata.get("oauthGrantRevision").is_none() {
+            if let Some(revision) = existing.metadata.get("oauthRevision").cloned() {
+                existing.metadata["oauthGrantRevision"] = revision;
+            }
         }
         existing.metadata["oauthRevision"] = json!(Uuid::new_v4().to_string());
         repository.replace(&existing).await.map_err(app_error)?;
@@ -4516,46 +4617,107 @@ where
                 .unwrap_or_default(),
             None => McpSecretBundle::default(),
         };
-        (existing, bundle)
+        let (context, owner) =
+            reserve_oauth_attempt(repository, &existing, lifecycle.clone(), epoch)
+                .await
+                .map_err(app_error)?;
+        (existing, bundle, context, owner)
     };
-    let work = async {
-        let bundle = authorize(existing.clone(), old_bundle)
-            .await
-            .map_err(|e| command_mcp_error(&existing, "connect", e))?;
-        let authority = CustomMcpDispatch::new(lifecycle.clone(), epoch, false);
-        CUSTOM_MCP_DISPATCH
-            .scope(authority, discover_server(&existing, &bundle, None))
-            .await
-            .map_err(|e| command_mcp_error(&existing, "discover", e))?;
-        Ok::<_, crate::domain::types::AppError>(bundle)
-    };
-    let bundle = tokio::select! {
+    let expires = tokio::time::Instant::now() + deadline;
+    let authorization = in_oauth_attempt(context.clone(), authorize(existing.clone(), old_bundle));
+    tokio::pin!(authorization);
+    let mut stopped = None;
+    let authorized = tokio::select! {
         biased;
-        _ = wait_oauth_invalidation(&lifecycle, epoch) => return Err(command_mcp_error(&existing, "connect", AgentMcpError::OauthCancelled)),
-        result = timeout(deadline, work) => result.map_err(|_| command_mcp_error(&existing, "connect", AgentMcpError::TimedOut))??,
+        _ = wait_oauth_invalidation(&lifecycle, epoch) => {
+            stopped = Some(AgentMcpError::OauthCancelled);
+            if oauth_exchange_was_admitted(&context) {
+                timeout(OAUTH_HTTP_TIMEOUT + Duration::from_secs(1), &mut authorization).await.unwrap_or(Err(AgentMcpError::TimedOut))
+            } else { Err(AgentMcpError::OauthCancelled) }
+        },
+        result = tokio::time::timeout_at(expires, &mut authorization) => match result {
+            Ok(result) => result,
+            Err(_) => {
+                stopped = Some(AgentMcpError::TimedOut);
+                if oauth_exchange_was_admitted(&context) {
+                    timeout(OAUTH_HTTP_TIMEOUT + Duration::from_secs(1), &mut authorization).await.unwrap_or(Err(AgentMcpError::TimedOut))
+                } else { Err(AgentMcpError::TimedOut) }
+            }
+        },
     };
-    let _guard = lifecycle.gate.lock().await;
-    let result = async {
-        check_oauth_epoch(&lifecycle, epoch)
-            .map_err(|_| command_mcp_error(&existing, "connect", AgentMcpError::OauthCancelled))?;
-        let current = repository.get(server_id).await.map_err(app_error)?;
-        if current.secret_ref != existing.secret_ref
-            || current.metadata != existing.metadata
-            || current.url != existing.url
-        {
+    let bundle = match authorized {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            let definitive = oauth_exchange_definitively_refused(&context);
+            compensate_oauth_attempt(repository, store, &context, None, definitive)
+                .await
+                .map_err(|e| command_mcp_error(&existing, "connect", e))?;
             return Err(command_mcp_error(
                 &existing,
                 "connect",
-                AgentMcpError::OauthReconnectRequired,
+                stopped.unwrap_or(error),
             ));
         }
-        persist_oauth_connection(repository, store, &existing, &bundle)
+    };
+    // The returned grant enters the reserved secure reference synchronously,
+    // before any catalog/cancellation/database await can discard its owner.
+    if let Err(error) = put_oauth_candidate(store, &context, &bundle) {
+        compensate_oauth_attempt(repository, store, &context, Some(&bundle), false)
+            .await
+            .map_err(|e| command_mcp_error(&existing, "connect", e))?;
+        return Err(command_mcp_error(&existing, "connect", error));
+    }
+    if let Err(error) = mark_oauth_candidate_received(&context).await {
+        compensate_oauth_attempt(repository, store, &context, Some(&bundle), false)
+            .await
+            .map_err(|e| command_mcp_error(&existing, "connect", e))?;
+        return Err(command_mcp_error(&existing, "connect", error));
+    }
+    let catalog_result = if let Some(error) = stopped {
+        Err(command_mcp_error(&existing, "connect", error))
+    } else {
+        let authority = CustomMcpDispatch::new(lifecycle.clone(), epoch, false);
+        tokio::select! {
+            biased;
+            _ = wait_oauth_invalidation(&lifecycle, epoch) => Err(command_mcp_error(&existing, "connect", AgentMcpError::OauthCancelled)),
+            result = tokio::time::timeout_at(expires, CUSTOM_MCP_DISPATCH.scope(authority, discover_server(&existing, &bundle, None))) => result
+                .unwrap_or(Err(AgentMcpError::TimedOut))
+                .map_err(|error| command_mcp_error(&existing, "discover", error)),
+        }
+    };
+    if let Err(error) = catalog_result {
+        compensate_oauth_attempt(repository, store, &context, Some(&bundle), false)
+            .await
+            .map_err(|e| command_mcp_error(&existing, "connect", e))?;
+        retire_server_sessions(server_id).await;
+        return Err(error);
+    }
+    let result = {
+        let _guard = lifecycle.gate.lock().await;
+        let result = if check_oauth_epoch(&lifecycle, epoch).is_err() {
+            Err(command_mcp_error(
+                &existing,
+                "connect",
+                AgentMcpError::OauthCancelled,
+            ))
+        } else {
+            in_oauth_attempt(
+                context.clone(),
+                persist_oauth_connection(repository, store, &existing, &bundle),
+            )
             .await
             .map_err(|mut error| {
-                let cause = if error.code.contains("cleanup") || error.code.contains("rollback") {
-                    AgentMcpError::OauthCleanupPending
-                } else {
-                    AgentMcpError::Storage
+                let cause = match error.code.as_str() {
+                    "agent_mcp_reconnect_required" => AgentMcpError::OauthReconnectRequired,
+                    "agent_mcp_connection_changed" => AgentMcpError::ConnectionChanged,
+                    "agent_mcp_secure_storage_failed" => AgentMcpError::SecureStorage,
+                    "agent_mcp_secure_storage_unavailable" => {
+                        AgentMcpError::SecureStorageUnavailable
+                    }
+                    code if code.contains("cleanup") || code.contains("rollback") => {
+                        AgentMcpError::OauthCleanupPending
+                    }
+                    _ => AgentMcpError::Storage,
                 };
                 let mut diagnostic = cause.diagnostic(&existing.name, None, "connect");
                 diagnostic.code = error.code.clone();
@@ -4564,11 +4726,19 @@ where
                 error.details = serde_json::to_value(diagnostic).ok();
                 error
             })
+        };
+        // A queued late cancel must observe this committed completion while
+        // the same activation gate is still held.
+        drop(_operation_guard);
+        result
+    };
+    if result.is_err() {
+        // Activation may have committed before an old-reference cleanup error.
+        // An absent attempt means the candidate is now primary: never revoke it.
+        compensate_oauth_attempt(repository, store, &context, Some(&bundle), false)
+            .await
+            .map_err(|e| command_mcp_error(&existing, "connect", e))?;
     }
-    .await;
-    // Publish operation completion while the commit gate is still held, so a
-    // queued late cancel cannot invalidate a credential committed by this flow.
-    drop(_operation_guard);
     retire_server_sessions(server_id).await;
     if result.is_ok() {
         record_mcp_diagnostic(server_id, None);
@@ -4582,67 +4752,44 @@ async fn persist_oauth_connection<S: McpSecretStore>(
     existing: &McpServerDefinition,
     bundle: &McpSecretBundle,
 ) -> Result<McpServerDefinition, crate::domain::types::AppError> {
-    // A new reference keeps the previously committed credential intact if the
-    // database update or rollback fails. Persist the retired reference before
-    // deleting it so a crash leaves an actionable cleanup record.
-    if !existing.metadata.is_object() {
-        return Err(app_error(AgentMcpError::Storage));
+    if let Some(context) = current_oauth_attempt() {
+        return activate_oauth_candidate(repository, store, existing, &context).await;
     }
-    let secret_ref = Uuid::new_v4().to_string();
-    let mut staged = existing.clone();
-    staged.metadata["oauthPendingSecretRef"] = json!(secret_ref);
-    // Reserve cleanup ownership durably before crossing the SQLite/cofre
-    // boundary. Never overwrite a previously committed credential in place.
-    repository.replace(&staged).await.map_err(app_error)?;
-    if let Err(error) = store.put(&secret_ref, bundle) {
-        let _ = recover_pending_oauth(repository, store, &mut staged).await;
-        return Err(app_error(error));
-    }
-    let mut connected = existing.clone();
-    connected.secret_ref = Some(secret_ref.clone());
-    connected.enabled = true;
-    let metadata = connected
-        .metadata
-        .as_object_mut()
-        .ok_or_else(|| app_error(AgentMcpError::Storage))?;
-    metadata.remove("legacyAuth");
-    metadata.remove("needsReview");
-    metadata.remove("migrationWarning");
-    metadata.insert("auth".into(), json!("oauth"));
-    metadata.insert("oauthConnected".into(), json!(true));
-    metadata.insert("oauthRevision".into(), json!(Uuid::new_v4().to_string()));
-    if let Some(previous_ref) = existing.secret_ref.as_deref() {
-        metadata.insert("oauthRetiredSecretRef".into(), json!(previous_ref));
-    }
-    if let Err(error) = repository.replace(&connected).await {
-        if recover_pending_oauth(repository, store, &mut staged)
+    // Direct internal callers use the same reserved-reference activation path.
+    let lifecycle = oauth_lifecycle(&existing.id);
+    let epoch = lifecycle.epoch.load(Ordering::SeqCst);
+    let guard = lifecycle.gate.lock().await;
+    let current = repository.get(&existing.id).await.map_err(app_error)?;
+    let (context, _owner) = reserve_oauth_attempt(repository, &current, lifecycle.clone(), epoch)
+        .await
+        .map_err(app_error)?;
+    if let Err(error) = put_oauth_candidate(store, &context, bundle) {
+        drop(guard);
+        compensate_oauth_attempt(repository, store, &context, Some(bundle), false)
             .await
-            .is_err()
-        {
-            let mut failure = crate::domain::types::AppError::new(
-                "agent_mcp_oauth_rollback_failed",
-                "The connection was not saved and credential cleanup is pending. Disconnect this server to retry cleanup; revoke the grant at the provider if needed.",
-            );
-            failure.details = Some(json!({"credentialReference": secret_ref}));
-            return Err(failure);
-        }
+            .map_err(app_error)?;
         return Err(app_error(error));
     }
-    if let Some(previous_ref) = existing.secret_ref.as_deref() {
-        if store.delete(previous_ref).is_err() {
-            let mut failure = crate::domain::types::AppError::new(
-                "agent_mcp_oauth_cleanup_pending",
-                "The new connection was saved, but the previous credential could not be removed. Disconnect to retry cleanup.",
-            );
-            failure.details = Some(json!({"credentialReference": previous_ref}));
-            return Err(failure);
-        }
-        if let Some(metadata) = connected.metadata.as_object_mut() {
-            metadata.remove("oauthRetiredSecretRef");
-        }
-        repository.replace(&connected).await.map_err(app_error)?;
+    let result = async {
+        mark_oauth_candidate_received_locked(&context)
+            .await
+            .map_err(app_error)?;
+        activate_oauth_candidate(repository, store, existing, &context).await
     }
-    Ok(connected)
+    .await;
+    drop(guard);
+    if result.is_err() {
+        let cleanup = compensate_oauth_attempt(repository, store, &context, Some(bundle), false)
+            .await
+            .map_err(app_error)?;
+        if cleanup.local_pending {
+            return Err(crate::domain::types::AppError::new(
+                "agent_mcp_oauth_rollback_failed",
+                "The connection was not saved and credential cleanup is pending. Disconnect to retry cleanup; revoke the grant at the provider if needed.",
+            ));
+        }
+    }
+    result
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -4708,6 +4855,22 @@ pub fn parse_legacy_mcp_config(input: &str) -> Result<LegacyMcpImport, AgentMcpE
             .get("metadata")
             .cloned()
             .unwrap_or_else(|| json!({"importedFrom":"legacy_hermes"}));
+        if let Some(metadata) = definition.metadata.as_object_mut() {
+            for key in [
+                "oauthConnected",
+                "oauthRevision",
+                "oauthGrantRevision",
+                "oauthPendingSecretRef",
+                "oauthRetiredSecretRef",
+                "oauthCleanupPending",
+                "oauthRemoteRevocationFailed",
+                "oauthRotatedRevocationUnconfirmed",
+                "oauthRevocationHistory",
+                "oauthConnectAttempts",
+            ] {
+                metadata.remove(key);
+            }
+        }
         let legacy_transport = raw.get("transport").and_then(Value::as_str);
         if let Some(legacy_transport) = legacy_transport {
             if !definition.metadata.is_object() {
@@ -7044,3 +7207,11 @@ mod stdio_authority_tests;
 #[cfg(test)]
 #[path = "agent_mcp_dispatch_authority_tests.rs"]
 mod dispatch_authority_tests;
+
+#[cfg(test)]
+#[path = "agent_mcp_connect_custody_tests.rs"]
+mod connect_custody_tests;
+
+#[cfg(test)]
+#[path = "agent_mcp_grant_history_tests.rs"]
+mod grant_history_tests;

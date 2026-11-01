@@ -262,7 +262,7 @@ async fn mode_removal_cannot_invent_a_connected_grant_through_metadata() {
     let server = disconnected_oauth(&repository).await;
     let mut input = settings_input(
         &server,
-        json!({"oauthConnected": true, "oauthRevision": "forged-fixture"}),
+        json!({"oauthConnected": true, "oauthRevision": "forged-fixture", "oauthGrantRevision": "forged-grant-fixture"}),
         true,
     );
     input.secrets = Some(header_bundle());
@@ -272,6 +272,7 @@ async fn mode_removal_cannot_invent_a_connected_grant_through_metadata() {
     assert!(saved.metadata.get("auth").is_none());
     assert_ne!(saved.metadata.get("oauthConnected"), Some(&json!(true)));
     assert!(saved.metadata.get("oauthRevision").is_none());
+    assert!(saved.metadata.get("oauthGrantRevision").is_none());
 }
 
 #[tokio::test]
@@ -321,4 +322,104 @@ async fn saving_a_disabled_name_keeps_remote_revocation_diagnostic() {
     assert_eq!(diagnostic.action, "revoke_at_provider");
     assert_eq!(diagnostic.phase, "disconnect");
     assert_eq!(diagnostic.server, saved.name);
+}
+
+#[tokio::test]
+async fn settings_preserves_host_history_and_attempts_against_forged_replacements() {
+    let repository = repository().await;
+    let store = FixtureStore::default();
+    let mut server = disconnected_oauth(&repository).await;
+    server.metadata["oauthGrantRevision"] = json!("host-fixture-grant-revision");
+    server.metadata["oauthRevocationHistory"] = json!([{
+        "id": "historical-fixture-obligation",
+        "affectedSecretRef": "historical-fixture-reference",
+        "affectedRevision": "historical-fixture-revision",
+        "reason": "rotation_unconfirmed"
+    }]);
+    server.metadata["oauthConnectAttempts"] = json!([{
+        "id": "host-fixture-attempt",
+        "secretRef": "reserved-fixture-reference",
+        "phase": "authorizing"
+    }]);
+    repository.replace(&server).await.unwrap();
+    let mut input = settings_input(
+        &server,
+        json!({"auth":"oauth", "oauthRevocationHistory":[], "oauthConnectAttempts":[], "oauthGrantRevision":"forged-fixture-grant-revision"}),
+        false,
+    );
+    input.enabled = None;
+    input.name = "renamed history fixture".into();
+    let saved = update_mcp_definition(&repository, &store, input)
+        .await
+        .unwrap();
+    assert_eq!(saved.name, "renamed history fixture");
+    for key in [
+        "oauthRevocationHistory",
+        "oauthConnectAttempts",
+        "oauthGrantRevision",
+    ] {
+        assert_eq!(saved.metadata[key], server.metadata[key]);
+    }
+    assert_eq!(store.writes.load(Ordering::SeqCst), 0);
+    assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
+
+    let empty = disconnected_oauth(&repository).await;
+    let mut forged = settings_input(&empty, saved.metadata.clone(), false);
+    forged.enabled = None;
+    forged.name = "forged history fixture".into();
+    let saved = update_mcp_definition(&repository, &store, forged)
+        .await
+        .unwrap();
+    assert!(saved.metadata.get("oauthRevocationHistory").is_none());
+    assert!(saved.metadata.get("oauthConnectAttempts").is_none());
+    assert!(saved.metadata.get("oauthGrantRevision").is_none());
+}
+
+#[tokio::test]
+async fn settings_cannot_remove_oauth_with_historical_or_pending_obligations() {
+    for (key, value, expected_code) in [
+        (
+            "oauthRevocationHistory",
+            Value::Null,
+            "agent_mcp_oauth_revoke_unconfirmed",
+        ),
+        (
+            "oauthRevocationHistory",
+            json!([{
+                "id":"historical-fixture",
+                "affectedSecretRef":"old-fixture-reference",
+                "affectedRevision":null,
+                "reason":"remote_revocation_failed"
+            }]),
+            "agent_mcp_oauth_revoke_unconfirmed",
+        ),
+        (
+            "oauthConnectAttempts",
+            Value::Null,
+            "agent_mcp_oauth_cleanup_pending",
+        ),
+        (
+            "oauthConnectAttempts",
+            json!([{"id":"pending-fixture", "phase":"exchange_pending"}]),
+            "agent_mcp_oauth_cleanup_pending",
+        ),
+    ] {
+        let repository = repository().await;
+        let store = FixtureStore::default();
+        let mut server = disconnected_oauth(&repository).await;
+        server.metadata[key] = value;
+        repository.replace(&server).await.unwrap();
+        let mut input = settings_input(&server, json!({}), true);
+        input.secrets = Some(header_bundle());
+        let error = update_mcp_definition(&repository, &store, input)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, expected_code);
+        let persisted = repository.get(&server.id).await.unwrap();
+        assert_eq!(persisted.metadata, server.metadata);
+        assert_eq!(persisted.secret_ref, server.secret_ref);
+        assert!(!persisted.enabled);
+        assert_eq!(store.writes.load(Ordering::SeqCst), 0);
+        assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
+    }
 }

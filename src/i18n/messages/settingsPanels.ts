@@ -41,6 +41,10 @@ export default defineMessages({
     "settingsPanels.mcp.disconnect": "Disconnect",
     "settingsPanels.mcp.localCleared": "Local credentials cleared",
     "settingsPanels.mcp.remoteRevoked": "Provider accepted revocation",
+    "settingsPanels.mcp.revocationHistoryWarning":
+      "An earlier OAuth authorization may still be active. Review and revoke it at the provider.",
+    "settingsPanels.mcp.connectCleanupWarning":
+      "An incomplete OAuth connection still needs cleanup. Disconnect to retry, or revoke its grant at the provider.",
     "settingsPanels.mcp.remoteRevokeFailed": "Remote revocation failed",
     "settingsPanels.mcp.remoteRevokeUnavailable": "Remote revocation unavailable",
     "settingsPanels.mcp.localClearUnconfirmed": "Local credential removal was not confirmed",
@@ -502,6 +506,10 @@ export default defineMessages({
     "settingsPanels.mcp.disconnect": "Desconectar",
     "settingsPanels.mcp.localCleared": "Credenciais locais removidas",
     "settingsPanels.mcp.remoteRevoked": "O provedor aceitou a revogação",
+    "settingsPanels.mcp.revocationHistoryWarning":
+      "Uma autorização OAuth anterior ainda pode estar ativa. Revise e revogue no provedor.",
+    "settingsPanels.mcp.connectCleanupWarning":
+      "Uma conexão OAuth incompleta ainda precisa de limpeza. Desconecte para tentar novamente ou revogue a autorização no provedor.",
     "settingsPanels.mcp.remoteRevokeFailed": "Falha na revogação remota",
     "settingsPanels.mcp.remoteRevokeUnavailable": "Revogação remota indisponível",
     "settingsPanels.mcp.localClearUnconfirmed": "Remoção das credenciais locais não confirmada",

@@ -54,6 +54,52 @@ fn token_bundle(value: &str) -> McpSecretBundle {
     bundle.oauth.insert("access_token".into(), value.into());
     bundle
 }
+async fn revocable_token_bundle(value: &str) -> (McpSecretBundle, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let mut bundle = token_bundle(value);
+    bundle.oauth.insert(
+        "revocation_endpoint".into(),
+        format!("http://{}/revoke", listener.local_addr().unwrap()),
+    );
+    let expected = value.to_owned();
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut bytes = [0; 2048];
+            let count = stream.read(&mut bytes).await.unwrap();
+            assert!(count > 0);
+            request.extend_from_slice(&bytes[..count]);
+            if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..end]);
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                if request.len() < end + 4 + length {
+                    continue;
+                }
+                let form: BTreeMap<String, String> =
+                    url::form_urlencoded::parse(&request[end + 4..end + 4 + length])
+                        .into_owned()
+                        .collect();
+                assert_eq!(form["token"], expected);
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                break;
+            }
+        }
+    });
+    (bundle, task)
+}
 async fn reject_activation(repository: &AgentMcpRepository) {
     query("CREATE TRIGGER reject_activation BEFORE UPDATE ON agent_mcp_servers WHEN NEW.secret_ref != OLD.secret_ref BEGIN SELECT RAISE(ABORT, 'fixture activation failure'); END")
         .execute(&repository.pool).await.unwrap();
@@ -65,10 +111,11 @@ async fn activation_rollback_cleans_new_entry_and_preserves_previous_grant() {
     let store = FixtureStore::default();
     let server = saved_server(&repository, &store).await;
     reject_activation(&repository).await;
-    let error =
-        persist_oauth_connection(&repository, &store, &server, &token_bundle("new-fixture"))
-            .await
-            .unwrap_err();
+    let (candidate, revocation) = revocable_token_bundle("new-fixture").await;
+    let error = persist_oauth_connection(&repository, &store, &server, &candidate)
+        .await
+        .unwrap_err();
+    revocation.await.unwrap();
     assert_eq!(error.code, "agent_mcp_storage_failed");
     let persisted = repository.get(&server.id).await.unwrap();
     assert_eq!(persisted.secret_ref, server.secret_ref);
@@ -87,20 +134,28 @@ async fn failed_rollback_keeps_durable_pointer_and_restart_recovers() {
     let server = saved_server(&repository, &store).await;
     reject_activation(&repository).await;
     store.fail_delete.store(true, Ordering::SeqCst);
-    let error =
-        persist_oauth_connection(&repository, &store, &server, &token_bundle("new-fixture"))
-            .await
-            .unwrap_err();
+    let (candidate, revocation) = revocable_token_bundle("new-fixture").await;
+    let error = persist_oauth_connection(&repository, &store, &server, &candidate)
+        .await
+        .unwrap_err();
+    revocation.await.unwrap();
     assert_eq!(error.code, "agent_mcp_oauth_rollback_failed");
     let mut persisted = repository.get(&server.id).await.unwrap();
-    let pending = persisted.metadata["oauthPendingSecretRef"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let attempts = persisted.metadata["oauthConnectAttempts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["phase"], "revoked_but_local_cleanup_pending");
+    let pending = attempts[0]["secretRef"].as_str().unwrap().to_owned();
     assert!(store.get(&pending).unwrap().is_some());
-    assert!(load_oauth_secrets(&repository, &store, &persisted, false)
-        .await
-        .is_err());
+    assert_eq!(
+        load_oauth_secrets(&repository, &store, &persisted, false)
+            .await
+            .unwrap()
+            .0
+            .oauth["access_token"],
+        "old-fixture"
+    );
     store.fail_delete.store(false, Ordering::SeqCst);
     // Recreate the repository owner exactly as a process restart would, using
     // the persisted journal rather than any in-memory cleanup task.
@@ -114,7 +169,7 @@ async fn failed_rollback_keeps_durable_pointer_and_restart_recovers() {
         .await
         .unwrap()
         .metadata
-        .get("oauthPendingSecretRef")
+        .get("oauthConnectAttempts")
         .is_none());
     assert_eq!(store.bundles.lock().unwrap().len(), 1);
 }
@@ -127,18 +182,24 @@ async fn crash_before_or_after_vault_put_is_recoverable_without_active_entry_del
         let mut server = saved_server(&repository, &store).await;
         server.metadata["oauthPendingSecretRef"] = json!("pending-fixture");
         repository.replace(&server).await.unwrap();
-        if put_completed {
-            store
-                .put("pending-fixture", &token_bundle("new-fixture"))
-                .unwrap();
+        let revocation = if put_completed {
+            let (candidate, task) = revocable_token_bundle("new-fixture").await;
+            store.put("pending-fixture", &candidate).unwrap();
+            Some(task)
+        } else {
+            None
+        };
+        recover_pending_oauth(&repository, &store, &mut server)
+            .await
+            .unwrap();
+        recover_pending_oauth(&repository, &store, &mut server)
+            .await
+            .unwrap();
+        if let Some(revocation) = revocation {
+            revocation.await.unwrap();
         }
-        recover_pending_oauth(&repository, &store, &mut server)
-            .await
-            .unwrap();
-        recover_pending_oauth(&repository, &store, &mut server)
-            .await
-            .unwrap();
         assert!(store.get("pending-fixture").unwrap().is_none());
+        assert_eq!(oauth_has_revocation_history(&server), !put_completed);
         assert!(store.get("previous").unwrap().is_some());
         assert!(server.metadata.get("oauthPendingSecretRef").is_none());
     }
@@ -155,13 +216,13 @@ async fn disconnect_preserves_non_oauth_credentials_and_cleans_pending_journal()
         .insert("x-fixture".into(), "synthetic-header".into());
     store.put("previous", &bundle).unwrap();
     server.metadata["oauthPendingSecretRef"] = json!("pending-fixture");
-    store
-        .put("pending-fixture", &token_bundle("new-fixture"))
-        .unwrap();
+    let (candidate, revocation) = revocable_token_bundle("new-fixture").await;
+    store.put("pending-fixture", &candidate).unwrap();
     repository.replace(&server).await.unwrap();
     let result = disconnect_oauth(&repository, &store, &server.id)
         .await
         .unwrap();
+    revocation.await.unwrap();
     assert!(result.local_cleared);
     assert!(!result.server.enabled);
     let retained = store.get("previous").unwrap().unwrap();
@@ -279,9 +340,8 @@ async fn file_backed_journal_survives_pool_close_and_reopen() {
     let mut server = saved_server(&repository, &store).await;
     server.metadata["oauthPendingSecretRef"] = json!("pending-fixture");
     repository.replace(&server).await.unwrap();
-    store
-        .put("pending-fixture", &token_bundle("new-fixture"))
-        .unwrap();
+    let (candidate, revocation) = revocable_token_bundle("new-fixture").await;
+    store.put("pending-fixture", &candidate).unwrap();
     repository.pool.close().await;
     let restarted = AgentMcpRepository::new(
         SqlitePoolOptions::new()
@@ -294,6 +354,7 @@ async fn file_backed_journal_survives_pool_close_and_reopen() {
     recover_pending_oauth(&restarted, &store, &mut persisted)
         .await
         .unwrap();
+    revocation.await.unwrap();
     assert!(store.get("pending-fixture").unwrap().is_none());
     assert!(store.get("previous").unwrap().is_some());
     assert!(restarted

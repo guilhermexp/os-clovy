@@ -646,6 +646,129 @@ describe("AgentMcpServersSection", () => {
     expect(mocks.connectOauth).not.toHaveBeenCalled();
   });
 
+  it("keeps an earlier grant warning while the new connection is usable after reconnect, Test, save and reload", async () => {
+    const history = [
+      {
+        id: "earlier-grant-fixture",
+        affectedSecretRef: "earlier-ref-fixture",
+        affectedRevision: "earlier-revision-fixture",
+        reason: "rotation_unconfirmed",
+      },
+    ];
+    let persisted: AgentMcpServerDto = {
+      ...server,
+      id: "oauth-history",
+      name: "Private tools",
+      enabled: false,
+      transport: "streamable_http",
+      command: undefined,
+      url: "https://example.test/mcp",
+      metadata: { auth: "oauth", oauthConnected: false },
+    };
+    mocks.list.mockImplementation(async () => [persisted]);
+    mocks.connectOauth.mockImplementation(async () => {
+      persisted = {
+        ...persisted,
+        enabled: true,
+        metadata: { auth: "oauth", oauthConnected: true, oauthRevocationHistory: history },
+      };
+      return persisted;
+    });
+    mocks.update.mockImplementation(async (input) => {
+      persisted = { ...persisted, ...input };
+      return persisted;
+    });
+    const user = userEvent.setup();
+    const view = render(<AgentMcpServersSection />);
+    await user.click(await screen.findByRole("button", { name: "Connect" }));
+    expect(await screen.findByText(/Last check: connected/)).toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent(
+      "An earlier OAuth authorization may still be active. Review and revoke it at the provider.",
+    );
+    await user.click(screen.getByRole("button", { name: "Test Private tools" }));
+    expect(await screen.findByText(/1 tool available/)).toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent(/earlier OAuth authorization/);
+    await user.click(screen.getByRole("button", { name: "Configure Private tools" }));
+    const dialog = screen.getByRole("dialog");
+    await user.clear(within(dialog).getByLabelText("Name"));
+    await user.type(within(dialog).getByLabelText("Name"), "Renamed tools");
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText("Renamed tools")).toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent(/earlier OAuth authorization/);
+    expect(mocks.update.mock.calls[0]?.[0].metadata.oauthRevocationHistory).toEqual(history);
+    view.unmount();
+    render(<AgentMcpServersSection />);
+    expect(await screen.findByText("Renamed tools")).toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent(/earlier OAuth authorization/);
+    expect(screen.getByRole("switch", { name: "Renamed tools enabled" })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Test Renamed tools" }));
+    expect(await screen.findByText(/Last check: connected/)).toHaveTextContent("1 tool available");
+    expect(screen.getByRole("note")).toHaveTextContent(/earlier OAuth authorization/);
+    expect(mocks.disconnectOauth).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { history: null },
+    { history: {} },
+    { history: [{}] },
+    { history: "malformed-history-fixture" },
+  ])("keeps malformed historical state visible without exposing its payload (%j)", async ({
+    history,
+  }) => {
+    mocks.list.mockResolvedValue([
+      {
+        ...server,
+        metadata: { oauthRevocationHistory: history },
+      },
+    ]);
+    render(<AgentMcpServersSection />);
+    expect(await screen.findByRole("note")).toHaveTextContent(/earlier OAuth authorization/);
+    expect(screen.queryByText("malformed-history-fixture")).not.toBeInTheDocument();
+  });
+
+  it("does not show a historical warning when history is absent or empty", async () => {
+    mocks.list.mockResolvedValue([
+      server,
+      {
+        ...server,
+        id: "empty-history",
+        name: "Empty history",
+        metadata: { oauthRevocationHistory: [] },
+      },
+    ]);
+    render(<AgentMcpServersSection />);
+    expect(await screen.findByText("Empty history")).toBeInTheDocument();
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  it("translates the earlier grant warning when the interface language changes", async () => {
+    mocks.list.mockResolvedValue([
+      {
+        ...server,
+        metadata: {
+          oauthRevocationHistory: [
+            {
+              id: "history-fixture",
+              affectedSecretRef: null,
+              affectedRevision: null,
+              reason: "connect_exchange_unconfirmed",
+            },
+          ],
+        },
+      },
+    ]);
+    render(<AgentMcpServersSection />);
+    expect(await screen.findByRole("note")).toHaveTextContent(/earlier OAuth authorization/);
+    try {
+      act(() => setInterfaceLocale("pt-BR"));
+      expect(screen.getByRole("note")).toHaveTextContent(
+        "Uma autorização OAuth anterior ainda pode estar ativa. Revise e revogue no provedor.",
+      );
+    } finally {
+      act(() => setInterfaceLocale("en"));
+    }
+  });
+
   it("reconnects migrated OAuth servers through the browser flow", async () => {
     mocks.list.mockResolvedValue([
       {
@@ -668,5 +791,230 @@ describe("AgentMcpServersSection", () => {
     );
     expect(await screen.findByText(/OAuth connected/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reconnect" })).toBeInTheDocument();
+  });
+
+  it.each([
+    "revocation_failed",
+    "revoked_but_local_cleanup_pending",
+  ])("keeps OAuth connect cleanup visible after failed reconnect, healthy Test, save and reload (%s)", async (phase) => {
+    const attempt = {
+      id: "failed-connect-fixture",
+      secretRef: "unactivated-candidate-fixture",
+      revision: "candidate-policy-fixture",
+      epoch: 1,
+      phase,
+      superseded: false,
+    };
+    let persisted: AgentMcpServerDto = {
+      ...server,
+      name: "Healthy primary",
+      transport: "streamable_http",
+      command: undefined,
+      url: "https://example.test/mcp",
+      secretRef: "healthy-primary-fixture",
+      metadata: { auth: "oauth", oauthConnected: true },
+    };
+    mocks.list.mockImplementation(async () => [persisted]);
+    mocks.connectOauth.mockImplementation(async () => {
+      persisted = {
+        ...persisted,
+        metadata: { ...persisted.metadata, oauthConnectAttempts: [attempt] },
+      };
+      throw { code: "agent_mcp_protocol", message: "Synthetic catalog rejected" };
+    });
+    mocks.update.mockImplementation(async (input) => {
+      persisted = { ...persisted, ...input };
+      return persisted;
+    });
+    const user = userEvent.setup();
+    const view = render(<AgentMcpServersSection />);
+    await user.click(await screen.findByRole("button", { name: "Reconnect" }));
+    expect(await screen.findByText(/Synthetic catalog rejected/)).toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent(
+      "An incomplete OAuth connection still needs cleanup. Disconnect to retry, or revoke its grant at the provider.",
+    );
+    expect(screen.getByRole("switch", { name: "Healthy primary enabled" })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Test Healthy primary" }));
+    expect(await screen.findByText(/Last check: connected/)).toHaveTextContent("1 tool available");
+    expect(screen.getByRole("note")).toHaveTextContent(/incomplete OAuth connection/);
+    await user.click(screen.getByRole("button", { name: "Configure Healthy primary" }));
+    const dialog = screen.getByRole("dialog");
+    await user.clear(within(dialog).getByLabelText("Name"));
+    await user.type(within(dialog).getByLabelText("Name"), "Renamed primary");
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText("Renamed primary")).toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent(/incomplete OAuth connection/);
+    expect(mocks.update.mock.calls[0]?.[0].metadata.oauthConnectAttempts).toEqual([attempt]);
+    view.unmount();
+    render(<AgentMcpServersSection />);
+    expect(await screen.findByText("Renamed primary")).toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent(/incomplete OAuth connection/);
+    await user.click(screen.getByRole("button", { name: "Test Renamed primary" }));
+    expect(await screen.findByText(/Last check: connected/)).toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent(/incomplete OAuth connection/);
+    expect(screen.getByRole("switch", { name: "Renamed primary enabled" })).toBeChecked();
+    expect(screen.queryByText("unactivated-candidate-fixture")).not.toBeInTheDocument();
+    expect(mocks.disconnectOauth).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { attempts: null },
+    { attempts: {} },
+    { attempts: [{}] },
+    { attempts: "malformed-connect-fixture" },
+  ])("keeps malformed OAuth connect cleanup visible without payload (%j)", async ({ attempts }) => {
+    mocks.list.mockResolvedValue([{ ...server, metadata: { oauthConnectAttempts: attempts } }]);
+    render(<AgentMcpServersSection />);
+    expect(await screen.findByRole("note")).toHaveTextContent(/incomplete OAuth connection/);
+    expect(screen.queryByText("malformed-connect-fixture")).not.toBeInTheDocument();
+  });
+
+  it("does not invent OAuth connect cleanup for live or superseded attempts", async () => {
+    const phases = [
+      "authorizing",
+      "exchange_pending",
+      "received",
+      "revocation_failed",
+      "revoked_but_local_cleanup_pending",
+    ];
+    mocks.list.mockResolvedValue([
+      server,
+      {
+        ...server,
+        id: "empty-attempts",
+        name: "Empty attempts",
+        metadata: { oauthConnectAttempts: [] },
+      },
+      ...phases.map((phase, index) => ({
+        ...server,
+        id: `live-attempt-${index}`,
+        name: `Live attempt ${index}`,
+        metadata: {
+          oauthConnectAttempts: [
+            {
+              id: `attempt-${index}`,
+              secretRef: `candidate-${index}`,
+              revision: null,
+              epoch: 0,
+              phase,
+              superseded: index >= 3,
+            },
+          ],
+        },
+      })),
+    ]);
+    render(<AgentMcpServersSection />);
+    expect(await screen.findByText("Live attempt 4")).toBeInTheDocument();
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  it("translates OAuth connect cleanup while historical warning remains independent", async () => {
+    mocks.list.mockResolvedValue([
+      {
+        ...server,
+        metadata: {
+          oauthRevocationHistory: [
+            {
+              id: "history-fixture",
+              affectedSecretRef: null,
+              affectedRevision: null,
+              reason: "rotation_unconfirmed",
+            },
+          ],
+          oauthConnectAttempts: [
+            {
+              id: "attempt-fixture",
+              secretRef: "candidate-fixture",
+              revision: null,
+              epoch: 0,
+              phase: "revocation_failed",
+            },
+          ],
+        },
+      },
+    ]);
+    render(<AgentMcpServersSection />);
+    expect(await screen.findAllByRole("note")).toHaveLength(2);
+    expect(screen.getByText(/incomplete OAuth connection/)).toBeInTheDocument();
+    expect(screen.getByText(/earlier OAuth authorization/)).toBeInTheDocument();
+    try {
+      act(() => setInterfaceLocale("pt-BR"));
+      expect(
+        screen.getByText(
+          "Uma conexão OAuth incompleta ainda precisa de limpeza. Desconecte para tentar novamente ou revogue a autorização no provedor.",
+        ),
+      ).toBeInTheDocument();
+      expect(screen.getByText(/Uma autorização OAuth anterior/)).toBeInTheDocument();
+    } finally {
+      act(() => setInterfaceLocale("en"));
+    }
+  });
+  it.each([
+    "revocation_failed",
+    "revoked_but_local_cleanup_pending",
+  ])("offers Disconnect after first OAuth Connect fails with cleanup pending (%s)", async (phase) => {
+    let persisted: AgentMcpServerDto = {
+      ...server,
+      id: `first-connect-${phase}`,
+      name: "First connection",
+      enabled: false,
+      transport: "streamable_http",
+      command: undefined,
+      url: "https://example.test/mcp",
+      metadata: {
+        auth: "oauth",
+        ...(phase === "revoked_but_local_cleanup_pending" ? { oauthConnected: false } : {}),
+      },
+    };
+    mocks.list.mockImplementation(async () => [persisted]);
+    mocks.connectOauth.mockImplementation(async () => {
+      persisted = {
+        ...persisted,
+        metadata: {
+          ...persisted.metadata,
+          oauthConnectAttempts: [
+            {
+              id: "first-attempt-fixture",
+              secretRef: "unactivated-first-candidate-fixture",
+              revision: "first-policy-fixture",
+              epoch: 1,
+              phase,
+              superseded: false,
+            },
+          ],
+        },
+      };
+      throw { code: "agent_mcp_protocol", message: "Synthetic first catalog rejected" };
+    });
+    mocks.disconnectOauth.mockImplementation(async () => {
+      persisted = {
+        ...persisted,
+        enabled: false,
+        metadata: { auth: "oauth", oauthConnected: false },
+      };
+      return { server: persisted, localCleared: true, remoteRevoked: true };
+    });
+    const user = userEvent.setup();
+    render(<AgentMcpServersSection />);
+    await user.click(await screen.findByRole("button", { name: /^Connect$/ }));
+    expect(await screen.findByText(/Synthetic first catalog rejected/)).toBeInTheDocument();
+    expect(await screen.findByRole("note")).toHaveTextContent(/incomplete OAuth connection/);
+    expect(mocks.list).toHaveBeenCalledTimes(2);
+    expect(mocks.connectOauth).toHaveBeenCalledWith(persisted.id, expect.any(String));
+    expect(persisted.metadata.oauthCleanupPending).toBeUndefined();
+    expect(persisted.metadata.oauthPendingSecretRef).toBeUndefined();
+    expect(persisted.metadata.oauthRetiredSecretRef).toBeUndefined();
+    expect(persisted.secretRef).toBeUndefined();
+    await user.click(screen.getByRole("button", { name: /^Disconnect$/ }));
+    await waitFor(() => expect(mocks.disconnectOauth).toHaveBeenCalledWith(persisted.id));
+    expect(mocks.disconnectOauth).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText(/Local credentials cleared/)).toBeInTheDocument();
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Connect$/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Disconnect$/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "First connection enabled" })).not.toBeChecked();
+    expect(screen.queryByText(/Last check: connected/)).not.toBeInTheDocument();
+    expect(mocks.connectOauth).toHaveBeenCalledTimes(1);
+    expect(mocks.cancelOauth).not.toHaveBeenCalled();
   });
 });

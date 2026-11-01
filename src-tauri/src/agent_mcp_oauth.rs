@@ -499,15 +499,18 @@ pub(super) async fn exchange_oauth_code(
     if let Some(secret) = client_secret.filter(|value| !value.is_empty()) {
         form.push(("client_secret", secret));
     }
-    let response = oauth_http_client()?
+    let request = oauth_http_client()?
         .post(secure_oauth_url(&auth.token_endpoint)?)
         .timeout(OAUTH_HTTP_TIMEOUT)
-        .form(&form)
-        .send()
-        .await
-        .map_err(oauth_transport_error)?;
+        .form(&form);
+    super::prepare_oauth_code_exchange().await?;
+    super::admit_oauth_code_exchange()?;
+    let response = request.send().await.map_err(oauth_transport_error)?;
     if !response.status().is_success() {
-        return Err(provider_error(response).await);
+        let status = response.status().as_u16();
+        let error = provider_error(response).await;
+        super::record_oauth_exchange_refusal(status, &error);
+        return Err(error);
     }
     let tokens = response
         .json::<OAuthTokenResponse>()

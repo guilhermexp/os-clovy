@@ -525,6 +525,17 @@ updates. GitHub ships `june_github` reads plus approval-only
 [ADR-0050](docs/adr/0050-linear-official-hosted-mcp.md).
 _Avoid_: integration (unqualified), plugin, the Google API.
 
+**Clovy-managed MCP OAuth grant**:
+Provider authorization whose credentials Clovy holds in the operating-system
+credential store for one custom MCP server. The committed primary credential
+reference identifies the grant eligible for calls. A newly received grant stays
+in temporary custody until its catalog and connection checks pass. An earlier
+grant's unresolved revocation is a separate, durable warning tied to its
+affected reference and revision; it neither authorizes nor blocks a separately
+authorized current grant.
+_Avoid_: treating a historical revocation warning as the current connection's
+authorization state, calling temporary custody a connected server.
+
 **Linear workspace access**:
 The workspace-wide `read` and `write` OAuth grant Clovy uses with Linear's
 official hosted MCP. Clovy does not add a selected-team authorization boundary
