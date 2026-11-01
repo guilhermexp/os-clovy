@@ -425,7 +425,7 @@ describe("notes recording reliability", () => {
     await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
     await userEvent.click(await screen.findByRole("button", { name: "Meeting notes" }));
     await userEvent.click(screen.getByRole("button", { name: "First note Preview" }));
-    await userEvent.click(screen.getByRole("button", { name: "Record" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Record" }));
     await waitFor(() =>
       expect(mocks.startRecording).toHaveBeenCalledWith("note-1", "microphonePlusSystem"),
     );
@@ -877,6 +877,68 @@ describe("notes recording reliability", () => {
     await userEvent.click(screen.getByRole("button", { name: "Done" }));
     await waitFor(() => expect(mocks.finishRecording).toHaveBeenCalledWith("rec-1"));
     expect(screen.getByText("Provisional words survive Stop")).toBeInTheDocument();
+  });
+
+  it("removes a discarded echo preview when the terminal event arrives", async () => {
+    const complete = {
+      ...first,
+      activeTab: "transcription" as const,
+      processingStatus: "ready" as const,
+      updatedAt: "2026-05-19T10:00:05Z",
+      sourceTranscripts: [
+        {
+          id: "system-final",
+          recordingSessionId: "rec-1",
+          source: "system" as const,
+          startMs: 0,
+          endMs: 4000,
+          text: "System final",
+          status: "succeeded" as const,
+        },
+      ],
+    };
+    mocks.finishRecording.mockResolvedValue({
+      note: { ...first, processingStatus: "transcribing" },
+      recording: recording({ state: "ready" }),
+      validation: {},
+      processingStarted: true,
+    });
+    await startRecordingDirectlyOnFirstNote();
+    await waitFor(() => expect(mocks.listeners.has("live-transcript-event")).toBe(true));
+    await act(async () => {
+      await mocks.listeners.get("live-transcript-event")?.({
+        payload: {
+          noteId: "note-1",
+          sessionId: "rec-1",
+          sourceMode: "microphonePlusSystem",
+          source: "microphone",
+          segmentId: "mic-echo",
+          startMs: 0,
+          endMs: 4000,
+          text: "Echo preview",
+          stability: "final",
+        },
+      });
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Transcription" }));
+    expect(await screen.findByText("Echo preview")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(mocks.finishRecording).toHaveBeenCalled());
+    mocks.getNote.mockResolvedValue(complete);
+    await act(async () => {
+      await mocks.listeners.get("note-processing-progress")?.({
+        payload: {
+          noteId: "note-1",
+          recordingSessionId: "rec-1",
+          stage: "done",
+          processingStatus: "ready",
+          revision: complete.updatedAt,
+          discardedSpans: [{ sessionId: "rec-1", source: "microphone", startMs: 0, endMs: 4000 }],
+        },
+      });
+    });
+    await waitFor(() => expect(screen.queryByText("Echo preview")).not.toBeInTheDocument());
+    expect(await screen.findByText("System final")).toBeInTheDocument();
   });
 
   it("follows live transcription until the reader scrolls upward, then resumes at the bottom", async () => {

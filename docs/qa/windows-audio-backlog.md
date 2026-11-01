@@ -4,7 +4,7 @@
 
 Registro solicitado pelo dono em 2026-11-01, antes de implementar as melhorias de Dock, ícones do histórico de ditado e contexto de ditado nos resumos. Relato: texto da fala e trechos da transcrição da reunião ficaram estranhos no Windows. A causa da gravação relatada ainda não foi demonstrada. Não atribuir o problema ao Groq nem à ausência do Parakeet sem evidência.
 
-Esta lista registra trabalho pendente, não correções entregues. Não altera o escopo das changes já propostas e não autoriza implementação. As três melhorias anteriores continuam pendentes, sem mudança.
+Este registro foi criado antes da implementação T2. F1-F3 agora têm código e provas portáveis; as caixas seguem abertas até o aceite nativo Windows. F4/I1 permanecem investigações, sem causa confirmada.
 
 ## Correções identificadas
 
@@ -26,3 +26,28 @@ Esta lista registra trabalho pendente, não correções entregues. Não altera o
 - Não foi executada nova reunião no Windows, suíte completa, chamada ao Groq ou teste de reconhecimento de fala real nesta investigação.
 - Não apagar previews indiscriminadamente ao terminar: a lógica atual preserva texto útil quando o processamento final falha. A correção de F2 precisa distinguir descarte definitivo de ausência de resultado.
 - Portar o modelo local ao Windows não está nesta lista e não decorre dos achados.
+
+## Protocolo sintético para aceite nativo (T2, 2026-11-01)
+
+Na box Linux não há endpoint WASAPI nem gravação nativa Windows. A inspeção
+confirma somente a escolha inicial `eRender/eConsole`; diferença para
+Communications ou a saída da reunião continua hipótese, sem causa atribuída.
+Nenhuma gravação, chave ou transcrição privada foi acessada.
+
+Em um perfil de teste isolado no Windows, registrar os nomes e identidade dos
+endpoints Console e Communications e a saída efetivamente escolhida pelo app de
+reunião sintético. Gerar sinais conhecidos por fonte, sem conteúdo pessoal:
+
+1. Com System pronto, alternar mic e dual no editor, conferir modo solicitado e
+   os WAVs resultantes; confirmar que não aparece ação de permissão macOS.
+2. Capturar System, pausar por tempo conhecido e parar sem retomar; comparar
+   duração do WAV ao tempo ativo. Repetir com retomada e silêncio ativo conhecido.
+3. Repetir mic, System e dual com preview ligado e desligado. Para cada execução,
+   comparar metadados e conteúdo sintético dos WAVs, validação, descarte por
+   silêncio/eco, spans e estado dos jobs, resposta ASR por fonte e texto exibido.
+4. Comparar Console, Communications, saída escolhida e troca de dispositivo;
+   registrar diferença observada antes de propor seleção ou acompanhamento.
+
+O evento terminal informa spans explicitamente descartados por eco; ausência de
+texto ou erro de ASR não constitui descarte. As provas nativas e qualquer
+chamada paga continuam pendentes de ambiente e autorização apropriados.

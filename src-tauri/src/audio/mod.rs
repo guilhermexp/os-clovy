@@ -1,3 +1,5 @@
+#[cfg(target_os = "windows")]
+mod active_silence;
 pub mod capture;
 mod capture_buffer;
 pub mod echo;

@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef } from "react";
+import { reconcileLiveTranscriptEvents } from "../lib/live-transcript-preview";
 import { messageFromError } from "../lib/errors";
 import {
   getNote,
@@ -30,7 +31,7 @@ function activeProcessingNotes(notes: NoteListItemDto[]) {
 }
 
 export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDependencies) {
-  const { dispatch, noteSaveController, notes, setError } = dependencies;
+  const { dispatch, noteSaveController, notes, setError, setLiveTranscriptEvents } = dependencies;
   const activeNotesRef = useRef(new Map<string, NoteListItemDto>());
   const reconcileInFlightRef = useRef(new Map<string, Promise<void>>());
   const pendingTerminalHydrationsRef = useRef(new Map<string, NoteProcessingProgressDto>());
@@ -114,6 +115,13 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
             shouldRetry = true;
             return;
           }
+          setLiveTranscriptEvents((current) =>
+            reconcileLiveTranscriptEvents(
+              current,
+              note.sourceTranscripts ?? [],
+              progress.discardedSpans ?? [],
+            ),
+          );
           dispatch({ type: "noteUpdated", note });
           clearTerminalHydration(progress);
         } catch (error) {
@@ -146,6 +154,7 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
       noteSaveController,
       scheduleTerminalHydrationRetry,
       setError,
+      setLiveTranscriptEvents,
     ],
   );
   refreshCompletedNoteRef.current = refreshCompletedNote;
@@ -208,6 +217,12 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
         processingStatus: progress.processingStatus,
       });
       if (progress.stage === "done") {
+        const discarded = progress.discardedSpans;
+        if (discarded?.length) {
+          setLiveTranscriptEvents((current) =>
+            reconcileLiveTranscriptEvents(current, [], discarded),
+          );
+        }
         pendingTerminalHydrationsRef.current.set(progress.noteId, progress);
         void refreshCompletedNote(progress);
       } else {
@@ -223,7 +238,7 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
       disposed = true;
       unlisten?.();
     };
-  }, [clearTerminalHydration, dispatch, refreshCompletedNote]);
+  }, [clearTerminalHydration, dispatch, refreshCompletedNote, setLiveTranscriptEvents]);
 
   useEffect(() => {
     const reconcileProcessing = () => {

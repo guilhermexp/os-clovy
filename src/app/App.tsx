@@ -1230,6 +1230,7 @@ export function App() {
     noteSaveController,
     notes: state.notes,
     setError,
+    setLiveTranscriptEvents,
   });
 
   const handleCreateNote = useCallback(

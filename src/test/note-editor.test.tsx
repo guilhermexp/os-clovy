@@ -1,7 +1,9 @@
+import * as React from "react";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { Editor } from "@tiptap/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { useAppState } from "../app/use-app-state";
 import { NoteEditor } from "../components/note-editor/NoteEditor";
 import { htmlToMarkdown } from "../components/note-editor/NotePreview";
 import type { NoteDto, RecoverableRecordingDto } from "../lib/tauri";
@@ -1433,6 +1435,66 @@ describe("NoteEditor", () => {
       screen.queryByText("System audio requires macOS 14.2 or later."),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Capture system audio" })).toBeInTheDocument();
+  });
+
+  it("lets Windows users change the effective source mode when system audio is ready", async () => {
+    const restoreNavigator = stubNavigatorPlatform(
+      "Win32",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    );
+    try {
+      function Fixture() {
+        const state = useAppState();
+        React.useEffect(() => {
+          state.setSourceReadiness({
+            sourceMode: "microphonePlusSystem",
+            ready: true,
+            checkedAt: now,
+            sources: [
+              {
+                source: "microphone",
+                required: true,
+                ready: true,
+                permissionState: "granted",
+                deviceAvailable: true,
+                captureAvailable: true,
+              },
+              {
+                source: "system",
+                required: true,
+                ready: true,
+                permissionState: "granted",
+                deviceAvailable: true,
+                captureAvailable: true,
+              },
+            ],
+          });
+        }, [state.setSourceReadiness]);
+        return (
+          <NoteEditor
+            {...props}
+            note={note()}
+            sourceMode={state.sourceMode}
+            onSourceModeChange={(mode) =>
+              state.setUserWantsSystemAudio(mode === "microphonePlusSystem")
+            }
+            sourceReadiness={state.sourceReadiness}
+          />
+        );
+      }
+      render(<Fixture />);
+      const user = userEvent.setup();
+      await user.click(screen.getByRole("button", { name: "Recording options" }));
+      const toggle = screen.getByRole("switch", { name: "Capture system audio" });
+      expect(toggle).toBeChecked();
+      await user.click(toggle);
+      expect(toggle).not.toBeChecked();
+      await user.click(toggle);
+      expect(toggle).toBeChecked();
+      expect(screen.queryByRole("button", { name: "Enable" })).not.toBeInTheDocument();
+    } finally {
+      restoreNavigator();
+    }
   });
 
   it("hides system audio recording options on Windows", () => {

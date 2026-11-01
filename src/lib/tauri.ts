@@ -588,12 +588,20 @@ export type NoteDto = NoteListItemDto & {
   queuedRecordings?: number;
 };
 
+export type DiscardedTranscriptSpanDto = {
+  sessionId: string;
+  source: "microphone" | "system";
+  startMs: number;
+  endMs: number;
+};
+
 export type NoteProcessingProgressDto = {
   noteId: string;
   recordingSessionId: string;
   stage: "transcribing" | "generating" | "done";
   processingStatus: ProcessingStatus;
   revision: string;
+  discardedSpans?: DiscardedTranscriptSpanDto[];
 };
 
 export type NotePatchDto = Pick<

@@ -179,6 +179,8 @@ pub struct EchoRejectionReport {
     /// these, or the contiguous segment extraction re-includes the trimmed
     /// audio.
     pub microphone_echo_spans: Vec<(i64, i64)>,
+    /// Exact detected-turn intervals removed by trimming, including discarded short remainders.
+    pub discarded_microphone_spans: Vec<(i64, i64)>,
     /// Artifacts that lost audio to trimming. Full-source transcription
     /// fallbacks (missing-source resurrection, all-remainders-failed lane
     /// retry) must never run for these: the raw file contains the trimmed
@@ -1046,6 +1048,9 @@ fn reject_speaker_echo_turns(
                     if kept.is_empty() {
                         report.dropped_turn_count += 1;
                     }
+                    report
+                        .discarded_microphone_spans
+                        .extend(discarded_turn_spans(turn, &kept));
                     report.microphone_echo_spans.extend(
                         echo_spans
                             .iter()
@@ -1434,6 +1439,21 @@ fn echo_runs_to_spans(
     spans
 }
 
+fn discarded_turn_spans(turn: &AudioTurn, kept: &[AudioTurn]) -> Vec<(i64, i64)> {
+    let mut cursor = turn.start_ms;
+    let mut removed = Vec::new();
+    for remainder in kept {
+        if remainder.start_ms > cursor {
+            removed.push((cursor, remainder.start_ms));
+        }
+        cursor = cursor.max(remainder.end_ms);
+    }
+    if cursor < turn.end_ms {
+        removed.push((cursor, turn.end_ms));
+    }
+    removed
+}
+
 /// Cut the echo spans out of `mic_turn` and return the remaining genuine
 /// stretches that are still long enough to stand as their own turns. An empty
 /// span list returns the turn unchanged; spans covering the whole turn return
@@ -1565,6 +1585,18 @@ fn source_order(source: &str) -> i32 {
 mod tests {
     use super::*;
     use hound::WavSpec;
+
+    #[test]
+    fn discarded_spans_include_short_remainders_but_never_kept_speech() {
+        let turn = make_turn("microphone", 0, 3000);
+        let kept = vec![make_turn("microphone", 1000, 2000)];
+        assert_eq!(
+            discarded_turn_spans(&turn, &kept),
+            vec![(0, 1000), (2000, 3000)]
+        );
+        assert_eq!(discarded_turn_spans(&turn, &[]), vec![(0, 3000)]);
+        assert!(discarded_turn_spans(&turn, &[turn.clone()]).is_empty());
+    }
 
     #[test]
     fn normalization_boosts_quiet_wav_without_touching_original() {
