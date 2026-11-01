@@ -76,6 +76,10 @@ pub struct EngineConfig {
     pub resolver: Arc<dyn Resolver>,
 }
 impl EngineConfig {
+    pub(crate) fn chrome_namespace(&self) -> Option<PathBuf> {
+        self.engine.parent().map(|parent| parent.join("chrome"))
+    }
+
     pub fn production(resources: PathBuf, data: PathBuf, persistent: bool) -> Self {
         let platform = if cfg!(target_os = "windows") {
             "win64"

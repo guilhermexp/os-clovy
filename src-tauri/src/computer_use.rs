@@ -24,7 +24,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -83,6 +83,7 @@ fn driver_pin() -> DriverPin {
 
 #[derive(Default)]
 pub struct ComputerUseState {
+    browser_runtime: OnceLock<crate::computer_use_policy::OwnedBrowserRuntime>,
     operation: AsyncMutex<()>,
     driver: AsyncMutex<Option<DriverClient>>,
     permission_probe: Arc<PermissionProbeCoordinator>,
@@ -120,6 +121,18 @@ pub struct ComputerUseState {
 }
 
 impl ComputerUseState {
+    pub(crate) fn set_browser_runtime(
+        &self,
+        runtime: crate::computer_use_policy::OwnedBrowserRuntime,
+    ) -> Result<(), AppError> {
+        self.browser_runtime.set(runtime).map_err(|_| {
+            AppError::new(
+                "computer_use_unavailable",
+                "Browser authority is already configured.",
+            )
+        })
+    }
+
     pub(crate) fn current_epoch(&self) -> u64 {
         self.epoch.load(Ordering::SeqCst)
     }
@@ -3293,6 +3306,7 @@ fn window_needs_restore(window: &WindowTarget) -> bool {
 }
 
 fn select_window(
+    state: &ComputerUseState,
     windows: &[WindowTarget],
     app_filter: Option<&str>,
     window_id: Option<u64>,
@@ -3325,7 +3339,7 @@ fn select_window(
         })?;
         unique_window_match(windows, filter)?
     };
-    if blocked_target(&selected.app_name, &selected.identity) {
+    if blocked_target(state, &selected.app_name, &selected.identity) {
         return Err(AppError::new(
             "computer_use_target_blocked",
             format!(
@@ -3350,7 +3364,7 @@ async fn refresh_window_target(
             window.pid == target.pid
                 && window.window_id == target.window_id
                 && window.identity == target.identity
-                && !blocked_target(&window.app_name, &window.identity)
+                && !blocked_target(state, &window.app_name, &window.identity)
         })
         .ok_or_else(stale_target_error)
 }
@@ -3481,6 +3495,10 @@ async fn join_target_to_clovy_stage(
     set_clovy_stage_companion(app, true).await?;
     tokio::time::sleep(Duration::from_millis(250)).await;
     ensure_task_generation_current(state, task_generation)?;
+    // The target can change while the companion window settles. Recheck the
+    // exact PID, window and process identity before the driver can activate it.
+    let target = refresh_window_target(app, state, target, epoch).await?;
+    ensure_task_generation_current(state, task_generation)?;
     let action_id = random_id();
     let stage_join_result = driver_call(
         app,
@@ -3501,7 +3519,7 @@ async fn join_target_to_clovy_stage(
         for _ in 0..if native_verified { 2 } else { 4 } {
             tokio::time::sleep(Duration::from_millis(250)).await;
             ensure_task_generation_current(state, task_generation)?;
-            let restored = refresh_window_target(app, state, target, epoch).await?;
+            let restored = refresh_window_target(app, state, &target, epoch).await?;
             if !window_needs_restore(&restored) {
                 return Ok(restored);
             }
@@ -3662,11 +3680,12 @@ async fn capture(
     let epoch = expected_epoch.unwrap_or_else(|| state.epoch.load(Ordering::SeqCst));
     let windows = windows(app, state, expected_epoch).await?;
     let mut target = select_window(
+        state,
         &windows,
         arguments.get("app").and_then(Value::as_str),
         optional_window_id(arguments)?,
     )?;
-    let newly_authorized = ensure_app_authorized(
+    ensure_app_authorized(
         app,
         state,
         identity_app_authorization(&target.identity),
@@ -3675,9 +3694,7 @@ async fn capture(
         task_generation,
     )
     .await?;
-    if newly_authorized {
-        target = refresh_window_target(app, state, &target, epoch).await?;
-    }
+    target = refresh_window_target(app, state, &target, epoch).await?;
     if window_needs_restore(&target) {
         target = join_target_to_clovy_stage(app, state, &target, epoch, task_generation).await?;
     }
@@ -3792,7 +3809,7 @@ async fn list_apps(
     let mut available_windows = Vec::new();
     for window in windows
         .into_iter()
-        .filter(|window| !blocked_target(&window.app_name, &window.identity))
+        .filter(|window| !blocked_target(state, &window.app_name, &window.identity))
     {
         if seen.insert(window.app_name.to_ascii_lowercase()) {
             apps.push(json!({ "name": window.app_name.clone(), "pid": window.pid }));
@@ -4030,7 +4047,7 @@ async fn open_app(
             .and_then(Value::as_str)
             .filter(|name| !name.trim().is_empty() && *name != "?")
             .unwrap_or(&requested_name);
-        if blocked_target(reported_name, &identity) {
+        if blocked_target(state, reported_name, &identity) {
             return Err(AppError::new(
                 "computer_use_target_blocked",
                 format!("Clovy cannot operate {reported_name} with Computer use."),
@@ -4067,7 +4084,11 @@ async fn open_app(
         let matching: Vec<_> = windows(app, state, Some(epoch))
             .await?
             .into_iter()
-            .filter(|window| window.pid == pid && window.identity == identity)
+            .filter(|window| {
+                window.pid == pid
+                    && window.identity == identity
+                    && !blocked_target(state, &window.app_name, &window.identity)
+            })
             .collect();
         let selected = matching
             .iter()
@@ -4201,8 +4222,8 @@ async fn focus_app(
         ));
     }
     let available_windows = windows(app, state, Some(epoch)).await?;
-    let mut target = select_window(&available_windows, app_name, window_id)?;
-    let newly_authorized = ensure_app_authorized(
+    let mut target = select_window(state, &available_windows, app_name, window_id)?;
+    ensure_app_authorized(
         app,
         state,
         identity_app_authorization(&target.identity),
@@ -4211,9 +4232,7 @@ async fn focus_app(
         task_generation,
     )
     .await?;
-    if newly_authorized {
-        target = refresh_window_target(app, state, &target, epoch).await?;
-    }
+    target = refresh_window_target(app, state, &target, epoch).await?;
     let joined_current_stage = raise_window || window_needs_restore(&target);
     let action_id = random_id();
     if joined_current_stage {
@@ -4264,7 +4283,7 @@ async fn mutate(
                 "Capture a specific allowed app before taking an action.",
             )
         })?;
-    validate_sensitive_action(action, arguments, &target)?;
+    validate_sensitive_action(state, action, arguments, &target)?;
     // Normalize and validate the driver request before any first-use app
     // authorization. The approved app must not turn an invalid request into a
     // different fallback action.
@@ -4425,7 +4444,7 @@ async fn revalidate_target(
                 && window.window_id == approved.window_id
                 && window.app_name == approved.app_name
                 && window.identity == approved.identity
-                && !blocked_target(&window.app_name, &window.identity)
+                && !blocked_target(state, &window.app_name, &window.identity)
         });
     let live_window = live_window.ok_or_else(stale_target_error)?;
 
@@ -4595,11 +4614,12 @@ async fn park_app_authorization(
 }
 
 fn validate_sensitive_action(
+    state: &ComputerUseState,
     action: &str,
     arguments: &Value,
     target: &TargetContext,
 ) -> Result<(), AppError> {
-    if blocked_target(&target.app_name, &target.identity) {
+    if blocked_target(state, &target.app_name, &target.identity) {
         return Err(AppError::new(
             "computer_use_target_blocked",
             format!(
@@ -5075,7 +5095,7 @@ fn remove_capture(path: Option<&str>) {
     }
 }
 
-fn blocked_target(app_name: &str, identity: &AppIdentity) -> bool {
+fn blocked_target(state: &ComputerUseState, app_name: &str, identity: &AppIdentity) -> bool {
     let executable = identity
         .executable_path
         .file_name()
@@ -5084,7 +5104,16 @@ fn blocked_target(app_name: &str, identity: &AppIdentity) -> bool {
     // Check all three independently. A localized/spoofed WindowServer owner
     // name cannot disguise a blocked bundle, while an unsigned/no-bundle
     // process never reaches this function because identity resolution fails.
-    blocked_app(app_name) || blocked_app(&identity.bundle_id) || blocked_app(executable)
+    blocked_app(app_name)
+        || blocked_app(&identity.bundle_id)
+        || blocked_app(executable)
+        || !matches!(
+            state
+                .browser_runtime
+                .get()
+                .map(|runtime| runtime.owns(&identity.executable_path)),
+            Some(Ok(false))
+        )
 }
 
 fn ensure_element_not_sensitive(target: &TargetContext, element: u32) -> Result<(), AppError> {
@@ -6151,6 +6180,35 @@ mod tests {
         }
     }
 
+    fn fixture_window_identity(bundle_id: &str) -> AppIdentity {
+        static ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+        let root = ROOT.get_or_init(|| {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join("ordinary-app"), b"fixture").unwrap();
+            root
+        });
+        AppIdentity {
+            bundle_id: bundle_id.to_string(),
+            executable_path: root.path().join("ordinary-app"),
+            process_creation: 1,
+        }
+    }
+
+    fn configured_window_state() -> (tempfile::TempDir, ComputerUseState) {
+        let root = tempfile::tempdir().unwrap();
+        let namespace = root.path().join("chrome");
+        std::fs::create_dir(&namespace).unwrap();
+        let image = namespace.join("browser");
+        std::fs::write(&image, b"private browser fixture").unwrap();
+        let state = ComputerUseState::default();
+        state
+            .set_browser_runtime(crate::computer_use_policy::OwnedBrowserRuntime::new(
+                namespace, image,
+            ))
+            .unwrap();
+        (root, state)
+    }
+
     #[test]
     fn launch_receipt_identity_cannot_be_replaced_by_a_reused_pid() {
         let path_a = std::env::temp_dir().join("clovy-launch-a.exe");
@@ -6210,10 +6268,7 @@ mod tests {
             pid: 42,
             window_id: 84,
             app_name: "TextEdit".to_string(),
-            identity: fixture_identity(
-                "com.apple.TextEdit",
-                "/System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
-            ),
+            identity: fixture_window_identity("com.apple.TextEdit"),
             elements: HashMap::from([(
                 7,
                 ElementSummary {
@@ -6240,10 +6295,7 @@ mod tests {
                 pid: 10,
                 window_id: 100,
                 app_name: "TextEdit".to_string(),
-                identity: fixture_identity(
-                    "com.apple.TextEdit",
-                    "/System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
-                ),
+                identity: fixture_window_identity("com.apple.TextEdit"),
                 title: "First note".to_string(),
                 z_index: 1,
                 x: 100.0,
@@ -6257,10 +6309,7 @@ mod tests {
                 pid: 10,
                 window_id: 101,
                 app_name: "TextEdit".to_string(),
-                identity: fixture_identity(
-                    "com.apple.TextEdit",
-                    "/System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
-                ),
+                identity: fixture_window_identity("com.apple.TextEdit"),
                 title: "Second note".to_string(),
                 z_index: 2,
                 x: 110.0,
@@ -6274,10 +6323,7 @@ mod tests {
                 pid: 20,
                 window_id: 200,
                 app_name: "Preview".to_string(),
-                identity: fixture_identity(
-                    "com.apple.Preview",
-                    "/System/Applications/Preview.app/Contents/MacOS/Preview",
-                ),
+                identity: fixture_window_identity("com.apple.Preview"),
                 title: "Document".to_string(),
                 z_index: 3,
                 x: -900.0,
@@ -6395,44 +6441,76 @@ mod tests {
             "/System/Library/PrivateFrameworks/UniversalAccess.framework/Versions/A/Resources/universalAccessAuthWarn.app/Contents/MacOS/universalAccessAuthWarn",
         );
 
-        assert!(blocked_target("macOS access prompt", &identity));
+        assert!(blocked_target(
+            &ComputerUseState::default(),
+            "macOS access prompt",
+            &identity
+        ));
+    }
+
+    #[test]
+    fn window_policy_requires_host_context_and_rejects_private_runtime() {
+        let external = fixture_window_identity("org.example.external");
+        assert!(blocked_target(
+            &ComputerUseState::default(),
+            "Editor",
+            &external
+        ));
+        let (root, state) = configured_window_state();
+        assert!(!blocked_target(&state, "Editor", &external));
+        let private = AppIdentity {
+            executable_path: root.path().join("chrome/browser"),
+            ..external.clone()
+        };
+        assert!(blocked_target(&state, "Browser", &private));
+        let mut windows = fixture_windows();
+        windows[0].identity = private;
+        assert_eq!(
+            select_window(&state, &windows, None, Some(100))
+                .unwrap_err()
+                .code,
+            "computer_use_target_blocked"
+        );
+        std::fs::remove_file(root.path().join("chrome/browser")).unwrap();
+        assert!(blocked_target(&state, "Editor", &external));
     }
 
     #[test]
     fn exact_window_selection_never_guesses_between_matches() {
+        let (_root, state) = configured_window_state();
         let windows = fixture_windows();
         assert_eq!(
-            select_window(&windows, Some("Second note"), None)
+            select_window(&state, &windows, Some("Second note"), None)
                 .expect("exact title")
                 .window_id,
             101
         );
         assert_eq!(
-            select_window(&windows, None, Some(100))
+            select_window(&state, &windows, None, Some(100))
                 .expect("exact id")
                 .window_id,
             100
         );
         assert_eq!(
-            select_window(&windows, Some("Preview"), None)
+            select_window(&state, &windows, Some("Preview"), None)
                 .expect("single app window")
                 .window_id,
             200
         );
         assert_eq!(
-            select_window(&windows, Some("TextEdit"), None)
+            select_window(&state, &windows, Some("TextEdit"), None)
                 .expect_err("same-app windows are ambiguous")
                 .code,
             "computer_use_target_ambiguous"
         );
         assert_eq!(
-            select_window(&windows, None, None)
+            select_window(&state, &windows, None, None)
                 .expect_err("implicit target is unsafe")
                 .code,
             "computer_use_target_required"
         );
         assert_eq!(
-            select_window(&windows, Some("Preview"), Some(100))
+            select_window(&state, &windows, Some("Preview"), Some(100))
                 .expect_err("model app text must not relabel another app's exact window")
                 .code,
             "computer_use_target_mismatch"
@@ -6455,13 +6533,14 @@ mod tests {
 
     #[test]
     fn window_id_for_app_b_with_app_a_is_denied() {
+        let (_root, state) = configured_window_state();
         let mut windows = fixture_windows();
         windows[0].app_name = "Notes".to_string();
         windows[0].window_id = 10;
         windows[1].app_name = "Mail".to_string();
         windows[1].window_id = 20;
 
-        let denied = select_window(&windows, Some("Notes"), Some(20)).unwrap_err();
+        let denied = select_window(&state, &windows, Some("Notes"), Some(20)).unwrap_err();
 
         assert_eq!(denied.code, "computer_use_target_mismatch");
         assert!(denied.message.contains("does not own"));
@@ -6493,6 +6572,7 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "windows"))]
     fn stage_manager_shelf_proxy_collapses_into_the_real_hidden_window() {
+        let (_root, state) = configured_window_state();
         let mut document = fixture_windows().remove(0);
         document.window_id = 4460;
         document.title.clear();
@@ -6513,7 +6593,7 @@ mod tests {
         assert_eq!(candidates[0].window_id, document.window_id);
         assert!(window_needs_restore(&candidates[0]));
         assert_eq!(
-            select_window(&candidates, Some("TextEdit"), None)
+            select_window(&state, &candidates, Some("TextEdit"), None)
                 .expect("the real TextEdit document must be unambiguous")
                 .window_id,
             document.window_id
@@ -6591,6 +6671,7 @@ mod tests {
 
     #[test]
     fn key_input_cannot_bypass_sensitive_element_checks() {
+        let (_root, state) = configured_window_state();
         let mut target = fixture_target();
         target.elements.insert(
             9,
@@ -6601,18 +6682,33 @@ mod tests {
             },
         );
 
-        assert!(validate_sensitive_action("key", &json!({ "keys": "a" }), &target).is_err());
         assert!(
-            validate_sensitive_action("key", &json!({ "keys": "a", "element": 7 }), &target,)
-                .is_ok()
+            validate_sensitive_action(&state, "key", &json!({ "keys": "a" }), &target).is_err()
         );
+        assert!(validate_sensitive_action(
+            &state,
+            "key",
+            &json!({ "keys": "a", "element": 7 }),
+            &target,
+        )
+        .is_ok());
+        assert!(validate_sensitive_action(
+            &state,
+            "key",
+            &json!({ "keys": "a", "element": 9 }),
+            &target,
+        )
+        .is_err());
         assert!(
-            validate_sensitive_action("key", &json!({ "keys": "a", "element": 9 }), &target,)
+            validate_sensitive_action(&state, "key", &json!({ "keys": "shift+a" }), &target)
                 .is_err()
         );
-        assert!(validate_sensitive_action("key", &json!({ "keys": "shift+a" }), &target).is_err());
-        assert!(validate_sensitive_action("key", &json!({ "keys": "ctrl+s" }), &target).is_ok());
-        assert!(validate_sensitive_action("key", &json!({ "keys": "esc" }), &target).is_ok());
+        assert!(
+            validate_sensitive_action(&state, "key", &json!({ "keys": "ctrl+s" }), &target).is_ok()
+        );
+        assert!(
+            validate_sensitive_action(&state, "key", &json!({ "keys": "esc" }), &target).is_ok()
+        );
     }
 
     #[test]
@@ -6748,6 +6844,7 @@ mod tests {
             assert!(!contains_blocked_shell_pattern(text), "{text}");
         }
 
+        let (_root, state) = configured_window_state();
         let target = fixture_target();
         for (action, arguments) in [
             ("type", json!({ "element": 7, "text": "rm -rf ~" })),
@@ -6757,7 +6854,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                validate_sensitive_action(action, &arguments, &target)
+                validate_sensitive_action(&state, action, &arguments, &target)
                     .expect_err("hazardous text")
                     .code,
                 "computer_use_dangerous_text_blocked"

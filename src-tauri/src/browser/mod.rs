@@ -134,13 +134,18 @@ pub(crate) fn setup(app: &tauri::AppHandle) -> Result<(), AppError> {
         (BrowserTransportKind::Attended, true),
         (BrowserTransportKind::Managed, false),
     ] {
-        let engine = tauri::async_runtime::block_on(async {
-            AgentBrowserTransport::new(EngineConfig::production(
-                resources.clone(),
-                data.clone(),
-                persistent,
-            ))
-        });
+        let config = EngineConfig::production(resources.clone(), data.clone(), persistent);
+        if kind == BrowserTransportKind::Attended {
+            let namespace = config.chrome_namespace().ok_or_else(|| {
+                AppError::new("browser_unavailable", "Browser resources are unavailable.")
+            })?;
+            app.state::<crate::computer_use::ComputerUseState>()
+                .set_browser_runtime(crate::computer_use_policy::OwnedBrowserRuntime::new(
+                    namespace,
+                    config.chrome.clone(),
+                ))?;
+        }
+        let engine = tauri::async_runtime::block_on(async { AgentBrowserTransport::new(config) });
         broker.configure_transport(
             kind,
             Arc::new(Transport(engine)),
