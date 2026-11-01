@@ -796,6 +796,49 @@ pub(crate) fn random_b64url(bytes: usize) -> String {
 mod tests {
     use super::*;
 
+    async fn callback_request(port: u16, path: &str) -> String {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        String::from_utf8(response).unwrap()
+    }
+
+    #[tokio::test]
+    async fn loopback_ignores_wrong_state_and_accepts_only_matching_callback() {
+        let listener = bind_loopback(&LoopbackPort::Ephemeral).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = async move {
+            let rejected = callback_request(port, "/callback?code=wrong&state=other").await;
+            assert!(rejected.starts_with("HTTP/1.1 400"));
+            let accepted = callback_request(port, "/callback?code=fixture&state=expected").await;
+            assert!(accepted.starts_with("HTTP/1.1 200"));
+        };
+        let (code, ()) = tokio::join!(await_callback(&listener, "expected", "Vercel"), client);
+        assert_eq!(code.unwrap(), "fixture");
+    }
+
+    #[tokio::test]
+    async fn loopback_reports_denial_only_for_matching_state() {
+        let listener = bind_loopback(&LoopbackPort::Ephemeral).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = async move {
+            let rejected =
+                callback_request(port, "/callback?error=access_denied&state=other").await;
+            assert!(rejected.starts_with("HTTP/1.1 400"));
+            let denied =
+                callback_request(port, "/callback?error=access_denied&state=expected").await;
+            assert!(denied.starts_with("HTTP/1.1 200"));
+        };
+        let (result, ()) = tokio::join!(await_callback(&listener, "expected", "Vercel"), client);
+        assert_eq!(result.unwrap_err().code, "connector_connect_denied");
+    }
+
     #[test]
     fn success_page_carries_the_clovy_app_tile() {
         let page = success_page("Signed in", "Signed in to Clovy", "Return to the app.");

@@ -225,6 +225,8 @@ pub fn run() {
             agent_mcp::delete_agent_mcp_server,
             agent_mcp::test_agent_mcp_server,
             agent_mcp::connect_agent_mcp_oauth,
+            agent_mcp::cancel_agent_mcp_oauth,
+            agent_mcp::disconnect_agent_mcp_oauth,
             routines::list_agent_routines,
             routines::create_agent_routine,
             routines::update_agent_routine,

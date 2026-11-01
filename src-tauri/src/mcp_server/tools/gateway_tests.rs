@@ -103,6 +103,11 @@ async fn gateway_approval_and_keychain_header_stay_on_host_transport() {
     let catalog = group.catalog(&ctx).await;
     assert_eq!(catalog.len(), 2);
     assert_eq!(catalog[0]["annotations"]["readOnlyHint"], false);
+    assert_eq!(catalog[0]["_meta"]["clovy"]["origin"], "clovy_managed");
+    assert!(catalog[0]["_meta"]["clovy"]["id"]
+        .as_str()
+        .unwrap()
+        .starts_with("mcp:"));
     assert!(!serde_json::to_string(&catalog)
         .unwrap()
         .contains("fixture-only-token"));
@@ -223,6 +228,19 @@ async fn gateway_discovery_failure_omits_only_the_failed_server() {
         .create(&bad)
         .await
         .unwrap();
+    assert_eq!(group.catalog(&ctx).await.len(), 2);
+    let error = group
+        .call(&ctx, "mcp_broken_lookup", &json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "agent_mcp_transport_failed");
+    let diagnostic = error.details.unwrap();
+    assert_eq!(diagnostic["origin"], "clovy_managed");
+    assert_eq!(diagnostic["server"], "broken");
+    assert_eq!(diagnostic["phase"], "discover");
+    assert_eq!(diagnostic["tool"], "mcp_broken_lookup");
+    assert_eq!(diagnostic["state"], "unavailable");
+    assert_eq!(diagnostic["action"], "check_connection");
     assert_eq!(group.catalog(&ctx).await.len(), 2);
 }
 
@@ -357,6 +375,16 @@ async fn gateway_failed_credentials_and_namespace_collision_do_not_hide_healthy_
     assert!(tools
         .iter()
         .all(|tool| tool["name"].as_str().unwrap().starts_with("mcp_private_")));
+    let error = group
+        .call(&ctx, "mcp_bad_credentials_lookup", &json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "agent_mcp_secure_storage_failed");
+    let diagnostic = error.details.unwrap();
+    assert_eq!(diagnostic["server"], "bad credentials");
+    assert_eq!(diagnostic["phase"], "refresh");
+    assert_eq!(diagnostic["action"], "check_local_storage");
+    assert_eq!(group.catalog(&ctx).await.len(), 2);
 }
 
 #[tokio::test]
@@ -405,7 +433,7 @@ async fn gateway_lost_parked_session_fails_without_replaying_the_tool() {
             .unwrap();
     };
     let (result, ()) = tokio::join!(call, retire);
-    assert_eq!(result.unwrap_err().code, "agent_mcp_tool_failed");
+    assert_eq!(result.unwrap_err().code, "agent_mcp_tool_unavailable");
     assert_eq!(http.tool_calls(), 1);
 }
 

@@ -352,6 +352,72 @@ stay in the Keychain and the app's memory, never in the CLI's argv,
 environment, or files. A server that cannot be discovered drops its tools
 from the list without failing `tools/list`.
 
+Vercel's official Streamable HTTP endpoint is `https://mcp.vercel.com`.
+Its protected-resource metadata identifies `https://vercel.com` as the
+authorization server and advertises `openid`; the authorization server also
+advertises `offline_access`, but a refresh grant depends on the actual consent
+and provider response. Vercel requires clients to be reviewed and approved:
+support for the protocol and approval of a different client do not establish
+approval of Clovy. A live connection therefore requires Vercel's acceptance
+of Clovy's own client and the user's consent. See the [Vercel MCP client
+review requirements](https://vercel.com/docs/agent-resources/vercel-mcp#connecting-to-vercel-mcp).
+The Vercel preset starts disabled and requires approval for its tools. The
+host reports credential cleanup separately from remote revocation; if local
+cleanup fails, the disabled server retains a pending cleanup state for retry.
+Tool calls are not automatically repeated after a 401 or transport failure,
+because delivery of a mutation can be uncertain. A connection configured by a
+CLI is a separate origin with its own credentials and permissions.
+
+For the exact official Vercel resource, Clovy reads authorization metadata
+from `https://mcp.vercel.com/.well-known/oauth-authorization-server` and
+requires issuer `https://vercel.com`, HTTPS and the official authorization,
+token, registration and revocation endpoints. This is a host-owned resource
+profile, not a configurable discovery override. The issuer's own metadata at
+`https://vercel.com/.well-known/oauth-authorization-server` describes a
+different login contract: it advertises only `web_message.opener` and uses
+`api.vercel.com` token endpoints. Clovy does not fall back to that document.
+The MCP document omits response modes; the OAuth metadata default includes
+query, which Clovy explicitly requests. An explicit response-mode list must
+include query. These metadata checks establish protocol compatibility, not
+provider acceptance or proof of a live loopback authorization. See
+[RFC 8414 section 2](https://www.rfc-editor.org/rfc/rfc8414.html#section-2).
+
+Connect owns an operation id so cancellation can be latched before repository
+startup and a late cancellation cannot cancel a later connection. A whole-flow
+deadline covers metadata, registration, callback, code exchange and bounded,
+validated paged tool discovery. Reconnect advances the stored policy revision
+before opening the browser; existing approval receipts do not authorize the new
+connection. Before writing a new credential, SQLite records its pending
+reference. A crash before or after the secure-store write is recovered from
+that journal on list, reconnect or disconnect. Failed deletion keeps the
+reference and prevents reuse. Remote revocation failure survives restart and
+remains distinct from local cleanup. Settings never accept pasted OAuth
+identity/tokens, and changes to HTTP headers preserve the host-owned grant;
+changing its URL or transport requires disconnect first.
+
+If a refresh returns rotated credentials after cancellation/disconnect, or the
+new credentials cannot be saved, the host tries to revoke that actual rotated
+grant before discarding it. An unconfirmed result is journaled and survives
+restart; a provider's idempotent acceptance of an older token's revocation does
+not clear that warning. A successful revocation response means the provider
+accepted the request, not independent proof about an entire token family.
+Disabling or deleting a locally cleared server reports remote revocation
+separately. Delete returns `{localDeleted, remoteRevoked}` and the UI keeps a
+provider-action warning when local removal succeeds but revocation remains
+unconfirmed. Failed local secure-store cleanup retains the disabled row for
+retry, rather than dropping its credential reference.
+
+The managed registry retains each discovery or refresh failure without removing
+healthy servers. Settings and relay errors carry origin, server, optional tool,
+actual phase, typed code, optional numeric remote code, state and recovery
+action. The relay serializes only this safe diagnostic shape. CLI-owned MCP
+errors identify their observed server/tool and separate custody; this is not a
+complete inventory of inherited CLI connections. Tool-call errors with uncertain
+delivery preserve that uncertainty and never cause automatic redispatch.
+Custom dispatch also checks the host configuration fingerprint and the epoch
+captured during discovery, so an earlier approval cannot adopt a replacement
+endpoint, credential or local safety policy between gateway check and I/O.
+
 ### Content blocks
 
 A tool result is one `text` block with the result as JSON, except

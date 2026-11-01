@@ -83,10 +83,25 @@ impl<D: GatewayDriver> GatewayTools<D> {
             }
         })
         .await
-        .map_err(mcp_error)?;
+        .map_err(mcp_discovery_error)?;
+        for diagnostic in subsystem
+            .discovery_diagnostics()
+            .map_err(mcp_discovery_error)?
+        {
+            tracing::warn!(
+                origin = %diagnostic.origin,
+                server = %diagnostic.server,
+                phase = %diagnostic.phase,
+                code = %diagnostic.code,
+                state = %diagnostic.state,
+                action = %diagnostic.action,
+                remote_code = ?diagnostic.remote_code,
+                "MCP server omitted from the turn catalog"
+            );
+        }
         agent_mcp::snapshot_run_policies(&ctx.data.notes, &binding.run_id, &descriptors)
             .await
-            .map_err(mcp_error)?;
+            .map_err(mcp_discovery_error)?;
         Ok(Arc::new(Catalog {
             subsystem,
             descriptors,
@@ -104,13 +119,30 @@ impl<D: GatewayDriver> GatewayTools<D> {
         let policy = catalog
             .subsystem
             .policy_for_tool(name)
-            .map_err(mcp_error)?
-            .ok_or_else(|| mcp_error(AgentMcpError::ToolUnavailable))?;
+            .map_err(|error| mcp_call_error(error, "gateway", name))?;
+        let policy = match policy {
+            Some(policy) => policy,
+            None => {
+                if let Some(mut diagnostic) = catalog
+                    .subsystem
+                    .discovery_failure_for_tool(name)
+                    .map_err(|error| mcp_call_error(error, "gateway", name))?
+                {
+                    diagnostic.tool = Some(name.to_owned());
+                    return Err(diagnostic.into_app_error());
+                }
+                return Err(mcp_call_error(
+                    AgentMcpError::ToolUnavailable,
+                    "gateway",
+                    name,
+                ));
+            }
+        };
         let server_name = catalog
             .subsystem
             .server_name_for_tool(name)
-            .map_err(mcp_error)?
-            .ok_or_else(|| mcp_error(AgentMcpError::ToolUnavailable))?;
+            .map_err(|error| mcp_call_error(error, "gateway", name))?
+            .ok_or_else(|| mcp_call_error(AgentMcpError::ToolUnavailable, "gateway", name))?;
         if crate::routines::routine_mcp_server_allowed_for_session(
             &ctx.data.notes,
             &binding.session_id,
@@ -128,7 +160,7 @@ impl<D: GatewayDriver> GatewayTools<D> {
         }
         if !agent_mcp::run_policy_matches(&ctx.data.notes, &binding.run_id, name, &policy)
             .await
-            .map_err(mcp_error)?
+            .map_err(|error| mcp_call_error(error, &server_name, name))?
         {
             return Err(AppError::new("agent_mcp_policy_changed","This MCP server changed during the turn. Retry the turn to use its current policy."));
         }
@@ -144,6 +176,11 @@ impl<D: GatewayDriver> GatewayTools<D> {
     ) -> Result<Value, AppError> {
         let binding = bound(ctx)?;
         let sandboxed = binding.safety_mode == AgentSafetyMode::Sandboxed;
+        let server_name = catalog
+            .subsystem
+            .server_name_for_tool(name)
+            .map_err(|error| mcp_call_error(error, "gateway", name))?
+            .ok_or_else(|| mcp_call_error(AgentMcpError::ToolUnavailable, "gateway", name))?;
         let mut answer = None::<String>;
         for _ in 0..16 {
             self.check(ctx, catalog, name).await?;
@@ -217,7 +254,7 @@ impl<D: GatewayDriver> GatewayTools<D> {
                     // transport resumes the original request, never submits
                     // the potentially mutating tools/call a second time.
                 }
-                Err(error) => return Err(mcp_error(error)),
+                Err(error) => return Err(mcp_call_error(error, &server_name, name)),
             }
         }
         agent_mcp::retire_server_sessions(&policy.server_id).await;
@@ -235,14 +272,30 @@ async fn wait_cancelled(ctx: &ToolCtx<'_>) {
         }
     }
 }
-fn mcp_error(error: AgentMcpError) -> AppError {
-    AppError::new("agent_mcp_tool_failed", error.to_string())
+fn mcp_discovery_error(error: AgentMcpError) -> AppError {
+    error
+        .diagnostic("gateway", None, "discover")
+        .into_app_error()
+}
+fn mcp_call_error(error: AgentMcpError, server: &str, tool: &str) -> AppError {
+    error
+        .diagnostic(server, Some(tool), "call")
+        .into_app_error()
 }
 fn descriptor(tool: &RuntimeToolDescriptorJson) -> Value {
     // Custom MCP policy may waive approval for a mutating tool. Do not
     // mislabel that as read-only: only the managed Linear classifier proves
     // a read from the provider annotations. Unknown hints stay conservative.
-    json!({"name":tool.name,"description":tool.description,"inputSchema":tool.parameters,"annotations":{"readOnlyHint":tool.approval_provider.as_deref()==Some("Linear") && tool.requires_approval!=Some(true)}})
+    let remote_annotations = serde_json::to_value(&tool.annotations).unwrap_or_else(|_| json!({}));
+    let mut annotations = remote_annotations.as_object().cloned().unwrap_or_default();
+    annotations.insert(
+        "readOnlyHint".into(),
+        json!(
+            tool.approval_provider.as_deref() == Some("Linear")
+                && tool.requires_approval != Some(true)
+        ),
+    );
+    json!({"name":tool.name,"description":tool.description,"inputSchema":tool.parameters,"annotations":annotations,"_meta":{"clovy":{"origin":"clovy_managed","id":tool.id,"remoteAnnotations":remote_annotations}}})
 }
 pub(crate) static GATEWAY: GatewayTools<NativeGateway> = GatewayTools::new(NativeGateway);
 impl<D: GatewayDriver> ToolGroup for GatewayTools<D> {
