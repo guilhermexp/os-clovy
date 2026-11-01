@@ -4,7 +4,7 @@ use crate::{
     approval_broker::{
         ApprovalBroker, ApprovalKind, ApprovalOutcome, ApprovalRequest, ApprovalTurn,
     },
-    browser::policy::{classify_managed_action, ActionClass, InteractiveElement, ManagedAction},
+    browser::policy::{interaction_route, InteractionClass, InteractionRoute, InteractiveElement},
     db::repositories::Repositories,
     domain::types::AppError,
     mcp_server::turns::TurnBinding,
@@ -122,6 +122,7 @@ struct Inspection {
     origin: String,
     document_id: String,
     metadata_id: String,
+    interaction_class: InteractionClass,
     backend_node_id: i64,
     element: InteractiveElement,
 }
@@ -446,18 +447,22 @@ impl BrowserBroker {
                 .await?;
             let expected: Inspection =
                 serde_json::from_value(inspected.data).map_err(|_| unavailable())?;
-            let action = match tool {
+            match tool {
                 "fill" => {
                     if !arguments["text"].is_string() {
                         return Err(err("invalid_arguments", "text is required."));
                     }
-                    ManagedAction::Fill
                 }
-                "press" => ManagedAction::Press(string(&arguments, "key")?),
-                _ => ManagedAction::Click,
-            };
-            match classify_managed_action(action, &expected.element) {
-                ActionClass::SensitiveField => {
+                "press" => {
+                    string(&arguments, "key")?;
+                }
+                _ => {}
+            }
+            // Redacted metadata cannot safely be classified again here. The
+            // required host enum was computed from original facts and is bound
+            // into metadataId/expected for the final guard.
+            match interaction_route(expected.interaction_class, binding.attended) {
+                InteractionRoute::HumanOnly => {
                     return Err(err(
                         "browser_human_takeover_required",
                         if binding.attended {
@@ -467,13 +472,13 @@ impl BrowserBroker {
                         },
                     ))
                 }
-                ActionClass::Consequential => {
-                    if !binding.attended {
-                        return Err(err(
-                            "unattended_requires_approval",
-                            "This browser action needs a person to approve it.",
-                        ));
-                    }
+                InteractionRoute::UnattendedDenied => {
+                    return Err(err(
+                        "unattended_requires_approval",
+                        "This browser action needs a person to approve it.",
+                    ));
+                }
+                InteractionRoute::CentralApproval => {
                     // A human takeover/Stop must remain available while the
                     // central approval card waits. The exact inspection is
                     // retained and guarded again after reacquiring authority.

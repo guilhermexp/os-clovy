@@ -492,6 +492,12 @@ impl AgentBrowserTransport {
                                         } else {
                                             "This routine uses an anonymous browser and cannot enter sensitive fields or use a login profile."
                                         }
+                                    } else if code == "browser_screenshot_requires_visible" {
+                                        if persistent {
+                                            "A screenshot of a hidden tab is unavailable. Read a fresh snapshot instead. If an image is required, call request_clarification and keep it pending while the user takes over the dedicated browser and resumes control. Then list tabs and inspect a fresh snapshot."
+                                        } else {
+                                            "A screenshot of a hidden tab is unavailable. This routine can read a fresh snapshot but cannot request human takeover."
+                                        }
                                     } else {
                                         "The browser operation did not complete. Inspect its state before continuing."
                                     };
@@ -712,6 +718,7 @@ fn safe_code(code: &str) -> &'static str {
         "unsupported_operation" => "browser_unsupported_operation",
         "no_history" => "browser_no_history",
         "invalid_url" => "browser_network_blocked",
+        "screenshot_hidden" => "browser_screenshot_requires_visible",
         _ => "browser_operation_failed",
     }
 }

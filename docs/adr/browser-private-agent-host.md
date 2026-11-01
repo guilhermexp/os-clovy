@@ -82,3 +82,58 @@ opaque random metadata revision, reused only while those facts are unchanged.
 This preserves the approval binding without publishing a low-entropy secret
 digest that could be guessed offline. This is an internal typed-wire extension,
 not another model-facing operation or authority grant.
+
+## 2026-11-01 addendum: classify original facts before redaction
+
+An attribute such as current-password can become current-[redacted] when its
+field content is removed from metadata. Reclassifying that DTO in Rust could
+therefore request approval for a human-only field, even though the final guard
+still refused execution. The private host now computes the single classification
+on original facts and returns a required closed enum with the sanitized
+inspection. The broker consumes it before requesting approval; it has no second
+DOM heuristic or default for missing/unknown values. The enum is bound into the
+opaque metadata revision, remains outside model tool schemas, and does not carry
+raw facts or field content. Ordinary actions still require the same central
+approval; this adds no authorization or browser bypass.
+
+## 2026-11-01 addendum: preserve visibility during coherent observation
+
+This supersedes the lifecycle mechanism in the coherent-redaction addendum,
+while retaining its privacy boundary. Chromium156's frozen lifecycle command
+calls WasHidden; active only unfreezes the page. It cannot restore an originally
+visible page by itself. Bringing the target to the foreground would instead
+change focus and activate an originally hidden tab.
+
+The private host therefore uses a transient debugger agent with an owned random
+source-URL breakpoint and a fixed, isolated void evaluation. It subscribes before
+enabling, accepts only its exact breakpoint hit in the selected session, and
+rejects pre-existing or unexpected pauses. Only registered breakpoint IDs pass
+the private event filter; stack frames, source, locals and foreign IDs are
+discarded. No debugger operation or evaluation becomes a model-facing tool.
+
+Release removes the owned breakpoint and disables only this debugger agent.
+V8 retains the pause when another enabled agent accepts it; the host never sends
+a global resume command. Completion of its fixed evaluation confirms release.
+Uncertain ownership, lost notifications or failed release makes the task
+terminal/unknown and reaps it. Page tasks remain paused during inventory, AX,
+inspection and capture, and ordinary mutation dispatch follows release with the
+same exact synchronous guard. Screenshot animation, geometry and document
+checks remain in force. The host does not enable virtual time: switching its
+policy from pause to advance still enables a synthetic clock in Chromium156.
+Screenshot capture instead pauses native animation playback while the debugger
+barrier holds page tasks, then restores the observed finite playback rate.
+No visibility emulation, foreground activation, browser
+fork or product sandbox/network/crypto override is introduced.
+
+Stock Chromium156's screenshot path requests a redraw and waits for frame
+presentation, including with fromSurface=false. A hidden page with pending paint
+can stall that request while the debugger's page scheduler pause holds. There
+is no established supported parameter for a fresh hidden-frame capture without
+that dependency. The host therefore refuses a hidden headed tab's screenshot
+before changing animation state or requesting pixels, then releases its owned
+pause normally. Snapshot/inspection and the original visibility/focus survive;
+default headless background and visible headed captures remain supported.
+The parent exposes a definite visibility requirement, with snapshots as the
+read alternative and human takeover when an image is required. It never
+activates the tab automatically or substitutes a retained surface image. Native
+hidden-image capture remains a documented API limit, not a passing PNG claim.

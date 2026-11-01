@@ -7,7 +7,6 @@ mod connection;
 mod doctor;
 mod flags;
 mod install;
-mod mcp;
 #[allow(unused_imports)]
 mod native;
 mod output;
@@ -118,6 +117,225 @@ struct GuardTarget {
     object: String,
     root: String,
 }
+struct ObservationBarrier {
+    client: std::sync::Arc<CdpClient>,
+    session: String,
+    events: tokio::sync::broadcast::Receiver<native::cdp::types::CdpEvent>,
+    enabled: bool,
+    breakpoint: Option<String>,
+    nudge: Option<tokio::task::JoinHandle<Result<Value, String>>>,
+    owned_pause: bool,
+    context: Option<i64>,
+    external_pause: bool,
+    unexpectedly_resumed: bool,
+}
+
+impl ObservationBarrier {
+    fn new(client: std::sync::Arc<CdpClient>, session: String) -> Self {
+        let events = client.subscribe(); // Before enabling or requesting any pause.
+        Self {
+            client,
+            session,
+            events,
+            enabled: false,
+            breakpoint: None,
+            nudge: None,
+            owned_pause: false,
+            context: None,
+            external_pause: false,
+            unexpectedly_resumed: false,
+        }
+    }
+
+    fn notification(&mut self, event: native::cdp::types::CdpEvent) -> Result<(), String> {
+        if event.session_id.as_deref() != Some(self.session.as_str()) {
+            return Ok(());
+        }
+        match event.method.as_str() {
+            "Debugger.paused" => {
+                let Some(hits) = event.params["ownHits"].as_array() else {
+                    self.external_pause = true;
+                    return Err("effect_unknown".into());
+                };
+                if event.params["foreignPaused"] != false {
+                    self.external_pause = true;
+                    return Err("effect_unknown".into());
+                }
+                let owned = self
+                    .breakpoint
+                    .as_ref()
+                    .is_some_and(|id| hits.len() == 1 && hits[0].as_str() == Some(id.as_str()));
+                if !owned {
+                    self.external_pause = true;
+                    return Err("effect_unknown".into());
+                }
+                self.owned_pause = true;
+            }
+            "Debugger.resumed" => {
+                if self.owned_pause {
+                    self.unexpectedly_resumed = true;
+                }
+                self.owned_pause = false;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn drain(&mut self) -> Result<(), String> {
+        loop {
+            match self.events.try_recv() {
+                Ok(event) => self.notification(event)?,
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => return Ok(()),
+                Err(_) => {
+                    self.external_pause = true;
+                    return Err("effect_unknown".into());
+                }
+            }
+        }
+    }
+
+    async fn start(&mut self) -> Result<(), String> {
+        self.enabled = true; // Cleanup must also handle a lost enable acknowledgement.
+        self.client
+            .send_command(
+                "Debugger.enable",
+                Some(json!({"maxScriptsCacheSize":0})),
+                Some(&self.session),
+            )
+            .await?;
+        // Exact V8 enableImpl reports a pre-existing pause before its reply.
+        self.drain()?;
+        if self.external_pause {
+            return Err("effect_unknown".into());
+        }
+        let frame = self
+            .client
+            .send_command_no_params("Page.getFrameTree", Some(&self.session))
+            .await?;
+        let frame = frame["frameTree"]["frame"]["id"]
+            .as_str()
+            .ok_or("redaction_failed")?;
+        let world=self.client.send_command("Page.createIsolatedWorld",Some(json!({"frameId":frame,"worldName":"clovy-private-guard","grantUniveralAccess":false})),Some(&self.session)).await?;
+        let context = world["executionContextId"]
+            .as_i64()
+            .ok_or("redaction_failed")?;
+        self.context = Some(context);
+        let marker = format!(
+            "clovy-private-observation:{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let breakpoint = self
+            .client
+            .send_command(
+                "Debugger.setBreakpointByUrl",
+                Some(json!({"lineNumber":0,"columnNumber":0,"url":marker})),
+                Some(&self.session),
+            )
+            .await?;
+        self.breakpoint = Some(
+            breakpoint["breakpointId"]
+                .as_str()
+                .filter(|id| !id.is_empty() && id.len() <= 1024)
+                .ok_or("redaction_failed")?
+                .to_owned(),
+        );
+        self.client.register_observation_breakpoint(
+            self.breakpoint.as_deref().ok_or("redaction_failed")?,
+            &marker,
+        )?;
+        self.drain()?;
+        let client = self.client.clone();
+        let session = self.session.clone();
+        self.nudge = Some(tokio::spawn(async move {
+            client.send_command("Runtime.evaluate",Some(json!({"expression":format!("void 0;\n//# sourceURL={marker}"),"contextId":context,"returnByValue":true,"silent":true})),Some(&session)).await
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !self.owned_pause {
+                let event = match self.events.recv().await {
+                    Ok(event) => event,
+                    Err(_) => {
+                        self.external_pause = true;
+                        return Err("effect_unknown".to_owned());
+                    }
+                };
+                self.notification(event)?;
+            }
+            Ok::<_, String>(())
+        })
+        .await
+        .map_err(|_| "redaction_failed".to_owned())??;
+        Ok(())
+    }
+
+    async fn visible(&self) -> Result<bool, String> {
+        // Fixed synchronous isolated-world read of the native Document getter.
+        // Never await page promises, emulate visibility, or activate a target.
+        let context = self.context.ok_or("redaction_failed")?;
+        let result = self.client.send_command(
+            "Runtime.evaluate",
+            Some(json!({"expression":"document.visibilityState","contextId":context,"returnByValue":true,"silent":true})),
+            Some(&self.session),
+        ).await?;
+        if result.get("exceptionDetails").is_some() {
+            return Err("redaction_failed".into());
+        }
+        match result["result"]["value"].as_str() {
+            Some("visible") => Ok(true),
+            Some("hidden") => Ok(false),
+            _ => Err("redaction_failed".into()),
+        }
+    }
+
+    async fn finish(&mut self) -> Result<(), String> {
+        self.drain()?;
+        if self.external_pause || self.unexpectedly_resumed {
+            // Never release another debugger's pause. The host closes this task.
+            return Err("effect_unknown".into());
+        }
+        let breakpoint = self.breakpoint.take();
+        let removed = if let Some(id) = breakpoint.as_ref() {
+            self.client
+                .send_command(
+                    "Debugger.removeBreakpoint",
+                    Some(json!({"breakpointId":id})),
+                    Some(&self.session),
+                )
+                .await
+        } else {
+            Ok(Value::Null)
+        };
+        self.drain()?;
+        if self.external_pause || self.unexpectedly_resumed {
+            return Err("effect_unknown".into());
+        }
+        let disabled = if self.enabled {
+            self.client
+                .send_command_no_params("Debugger.disable", Some(&self.session))
+                .await
+        } else {
+            Ok(Value::Null)
+        };
+        // V8 releases this agent's pause only if no other accepting debugger
+        // retains it. No global Debugger.resume command is ever issued.
+        self.enabled = false;
+        if let Some(id) = breakpoint.as_deref() {
+            self.client.unregister_observation_breakpoint(id);
+        }
+        let completed = if let Some(nudge) = self.nudge.take() {
+            matches!(tokio::time::timeout(std::time::Duration::from_secs(3),nudge).await,
+                Ok(Ok(Ok(ref value))) if value.get("exceptionDetails").is_none())
+        } else {
+            true
+        };
+        self.owned_pause = false;
+        if removed.is_err() || disabled.is_err() || !completed {
+            return Err("effect_unknown".into());
+        }
+        Ok(())
+    }
+}
+
 struct Host {
     browser: Option<BrowserManager>,
     chrome: Option<clovy_private_launch::Chrome>,
@@ -277,26 +495,15 @@ impl Host {
         let b = self.browser()?;
         let client = b.client.clone();
         let sid = b.active_session_id()?.to_owned();
-        let frozen = client
-            .send_command(
-                "Page.setWebLifecycleState",
-                Some(json!({"state":"frozen"})),
-                Some(&sid),
-            )
-            .await;
-        let result = if frozen.is_ok() {
-            self.inspect_frozen(tab, reference, expected.as_ref(), remember)
+        let mut observation = ObservationBarrier::new(client.clone(), sid.clone());
+        let prepared = observation.start().await;
+        let result = if prepared.is_ok() {
+            self.inspect_observed(tab, reference, expected.as_ref(), remember)
                 .await
         } else {
             Err("redaction_failed".to_owned())
         };
-        let restored = client
-            .send_command(
-                "Page.setWebLifecycleState",
-                Some(json!({"state":"active"})),
-                Some(&sid),
-            )
-            .await;
+        let restored = observation.finish().await;
         if restored.is_err() {
             self.close().await;
             return Err("effect_unknown".into());
@@ -322,7 +529,7 @@ impl Host {
         }
         Ok(value["inspection"].clone())
     }
-    async fn inspect_frozen(
+    async fn inspect_observed(
         &mut self,
         tab: u32,
         reference: &str,
@@ -629,32 +836,21 @@ impl Host {
         let b = self.browser()?;
         let client = b.client.clone();
         let sid = b.active_session_id()?.to_owned();
-        let frozen = client
-            .send_command(
-                "Page.setWebLifecycleState",
-                Some(json!({"state":"frozen"})),
-                Some(&sid),
-            )
-            .await;
-        let result = if frozen.is_ok() {
-            self.snapshot_frozen(tab_id).await
+        let mut observation = ObservationBarrier::new(client.clone(), sid.clone());
+        let prepared = observation.start().await;
+        let result = if prepared.is_ok() {
+            self.snapshot_observed(tab_id).await
         } else {
             Err("redaction_failed".to_owned())
         };
-        let restored = client
-            .send_command(
-                "Page.setWebLifecycleState",
-                Some(json!({"state":"active"})),
-                Some(&sid),
-            )
-            .await;
+        let restored = observation.finish().await;
         if restored.is_err() {
             self.close().await;
             return Err("effect_unknown".into());
         }
         result
     }
-    async fn snapshot_frozen(&mut self, tab_id: u32) -> Result<Value, String> {
+    async fn snapshot_observed(&mut self, tab_id: u32) -> Result<Value, String> {
         let (doc, document_id) = self.document().await?;
         let b = self.browser()?;
         let sid = b.active_session_id()?.to_owned();
@@ -676,7 +872,7 @@ impl Host {
             &HashMap::new(),
         )
         .await?;
-        let url = b.get_url().await?;
+        let url = observed_url(&b.client, &sid).await?;
         if self.document().await? != (doc, document_id.clone()) {
             return Err("stale_reference".into());
         }
@@ -714,19 +910,17 @@ impl Host {
         let b = self.browser()?;
         let client = b.client.clone();
         let sid = b.active_session_id()?.to_owned();
-        let frozen = client
-            .send_command(
-                "Page.setWebLifecycleState",
-                Some(json!({"state":"frozen"})),
-                Some(&sid),
-            )
-            .await;
+        let mut observation = ObservationBarrier::new(client.clone(), sid.clone());
+        let prepared = observation.start().await;
+        let mut original_playback_rate = None;
         let capture=async {
-            if frozen.is_err(){return Err("redaction_failed".into());}
-            if &document_identity(&client,&sid).await?!=expected_document||b.get_url().await?!=expected_url{return Err("stale_reference".into());}
+            if prepared.is_err(){return Err("redaction_failed".into());}
+            if &document_identity(&client,&sid).await?!=expected_document||observed_url(&client,&sid).await?!=expected_url{return Err("stale_reference".into());}
+            if !observation.visible().await? {return Err("screenshot_hidden".into());}
             client.send_command_no_params("Animation.enable",Some(&sid)).await?;
+            let rate=client.send_command_no_params("Animation.getPlaybackRate",Some(&sid)).await?;
+            original_playback_rate=Some(rate["playbackRate"].as_f64().filter(|v|v.is_finite()).ok_or("redaction_failed")?);
             client.send_command("Animation.setPlaybackRate",Some(json!({"playbackRate":0})),Some(&sid)).await?;
-            client.send_command("Emulation.setVirtualTimePolicy",Some(json!({"policy":"pause"})),Some(&sid)).await?;
             let boxes=redaction_boxes(&b.client,&sid).await?;
             let metrics=b.client.send_command_no_params("Page.getLayoutMetrics",Some(&sid)).await?;
             let viewport=&metrics["cssVisualViewport"];
@@ -743,34 +937,49 @@ impl Host {
             if let Some(boxes)=boxes.as_array(){for rect in boxes {let x=((rect[0].as_f64().unwrap_or(0.0)-32.0)*sx).floor().max(0.0) as u32;let y=((rect[1].as_f64().unwrap_or(0.0)-32.0)*sy).floor().max(0.0) as u32;let right=((rect[0].as_f64().unwrap_or(0.0)+rect[2].as_f64().unwrap_or(0.0)+32.0)*sx).ceil().max(0.0) as u32;let bottom=((rect[1].as_f64().unwrap_or(0.0)+rect[3].as_f64().unwrap_or(0.0)+32.0)*sy).ceil().max(0.0) as u32;for yy in y..bottom.min(img.height()){for xx in x..right.min(img.width()){img.put_pixel(xx,yy,image::Rgba([24,24,24,255]));}}}}
             let mut output=std::io::Cursor::new(Vec::new());img.write_to(&mut output,image::ImageFormat::Png).map_err(|_|"screenshot_encoding")?;Ok::<_,String>(json!({"base64":base64::engine::general_purpose::STANDARD.encode(output.into_inner())}))
         }.await;
-        // Always restore every potentially changed scheduler, including setup errors.
-        let virtual_restored = client
-            .send_command(
-                "Emulation.setVirtualTimePolicy",
-                Some(json!({"policy":"advance"})),
-                Some(&sid),
-            )
-            .await;
-        let animation_restored = client
-            .send_command(
-                "Animation.setPlaybackRate",
-                Some(json!({"playbackRate":1})),
-                Some(&sid),
-            )
-            .await;
-        let active_restored = client
-            .send_command(
-                "Page.setWebLifecycleState",
-                Some(json!({"state":"active"})),
-                Some(&sid),
-            )
-            .await;
-        if virtual_restored.is_err() || animation_restored.is_err() || active_restored.is_err() {
+        // The owned debugger pause holds page tasks. Virtual time is never
+        // enabled: advancing it would not restore the native wall clock.
+        // Restore the observed animation rate even after a lost setup reply.
+        let animation_restored = if let Some(rate) = original_playback_rate {
+            client
+                .send_command(
+                    "Animation.setPlaybackRate",
+                    Some(json!({"playbackRate":rate})),
+                    Some(&sid),
+                )
+                .await
+                .map(|_| ())
+        } else {
+            Ok(())
+        };
+        let active_restored = observation.finish().await;
+        if animation_restored.is_err() || active_restored.is_err() {
             self.close().await;
             return Err("effect_unknown".into());
         }
         capture
     }
+}
+async fn observed_url(client: &CdpClient, sid: &str) -> Result<String, String> {
+    // A promise-awaiting Runtime.evaluate cannot finish while our debugger
+    // pause holds page tasks. The native frame URL needs no page evaluation.
+    let tree = client
+        .send_command_no_params("Page.getFrameTree", Some(sid))
+        .await?;
+    let frame = &tree["frameTree"]["frame"];
+    let mut url = frame["url"]
+        .as_str()
+        .filter(|url| !url.is_empty())
+        .ok_or("document_unavailable")?
+        .to_owned();
+    if let Some(fragment) = frame.get("urlFragment") {
+        let fragment = fragment
+            .as_str()
+            .filter(|fragment| fragment.starts_with('#'))
+            .ok_or("document_unavailable")?;
+        url.push_str(fragment);
+    }
+    Ok(url)
 }
 async fn document_identity(client: &CdpClient, sid: &str) -> Result<(i64, String), String> {
     let document = client
@@ -822,7 +1031,6 @@ async fn privacy_inventory(
     sid: &str,
     geometry: bool,
 ) -> Result<PrivacyInventory, String> {
-    use std::collections::{HashMap, HashSet};
     let snapshot = client
         .send_command(
             "DOMSnapshot.captureSnapshot",
@@ -833,20 +1041,43 @@ async fn privacy_inventory(
             Some(sid),
         )
         .await?;
-    let strings = snapshot["strings"].as_array().ok_or("redaction_failed")?;
-    let string = |v: &Value| -> Result<&str, String> {
-        let index = v.as_u64().ok_or("redaction_failed")? as usize;
-        strings
-            .get(index)
-            .and_then(Value::as_str)
-            .ok_or_else(|| "redaction_failed".into())
-    };
     let tree = client
         .send_command_no_params("Page.getFrameTree", Some(sid))
         .await?;
     let main_frame = tree["frameTree"]["frame"]["id"]
         .as_str()
         .ok_or("redaction_failed")?;
+    parse_privacy_snapshot(&snapshot, main_frame, geometry)
+}
+
+fn native_snapshot_string<'a>(
+    strings: &'a [Value],
+    index: &Value,
+    allow_empty: bool,
+) -> Result<&'a str, String> {
+    let index = index.as_i64().ok_or("redaction_failed")?;
+    if index == -1 && allow_empty {
+        return Ok("");
+    }
+    if index < 0 {
+        return Err("redaction_failed".into());
+    }
+    let index = usize::try_from(index).map_err(|_| "redaction_failed")?;
+    strings
+        .get(index)
+        .and_then(Value::as_str)
+        .filter(|value| allow_empty || !value.is_empty())
+        .ok_or_else(|| "redaction_failed".into())
+}
+fn parse_privacy_snapshot(
+    snapshot: &Value,
+    main_frame: &str,
+    geometry: bool,
+) -> Result<PrivacyInventory, String> {
+    use std::collections::{HashMap, HashSet};
+    let strings = snapshot["strings"].as_array().ok_or("redaction_failed")?;
+    let string = |value: &Value| native_snapshot_string(strings, value, false);
+    let text = |value: &Value| native_snapshot_string(strings, value, true);
     let documents = snapshot["documents"].as_array().ok_or("redaction_failed")?;
     let mut private = HashSet::new();
     let mut values = Vec::new();
@@ -940,7 +1171,7 @@ async fn privacy_inventory(
                         .ok()
                         .is_some_and(|name| name.eq_ignore_ascii_case("type"))
                     {
-                        string(&pair[1]).ok()
+                        text(&pair[1]).ok()
                     } else {
                         None
                     }
@@ -955,7 +1186,7 @@ async fn privacy_inventory(
                     ));
             for pair in attributes.chunks_exact(2) {
                 if string(&pair[0])?.eq_ignore_ascii_case("contenteditable")
-                    && !string(&pair[1])?.eq_ignore_ascii_case("false")
+                    && !text(&pair[1])?.eq_ignore_ascii_case("false")
                 {
                     editable[i] = true;
                 }
@@ -1030,7 +1261,7 @@ async fn privacy_inventory(
                     .filter(|i| (*i as usize) < n)
                     .ok_or("redaction_failed")? as usize;
                 if value_field[i] {
-                    add_value(string(content)?)?;
+                    add_value(text(content)?)?;
                 }
             }
         }
@@ -1042,7 +1273,7 @@ async fn privacy_inventory(
                     .filter(|i| *i >= -1)
                     .ok_or("redaction_failed")?;
                 if index >= 0 {
-                    add_value(string(&layout_text[li])?)?;
+                    add_value(text(&layout_text[li])?)?;
                 }
             }
         }
@@ -1057,7 +1288,7 @@ async fn privacy_inventory(
                 let attributes = attrs[index].as_array().ok_or("redaction_failed")?;
                 for pair in attributes.chunks_exact(2) {
                     if string(&pair[0])?.eq_ignore_ascii_case("value") {
-                        add_value(string(&pair[1])?)?;
+                        add_value(text(&pair[1])?)?;
                     }
                 }
             }
@@ -1073,7 +1304,7 @@ async fn privacy_inventory(
             }
             if matches!(node_types[i].as_u64(), Some(3 | 4)) {
                 if let Some(root) = selected_owner[i] {
-                    let text = string(&node_values[i])?;
+                    let text = text(&node_values[i])?;
                     let joined = selected_text.entry(root).or_default();
                     if joined.len().saturating_add(text.len()) > 1024 * 1024 {
                         return Err("redaction_failed".into());
@@ -1089,7 +1320,7 @@ async fn privacy_inventory(
         for i in 0..n {
             if matches!(node_types[i].as_u64(), Some(3 | 4)) {
                 if let Some(root) = owner[i] {
-                    let text = string(&node_values[i])?;
+                    let text = text(&node_values[i])?;
                     add_value(text)?;
                     let joined = editable_text.entry(root).or_default();
                     if joined.len().saturating_add(text.len()) > 1024 * 1024 {
@@ -1218,6 +1449,7 @@ fn host_error_code(code: &str) -> &'static str {
         "guard_execution_failed",
         "redaction_failed",
         "screenshot_unavailable",
+        "screenshot_hidden",
         "screenshot_invalid",
         "screenshot_encoding",
         "effect_unknown",
@@ -1329,7 +1561,7 @@ async fn run() -> Result<(), String> {
         let result = tokio::select! {result=host.execute(request.op,&mut attempted)=>result,_=term.recv()=>{host.close().await;return Ok(());}};
         #[cfg(not(unix))]
         let result = host.execute(request.op, &mut attempted).await;
-        // A failed lifecycle restoration poisons this browser task even on a read.
+        // A failed observation restoration poisons this browser task even on a read.
         // The supervisor must reap the slot and invalidate every advertised handle.
         if result
             .as_ref()
@@ -1356,5 +1588,72 @@ async fn run() -> Result<(), String> {
         if shutdown {
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod private_inventory_tests {
+    use super::*;
+
+    fn empty_fields() -> Value {
+        // Native156 AddString("") emits -1. There is intentionally NO empty
+        // string in this table: the producer's signed sentinel is exercised.
+        json!({"strings":["frame","#document","INPUT","TEXTAREA","read-only","none","0px"],"documents":[{
+            "frameId":0,"scrollOffsetX":0,"scrollOffsetY":0,
+            "nodes":{"parentIndex":[-1,0,0],"nodeType":[9,1,1],"nodeName":[1,2,3],"nodeValue":[-1,-1,-1],"backendNodeId":[1,2,3],"attributes":[[],[],[]],"inputValue":{"index":[1],"value":[-1]},"textValue":{"index":[2],"value":[-1]}},
+            "layout":{"nodeIndex":[0,1,2],"bounds":[[0,0,800,600],[10,10,100,20],[10,40,100,40]],"styles":[[],[4,5,5,5,5,5,5,5,5,6,5],[4,5,5,5,5,5,5,5,5,6,5]],"text":[-1,-1,-1]},
+            "textBoxes":{"layoutIndex":[],"bounds":[]}
+        }]})
+    }
+
+    #[test]
+    fn actual_parser_accepts_native_empty_input_and_textarea_sentinels() {
+        let raw = empty_fields();
+        let inventory = parse_privacy_snapshot(&raw, "frame", true).unwrap();
+        assert!(inventory.values.is_empty());
+        assert_eq!(inventory.boxes.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn actual_parser_rejects_malformed_signed_string_indices() {
+        for property in ["inputValue", "textValue"] {
+            for invalid in [
+                json!(-2),
+                json!(1000),
+                json!("0"),
+                json!(true),
+                Value::Null,
+                json!(0.5),
+            ] {
+                let mut raw = empty_fields();
+                raw["documents"][0]["nodes"][property]["value"][0] = invalid;
+                assert!(parse_privacy_snapshot(&raw, "frame", false).is_err());
+            }
+        }
+        for field in ["frameId", "nodeName", "style"] {
+            let mut raw = empty_fields();
+            match field {
+                "frameId" => raw["documents"][0]["frameId"] = json!(-1),
+                "nodeName" => raw["documents"][0]["nodes"]["nodeName"][1] = json!(-1),
+                _ => raw["documents"][0]["layout"]["styles"][1][0] = json!(-1),
+            }
+            assert!(parse_privacy_snapshot(&raw, "frame", false).is_err());
+        }
+    }
+
+    #[test]
+    fn empty_attribute_content_and_text_do_not_weaken_required_name_validation() {
+        let mut raw = empty_fields();
+        raw["strings"]
+            .as_array_mut()
+            .unwrap()
+            .extend([json!("contenteditable"), json!("#text")]);
+        raw["documents"][0]["nodes"]["attributes"][1] = json!([7, -1]);
+        raw["documents"][0]["nodes"]["parentIndex"][2] = json!(1);
+        raw["documents"][0]["nodes"]["nodeType"][2] = json!(3);
+        raw["documents"][0]["nodes"]["nodeName"][2] = json!(8);
+        assert!(parse_privacy_snapshot(&raw, "frame", false).is_ok());
+        raw["documents"][0]["nodes"]["attributes"][1][0] = json!(-1);
+        assert!(parse_privacy_snapshot(&raw, "frame", false).is_err());
     }
 }

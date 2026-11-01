@@ -10,6 +10,37 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 const LIMIT: usize = 16 * 1024 * 1024;
+fn valid_observation_breakpoint(id: &str, marker: &str) -> bool {
+    let Some(nonce) = marker.strip_prefix("clovy-private-observation:") else {
+        return false;
+    };
+    if nonce.len() != 32
+        || !nonce
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return false;
+    }
+    id == format!("br:1:0:0:{marker}")
+}
+fn observation_event(method: &str, params: &Value, owned: &HashSet<String>) -> Value {
+    if method == "Debugger.resumed" {
+        return Value::Null;
+    }
+    let Some(hits) = params["hitBreakpoints"].as_array() else {
+        return json!({"ownHits":[],"foreignPaused":true});
+    };
+    let mut own_hits = Vec::new();
+    let mut foreign = hits.is_empty() || hits.len() > 16;
+    for hit in hits.iter().take(16) {
+        match hit.as_str() {
+            Some(id) if owned.contains(id) => own_hits.push(id),
+            _ => foreign = true,
+        }
+    }
+    json!({"ownHits":own_hits,"foreignPaused":foreign})
+}
+
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpMessage>>>>;
 type Taps = Arc<StdMutex<Vec<(&'static [&'static str], mpsc::UnboundedSender<CdpEvent>)>>>;
 #[derive(Debug, Clone)]
@@ -19,6 +50,7 @@ pub struct RawCdpMessage {
 }
 pub struct CdpClient {
     writer: Arc<StdMutex<Option<File>>>,
+    observation_breakpoints: Arc<StdMutex<HashSet<String>>>,
     redacted_nodes: StdMutex<HashSet<i64>>,
     redacted_values: StdMutex<Vec<String>>,
     pending: Pending,
@@ -29,11 +61,27 @@ pub struct CdpClient {
     sessions: Arc<StdMutex<HashMap<String, mpsc::Sender<CdpEvent>>>>,
 }
 impl CdpClient {
+    pub fn register_observation_breakpoint(&self, id: &str, marker: &str) -> Result<(), String> {
+        if !valid_observation_breakpoint(id, marker) {
+            return Err("redaction_failed".into());
+        }
+        let mut owned = self.observation_breakpoints.lock().unwrap();
+        if owned.len() >= 4 {
+            return Err("redaction_failed".into());
+        }
+        owned.insert(id.to_owned());
+        Ok(())
+    }
+    pub fn unregister_observation_breakpoint(&self, id: &str) {
+        self.observation_breakpoints.lock().unwrap().remove(id);
+    }
     pub fn set_redacted_nodes(&self, nodes: HashSet<i64>, values: Vec<String>) {
         *self.redacted_values.lock().unwrap() = values;
         *self.redacted_nodes.lock().unwrap() = nodes;
     }
     pub fn from_pipe(read: File, write: File) -> Self {
+        let observation_breakpoints = Arc::new(StdMutex::new(HashSet::new()));
+        let reader_breakpoints = observation_breakpoints.clone();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let (events, _) = broadcast::channel(128);
         let closed = Arc::new(AtomicBool::new(false));
@@ -72,13 +120,25 @@ impl CdpClient {
                     // No console, response-body, credential, plugin or streaming event buffer.
                     if !matches!(
                         method.as_str(),
-                        "Page.domContentEventFired" | "Page.loadEventFired" | "Page.lifecycleEvent"
+                        "Page.domContentEventFired"
+                            | "Page.loadEventFired"
+                            | "Page.lifecycleEvent"
+                            | "Debugger.paused"
+                            | "Debugger.resumed"
                     ) {
                         continue;
                     }
                     let ev = CdpEvent {
-                        method,
-                        params: msg.params.unwrap_or(Value::Null),
+                        method: method.clone(),
+                        params: if method.starts_with("Debugger.") {
+                            observation_event(
+                                &method,
+                                &msg.params.unwrap_or(Value::Null),
+                                &reader_breakpoints.lock().unwrap(),
+                            )
+                        } else {
+                            msg.params.unwrap_or(Value::Null)
+                        },
                         session_id: msg.session_id,
                     };
                     if let Some(tx) = ev
@@ -99,6 +159,7 @@ impl CdpClient {
         });
         Self {
             writer: Arc::new(StdMutex::new(Some(write))),
+            observation_breakpoints,
             redacted_nodes: StdMutex::new(HashSet::new()),
             redacted_values: StdMutex::new(Vec::new()),
             pending,
@@ -201,6 +262,11 @@ impl CdpClient {
     }
     pub fn subscribe(&self) -> broadcast::Receiver<CdpEvent> {
         self.events.subscribe()
+    }
+    /// Count the actual in-flight command map for upstream cancellation tests.
+    #[cfg(test)]
+    pub(crate) async fn pending_len(&self) -> usize {
+        self.pending.lock().await.len()
     }
     pub fn subscribe_methods(
         &self,
@@ -352,6 +418,33 @@ fn redact_response(
 #[cfg(test)]
 mod private_redaction_tests {
     use super::*;
+    #[test]
+    fn debugger_notifications_never_retain_foreign_urls_or_stack_values() {
+        let marker = "clovy-private-observation:aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa";
+        let own = format!("br:1:0:0:{marker}");
+        assert!(valid_observation_breakpoint(&own, marker));
+        let foreign = "br:1:0:0:https://private.invalid/?otp=123456";
+        assert!(!valid_observation_breakpoint(foreign, marker));
+        let raw = json!({"hitBreakpoints":[own,foreign],"callFrames":[{"url":"secret-url","scopeChain":[{"value":"secret-local"}]}]});
+        let safe = observation_event("Debugger.paused", &raw, &HashSet::from([own.clone()]));
+        assert_eq!(safe["ownHits"], json!([own]));
+        assert_eq!(safe["foreignPaused"], true);
+        let encoded = safe.to_string();
+        assert!(
+            !encoded.contains("private.invalid")
+                && !encoded.contains("123456")
+                && !encoded.contains("secret-url")
+                && !encoded.contains("secret-local")
+        );
+        assert_eq!(
+            observation_event(
+                "Debugger.paused",
+                &json!({"hitBreakpoints":[]}),
+                &HashSet::new()
+            )["foreignPaused"],
+            true
+        );
+    }
 
     #[test]
     fn ax_current_and_new_field_values_redact_names_without_stale_inventory() {

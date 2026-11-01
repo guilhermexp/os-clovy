@@ -100,17 +100,34 @@ origin, document, backend node and element facts immediately before input.
 A replaced same-name element is stale, never recovered by role or name.
 These operations are not additional model-facing tools.
 
-Field inventory and AX observations share a frozen page lifecycle boundary;
+Field inventory and AX observations share an owned debugger pause boundary;
 the native inventory includes closed shadow roots and inherited editable
 content. Image masks cover native editable-subtree layout/text geometry,
 including overflow and pseudo-elements, and reject unsupported paint geometry.
-The page is restored before dispatching an event. Failed restoration terminates
-the task rather than leaving a frozen page advertised as usable.
+The host verifies its own breakpoint hit in the exact session and releases only
+its own debugger agent before dispatching an event. Observation preserves actual
+visibility and focus, including a background tab. A pre-existing or unexpected
+pause, lost ownership or failed restoration terminates the task with unknown
+delivery rather than leaving an uncertain page advertised as usable.
+The pinned stock browser's screenshot API waits for frame presentation. A hidden
+headed tab cannot reliably present a fresh frame while page tasks are paused,
+so its image is refused before capture with a definite visibility requirement.
+Snapshots and inspection remain available, and observation never activates the
+tab. Default headless background sessions and visible headed tabs retain native
+PNG capture. This limitation is not proof of a hidden-tab image.
 Inspection exposes value-redacted metadata and an opaque random `metadataId`
 revision. Exact original facts remain private in the reference cache, so two
 different raw labels that both display as redacted cannot share approval.
 The revision changes when those facts change; no raw field content or
 guessable digest of it is published.
+
+The private host classifies original field facts before redaction and returns
+only the closed `interactionClass` value. `human_only` routes directly to human
+takeover before the central approval broker; `approval_required` uses the existing
+attended approval path. Missing or invalid classification fails closed. The
+broker never infers sensitivity again from redacted attributes, and a model
+cannot supply this private result as a tool argument. The class is bound into
+the exact metadata revision and rechecked by the same host guard before input.
 
 The native broker owns grants, session leases, reference expiry, network
 policy, artifact roots, input approvals and lifecycle. The

@@ -37,7 +37,8 @@ pub struct PolicyConfig {
 }
 
 /// The broker-visible facts about an interactive element. Page script only
-/// reports these facts; the Rust policy below is the sole classifier.
+/// reports these redacted facts; only the private host classifies the original
+/// field facts. Network policy remains enforced here in Rust.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractiveElement {
@@ -52,85 +53,31 @@ pub struct InteractiveElement {
     pub content_editable: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManagedAction<'a> {
-    Click,
-    Fill,
-    Press(&'a str),
+/// A closed classification from the private host's original, unredacted facts.
+/// This is never accepted as a model tool argument. The host guard is the only
+/// field classifier; the broker routes this trusted result before approval.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionClass {
+    HumanOnly,
+    ApprovalRequired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActionClass {
-    Consequential,
-    SensitiveField,
+pub enum InteractionRoute {
+    HumanOnly,
+    UnattendedDenied,
+    CentralApproval,
 }
 
-/// Page-authored metadata cannot establish that input has no outward effect:
-/// click, input and key handlers can all mutate arbitrary application state.
-/// Every agent interaction therefore asks the central approval broker unless
-/// the field is human-only, which approval cannot override. Read/navigation
-/// tools do not enter this input classifier and retain their existing grants.
-pub fn classify_managed_action(
-    _action: ManagedAction<'_>,
-    element: &InteractiveElement,
-) -> ActionClass {
-    if is_sensitive_field(element) {
-        return ActionClass::SensitiveField;
+/// Route the trusted host class before attendance or central approval. No DOM
+/// metadata is accepted here: redaction cannot change this routing decision.
+pub fn interaction_route(class: InteractionClass, attended: bool) -> InteractionRoute {
+    match (class, attended) {
+        (InteractionClass::HumanOnly, _) => InteractionRoute::HumanOnly,
+        (InteractionClass::ApprovalRequired, false) => InteractionRoute::UnattendedDenied,
+        (InteractionClass::ApprovalRequired, true) => InteractionRoute::CentralApproval,
     }
-    ActionClass::Consequential
-}
-
-pub fn is_sensitive_field(element: &InteractiveElement) -> bool {
-    if element.input_type.eq_ignore_ascii_case("password") {
-        return true;
-    }
-    let autocomplete = element.autocomplete.to_ascii_lowercase();
-    if autocomplete.split_whitespace().any(|token| {
-        token.contains("password") || token == "one-time-code" || token.starts_with("cc-")
-    }) {
-        return true;
-    }
-    contains_term(
-        element,
-        &[
-            "password",
-            "passcode",
-            "one time code",
-            "one-time code",
-            "otp",
-            "verification code",
-            "authentication code",
-            "auth code",
-            "2fa code",
-            "2 fa code",
-            "mfa code",
-            "two factor code",
-            "security code",
-            "card number",
-            "credit card",
-            "expiration",
-            "expiry",
-            "exp date",
-            "exp month",
-            "exp year",
-            "mm/yy",
-            "mm / yy",
-            "valid thru",
-            "valid through",
-            "cvv",
-            "cvc",
-        ],
-    )
-}
-
-fn contains_term(element: &InteractiveElement, terms: &[&str]) -> bool {
-    let haystack = format!(
-        "{} {} {} {}",
-        element.name, element.id, element.label, element.role
-    )
-    .to_ascii_lowercase()
-    .replace(['_', '-'], " ");
-    terms.iter().any(|term| haystack.contains(term))
 }
 
 /// The class of a blocked address, used to name a refusal without leaking the
@@ -973,172 +920,39 @@ mod tests {
     }
 
     #[test]
-    fn page_metadata_cannot_exempt_input_from_central_approval() {
-        let submit = InteractiveElement {
-            tag: "button".into(),
-            in_form: true,
-            label: "Continue".into(),
-            ..InteractiveElement::default()
-        };
-        assert_eq!(
-            classify_managed_action(ManagedAction::Click, &submit),
-            ActionClass::Consequential
-        );
-
-        let delete = InteractiveElement {
-            tag: "div".into(),
-            role: "button".into(),
-            label: "Delete draft".into(),
-            ..InteractiveElement::default()
-        };
-        assert_eq!(
-            classify_managed_action(ManagedAction::Click, &delete),
-            ActionClass::Consequential
-        );
-
-        let link = InteractiveElement {
-            tag: "a".into(),
-            label: "Read details".into(),
-            ..InteractiveElement::default()
-        };
-        assert_eq!(
-            classify_managed_action(ManagedAction::Click, &link),
-            ActionClass::Consequential
-        );
-        assert_eq!(
-            classify_managed_action(ManagedAction::Press("Escape"), &submit),
-            ActionClass::Consequential
-        );
-        let form_input = InteractiveElement {
-            tag: "input".into(),
-            in_form: true,
-            label: "Email address".into(),
-            ..InteractiveElement::default()
-        };
-        assert_eq!(
-            classify_managed_action(ManagedAction::Press("Enter"), &form_input),
-            ActionClass::Consequential
-        );
-    }
-
-    #[test]
-    fn neutral_and_localized_labels_need_approval_just_like_outward_labels() {
-        for label in [
-            "Continue",
-            "Continuar",
-            "下一步",
-            "",
-            "Submit application",
-            "Send message",
-            "Publish post",
-            "Purchase now",
-            "Pay",
-            "Pay now",
-            "Complete order",
-            "Delete account",
-            "Save",
-        ] {
-            let element = InteractiveElement {
-                tag: "button".into(),
-                input_type: "button".into(),
-                label: label.into(),
-                ..InteractiveElement::default()
-            };
+    fn human_only_host_class_precedes_attendance_and_central_approval() {
+        let class: InteractionClass = serde_json::from_str("\"human_only\"").unwrap();
+        for attended in [false, true] {
             assert_eq!(
-                classify_managed_action(ManagedAction::Click, &element),
-                ActionClass::Consequential,
-                "{label} must be consequential"
+                interaction_route(class, attended),
+                InteractionRoute::HumanOnly
             );
         }
     }
 
     #[test]
-    fn sensitive_fields_are_human_only_for_every_input_operation() {
-        for sensitive in [
-            InteractiveElement {
-                tag: "input".into(),
-                input_type: "password".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                input_type: "text".into(),
-                autocomplete: "section-login current-password webauthn".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                input_type: "text".into(),
-                autocomplete: "section-signup new-password".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                autocomplete: "one-time-code".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                label: "Verification code".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                label: "2FA code".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                label: "Authentication code".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                autocomplete: "cc-number".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                label: "Expiration date (MM/YY)".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                name: "card_expiry".into(),
-                ..InteractiveElement::default()
-            },
-            InteractiveElement {
-                tag: "input".into(),
-                label: "Valid thru".into(),
-                ..InteractiveElement::default()
-            },
+    fn ordinary_host_class_requires_attended_central_approval() {
+        let class: InteractionClass = serde_json::from_str("\"approval_required\"").unwrap();
+        assert_eq!(
+            interaction_route(class, false),
+            InteractionRoute::UnattendedDenied
+        );
+        assert_eq!(
+            interaction_route(class, true),
+            InteractionRoute::CentralApproval
+        );
+    }
+
+    #[test]
+    fn private_host_class_has_no_unknown_or_boolean_default() {
+        for invalid in [
+            serde_json::json!("unknown"),
+            serde_json::json!("HumanOnly"),
+            serde_json::json!(true),
+            serde_json::Value::Null,
         ] {
-            assert_eq!(
-                classify_managed_action(ManagedAction::Click, &sensitive),
-                ActionClass::SensitiveField
-            );
-            assert_eq!(
-                classify_managed_action(ManagedAction::Fill, &sensitive),
-                ActionClass::SensitiveField
-            );
-            assert_eq!(
-                classify_managed_action(ManagedAction::Press("a"), &sensitive),
-                ActionClass::SensitiveField
-            );
+            assert!(serde_json::from_value::<InteractionClass>(invalid).is_err());
         }
-        let ordinary = InteractiveElement {
-            tag: "input".into(),
-            label: "City".into(),
-            ..InteractiveElement::default()
-        };
-        assert_eq!(
-            classify_managed_action(ManagedAction::Fill, &ordinary),
-            ActionClass::Consequential
-        );
-        assert_eq!(
-            classify_managed_action(ManagedAction::Press("a"), &ordinary),
-            ActionClass::Consequential
-        );
     }
 
     #[test]

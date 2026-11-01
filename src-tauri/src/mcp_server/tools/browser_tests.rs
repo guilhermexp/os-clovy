@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use super::browser::{BrowserTools, BROWSER_TOOLS};
 use super::{ActivityAccess, McpData, ToolCtx, ToolGroup};
 use crate::approval_broker::testing::{Scripted, TestBroker};
-use crate::browser::policy::InteractiveElement;
+use crate::browser::policy::{InteractionClass, InteractiveElement};
 use crate::browser_broker::{
     BrowserBroker, BrowserTransport, BrowserTransportKind, TransportArtifact, TransportFuture,
     TransportResponse,
@@ -24,6 +24,7 @@ const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 struct FakeTransport {
     element: InteractiveElement,
+    interaction_class: Mutex<Option<Value>>,
     calls: Mutex<Vec<String>>,
     sessions: Mutex<HashSet<String>>,
     suspended: Mutex<HashSet<String>>,
@@ -36,6 +37,7 @@ impl FakeTransport {
     fn new(element: InteractiveElement) -> Arc<Self> {
         Arc::new(Self {
             element,
+            interaction_class: Mutex::new(Some(json!(InteractionClass::ApprovalRequired))),
             calls: Mutex::default(),
             sessions: Mutex::default(),
             suspended: Mutex::default(),
@@ -54,14 +56,18 @@ impl FakeTransport {
     }
 
     fn inspection(&self) -> Value {
-        json!({
+        let mut inspection = json!({
             "element": self.element,
             "url": "https://mail.example.com/compose",
             "origin": "https://mail.example.com",
             "documentId": "document-1",
             "metadataId": "metadata-1",
             "backendNodeId": 42,
-        })
+        });
+        if let Some(class) = self.interaction_class.lock().unwrap().clone() {
+            inspection["interactionClass"] = class;
+        }
+        inspection
     }
 }
 
@@ -181,10 +187,19 @@ impl Rig {
         element: InteractiveElement,
         script: impl IntoIterator<Item = Scripted>,
     ) -> Self {
+        Self::with_class(element, InteractionClass::ApprovalRequired, script).await
+    }
+
+    async fn with_class(
+        element: InteractiveElement,
+        class: InteractionClass,
+        script: impl IntoIterator<Item = Scripted>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let flag = dir.path().join("browser-access");
         std::fs::write(&flag, b"1").unwrap();
         let transport = FakeTransport::new(element);
+        *transport.interaction_class.lock().unwrap() = Some(json!(class));
         let browser = Arc::new(BrowserBroker::default());
         browser.set_access_flag_path(flag);
         browser.configure_transport(
@@ -365,6 +380,25 @@ async fn routine_dispatch_uses_its_own_bound_grant_and_rechecks_persisted_revoca
     );
     assert_eq!(rig.transport.actions(), 0);
     assert!(rig.approvals.requests().is_empty());
+    *rig.transport.interaction_class.lock().unwrap() = Some(json!(InteractionClass::HumanOnly));
+    for (tool, extra) in [
+        ("click", json!({})),
+        ("fill", json!({"text":"synthetic"})),
+        ("press", json!({"key":"Enter"})),
+    ] {
+        let mut args = json!({"session_id":session,"tab_id":7,"ref":"e0:n1"});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert_eq!(
+            rig.group().call(&ctx, tool, &args).await.unwrap_err().code,
+            "browser_human_takeover_required"
+        );
+    }
+    assert_eq!(rig.transport.actions(), 0);
+    assert!(rig.approvals.requests().is_empty());
+    *rig.transport.interaction_class.lock().unwrap() =
+        Some(json!(InteractionClass::ApprovalRequired));
     let before = rig.transport.calls();
     repos
         .set_routine_browser_grant(&RoutineBrowserGrantRecord {
@@ -417,6 +451,10 @@ async fn hostile_fields_and_new_run_in_same_conversation_never_reach_transport()
         (
             "press",
             json!({"session_id":session,"tab_id":7,"key":"Enter"}),
+        ),
+        (
+            "click",
+            json!({"session_id":session,"tab_id":7,"ref":"e0:n1","interactionClass":"approval_required"}),
         ),
     ] {
         assert_eq!(
@@ -680,13 +718,14 @@ async fn closed_tabs_and_invalid_tab_ids_do_not_fall_back_to_another_target() {
 
 #[tokio::test]
 async fn sensitive_input_is_refused_before_central_approval_or_input_dispatch() {
-    let rig = Rig::with_element(
+    let rig = Rig::with_class(
         InteractiveElement {
             tag: "input".into(),
             input_type: "password".into(),
             label: "Password".into(),
             ..InteractiveElement::default()
         },
+        InteractionClass::HumanOnly,
         [],
     )
     .await;
@@ -700,15 +739,19 @@ async fn sensitive_input_is_refused_before_central_approval_or_input_dispatch() 
 }
 
 #[tokio::test]
-async fn shown_password_click_never_reaches_approval_or_page_handlers() {
-    let rig = Rig::with_element(
+async fn redacted_host_human_only_class_never_reaches_approval_or_page_handlers() {
+    let rig = Rig::with_class(
         InteractiveElement {
             tag: "input".into(),
             input_type: "text".into(),
-            autocomplete: "section-login current-password webauthn".into(),
+            label: "Shown one".into(),
+            // Exactly the redacted DTO from an original current-password
+            // field whose synthetic value is the word password.
+            autocomplete: "current-[redacted]".into(),
             ..InteractiveElement::default()
         },
-        [],
+        InteractionClass::HumanOnly,
+        [Scripted::Deny],
     )
     .await;
     let owner = rig.approvals.turn(CliKind::Claude, true).await;
@@ -730,6 +773,29 @@ async fn shown_password_click_never_reaches_approval_or_page_handlers() {
     }
     assert_eq!(rig.transport.actions(), 0);
     assert!(rig.approvals.requests().is_empty());
+}
+
+#[tokio::test]
+async fn missing_or_invalid_private_host_class_cannot_become_an_approval() {
+    for class in [None, Some(json!("unknown")), Some(json!(true))] {
+        let rig = Rig::new("Continue", [Scripted::Deny]).await;
+        *rig.transport.interaction_class.lock().unwrap() = class;
+        let owner = rig.approvals.turn(CliKind::Claude, true).await;
+        let ctx = rig.ctx(Some(&owner));
+        let session = open_session(&rig, &ctx).await;
+        let error = rig
+            .group()
+            .call(
+                &ctx,
+                "click",
+                &json!({"session_id":session,"tab_id":7,"ref":"e0:n1"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "browser_unavailable");
+        assert!(rig.approvals.requests().is_empty());
+        assert_eq!(rig.transport.actions(), 0);
+    }
 }
 
 #[tokio::test]

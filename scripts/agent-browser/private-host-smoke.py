@@ -46,9 +46,10 @@ privacy_overflow="""<!doctype html><title>Overflow privacy fixture</title><style
 </style><div id=editor contenteditable=true><span id=child>synthetic-overflow-secret</span><span id=closed></span></div><p id=context>Public context remains readable</p><input aria-label='Normal control' value='normal-secret' style='position:fixed;left:100px;top:180px'>
 <script>document.getElementById('closed').attachShadow({mode:'closed'}).innerHTML='<span style="position:fixed;left:600px;top:420px;white-space:nowrap">synthetic-closed-secret</span>'</script>"""
 privacy_passwords="""<!doctype html><title>Password token fixture</title><output id=events>Events:0</output><script>function record(){const e=document.getElementById('events');e.textContent='Events:'+(+e.textContent.split(':')[1]+1)}</script>
-<input aria-label='Shown one' autocomplete='section-account current-password' onclick='record()' onfocus='record()' oninput='record()' onkeydown='record()'><input aria-label='Shown two' autocomplete='section-user new-password' onclick='record()' onfocus='record()' oninput='record()' onkeydown='record()'><input aria-label='Neutral three' id='billing_expiry' onclick='record()' onfocus='record()' oninput='record()' onkeydown='record()'><input aria-label='Neutral four' role='authentication-code' onclick='record()' onfocus='record()' oninput='record()' onkeydown='record()'><button onclick='record()'>Ordinary action</button>"""
+<input aria-label='Shown one' value='password' autocomplete='section-account current-password' onclick='record()' onfocus='record()' oninput='record()' onkeydown='record()'><input aria-label='Shown two' autocomplete='section-user new-password' onclick='record()' onfocus='record()' oninput='record()' onkeydown='record()'><input aria-label='Neutral three' id='billing_expiry' onclick='record()' onfocus='record()' oninput='record()' onkeydown='record()'><input aria-label='Neutral four' role='authentication-code' onclick='record()' onfocus='record()' oninput='record()' onkeydown='record()'><button onclick='record()'>Ordinary action</button>"""
 privacy_race="""<!doctype html><title>Race privacy fixture</title><h1>Race fixture</h1><input data-race id='RACE_SECRET_A' name='RACE_SECRET_A' aria-label='RACE_SECRET_A' value='RACE_SECRET_A' onkeydown="document.getElementById('edited').textContent='Edited:1'"><input type=hidden id=hidden value='HIDDEN_SECRET_A'><button id=copy aria-label='RACE_SECRET_A'></button><button id=hidden-copy aria-label='HIDDEN_SECRET_A'></button><span id=closed></span><input aria-label='Query stable' id=ordinary value='ordinary-private-value'><output id=edited>Edited:0</output><button onclick="const e=document.querySelector('[data-race]');e.value='RACE_SECRET_C';e.id=e.name='RACE_SECRET_C';e.setAttribute('aria-label','RACE_SECRET_C')">Mutate labels</button>
 <img src='http://fixture.invalid/privacy-latch' onload="const e=document.querySelector('[data-race]');e.value='RACE_SECRET_B';e.id=e.name='RACE_SECRET_B';e.setAttribute('aria-label','RACE_SECRET_B');document.getElementById('copy').setAttribute('aria-label','RACE_SECRET_B');document.getElementById('hidden').value='HIDDEN_SECRET_B';document.getElementById('hidden-copy').setAttribute('aria-label','HIDDEN_SECRET_B');const n=document.createElement('input');n.value=n.name=n.id='NEW_SECRET_B';n.setAttribute('aria-label','NEW_SECRET_B');document.body.append(n);document.getElementById('closed').attachShadow({mode:'closed'}).innerHTML='<input value=NEW_CLOSED_SECRET_B aria-label=NEW_CLOSED_SECRET_B>';fetch('http://fixture.invalid/privacy-race-done')">"""
+privacy_empty="""<!doctype html><title>Empty field fixture</title><h1>Empty input fixture</h1><form action='http://fixture.invalid/privacy-empty-done'><label>Empty input<input name=input id=empty-input oninput="document.getElementById('changed').textContent='Changed:'+(+document.getElementById('changed').textContent.split(':')[1]+1)"></label><label>Empty textarea<textarea name=textarea id=empty-textarea oninput="document.getElementById('changed').textContent='Changed:'+(+document.getElementById('changed').textContent.split(':')[1]+1)"></textarea></label><button>Submit empties</button></form><output id=changed>Changed:0</output><p>Public empty context useful</p>"""
 long_value='LONG_PRIVATE_'+('x'*1300)
 privacy_race=privacy_race.replace("<img src=", "<input aria-label='Long field' value='"+long_value+"'><button>"+long_value+"</button><input aria-label='Spaced field' value=' SPACE_PRIVATE  VALUE '><button aria-label=' SPACE_PRIVATE  VALUE '>Spaced copy</button><img src=",1)
 race_release=threading.Event();race_done=threading.Event()
@@ -67,6 +68,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
             self.send_response(200);self.send_header('Content-Type','image/gif');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
         elif parsed.path=='/privacy-overflow':text=privacy_overflow
         elif parsed.path=='/privacy-passwords':text=privacy_passwords
+        elif parsed.path=='/privacy-empty':text=privacy_empty
         elif parsed.path=='/privacy-race':text=privacy_race
         elif parsed.path=='/privacy-paint':text=privacy_overflow.replace('width:20px;height:20px','width:20px;height:20px;text-shadow:120px 0 black')
         else:text=None
@@ -83,6 +85,9 @@ profile=pathlib.Path(tempfile.mkdtemp(prefix='clovy-private-fixture-'))
 proc=None;xvfb=None;receipts=[];stderr_file=None
 try:
     env={'HOME':str(profile),'PATH':'/usr/bin:/bin'}
+    runtime=profile/'runtime';runtime.mkdir(mode=0o700)
+    env['XDG_RUNTIME_DIR']=str(runtime)
+    env['DBUS_SESSION_BUS_ADDRESS']='unix:abstract=clovy-owned-host-unavailable-'+str(os.getpid())
     if shutil.which('Xvfb'):
         display=f':{200+os.getpid()%2000}'
         xvfb=subprocess.Popen(['Xvfb',display,'-screen','0','1280x900x24','-nolisten','tcp'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -131,19 +136,38 @@ try:
         for name in ['Shown one','Shown two','Neutral three','Neutral four']:
             for operation,params in [('click',{}),('fill',{'text':'forbidden synthetic'}),('press',{'key':'Enter'})]:
                 text=call('snapshot',tab_id=active)['snapshot'];reference=named_reference(text,name);expected=call('inspect_reference',tab_id=active,ref=reference)
+                checks[name+'_original_host_class']=expected.get('interactionClass')=='human_only'
+                if name=='Shown one':checks['redacted_autocomplete_routes_human']=expected.get('interactionClass')=='human_only' and 'password' not in json.dumps(expected['element'])
                 denied=call('guarded_action',ok=False,tab_id=active,ref=reference,operation=operation,expected=expected,**params)
                 checks[name+'_'+operation]=denied.get('delivery')=='not_attempted' and denied.get('error',{}).get('code')=='sensitive_field'
         current=call('snapshot',tab_id=active)['snapshot'];checks['sensitive_events_zero']='Events:0' in current
         before_count=int(re.search(r'Events:(\d+)',current).group(1))
         reference=named_reference(current,'Ordinary action');expected=call('inspect_reference',tab_id=active,ref=reference)
         control=call('guarded_action',ok=False,tab_id=active,ref=reference,operation='click',expected=expected)
+        checks['ordinary_class_requires_approval']=expected.get('interactionClass')=='approval_required'
         checks['ordinary_click_delivered']=control.get('delivery')=='delivered' and ('Events:'+str(before_count+1)) in call('snapshot',tab_id=active)['snapshot']
+        call('navigate',tab_id=active,url='http://fixture.invalid/privacy-empty')
+        empty=call('snapshot',tab_id=active);checks['native_empty_fields_snapshot']='Public empty context useful' in empty['snapshot']
+        empty_png=call('screenshot',tab_id=active);checks['native_empty_fields_png']=base64.b64decode(empty_png['base64']).startswith(b'\x89PNG\r\n\x1a\n')
+        (evidence/'empty-fields.png').write_bytes(base64.b64decode(empty_png['base64']))
+        for name in ['Empty input','Empty textarea']:
+            current=call('snapshot',tab_id=active)['snapshot'];reference=named_reference(current,name);expected=call('inspect_reference',tab_id=active,ref=reference)
+            call('guarded_action',tab_id=active,ref=reference,operation='fill',text='Z',expected=expected)
+            current=call('snapshot',tab_id=active)['snapshot'];reference=named_reference(current,name);expected=call('inspect_reference',tab_id=active,ref=reference)
+            call('guarded_action',tab_id=active,ref=reference,operation='press',key='Backspace',expected=expected)
+            checks[name+'_deleted_reobserved']='Public empty context useful' in call('snapshot',tab_id=active)['snapshot']
+        current=call('snapshot',tab_id=active)['snapshot'];checks['empty_fill_delete_events']='Changed:4' in current
+        reference=named_reference(current,'Submit empties');expected=call('inspect_reference',tab_id=active,ref=reference)
+        call('guarded_action',tab_id=active,ref=reference,operation='click',expected=expected)
+        submitted=call('snapshot',tab_id=active)['url'];query=urllib.parse.parse_qs(urllib.parse.urlsplit(submitted).query,keep_blank_values=True)
+        checks['empty_form_reobserved']=query.get('input')==[''] and query.get('textarea')==['']
         call('navigate',tab_id=active,url='http://fixture.invalid/privacy-race');armed.touch()
         raced=call('snapshot',tab_id=active);(evidence/'race-snapshot.json').write_text(json.dumps(raced,indent=2))
         secrets_in_race=['RACE_SECRET_A','RACE_SECRET_B','HIDDEN_SECRET_A','HIDDEN_SECRET_B','NEW_SECRET_B','NEW_CLOSED_SECRET_B','LONG_PRIVATE_','SPACE_PRIVATE']
         checks['latched_snapshot_no_secret']=all(secret not in json.dumps(raced) for secret in secrets_in_race)
         checks['latched_mutation_completed']=race_done.wait(5)
         latch=evidence/'race-latch.json';checks['latched_before_ax']=latch.exists()
+        checks['owned_debugger_pause_observed']=latch.exists() and json.loads(latch.read_text()).get('ownedDebuggerPauseAtAxDispatch') is True
         after=call('snapshot',tab_id=active);(evidence/'race-after.json').write_text(json.dumps(after,indent=2));checks['fresh_snapshot_no_secret']=all(secret not in json.dumps(after) for secret in secrets_in_race)
         inspections=[];target=None
         for reference in re.findall(r'ref=([a-f0-9]{32})',after['snapshot']):
@@ -182,8 +206,10 @@ try:
         checks=privacy_checks(tab);call('shutdown');proc.wait(timeout=5)
         print(json.dumps({'passed':all(checks.values()),'privacy':checks,'receipts':len(receipts)}))
         raise SystemExit(0 if all(checks.values()) else 1)
-    assert call('navigate',tab_id=tab,url='http://fixture.invalid/')['url']=='http://fixture.invalid/'
-    snap=call('snapshot',tab_id=tab)['snapshot']
+    initial_url='http://fixture.invalid/#native-url-fragment'
+    assert call('navigate',tab_id=tab,url=initial_url)['url']==initial_url
+    first_snapshot=call('snapshot',tab_id=tab);assert first_snapshot['url']==initial_url
+    snap=first_snapshot['snapshot']
     assert all(secret not in snap for secret in ['synthetic-password-secret','synthetic-otp-secret','synthetic-card-secret','synthetic-editable-secret','synthetic-readonly-secret'])
     (evidence/'snapshot.txt').write_text(snap)
     def ref(name,snapshot=None):
@@ -211,7 +237,7 @@ try:
     snap=call('snapshot',tab_id=tab)['snapshot']
     query=ref('Query');act(query,'fill',text='synthetic query')
     snap2=call('snapshot',tab_id=tab)['snapshot'];assert 'synthetic query' not in snap2
-    shot=call('screenshot',tab_id=tab);assert shot['url']=='http://fixture.invalid/' and shot['tabId']==tab;png=base64.b64decode(shot['base64']);assert png.startswith(b'\x89PNG\r\n\x1a\n');assert masked_pixels(png)>1000;(evidence/'screenshot.png').write_bytes(png)
+    shot=call('screenshot',tab_id=tab);assert shot['url']==initial_url and shot['tabId']==tab;png=base64.b64decode(shot['base64']);assert png.startswith(b'\x89PNG\r\n\x1a\n');assert masked_pixels(png)>1000;(evidence/'screenshot.png').write_bytes(png)
     save=ref('Save',snap2);expected=call('inspect_reference',tab_id=tab,ref=save)
     act(ref('Replace',snap2),'click')
     stale=call('guarded_action',ok=False,tab_id=tab,ref=save,operation='click',expected=expected)
@@ -223,7 +249,7 @@ try:
     assert call('inspect_reference',ok=False,tab_id=tab,ref=ref('Query',snap3))['error']['code']=='stale_reference'
     snap3=call('snapshot',tab_id=tab)['snapshot'];act(ref('Query',snap3),'press',key='Enter')
     submitted=call('snapshot',tab_id=tab)['url'];assert 'submitted' in submitted and urllib.parse.parse_qs(urllib.parse.urlsplit(submitted).query)['query']==['synthetic query']
-    call('back',tab_id=tab);assert call('snapshot',tab_id=tab)['url']=='http://fixture.invalid/'
+    call('back',tab_id=tab);assert call('snapshot',tab_id=tab)['url']==initial_url
     tab2=call('tab_open',url='http://fixture.invalid/two')['tabId'];assert tab2!=tab
     assert len(call('tab_list')['tabs'])==2
     call('tab_switch',tab_id=tab);call('tab_close',tab_id=tab2)
@@ -308,6 +334,8 @@ try:
     assert len(descendants)>1
     call('shutdown');proc.wait(timeout=5);assert proc.returncode==0
     (evidence/'receipts.json').write_text(json.dumps(receipts,indent=2))
+    try:os.killpg(proc.pid,signal.SIGKILL)
+    except ProcessLookupError:pass
     print(json.dumps({'passed':True,'receipts':len(receipts),'takeover':bool(xvfb),'owned_processes':len(descendants)}))
 finally:
     if proc:

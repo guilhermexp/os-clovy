@@ -63,41 +63,7 @@ function _clovyGuard(
     inForm: !!(this.form || this.closest("form")),
     contentEditable: this.isContentEditable,
   };
-  const redact = (value) => {
-    let safe = value;
-    for (const secret of redactedValues || []) {
-      if (secret) safe = safe.split(secret).join("[redacted]");
-    }
-    return safe;
-  };
-  const element = {
-    ...rawElement,
-    name: redact(rawElement.name),
-    id: redact(rawElement.id),
-    label: redact(rawElement.label).slice(0, 1000),
-    role: redact(rawElement.role),
-    autocomplete: redact(rawElement.autocomplete),
-  };
-  const inspection = {
-    url: location.href,
-    origin: location.origin,
-    documentId,
-    metadataId,
-    backendNodeId,
-    element,
-  };
-  if (!expected) return { inspection, rawElement };
-  const equal = (a, b) =>
-    a === b ||
-    (a &&
-      b &&
-      typeof a === "object" &&
-      typeof b === "object" &&
-      Object.keys(a).length === Object.keys(b).length &&
-      Object.keys(a).every((k) => equal(a[k], b[k])));
-  if (!equal(inspection, expected) || !equal(rawElement, expectedRaw))
-    return { error: "stale_reference" };
-  // Keep the effective human-only criteria aligned with browser/policy.rs.
+  // Authoritative host-only interaction class; the broker consumes this closed enum.
   // Classify ORIGINAL facts, before value-derived metadata is redacted.
   const asciiLower = (value) => value.replace(/[A-Z]/g, (c) => c.toLowerCase());
   const sensitiveText = asciiLower(
@@ -131,7 +97,7 @@ function _clovyGuard(
     "cvv",
     "cvc",
   ];
-  if (
+  const humanOnly =
     inputType === "password" ||
     asciiLower(rawElement.autocomplete)
       .split(/\s+/)
@@ -139,9 +105,43 @@ function _clovyGuard(
         (token) =>
           token.includes("password") || token === "one-time-code" || token.startsWith("cc-"),
       ) ||
-    sensitiveTerms.some((term) => sensitiveText.includes(term))
-  )
-    return { error: "sensitive_field" };
+    sensitiveTerms.some((term) => sensitiveText.includes(term));
+  const redact = (value) => {
+    let safe = value;
+    for (const secret of redactedValues || []) {
+      if (secret) safe = safe.split(secret).join("[redacted]");
+    }
+    return safe;
+  };
+  const element = {
+    ...rawElement,
+    name: redact(rawElement.name),
+    id: redact(rawElement.id),
+    label: redact(rawElement.label).slice(0, 1000),
+    role: redact(rawElement.role),
+    autocomplete: redact(rawElement.autocomplete),
+  };
+  const inspection = {
+    url: location.href,
+    origin: location.origin,
+    documentId,
+    metadataId,
+    interactionClass: humanOnly ? "human_only" : "approval_required",
+    backendNodeId,
+    element,
+  };
+  if (!expected) return { inspection, rawElement };
+  const equal = (a, b) =>
+    a === b ||
+    (a &&
+      b &&
+      typeof a === "object" &&
+      typeof b === "object" &&
+      Object.keys(a).length === Object.keys(b).length &&
+      Object.keys(a).every((k) => equal(a[k], b[k])));
+  if (!equal(inspection, expected) || !equal(rawElement, expectedRaw))
+    return { error: "stale_reference" };
+  if (humanOnly) return { error: "sensitive_field" };
   const verify = () => {
     const check = _clovyGuard.call(
       this,

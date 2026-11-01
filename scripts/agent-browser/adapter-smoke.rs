@@ -566,6 +566,33 @@ async fn main() {
             .to_string()
             .contains("Synthetic login retained")
     );
+    // Creating another owned headed tab establishes a genuinely hidden target.
+    // The private host must refuse its image without poisoning task handles;
+    // ordinary redacted observation remains available through the real client.
+    let foreground_tab = call(&engine, "task-a", "open_tab", json!({"url":origin})).await["tabId"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(
+        engine
+            .execute("task-a", "screenshot", json!({"tab_id":human_tab}))
+            .await
+            .unwrap_err()
+            .code,
+        "browser_screenshot_requires_visible"
+    );
+    assert!(
+        call(&engine, "task-a", "snapshot", json!({"tab_id":human_tab}))
+            .await
+            .to_string()
+            .contains("Synthetic login retained")
+    );
+    call(
+        &engine,
+        "task-a",
+        "close_tab",
+        json!({"tab_id":foreground_tab}),
+    )
+    .await;
     engine.terminate("task-a");
     assert!(data.join("browser-profile").is_dir());
     engine.reserve("task-new-run").unwrap();

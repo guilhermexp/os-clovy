@@ -33,10 +33,16 @@ Actions:
   `tabId`. Screenshot returns PNG `base64`, `url` and `tabId`; non-HTTP pages
   are refused before capture (except the empty about:blank page), and document,
   URL, field geometry and viewport must remain unchanged before emission.
+  A document whose actual native visibility is hidden returns `screenshot_hidden`,
+  `not_attempted`, with no image. Stock Chrome requires a newly presented frame
+  and can stall on a mutable hidden page under the coherent observation barrier.
+  The host refuses before Animation/capture and releases its own pause normally;
+  it never activates the target or substitutes another window's image. Redacted
+  snapshot/inspection and exact guarded interactions remain available on hidden tabs.
 - `tab_open`: optional `url`; `tab_list`; `tab_switch`, `tab_close`: `tab_id`.
   Only explicitly created task tabs are listed or addressable. IDs remain
   monotonic through a human takeover restart. Closed targets fail `tab_gone`.
-- `inspect_reference`: `tab_id`, `ref`. Returns `url`, `origin`, `documentId`, `metadataId`,
+- `inspect_reference`: `tab_id`, `ref`. Returns `url`, `origin`, `documentId`, `metadataId`, `interactionClass`,
   `backendNodeId`, and `element` containing strings `tag`, `inputType`, `role`,
   `name`, `id`, `label`, `autocomplete`, and booleans `inForm`, `contentEditable`.
   `name` is the HTML name attribute; `label` is the accessible caption.
@@ -44,6 +50,10 @@ Actions:
   field inventory. `metadataId` is a random private-cache revision, reused only
   while the original metadata and inspection facts remain unchanged. It is not
   a digest of field content. Original metadata stays private to the host.
+  The required closed `interactionClass` is `human_only` or `approval_required`,
+  derived from the original facts before metadata redaction. The parent consumes
+  this trusted classification; the model cannot supply or override it. The final
+  guard uses the same original-fact classification and binds it to the revision.
 - `guarded_action`: `tab_id`, `ref`, `operation`, full `expected` inspection,
   optional `text` or `key`. Supported operations are `click`, `fill`, `press`.
   Press currently supports Enter, Space, Escape, Backspace and Delete; other keys
@@ -66,14 +76,23 @@ Actions:
 
 References are random opaque IDs minted per snapshot and bound in memory to a
 single tab, exact main-frame id, loader id, document root and backend node.
-Snapshot and inspection observations freeze the page lifecycle while the native
-field inventory and accessibility data are collected. AX values and editable
+Snapshot and inspection observations use an owned debugger breakpoint while the
+native field inventory and accessibility data are collected. Subscription precedes
+setup; an actual hit of the registered random breakpoint establishes ownership.
+No stack, locals, arbitrary breakpoint identifiers or source data are retained.
+AX values and editable
 descendants are also derived from each raw AX response before any formatting.
-Lifecycle scheduling is restored before the synchronous final guard and effect,
+The own breakpoint is removed and only the host's debugger agent is disabled;
+completion of the fixed no-op proves release. No debugger resume command is sent.
+A pre-existing or concurrent foreign pause is never resumed. Uncertain ownership
+or release closes the browser with a terminal unknown result. This preserves the
+original native page visibility and focus. Release completes before the synchronous final guard and effect,
 so ordinary network handlers retain their normal behavior. Private snapshots do
 not annotate the page or recurse into frames.
 
-Screenshots freeze lifecycle tasks and pause virtual time/animations. Native DOM
+Screenshots use the same owned task barrier and temporarily pause native animations,
+restoring the observed finite playback rate on every path. Virtual time is never
+enabled: its advance policy would retain a synthetic clock. Native DOM
 layout and text-fragment bounds cover controls, inherited editable descendants,
 closed shadow content, pseudo elements and iframes. Overflow outside an editable
 ancestor's own box is covered independently. Native geometry and the viewport
@@ -91,3 +110,11 @@ proxy which rejects every hostname except `fixture.invalid`.
 The source-only `cdp_fixture.py` relay is not shipped. Its real HTTP image latch
 exercises mutation between inventory and AX without adding a production hook or
 injecting any CDP command.
+The separately admitted visibility helper exercises the rebuilt host in both visible and hidden tabs,
+including real button effects, paint refusal and a native CDP error, and checks
+actual focus, RAF and native clock pacing. Visible capture produces a real masked PNG;
+hidden capture is explicitly unavailable and must refuse without poisoning handles.
+It does not emulate visibility or
+restore foreground focus after observations. Native DOM snapshot empty strings
+accept the protocol's signed `-1` only in permitted text/value fields; invalid
+indices and missing required node/frame/style facts fail closed.
