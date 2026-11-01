@@ -6,6 +6,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } fr
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { computerUseBundleIdentifier } from "./computer-use-dev.mjs";
+import { helperBuildInputsMatch, verifyEngineArtifact } from "./agent-desktop-artifact.mjs";
 import {
   AD_HOC_IDENTITY,
   DEV_SIGNING_IDENTITY_ENV,
@@ -13,28 +14,62 @@ import {
 } from "./dev-signing-identity.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const pinPath = path.join(rootDir, "src-tauri", "cua-driver-pin.json");
+const pinPath = path.join(rootDir, "src-tauri", "agent-desktop-pin.json");
 const pin = JSON.parse(readFileSync(pinPath, "utf8"));
-const sbomSource = path.join(rootDir, "src-tauri", "cua-driver-sbom.spdx.json");
-const licenseSource = path.join(rootDir, "src-tauri", "cua-driver-LICENSE.md");
+const sbomSource = path.join(rootDir, "src-tauri", "agent-desktop", "sbom.spdx.json");
+const licenseSource = path.join(rootDir, "src-tauri", "agent-desktop", "LICENSE");
 const iconSource = path.join(rootDir, "src-tauri", "icons", "icon.icns");
 const iconFileName = "Clovy.icns";
 
 const tauriPlatform = process.env.TAURI_ENV_PLATFORM?.trim();
-if (process.platform !== "darwin" || (tauriPlatform && tauriPlatform !== "darwin")) {
-  console.error("Skipping Computer use helper preparation: Computer use is macOS-only.");
-  process.exit(0);
+if (
+  !["darwin", "win32"].includes(process.platform) ||
+  (tauriPlatform && !["darwin", "windows"].includes(tauriPlatform))
+) {
+  throw new Error("Computer use helper packaging requires macOS or Windows");
 }
 
 const parsed = parseArguments(process.argv.slice(2));
 const release = parsed.release;
-const target = parsed.target || tauriTargetTriple();
+const target =
+  parsed.target ||
+  tauriTargetTriple() ||
+  (process.platform === "win32"
+    ? `${process.arch === "arm64" ? "aarch64" : "x86_64"}-pc-windows-msvc`
+    : `${process.arch === "arm64" ? "aarch64" : "x86_64"}-apple-darwin`);
+const preparedEngineDir = path.join(rootDir, ".tauri-helper", "agent-desktop", target);
+const preparedEngineManifest = verifyEngineArtifact(preparedEngineDir, pin, target);
+const engineSha256 = preparedEngineManifest.executableSha256;
+const preparedEngineBytes = readFileSync(
+  path.join(preparedEngineDir, preparedEngineManifest.executable),
+);
+if (createHash("sha256").update(preparedEngineBytes).digest("hex") !== engineSha256)
+  throw new Error("Prepared engine changed while helper preparation started");
+const preparedReview = readFileSync(path.join(preparedEngineDir, "source-review.md"));
+if (createHash("sha256").update(preparedReview).digest("hex") !== pin.sourceReviewSha256)
+  throw new Error("Prepared source qualification changed while helper preparation started");
 const profile = release ? "release" : "debug";
+const cargoTargetDir = path.resolve(
+  process.env.CARGO_TARGET_DIR || path.join(rootDir, "src-tauri", "target"),
+);
+const overlayIdentifier = process.env.TAURI_CONFIG
+  ? JSON.parse(process.env.TAURI_CONFIG).identifier
+  : undefined;
+const compiledAppIdentifier =
+  overlayIdentifier ||
+  (!release ? process.env.CLOVY_DEV_APP_IDENTIFIER : undefined) ||
+  JSON.parse(readFileSync(path.join(rootDir, "src-tauri", "tauri.conf.json"), "utf8")).identifier;
+if (!/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(compiledAppIdentifier))
+  throw new Error("Invalid Computer use helper parent identity");
 const bundleIdentifier = computerUseBundleIdentifier({
   baseIdentifier: pin.bundleIdentifier,
   profile,
   worktreeRoot: rootDir,
 });
+if (process.platform === "win32") {
+  prepareWindowsHelper(target, release);
+  process.exit(0);
+}
 const rustTargets =
   target === "universal-apple-darwin"
     ? ["aarch64-apple-darwin", "x86_64-apple-darwin"]
@@ -50,7 +85,7 @@ const contentsDir = path.join(bundleDir, "Contents");
 const executableDir = path.join(contentsDir, "MacOS");
 const resourcesDir = path.join(contentsDir, "Resources");
 const executable = path.join(executableDir, pin.executable);
-const stampPath = path.join(resourcesDir, "clovy-cua-driver-pin.json");
+const stampPath = path.join(resourcesDir, "clovy-computer-use-pin.json");
 const iconDestination = path.join(resourcesDir, iconFileName);
 // Debug helpers launched by `pnpm tauri:dev` carry the same certificate as the
 // dev app bundle so their Accessibility grant survives rebuilds
@@ -59,7 +94,7 @@ const iconDestination = path.join(resourcesDir, iconFileName);
 // `pnpm computer-use:prepare`), new bundles are signed ad hoc and an existing
 // valid signature is kept; build.rs re-signs release with APPLE_SIGNING_IDENTITY.
 const selectedIdentity = release
-  ? undefined
+  ? process.env.APPLE_SIGNING_IDENTITY?.trim() || undefined
   : process.env[DEV_SIGNING_IDENTITY_ENV]?.trim() || undefined;
 
 if (preparedBundleContentMatches()) {
@@ -75,10 +110,8 @@ if (preparedBundleContentMatches()) {
   process.exit(0);
 }
 
-// Cargo runs this package's build.rs even when only the helper binary is
-// requested. Remove a stale real bundle before that build so build.rs creates
-// its non-packaging placeholder instead of rejecting the old source stamp.
-// The newly compiled helper replaces the placeholder below.
+// The helper bootstrap excludes runtime artifact validation in build.rs;
+// the final desktop build validates the completed resource before bundling.
 rmSync(bundleDir, { recursive: true, force: true });
 
 const developerDir = existsSync("/Applications/Xcode.app/Contents/Developer")
@@ -101,21 +134,27 @@ for (const rustTarget of buildTargets) {
     cwd: rootDir,
     env: {
       ...process.env,
+      CLOVY_PREPARING_COMPUTER_USE: "1",
+      CLOVY_COMPUTER_USE_HELPER_IDENTIFIER: bundleIdentifier,
+      CLOVY_PREPARED_AGENT_DESKTOP_SHA256: engineSha256,
+      CLOVY_PREPARED_AGENT_DESKTOP_TARGET: target,
+      ...(!release ? { CLOVY_DEV_APP_IDENTIFIER: compiledAppIdentifier } : {}),
+      CARGO_INCREMENTAL: "0",
+      CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP: "none",
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none",
       MACOSX_DEPLOYMENT_TARGET: pin.minimumMacOSVersion,
       ...(developerDir ? { DEVELOPER_DIR: developerDir } : {}),
     },
   });
   builtExecutables.push(
-    path.join(
-      rootDir,
-      "src-tauri",
-      "target",
-      ...(rustTarget ? [rustTarget] : []),
-      profile,
-      pin.executable,
-    ),
+    path.join(cargoTargetDir, ...(rustTarget ? [rustTarget] : []), profile, pin.executable),
   );
 }
+
+if (helperSourceSha256() !== sourceSha256)
+  throw new Error(
+    "Computer use helper source changed during compilation; prepare again from a stable checkout",
+  );
 
 rmSync(bundleDir, { recursive: true, force: true });
 mkdirSync(executableDir, { recursive: true });
@@ -157,14 +196,21 @@ writeFileSync(
     {
       ...pin,
       bundleIdentifier,
-      clovyBuild: { profile, architectures: [...architectures].sort(), sourceSha256 },
+      clovyBuild: {
+        profile,
+        appIdentifier: compiledAppIdentifier,
+        engineSha256,
+        architectures: [...architectures].sort(),
+        sourceSha256,
+      },
     },
     null,
     2,
   )}\n`,
 );
-cpSync(sbomSource, path.join(resourcesDir, "clovy-cua-driver.spdx.json"));
-cpSync(licenseSource, path.join(resourcesDir, "cua-driver-LICENSE.md"));
+stageEngine(executableDir, resourcesDir, target);
+cpSync(sbomSource, path.join(resourcesDir, "agent-desktop.spdx.json"));
+cpSync(licenseSource, path.join(resourcesDir, "agent-desktop-LICENSE"));
 cpSync(iconSource, iconDestination);
 signBundle();
 
@@ -175,7 +221,7 @@ if (version.version !== pin.version || version.commit !== pin.sourceCommit) {
   );
 }
 console.error(
-  `Prepared authenticated Computer use helper from cua-driver ${pin.version} (${pin.sourceCommit}).`,
+  `Prepared authenticated Computer use helper using agent-desktop ${pin.version} (${pin.sourceCommit}).`,
 );
 stageUniversalCargoBin();
 
@@ -186,14 +232,7 @@ stageUniversalCargoBin();
 // executable there ourselves.
 function stageUniversalCargoBin() {
   if (target !== "universal-apple-darwin") return;
-  const stagedBin = path.join(
-    rootDir,
-    "src-tauri",
-    "target",
-    "universal-apple-darwin",
-    profile,
-    pin.executable,
-  );
+  const stagedBin = path.join(cargoTargetDir, "universal-apple-darwin", profile, pin.executable);
   mkdirSync(path.dirname(stagedBin), { recursive: true });
   cpSync(executable, stagedBin);
   run("/bin/chmod", ["755", stagedBin]);
@@ -210,11 +249,9 @@ function helperVersion(file) {
 
 function helperSourceSha256() {
   const hash = createHash("sha256");
-  for (const relative of [
-    "src-tauri/src/computer_use_driver.rs",
-    "src-tauri/Cargo.toml",
-    "src-tauri/Cargo.lock",
-  ]) {
+  for (const relative of JSON.parse(
+    readFileSync(path.join(rootDir, "src-tauri", "computer-use-build-inputs.json"), "utf8"),
+  )) {
     hash.update(relative);
     hash.update("\0");
     hash.update(readFileSync(path.join(rootDir, relative)));
@@ -244,11 +281,16 @@ function preparedBundleContentMatches() {
     stamp.version === pin.version &&
     stamp.sourceCommit === pin.sourceCommit &&
     stamp.bundleIdentifier === bundleIdentifier &&
-    stamp.clovyBuild?.profile === profile &&
-    stamp.clovyBuild?.sourceSha256 === sourceSha256 &&
+    helperBuildInputsMatch(stamp, {
+      profile,
+      appIdentifier: compiledAppIdentifier,
+      engineSha256,
+      sourceSha256,
+    }) &&
     architectures.every((architecture) => actualArchitectures.has(architecture)) &&
     version.version === pin.version &&
     version.commit === pin.sourceCommit &&
+    engineMatches() &&
     bundleIconMatches() &&
     bundleSealMatches()
   );
@@ -288,12 +330,12 @@ function bundleSignatureMatches() {
 }
 
 function signBundle() {
+  const releaseSigning = release && selectedIdentity && selectedIdentity !== AD_HOC_IDENTITY;
   run("/usr/bin/codesign", [
     "--force",
-    "--deep",
     "--sign",
     selectedIdentity ?? AD_HOC_IDENTITY,
-    "--timestamp=none",
+    ...(releaseSigning ? ["--timestamp", "--options", "runtime"] : ["--timestamp=none"]),
     "--identifier",
     bundleIdentifier,
     bundleDir,
@@ -312,7 +354,9 @@ function tauriTargetTriple() {
   if (
     target === "universal-apple-darwin" ||
     target === "aarch64-apple-darwin" ||
-    target === "x86_64-apple-darwin"
+    target === "x86_64-apple-darwin" ||
+    target === "x86_64-pc-windows-msvc" ||
+    target === "aarch64-pc-windows-msvc"
   ) {
     return target;
   }
@@ -355,4 +399,90 @@ function run(command, commandArgs, options = {}) {
   if (result.status !== 0) {
     throw new Error(`${command} exited with ${result.status ?? "no status"}`);
   }
+}
+
+function engineMatches() {
+  try {
+    const staged = JSON.parse(
+      readFileSync(path.join(resourcesDir, "agent-desktop-manifest.json"), "utf8"),
+    );
+    return (
+      JSON.stringify(staged) === JSON.stringify(preparedEngineManifest) &&
+      createHash("sha256")
+        .update(readFileSync(path.join(executableDir, "agent-desktop")))
+        .digest("hex") === engineSha256
+    );
+  } catch {
+    return false;
+  }
+}
+function stageEngine(binaryDir, resourceDir, triple) {
+  if (triple !== target) throw new Error("Prepared engine target changed");
+  const executableName = triple.includes("windows") ? "agent-desktop.exe" : "agent-desktop";
+  writeFileSync(path.join(binaryDir, executableName), preparedEngineBytes, { mode: 0o755 });
+  writeFileSync(
+    path.join(resourceDir, "agent-desktop-manifest.json"),
+    `${JSON.stringify(preparedEngineManifest, null, 2)}\n`,
+  );
+  writeFileSync(path.join(resourceDir, "source-review.md"), preparedReview);
+}
+function prepareWindowsHelper(triple, isRelease) {
+  if (!triple.endsWith("-pc-windows-msvc") || !process.env.WINDOWS_CERTIFICATE_THUMBPRINT)
+    throw new Error("Windows helper requires MSVC target and WINDOWS_CERTIFICATE_THUMBPRINT");
+  const sourceSha256 = helperSourceSha256();
+  const destination = path.join(rootDir, ".tauri-helper", "computer-use");
+  mkdirSync(destination, { recursive: true });
+  const args = [
+    "build",
+    "--manifest-path",
+    path.join(rootDir, "src-tauri", "Cargo.toml"),
+    "--bin",
+    pin.executable,
+    "--locked",
+    "--target",
+    triple,
+    ...(isRelease ? ["--release"] : []),
+  ];
+  run(process.env.CARGO || "cargo", args, {
+    cwd: rootDir,
+    env: {
+      ...process.env,
+      CLOVY_PREPARING_COMPUTER_USE: "1",
+      CLOVY_COMPUTER_USE_HELPER_IDENTIFIER: bundleIdentifier,
+      CLOVY_PREPARED_AGENT_DESKTOP_SHA256: engineSha256,
+      CLOVY_PREPARED_AGENT_DESKTOP_TARGET: target,
+      ...(!isRelease ? { CLOVY_DEV_APP_IDENTIFIER: compiledAppIdentifier } : {}),
+      CARGO_INCREMENTAL: "0",
+    },
+  });
+  if (helperSourceSha256() !== sourceSha256)
+    throw new Error(
+      "Computer use helper source changed during compilation; prepare again from a stable checkout",
+    );
+  const targetDir = process.env.CARGO_TARGET_DIR || path.join(rootDir, "src-tauri", "target");
+  const helper = path.join(destination, `${pin.executable}.exe`);
+  cpSync(
+    path.join(targetDir, triple, isRelease ? "release" : "debug", `${pin.executable}.exe`),
+    helper,
+  );
+  stageEngine(destination, destination, triple);
+  cpSync(licenseSource, path.join(destination, "LICENSE"));
+  cpSync(sbomSource, path.join(destination, "agent-desktop.spdx.json"));
+  run(process.env.WINDOWS_SIGNTOOL_PATH || "signtool", [
+    "sign",
+    "/sha1",
+    process.env.WINDOWS_CERTIFICATE_THUMBPRINT,
+    "/fd",
+    "sha256",
+    "/td",
+    "sha256",
+    "/tr",
+    process.env.WINDOWS_SIGNING_TIMESTAMP_URL || "http://timestamp.digicert.com",
+    helper,
+  ]);
+  run(process.env.WINDOWS_SIGNTOOL_PATH || "signtool", ["verify", "/pa", helper]);
+  writeFileSync(
+    path.join(destination, "clovy-computer-use-pin.json"),
+    `${JSON.stringify({ ...pin, clovyBuild: { profile: isRelease ? "release" : "debug", appIdentifier: compiledAppIdentifier, engineSha256, sourceSha256 } }, null, 2)}\n`,
+  );
 }

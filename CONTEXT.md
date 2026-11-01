@@ -366,13 +366,18 @@ Browser access grant and never exposes the user's signed-in browser session.
 _Avoid_: routine browser permission, global routine browsing.
 
 **Computer use**:
-The consent-gated capability (JUN-278 phase 2) that lets the agent operate
-Mac apps in the background without moving the user's real pointer, stealing
-keyboard focus, or changing the active Space. The turn-bound `computer_use`
-MCP tool uses the Rust broker and a Clovy-bundled pinned cua-driver.
+The consent-gated capability that lets an attended CLI turn operate authorized
+macOS or Windows app windows through Clovy's Rust broker and the privately
+bundled, source-pinned agent-desktop engine. Background input is the default.
+An operation that cannot run in the background may use visible focus/pointer
+input in the authorized window, selected before delivery or after definitive
+unsupported/not-delivered evidence. Delivered or uncertain input is never
+replayed in another mode. Visible mode grants no administrator, system
+permission, credential or login access.
 The first access to each verified target app requires one authorization for
-the current attended task. Local grants, the driver, and macOS permissions
-determine availability (ADR-0067). Bringing a parked
+the current attended task. Local grants, the pinned helper and real platform
+readiness determine availability: macOS permissions or the normal interactive
+Windows desktop and compatible integrity. Bringing a parked macOS
 window into Clovy's current Stage Manager group is part of that authorized app
 use and does not ask again.
 _Avoid_: desktop automation (vague), computer_use toolset (that is the

@@ -8,6 +8,7 @@ pub mod ax;
 pub mod clipboard;
 pub mod disk;
 pub mod input_tap;
+pub(crate) mod native;
 pub mod ocr;
 pub mod permissions;
 pub mod screens;

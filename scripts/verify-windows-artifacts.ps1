@@ -100,14 +100,38 @@ try {
     }
   }
 
-  foreach ($unsignedFile in @($installer, $app, $helper)) {
-    $signature = Get-AuthenticodeSignature -LiteralPath $unsignedFile.FullName
-    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
-      throw "Expected an unsigned file, but Authenticode status is $($signature.Status): $($unsignedFile.FullName)"
+  $desktopEngines = @($files | Where-Object { $_.Name -ieq "agent-desktop.exe" -and $_.DirectoryName.Replace('\', '/').ToLowerInvariant().EndsWith('/native/bin/computer-use') })
+  if ($desktopEngines.Count -ne 1) { throw "Expected one nested Computer use engine." }
+  $desktopEngine = $desktopEngines[0]
+  $desktopHelper = Get-Item -LiteralPath (Join-Path $desktopEngine.DirectoryName "clovy-computer-use-driver.exe")
+  $stagedHelper = Join-Path $PSScriptRoot "../.tauri-helper/computer-use/clovy-computer-use-driver.exe"
+  $stagedHelperHash = (Get-FileHash -LiteralPath $stagedHelper -Algorithm SHA256).Hash
+  $packagedHelperHash = (Get-FileHash -LiteralPath $desktopHelper.FullName -Algorithm SHA256).Hash
+  if ($stagedHelperHash -ne $packagedHelperHash) { throw "Bundling changed the staged signed helper bytes after the host digest was compiled." }
+  $manifest = Get-Content -LiteralPath (Join-Path $desktopEngine.DirectoryName "agent-desktop-manifest.json") -Raw | ConvertFrom-Json
+  $pin = Get-Content -LiteralPath (Join-Path $PSScriptRoot "../src-tauri/agent-desktop-pin.json") -Raw | ConvertFrom-Json
+  foreach ($field in @("sourceCommit", "protocolVersion", "cargoLockSha256", "licenseSha256", "patchSha256", "sourceReviewSha256")) {
+    if ($manifest.$field -ne $pin.$field) { throw "Nested engine manifest $field mismatch." }
+  }
+  if ($manifest.target -ne "x86_64-pc-windows-msvc" -or $manifest.executable -ne "agent-desktop.exe") { throw "Nested engine target mismatch." }
+  $engineHash = (Get-FileHash -LiteralPath $desktopEngine.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($engineHash -ne $manifest.executableSha256) { throw "Nested engine executable digest mismatch." }
+  $licenseHash = (Get-FileHash -LiteralPath (Join-Path $desktopEngine.DirectoryName "LICENSE") -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($licenseHash -ne $pin.licenseSha256) { throw "Nested engine license digest mismatch." }
+  $reviewHash = (Get-FileHash -LiteralPath (Join-Path $desktopEngine.DirectoryName "source-review.md") -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($reviewHash -ne $pin.sourceReviewSha256) { throw "Nested engine source qualification digest mismatch." }
+  $publisher = $null
+  foreach ($signedFile in @($installer, $app, $desktopHelper, $desktopEngine)) {
+    $signature = Get-AuthenticodeSignature -LiteralPath $signedFile.FullName
+    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+      throw "Expected a valid Authenticode signature: $($signedFile.FullName)"
     }
+    $thumbprint = $signature.SignerCertificate.Thumbprint
+    if ($publisher -and $thumbprint -ne $publisher) { throw "Computer use and Clovy must have the same signing publisher." }
+    $publisher = $thumbprint
   }
   $updaterNote = if ($hasUpdaterKey) { " with its updater signature" } else { "" }
-  Write-Host "Verified unsigned Windows installer payload$($updaterNote): $($installer.FullName)"
+  Write-Host "Verified signed Windows installer and Computer use payload$($updaterNote): $($installer.FullName)"
 }
 finally {
   if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }

@@ -5,11 +5,11 @@ use std::collections::HashSet;
 use objc2_app_kit::NSRunningApplication;
 
 use crate::activity::macos::ax::{is_private_window, resolve_browser_url, AutoAxElement};
-use crate::activity::platform::WindowDescriptor;
-use platform_macos::ax::bindings::{
+use crate::activity::macos::native::{
     ax_get_window_id, copy_ax_windows, copy_string_attr, enable_chromium_accessibility,
     AXUIElementCreateApplication,
 };
+use crate::activity::platform::WindowDescriptor;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -142,7 +142,7 @@ pub fn secondary_windows(chromium_settled_pids: &mut HashSet<i32>) -> Vec<Window
         return Vec::new();
     }
 
-    let visible = platform_macos::windows::visible_windows();
+    let visible = crate::activity::macos::native::visible_windows();
     let mut results = Vec::new();
 
     for sec_id in secondary_display_ids {

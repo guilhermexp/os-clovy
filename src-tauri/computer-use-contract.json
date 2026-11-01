@@ -1,5 +1,5 @@
 {
-  "version": "0.5.0",
+  "version": "1.0.2",
   "protocolVersion": "2024-11-05",
   "clovyActions": [
     "capture",
@@ -19,30 +19,51 @@
   "driverTools": {
     "check_permissions": {
       "required": [],
-      "properties": { "prompt": "boolean" }
+      "properties": {
+        "prompt": "boolean"
+      }
     },
     "list_windows": {
       "required": [],
-      "properties": { "on_screen_only": "boolean", "pid": "integer" }
+      "properties": {
+        "on_screen_only": "boolean",
+        "pid": "integer"
+      }
     },
     "launch_app": {
-      "required": ["name"],
-      "properties": { "name": "string" }
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": "string"
+      }
     },
     "join_current_stage": {
-      "required": ["pid", "window_id"],
-      "properties": { "pid": "integer", "window_id": "integer" }
-    },
-    "get_window_state": {
-      "required": ["pid", "window_id"],
+      "required": [
+        "pid",
+        "window_id"
+      ],
       "properties": {
-        "capture_mode": "string",
         "pid": "integer",
         "window_id": "integer"
       }
     },
+    "get_window_state": {
+      "required": [
+        "pid",
+        "window_id"
+      ],
+      "properties": {
+        "capture_mode": "string",
+        "pid": "integer",
+        "window_id": "integer",
+        "revalidate": "boolean"
+      }
+    },
     "click": {
-      "required": ["pid"],
+      "required": [
+        "pid"
+      ],
       "properties": {
         "count": "integer",
         "element_index": "integer",
@@ -54,7 +75,9 @@
       }
     },
     "double_click": {
-      "required": ["pid"],
+      "required": [
+        "pid"
+      ],
       "properties": {
         "element_index": "integer",
         "pid": "integer",
@@ -64,7 +87,9 @@
       }
     },
     "right_click": {
-      "required": ["pid"],
+      "required": [
+        "pid"
+      ],
       "properties": {
         "element_index": "integer",
         "modifier": "array",
@@ -75,7 +100,13 @@
       }
     },
     "drag": {
-      "required": ["pid", "from_x", "from_y", "to_x", "to_y"],
+      "required": [
+        "pid",
+        "from_x",
+        "from_y",
+        "to_x",
+        "to_y"
+      ],
       "properties": {
         "from_x": "number",
         "from_y": "number",
@@ -87,7 +118,10 @@
       }
     },
     "scroll": {
-      "required": ["pid", "direction"],
+      "required": [
+        "pid",
+        "direction"
+      ],
       "properties": {
         "amount": "integer",
         "direction": "string",
@@ -97,7 +131,10 @@
       }
     },
     "type_text": {
-      "required": ["pid", "text"],
+      "required": [
+        "pid",
+        "text"
+      ],
       "properties": {
         "element_index": "integer",
         "pid": "integer",
@@ -106,7 +143,10 @@
       }
     },
     "press_key": {
-      "required": ["pid", "key"],
+      "required": [
+        "pid",
+        "key"
+      ],
       "properties": {
         "element_index": "integer",
         "key": "string",
@@ -115,11 +155,23 @@
       }
     },
     "hotkey": {
-      "required": ["pid", "keys"],
-      "properties": { "keys": "array", "pid": "integer", "window_id": "integer" }
+      "required": [
+        "pid",
+        "keys"
+      ],
+      "properties": {
+        "keys": "array",
+        "pid": "integer",
+        "window_id": "integer"
+      }
     },
     "set_value": {
-      "required": ["pid", "window_id", "element_index", "value"],
+      "required": [
+        "pid",
+        "window_id",
+        "element_index",
+        "value"
+      ],
       "properties": {
         "element_index": "integer",
         "pid": "integer",
@@ -127,5 +179,6 @@
         "window_id": "integer"
       }
     }
-  }
+  },
+  "engineProtocolVersion": "2.5"
 }

@@ -93,7 +93,7 @@ tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-updater = "2.10.1"
 thiserror = "2.0"
 tempfile = "3.14"
-tokio = { version = "1.42", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.42", features = ["fs", "io-util", "io-std", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 # Untrusted URL parsing for the managed browser's public-web policy.
 url = "2"
@@ -117,7 +117,6 @@ apple-metal = { version = "=0.6.0", default-features = false }
 core-foundation = "0.10"
 keyring = { version = "3", features = ["apple-native"] }
 block2 = "0.6"
-cua-driver-core = { git = "https://github.com/trycua/cua", rev = "51582fd2ad8cffb68b2c6c81077d391132d7a0e1" }
 libc = "0.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
@@ -157,7 +156,6 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSDictionary",
 ] }
 window-vibrancy = "0.6"
-platform-macos = { git = "https://github.com/trycua/cua", rev = "51582fd2ad8cffb68b2c6c81077d391132d7a0e1" }
 security-framework = "3.7"
 # SQLCipher for the encrypted activity database (activity.sqlite3). Cargo
 # unifies features into the single libsqlite3-sys that sqlx-sqlite links, so
@@ -204,8 +202,14 @@ windows = { version = "0.61", features = [
     "Win32_Media_KernelStreaming",
     "Win32_Media_Multimedia",
     "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_WinTrust",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
     "Win32_Storage_FileSystem",
     "Win32_Storage_Packaging_Appx",
+    "Win32_System_ApplicationInstallationAndServicing",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_DataExchange",
@@ -215,11 +219,15 @@ windows = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Ole",
+    "Win32_System_Pipes",
     "Win32_System_Registry",
     "Win32_System_Environment",
     "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
     "Win32_System_Threading",
+    "Win32_System_StationsAndDesktops",
     "Win32_System_Variant",
+    "Win32_System_WindowsProgramming",
     "Win32_System_WinRT",
     "Win32_System_WinRT_Direct3D11",
     "Win32_System_WinRT_Graphics_Capture",

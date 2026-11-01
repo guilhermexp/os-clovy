@@ -45,6 +45,9 @@ jobs:
       - name: Frontend coverage
         run: pnpm test:coverage
 
+      - name: Prepare the real pinned Computer use engine and helper
+        run: node scripts/prepare-computer-use.mjs
+
       - name: Tauri Rust coverage
         run: pnpm test:rust:coverage
 

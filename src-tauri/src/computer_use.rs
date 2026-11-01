@@ -7,6 +7,7 @@
 //! app used by the current task. This is intentionally structural: a model prompt, inherited
 //! environment variable, or unrestricted agent process cannot bypass it.
 
+use crate::computer_use_policy::blocked_app;
 use crate::domain::types::AppError;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rand::{distributions::Alphanumeric, Rng};
@@ -28,17 +29,16 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use tokio::io::BufReader;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use tokio::io::{AsyncWriteExt, BufWriter};
+#[cfg(target_os = "macos")]
+use tokio::net::{unix::OwnedReadHalf, unix::OwnedWriteHalf, UnixStream};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt},
     process::Command,
     sync::{oneshot, watch, Mutex as AsyncMutex},
-};
-#[cfg(target_os = "macos")]
-use tokio::{
-    io::{AsyncWriteExt, BufWriter},
-    net::{unix::OwnedReadHalf, unix::OwnedWriteHalf, UnixStream},
 };
 
 /// Compatibility identity for restored runs created before Computer use moved
@@ -77,8 +77,8 @@ struct DriverPin {
 }
 
 fn driver_pin() -> DriverPin {
-    serde_json::from_str(include_str!("../cua-driver-pin.json"))
-        .expect("cua-driver-pin.json must be valid")
+    serde_json::from_str(include_str!("../agent-desktop-pin.json"))
+        .expect("agent-desktop-pin.json must be valid")
 }
 
 #[derive(Default)]
@@ -88,7 +88,19 @@ pub struct ComputerUseState {
     permission_probe: Arc<PermissionProbeCoordinator>,
     signature_verification: AsyncMutex<Option<CachedBundleSignature>>,
     driver_pid: AtomicU32,
+    #[cfg(target_os = "macos")]
+    driver_run_directory: Mutex<Option<PathBuf>>,
+    #[cfg(target_os = "macos")]
+    driver_socket: Mutex<Option<Arc<std::os::unix::net::UnixStream>>>,
+    /// A helper and its engine refs belong to exactly one broker epoch.
+    driver_epoch: AtomicU64,
+    #[cfg(target_os = "windows")]
+    driver_cancel: Mutex<Option<crate::computer_use_windows::JobCancel>>,
     target: Mutex<Option<TargetContext>>,
+    /// Owner of the transient target and authorizations while an operation is
+    /// running. Access is serialized by `operation`; the lease remains the
+    /// authority and is rechecked after each asynchronous boundary.
+    active_turn: Mutex<Option<String>>,
     approvals: Mutex<HashMap<String, PendingEntry>>,
     authorized_apps: Mutex<HashSet<AppAuthorizationKey>>,
     attended_runs: Mutex<HashSet<String>>,
@@ -98,6 +110,7 @@ pub struct ComputerUseState {
     attended_generation: AtomicU64,
     cleanup_in_progress: AtomicU32,
     epoch: AtomicU64,
+    epoch_changed: tokio::sync::Notify,
     cursor: crate::computer_use_cursor::ComputerUseCursorState,
     capture_generation: AtomicU64,
     runtime_ready_state: AtomicU32,
@@ -140,6 +153,7 @@ struct ElementSummary {
 struct AppIdentity {
     bundle_id: String,
     executable_path: PathBuf,
+    process_creation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -169,6 +183,7 @@ pub struct PendingComputerUseApproval {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputerUseStatus {
+    pub platform: &'static str,
     pub platform_supported: bool,
     pub grant_enabled: bool,
     pub driver_available: bool,
@@ -421,6 +436,8 @@ struct DriverClient {
     next_id: u64,
     pid: u32,
     socket_dir: PathBuf,
+    _run_directory: tempfile::TempDir,
+    control_socket: Arc<std::os::unix::net::UnixStream>,
 }
 
 #[cfg(target_os = "macos")]
@@ -430,13 +447,16 @@ impl DriverClient {
         permission_prompt: Option<DriverPermissionPrompt>,
     ) -> Result<Self, AppError> {
         let capability = random_id();
-        let socket_dir = PathBuf::from("/tmp").join(format!("clovy-cua-{}", random_id()));
-        std::fs::create_dir(&socket_dir).map_err(|error| {
-            AppError::new(
-                "computer_use_driver_start_failed",
-                format!("Could not prepare the Computer use driver channel. {error}"),
-            )
-        })?;
+        let run_directory = tempfile::Builder::new()
+            .prefix("clovy-desktop-")
+            .tempdir_in("/tmp")
+            .map_err(|error| {
+                AppError::new(
+                    "computer_use_driver_start_failed",
+                    format!("Could not prepare the Computer use driver channel. {error}"),
+                )
+            })?;
+        let socket_dir = run_directory.path().to_path_buf();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -494,13 +514,33 @@ impl DriverClient {
             .is_some_and(|actual| same_path(&actual, path))
             || !process_group_is_owned(pid)
         {
-            let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
             let _ = std::fs::remove_dir_all(&socket_dir);
             return Err(AppError::new(
                 "computer_use_driver_start_failed",
                 "The private Computer use channel did not have the expected isolated driver identity.",
             ));
         }
+        let expected_helper = option_env!("CLOVY_COMPUTER_USE_HELPER_CDHASH").ok_or_else(|| {
+            AppError::new(
+                "computer_use_driver_start_failed",
+                "This build omitted the signed Computer use helper identity.",
+            )
+        })?;
+        crate::computer_use_macos::verify_mapped_image(pid, expected_helper).map_err(|_| {
+            AppError::new(
+                "computer_use_driver_start_failed",
+                "The connected Computer use helper does not match this build.",
+            )
+        })?;
+        let native_stream = stream.into_std().map_err(|error| {
+            AppError::new("computer_use_driver_start_failed", error.to_string())
+        })?;
+        let control_socket = Arc::new(native_stream.try_clone().map_err(|error| {
+            AppError::new("computer_use_driver_start_failed", error.to_string())
+        })?);
+        let stream = UnixStream::from_std(native_stream).map_err(|error| {
+            AppError::new("computer_use_driver_start_failed", error.to_string())
+        })?;
         let (stdout, stdin) = stream.into_split();
         let mut client = Self {
             stdin,
@@ -508,6 +548,8 @@ impl DriverClient {
             next_id: 1,
             pid,
             socket_dir,
+            _run_directory: run_directory,
+            control_socket,
         };
         let mut ignore_notification = |_: &Value| {};
         client
@@ -517,10 +559,7 @@ impl DriverClient {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {
                         "experimental": {
-                            "clovyComputerUseCapability": capability,
-                            // Compatibility for the released capability field
-                            // during the technical-identity bridge window.
-                            "juneComputerUseCapability": capability
+                            "clovyComputerUseCapability": capability
                         }
                     },
                     "clientInfo": { "name": "Clovy", "version": env!("CARGO_PKG_VERSION") }
@@ -539,11 +578,15 @@ impl DriverClient {
     }
 
     fn terminate(&mut self) {
+        let _ = self.control_socket.shutdown(std::net::Shutdown::Both);
         if self.pid > 0 {
-            signal_process_group(self.pid, libc::SIGTERM);
+            crate::computer_use_macos::terminate_owned_group(self.pid, &self.socket_dir);
         }
     }
+}
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl DriverClient {
     async fn request(
         &mut self,
         method: &str,
@@ -597,17 +640,19 @@ impl DriverClient {
                 "The Computer use driver returned no result.",
             )
         })?;
+        if !result.is_object() {
+            return Err(AppError::new(
+                "computer_use_driver_invalid_response",
+                "The Computer use driver returned an invalid result.",
+            ));
+        }
         if result
             .get("isError")
             .or_else(|| result.get("is_error"))
             .and_then(Value::as_bool)
             .unwrap_or(false)
         {
-            return Err(AppError::new(
-                "computer_use_driver_failed",
-                tool_result_text(&result)
-                    .unwrap_or_else(|| "The Computer use driver rejected the action.".to_string()),
-            ));
+            return Err(driver_result_error(&result));
         }
         Ok(result)
     }
@@ -669,14 +714,17 @@ impl DriverClient {
             }
         }
     }
+}
 
+#[cfg(target_os = "macos")]
+impl DriverClient {
     async fn stop(mut self) {
         let _ = tokio::time::timeout(DRIVER_SHUTDOWN_TIMEOUT, self.stdin.shutdown()).await;
         if !wait_for_process_exit(self.pid, DRIVER_SHUTDOWN_TIMEOUT).await {
             self.terminate();
         }
         if !wait_for_process_exit(self.pid, DRIVER_SHUTDOWN_TIMEOUT).await {
-            force_stop_pid(self.pid);
+            crate::computer_use_macos::terminate_owned_group(self.pid, &self.socket_dir);
         }
         if !wait_for_process_exit(self.pid, DRIVER_KILL_TIMEOUT).await {
             tracing::warn!(
@@ -692,18 +740,87 @@ impl DriverClient {
 #[cfg(target_os = "macos")]
 impl Drop for DriverClient {
     fn drop(&mut self) {
+        let _ = self.control_socket.shutdown(std::net::Shutdown::Both);
         if self.pid > 0 {
-            force_stop_pid(self.pid);
+            crate::computer_use_macos::terminate_owned_group(self.pid, &self.socket_dir);
             self.pid = 0;
         }
         let _ = std::fs::remove_dir_all(&self.socket_dir);
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+struct DriverClient {
+    stdin: tokio::process::ChildStdin,
+    stdout: BufReader<tokio::process::ChildStdout>,
+    next_id: u64,
+    pid: u32,
+    helper: crate::computer_use_windows::PrivateHelper,
+}
+
+#[cfg(target_os = "windows")]
+impl DriverClient {
+    async fn start(
+        path: &Path,
+        _permission_prompt: Option<DriverPermissionPrompt>,
+    ) -> Result<Self, AppError> {
+        let capability = random_id();
+        let mut helper = crate::computer_use_windows::PrivateHelper::spawn(path, &capability)
+            .await
+            .map_err(|error| {
+                AppError::new("computer_use_driver_start_failed", error.to_string())
+            })?;
+        let stdin = helper.stdin.take().ok_or_else(|| {
+            AppError::new(
+                "computer_use_driver_start_failed",
+                "Private helper input pipe is missing.",
+            )
+        })?;
+        let stdout = helper.stdout.take().ok_or_else(|| {
+            AppError::new(
+                "computer_use_driver_start_failed",
+                "Private helper output pipe is missing.",
+            )
+        })?;
+        let mut client = Self {
+            stdin,
+            stdout: BufReader::new(stdout),
+            next_id: 1,
+            pid: helper.pid(),
+            helper,
+        };
+        let mut ignore = |_: &Value| {};
+        client.request("initialize", json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": { "experimental": { "clovyComputerUseCapability": capability } },
+            "clientInfo": { "name": "Clovy", "version": env!("CARGO_PKG_VERSION") }
+        }), &mut ignore).await?;
+        client
+            .notify("notifications/initialized", json!({}))
+            .await?;
+        Ok(client)
+    }
+
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+    fn cancel_handle(&self) -> crate::computer_use_windows::JobCancel {
+        self.helper.cancel_handle()
+    }
+    fn terminate(&mut self) {
+        self.helper.cancel_handle().cancel();
+    }
+    async fn stop(mut self) {
+        self.terminate();
+        let _ = self.stdin.shutdown().await;
+        self.helper.stop().await;
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 struct DriverClient;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 impl DriverClient {
     async fn start(
         _path: &Path,
@@ -711,7 +828,7 @@ impl DriverClient {
     ) -> Result<Self, AppError> {
         Err(AppError::new(
             "computer_use_unsupported",
-            "Computer use is available on macOS only.",
+            "Computer use requires macOS or Windows.",
         ))
     }
 
@@ -727,7 +844,7 @@ impl DriverClient {
     ) -> Result<Value, AppError> {
         Err(AppError::new(
             "computer_use_unsupported",
-            "Computer use is available on macOS only.",
+            "Computer use requires macOS or Windows.",
         ))
     }
 
@@ -739,7 +856,7 @@ impl DriverClient {
     ) -> Result<Value, AppError> {
         Err(AppError::new(
             "computer_use_unsupported",
-            "Computer use is available on macOS only.",
+            "Computer use requires macOS or Windows.",
         ))
     }
 
@@ -750,7 +867,7 @@ impl DriverClient {
 /// the nested helper can authenticate its parent, but it can operate only the
 /// two disposable fixture bundle identifiers created by the release test.
 /// This deliberately is not a general driver proxy.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub async fn run_release_self_test_host(
     path: PathBuf,
     permission_prompt: Option<String>,
@@ -897,17 +1014,59 @@ fn release_self_test_driver_path_allowed(path: &Path) -> bool {
     expected.is_some_and(|expected| same_path(path, &expected))
 }
 
-#[cfg(target_os = "macos")]
-fn same_path(left: &Path, right: &Path) -> bool {
-    std::fs::canonicalize(left).ok() == std::fs::canonicalize(right).ok()
+#[cfg(target_os = "windows")]
+fn release_self_test_driver_path_allowed(path: &Path) -> bool {
+    let expected = if cfg!(debug_assertions) {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|repo| repo.join(".tauri-helper/computer-use/clovy-computer-use-driver.exe"))
+    } else {
+        std::env::current_exe().ok().and_then(|exe| {
+            Some(
+                exe.parent()?
+                    .join("native/bin/computer-use/clovy-computer-use-driver.exe"),
+            )
+        })
+    };
+    expected.is_some_and(|expected| same_path(path, &expected))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn same_path(left: &Path, right: &Path) -> bool {
+    matches!((std::fs::canonicalize(left), std::fs::canonicalize(right)), (Ok(left), Ok(right)) if left == right)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn release_self_test_call_allowed(name: &str, arguments: &Value) -> bool {
     if name == "check_permissions" {
         return arguments
             .as_object()
             .is_some_and(|values| values.keys().all(|key| key == "prompt"));
+    }
+    if name == "launch_app" {
+        let Some(name) = arguments.get("name").and_then(Value::as_str) else {
+            return false;
+        };
+        #[cfg(target_os = "macos")]
+        {
+            // The QA launcher starts its two signed fixtures by exact path.
+            // A global LaunchServices name is not proof of fixture identity.
+            let _ = name;
+            return false;
+        }
+        #[cfg(target_os = "windows")]
+        return std::env::current_exe()
+            .ok()
+            .and_then(|path| {
+                Some(
+                    path.parent()?
+                        .join("native/fixtures/clovy-computer-use-fixture.exe"),
+                )
+            })
+            .is_some_and(|fixture| {
+                same_path(Path::new(name), &fixture)
+                    && crate::computer_use_windows::verify_fixture(&fixture).is_ok()
+            });
     }
     let Some(pid) = arguments.get("pid").and_then(Value::as_i64) else {
         return false;
@@ -915,6 +1074,20 @@ fn release_self_test_call_allowed(name: &str, arguments: &Value) -> bool {
     let Some(identity) = app_identity(pid) else {
         return false;
     };
+    #[cfg(target_os = "windows")]
+    {
+        let fixture = std::env::current_exe().ok().and_then(|path| {
+            Some(
+                path.parent()?
+                    .join("native/fixtures/clovy-computer-use-fixture.exe"),
+            )
+        });
+        return fixture.is_some_and(|fixture| {
+            same_path(&identity.executable_path, &fixture)
+                && crate::computer_use_windows::verify_fixture(&fixture).is_ok()
+        });
+    }
+    #[cfg(target_os = "macos")]
     matches!(
         identity.bundle_id.as_str(),
         "dev.guilhermexp.clovy.computer-use-self-test.target"
@@ -923,9 +1096,10 @@ fn release_self_test_call_allowed(name: &str, arguments: &Value) -> bool {
         .executable_path
         .file_name()
         .is_some_and(|name| name == "computer-use-fixture")
+        && crate::computer_use_macos::verify_fixture(&identity.executable_path, &identity.bundle_id)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn sanitize_release_self_test_result(
     name: &str,
     arguments: &Value,
@@ -950,12 +1124,12 @@ fn sanitize_release_self_test_result(
     })))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn release_self_test_error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 async fn write_release_self_test_response(
     stdout: &mut BufWriter<tokio::io::Stdout>,
     response: Value,
@@ -1006,6 +1180,17 @@ fn driver_launch_spec(
         format!("CLOVY_COMPUTER_USE_SOCKET={socket}"),
         "--env".to_string(),
         format!("CLOVY_COMPUTER_USE_HELPER_CAPABILITY={capability}"),
+        "--env".to_string(),
+        format!(
+            "CLOVY_COMPUTER_USE_RUN_DIR={}",
+            socket_path
+                .parent()
+                .and_then(Path::to_str)
+                .ok_or_else(|| AppError::new(
+                    "computer_use_driver_start_failed",
+                    "Missing private run directory."
+                ))?
+        ),
     ];
     if let Some(prompt) = permission_prompt {
         args.extend([
@@ -1105,13 +1290,15 @@ async fn bounded_command_output(
 
 fn should_scrub_driver_env(name: &OsStr) -> bool {
     let name = name.to_string_lossy();
-    name.starts_with("CUA_DRIVER_RS_")
+    name.starts_with("AGENT_DESKTOP_")
+        || name.starts_with("CUA_DRIVER_RS_")
         || name.starts_with("CLOVY_CUA_DRIVER")
         || name.starts_with("JUNE_CUA_DRIVER")
         || name == "CLOVY_COMPUTER_USE_BACKEND"
         || name == "CLOVY_COMPUTER_USE_HELPER_CAPABILITY"
         || name == "CLOVY_COMPUTER_USE_PERMISSION_PROMPT"
         || name == "CLOVY_COMPUTER_USE_SOCKET"
+        || name == "CLOVY_COMPUTER_USE_RUN_DIR"
         || matches!(
             name.as_ref(),
             "HTTP_PROXY"
@@ -1144,10 +1331,36 @@ fn tool_result_text(result: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Error envelopes are action receipts too. Retain the engine code, delivery,
+/// retry advice and evidence when passing an error through the policy broker.
+fn driver_result_error(result: &Value) -> AppError {
+    let receipt = structured(result).cloned().unwrap_or_else(|| json!({}));
+    let engine_code = receipt
+        .pointer("/error/code")
+        .or_else(|| receipt.get("code"))
+        .and_then(Value::as_str);
+    let mut error = AppError::new(
+        engine_code.unwrap_or("computer_use_driver_failed"),
+        tool_result_text(result)
+            .unwrap_or_else(|| "The Computer use driver rejected the action.".to_string()),
+    );
+    let mut details = json!({ "engineReceipt": receipt });
+    if let Some(disposition) = receipt.get("disposition") {
+        details["disposition"] = disposition.clone();
+    }
+    if let Some(modality) = receipt
+        .get("effective_modality")
+        .or_else(|| receipt.get("modality"))
+    {
+        details["modality"] = modality.clone();
+    }
+    error.details = Some(details);
+    error
+}
+
 #[cfg(not(debug_assertions))]
 fn release_grant_file(app: &AppHandle) -> Result<PathBuf, AppError> {
-    app.path()
-        .app_config_dir()
+    crate::app_paths::app_config_dir(app)
         .map(|directory| directory.join(GRANT_FILE_NAME))
         .map_err(|error| AppError::new("computer_use_grant_failed", error.to_string()))
 }
@@ -1157,7 +1370,7 @@ pub(crate) async fn grant_enabled(_app: &AppHandle) -> bool {
     DEVELOPMENT_GRANT.load(Ordering::SeqCst)
 }
 
-#[cfg(all(not(debug_assertions), target_os = "macos"))]
+#[cfg(all(not(debug_assertions), any(target_os = "macos", target_os = "windows")))]
 pub(crate) async fn grant_enabled(app: &AppHandle) -> bool {
     let Ok(path) = release_grant_file(app) else {
         return false;
@@ -1169,7 +1382,10 @@ pub(crate) async fn grant_enabled(app: &AppHandle) -> bool {
     .unwrap_or(false)
 }
 
-#[cfg(all(not(debug_assertions), not(target_os = "macos")))]
+#[cfg(all(
+    not(debug_assertions),
+    not(any(target_os = "macos", target_os = "windows"))
+))]
 pub(crate) async fn grant_enabled(_app: &AppHandle) -> bool {
     false
 }
@@ -1180,7 +1396,7 @@ async fn store_grant(_app: &AppHandle, enabled: bool) -> Result<(), AppError> {
     Ok(())
 }
 
-#[cfg(all(not(debug_assertions), target_os = "macos"))]
+#[cfg(all(not(debug_assertions), any(target_os = "macos", target_os = "windows")))]
 async fn store_grant(app: &AppHandle, enabled: bool) -> Result<(), AppError> {
     let path = release_grant_file(app)?;
     tokio::task::spawn_blocking(move || {
@@ -1216,16 +1432,20 @@ async fn store_grant(app: &AppHandle, enabled: bool) -> Result<(), AppError> {
     .map_err(|error| AppError::new("computer_use_grant_failed", error.to_string()))
 }
 
-#[cfg(all(not(debug_assertions), not(target_os = "macos")))]
+#[cfg(all(
+    not(debug_assertions),
+    not(any(target_os = "macos", target_os = "windows"))
+))]
 async fn store_grant(_app: &AppHandle, _enabled: bool) -> Result<(), AppError> {
     Err(AppError::new(
         "computer_use_unsupported",
-        "Computer use is available on macOS only.",
+        "Computer use requires macOS or Windows.",
     ))
 }
 
 fn bundled_driver_executable(app: &AppHandle) -> Result<PathBuf, AppError> {
     let pin = driver_pin();
+    #[cfg(not(target_os = "windows"))]
     let packaged = app.path().resource_dir().ok().map(|resources| {
         resources
             .join("native")
@@ -1235,6 +1455,12 @@ fn bundled_driver_executable(app: &AppHandle) -> Result<PathBuf, AppError> {
             .join("MacOS")
             .join(&pin.executable)
     });
+    #[cfg(target_os = "windows")]
+    let packaged =
+        app.path().resource_dir().ok().map(|resources| {
+            resources.join("native/bin/computer-use/clovy-computer-use-driver.exe")
+        });
+    #[cfg(not(target_os = "windows"))]
     let development = Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(|repo| {
         repo.join(".tauri-helper")
             .join(&pin.bundle_name)
@@ -1242,6 +1468,10 @@ fn bundled_driver_executable(app: &AppHandle) -> Result<PathBuf, AppError> {
             .join("MacOS")
             .join(&pin.executable)
     });
+    #[cfg(target_os = "windows")]
+    let development = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|repo| repo.join(".tauri-helper/computer-use/clovy-computer-use-driver.exe"));
     let candidates = if cfg!(debug_assertions) {
         [development, packaged]
     } else {
@@ -1260,10 +1490,19 @@ fn bundled_driver_executable(app: &AppHandle) -> Result<PathBuf, AppError> {
 }
 
 fn driver_stamp_matches(executable: &Path, pin: &DriverPin) -> bool {
+    #[cfg(not(target_os = "windows"))]
     let Some(contents) = executable.parent().and_then(Path::parent) else {
         return false;
     };
-    let stamp = contents.join("Resources").join("clovy-cua-driver-pin.json");
+    #[cfg(not(target_os = "windows"))]
+    let stamp = contents
+        .join("Resources")
+        .join("clovy-computer-use-pin.json");
+    #[cfg(target_os = "windows")]
+    let stamp = match executable.parent() {
+        Some(parent) => parent.join("clovy-computer-use-pin.json"),
+        None => return false,
+    };
     let Ok(raw) = std::fs::read_to_string(stamp) else {
         return false;
     };
@@ -1362,6 +1601,32 @@ async fn verify_packaged_driver_signatures(
     path: &Path,
     force: bool,
 ) -> Result<(), AppError> {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let expected = option_env!("CLOVY_COMPUTER_USE_HELPER_SHA256")
+            .filter(|hash| hash.len() == 64)
+            .ok_or_else(|| {
+                AppError::new(
+                    "computer_use_driver_mismatch",
+                    "The signed build has no bound Computer use helper digest.",
+                )
+            })?;
+        let file = std::fs::File::open(path)
+            .map_err(|error| AppError::new("computer_use_driver_mismatch", error.to_string()))?;
+        let mut digest = Sha256::new();
+        std::io::copy(&mut std::io::BufReader::new(file), &mut digest)
+            .map_err(|error| AppError::new("computer_use_driver_mismatch", error.to_string()))?;
+        if format!("{:x}", digest.finalize()) != expected {
+            return Err(AppError::new(
+                "computer_use_driver_mismatch",
+                "The Computer use helper differs from this signed Clovy build.",
+            ));
+        }
+        #[cfg(target_os = "windows")]
+        crate::computer_use_windows::verify_signed_peer(path).map_err(|error| {
+            AppError::new("computer_use_driver_signature_failed", error.to_string())
+        })?;
+    }
     let Some(bundles) = packaged_driver_bundles(path)? else {
         return Ok(());
     };
@@ -1661,6 +1926,13 @@ fn status_from_checks(checks: StatusChecks) -> ComputerUseStatus {
         permissions,
     } = checks;
     let status = |state: &str, error: Option<String>| ComputerUseStatus {
+        platform: if cfg!(target_os = "windows") {
+            "windows"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "unsupported"
+        },
         platform_supported,
         grant_enabled,
         driver_available: false,
@@ -1696,7 +1968,7 @@ fn status_from_checks(checks: StatusChecks) -> ComputerUseStatus {
     let permissions = permission_probe_status(permissions.unwrap_or_else(|| {
         Err(AppError::new(
             "computer_use_permission_probe_missing",
-            "The macOS permission check did not run.",
+            "The local Computer use readiness check did not run.",
         ))
     }));
     ComputerUseStatus {
@@ -1713,7 +1985,7 @@ fn status_from_checks(checks: StatusChecks) -> ComputerUseStatus {
 /// bundled driver and its signature, and the macOS permissions (ADR-0067).
 /// No Clovy plan, vision model or remote rollout answer is consulted.
 async fn status_inner(app: &AppHandle, computer_use: &ComputerUseState) -> ComputerUseStatus {
-    let platform_supported = cfg!(target_os = "macos");
+    let platform_supported = cfg!(any(target_os = "macos", target_os = "windows"));
     let grant_enabled = platform_supported && grant_enabled(app).await;
     let mut checks = StatusChecks {
         platform_supported,
@@ -1861,13 +2133,36 @@ async fn prewarm_driver(app: &AppHandle, expected_epoch: u64) -> Result<bool, Ap
         return Ok(false);
     }
 
-    let client = DriverClient::start(&path, None).await?;
+    let client = start_driver_for_epoch(&state, &path, expected_epoch).await?;
     if !driver_prewarm_is_current(&state, expected_epoch) {
         client.stop().await;
         return Ok(false);
     }
     state.driver_pid.store(client.pid(), Ordering::SeqCst);
+    #[cfg(target_os = "macos")]
+    if let Ok(mut run) = state.driver_run_directory.lock() {
+        *run = Some(client.socket_dir.clone());
+    }
+    #[cfg(target_os = "macos")]
+    if let Ok(mut socket) = state.driver_socket.lock() {
+        *socket = Some(client.control_socket.clone());
+    }
+    state.driver_epoch.store(expected_epoch, Ordering::SeqCst);
+    #[cfg(target_os = "windows")]
+    if let Ok(mut cancel) = state.driver_cancel.lock() {
+        *cancel = Some(client.cancel_handle());
+    }
     *driver = Some(client);
+    // Stop can race publication after the preceding check and exhaust its
+    // bounded wait for this mutex. Once handles are visible, either Stop
+    // cancels them or this publisher observes revocation and retires itself.
+    if !driver_prewarm_is_current(&state, expected_epoch) {
+        cancel_driver_processes(&state);
+        if let Some(client) = driver.take() {
+            client.stop().await;
+        }
+        return Ok(false);
+    }
     Ok(true)
 }
 
@@ -1985,7 +2280,7 @@ pub async fn computer_use_request_permissions(
     if !grant_enabled(&app).await {
         return Err(AppError::new(
             "computer_use_grant_required",
-            "Enable Computer use before requesting macOS access.",
+            "Enable Computer use before checking system access.",
         ));
     }
     stop_inner(&app, &state).await;
@@ -2207,7 +2502,20 @@ pub(crate) fn end_turn_lease_in(
 ) -> Result<Option<u64>, AppError> {
     let mut leases = turn_leases(state)?;
     leases.insert(run_id.to_string(), TurnLease::Ended);
+    let mut owner = state
+        .active_turn
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "Turn owner lock failed."))?;
     let ended = end_run_lease(state, &turn_lease_key(run_id));
+    if owner.as_deref() == Some(run_id) {
+        // Termination must not wait behind a driver call holding its mutex.
+        // Invalidate its epoch and kill the owned process before allowing a
+        // different turn to select its own target.
+        invalidate_epoch(state);
+        cancel_driver_processes(state);
+        *owner = None;
+    }
+    drop(owner);
     drop(leases);
     ended
 }
@@ -2272,7 +2580,10 @@ fn is_terminal_event_of(payload: &str, run_id: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) fn has_attended_run(state: &ComputerUseState) -> bool {
-    ensure_attended_run(state).is_ok()
+    state
+        .attended_runs
+        .lock()
+        .is_ok_and(|runs| !runs.is_empty())
 }
 
 /// Stop for tests without an app: clears every lease, as [`stop_inner`].
@@ -2335,12 +2646,16 @@ async fn stop_inner(app: &AppHandle, state: &ComputerUseState) {
     if let Ok(mut runs) = state.attended_runs.lock() {
         runs.clear();
     }
-    state.epoch.fetch_add(1, Ordering::SeqCst);
+    invalidate_epoch(state);
     crate::computer_use_cursor::hide(app);
     cancel_pending(app, state);
-    force_stop_pid(state.driver_pid.swap(0, Ordering::SeqCst));
-    if let Some(driver) = state.driver.lock().await.take() {
-        driver.stop().await;
+    cancel_driver_processes(state);
+    if let Some(mut slot) =
+        crate::shutdown::lock_async_for(&state.driver, SHUTDOWN_MUTEX_TIMEOUT).await
+    {
+        if let Some(driver) = slot.take() {
+            driver.stop().await;
+        }
     }
     if let Ok(mut target) = state.target.lock() {
         *target = None;
@@ -2359,7 +2674,7 @@ async fn stop_for_shutdown(app: &AppHandle, state: &ComputerUseState) {
     } else {
         tracing::warn!("computer use shutdown timed out acquiring the run lock");
     }
-    state.epoch.fetch_add(1, Ordering::SeqCst);
+    invalidate_epoch(state);
     crate::computer_use_cursor::hide(app);
 
     let entries = crate::shutdown::try_lock_for(&state.approvals, SHUTDOWN_MUTEX_TIMEOUT)
@@ -2374,7 +2689,7 @@ async fn stop_for_shutdown(app: &AppHandle, state: &ComputerUseState) {
         let _ = entry.responder.send(false);
     }
 
-    force_stop_pid(state.driver_pid.swap(0, Ordering::SeqCst));
+    cancel_driver_processes(state);
     if let Some(mut driver) =
         crate::shutdown::lock_async_for(&state.driver, SHUTDOWN_MUTEX_TIMEOUT).await
     {
@@ -2399,15 +2714,17 @@ async fn stop_for_shutdown(app: &AppHandle, state: &ComputerUseState) {
 /// Retires a completed attended run without erasing a newer run that began
 /// while the terminal event was crossing the webview boundary.
 ///
-/// The initialized driver is intentionally retained as the off-action-path
-/// prewarm for the next attended task. It has no authority without an attended lease;
-/// explicit Stop, revocation, readiness loss, and shutdown still invalidate the
-/// epoch and terminate it through `stop_inner`/`stop_for_shutdown`.
+/// Retire the controller namespace too: engine refs cannot outlive their run.
 async fn stop_if_idle(app: &AppHandle, state: &ComputerUseState, generation: u64) {
     let _operation = state.operation.lock().await;
     let _cleanup = CleanupInProgress::begin(&state.cleanup_in_progress);
     if !idle_generation_is_current(state, generation) {
         return;
+    }
+    invalidate_epoch(state);
+    cancel_driver_processes(state);
+    if let Some(client) = state.driver.lock().await.take() {
+        client.stop().await;
     }
     crate::computer_use_cursor::hide(app);
     cancel_pending(app, state);
@@ -2432,14 +2749,59 @@ fn clear_app_authorizations(state: &ComputerUseState) {
     }
 }
 
-fn force_stop_pid(_pid: u32) {
+fn cancel_driver_processes(state: &ComputerUseState) {
+    let pid = state.driver_pid.swap(0, Ordering::SeqCst);
     #[cfg(target_os = "macos")]
-    if _pid > 0 {
-        if process_group_is_owned(_pid) {
-            signal_process_group(_pid, libc::SIGKILL);
-        } else {
-            let _ = unsafe { libc::kill(_pid as libc::pid_t, libc::SIGKILL) };
+    if let Ok(mut socket) = state.driver_socket.lock() {
+        if let Some(socket) = socket.take() {
+            // The authenticated helper watches EOF on a separate task and
+            // kills its own controller group. This also works when macOS
+            // refuses external process-environment inspection.
+            let _ = socket.shutdown(std::net::Shutdown::Both);
         }
+    }
+    #[cfg(target_os = "macos")]
+    if let Ok(mut root) = state.driver_run_directory.lock() {
+        if let Some(root) = root.take() {
+            crate::computer_use_macos::terminate_owned_group(pid, &root);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if let Ok(mut cancel) = state.driver_cancel.lock() {
+        if let Some(cancel) = cancel.take() {
+            cancel.cancel();
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = pid;
+}
+
+fn invalidate_epoch(state: &ComputerUseState) {
+    state.epoch.fetch_add(1, Ordering::SeqCst);
+    state.epoch_changed.notify_waiters();
+}
+
+async fn start_driver_for_epoch(
+    state: &ComputerUseState,
+    path: &Path,
+    epoch: u64,
+) -> Result<DriverClient, AppError> {
+    with_epoch_guard(state, epoch, DriverClient::start(path, None)).await
+}
+
+async fn with_epoch_guard<T>(
+    state: &ComputerUseState,
+    epoch: u64,
+    operation: impl Future<Output = Result<T, AppError>>,
+) -> Result<T, AppError> {
+    let cancelled = state.epoch_changed.notified();
+    tokio::pin!(cancelled);
+    cancelled.as_mut().enable();
+    ensure_epoch_current(state, Some(epoch))?;
+    tokio::select! {
+        biased;
+        _ = &mut cancelled => Err(AppError::new("computer_use_stopped", "Computer use stopped during helper startup.")),
+        result = operation => result,
     }
 }
 
@@ -2474,11 +2836,15 @@ fn emit_approvals_changed(app: &AppHandle, state: &ComputerUseState) {
 
 /// Runs a CLI turn's Computer use action through the broker and the per-app
 /// authorization. CLI turns are the only callers (ADR-0067).
-pub(crate) async fn handle_cli_action_for_call(app: &AppHandle, arguments: Value) -> Value {
+pub(crate) async fn handle_cli_action_for_call(
+    app: &AppHandle,
+    run_id: String,
+    arguments: Value,
+) -> Value {
     let state = app.state::<ComputerUseState>();
-    match handle_action(app, &state, arguments).await {
+    match handle_action(app, &state, &run_id, arguments).await {
         Ok(result) => result,
-        Err(error) => mcp_error(&error.message),
+        Err(error) => mcp_error(&error),
     }
 }
 
@@ -2517,10 +2883,13 @@ pub(crate) fn normalized_action(arguments: &Value) -> Result<String, AppError> {
 async fn handle_action(
     app: &AppHandle,
     state: &ComputerUseState,
+    run_id: &str,
     arguments: Value,
 ) -> Result<Value, AppError> {
     let _operation = state.operation.lock().await;
+    select_turn_owner(state, run_id)?;
     let epoch = state.epoch.load(Ordering::SeqCst);
+    ensure_epoch_current(state, Some(epoch))?;
     ensure_attended_run(state)?;
     let task_generation = state.attended_generation.load(Ordering::SeqCst);
     ensure_action_eligible(app).await?;
@@ -2557,11 +2926,18 @@ async fn handle_action(
 }
 
 fn ensure_attended_run(state: &ComputerUseState) -> Result<(), AppError> {
-    let attended = !state
+    let owner = state
+        .active_turn
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "Turn owner lock failed."))?
+        .clone();
+    let runs = state
         .attended_runs
         .lock()
-        .map_err(|_| AppError::new("computer_use_unavailable", "Run lease lock failed."))?
-        .is_empty();
+        .map_err(|_| AppError::new("computer_use_unavailable", "Run lease lock failed."))?;
+    let attended = owner
+        .as_ref()
+        .is_some_and(|owner| runs.contains(&turn_lease_key(owner)));
     if attended {
         Ok(())
     } else {
@@ -2570,6 +2946,39 @@ fn ensure_attended_run(state: &ComputerUseState) -> Result<(), AppError> {
             "Computer use is available only during a turn started from Clovy chat.",
         ))
     }
+}
+
+// One attended run owns the serialized controller. Switching owners retires
+// its entire engine namespace as well as the target and app grants.
+fn select_turn_owner(state: &ComputerUseState, run_id: &str) -> Result<(), AppError> {
+    let mut owner = state
+        .active_turn
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "Turn owner lock failed."))?;
+    let runs = state
+        .attended_runs
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "Run lease lock failed."))?;
+    if !runs.contains(&turn_lease_key(run_id)) {
+        return Err(attended_run_required());
+    }
+    if owner.as_deref() != Some(run_id) {
+        invalidate_epoch(state);
+        cancel_driver_processes(state);
+        let mut target = state
+            .target
+            .lock()
+            .map_err(|_| AppError::new("computer_use_unavailable", "Target lock failed."))?;
+        let mut apps = state.authorized_apps.lock().map_err(|_| {
+            AppError::new("computer_use_unavailable", "App authorization lock failed.")
+        })?;
+        if let Some(path) = target.take().and_then(|target| target.capture_path) {
+            remove_capture(Some(&path));
+        }
+        apps.clear();
+        *owner = Some(run_id.to_owned());
+    }
+    Ok(())
 }
 
 fn ensure_task_generation_current(
@@ -2591,8 +3000,8 @@ fn ensure_task_generation_current(
 /// check). Nothing remote and nothing about Clovy's plan or models
 /// (ADR-0067); the action only reaches here from a CLI turn's `clovy-mcp`.
 pub(crate) trait EligibilityProbe: Sync {
-    fn macos(&self) -> bool {
-        cfg!(target_os = "macos")
+    fn platform_supported(&self) -> bool {
+        cfg!(any(target_os = "macos", target_os = "windows"))
     }
     fn grant_enabled(&self) -> BoxedBool<'_>;
     fn driver(&self) -> Result<(), AppError>;
@@ -2616,10 +3025,10 @@ async fn ensure_action_eligible(app: &AppHandle) -> Result<(), AppError> {
 }
 
 pub(crate) async fn check_eligibility(probe: &dyn EligibilityProbe) -> Result<(), AppError> {
-    if !probe.macos() {
+    if !probe.platform_supported() {
         return Err(AppError::new(
             "computer_use_unsupported",
-            "Computer use is available on macOS only.",
+            "Computer use requires macOS or Windows.",
         ));
     }
     if !probe.grant_enabled().await {
@@ -2638,17 +3047,48 @@ async fn driver_call(
     arguments: Value,
     expected_epoch: Option<u64>,
 ) -> Result<Value, AppError> {
+    let startup_epoch = expected_epoch.unwrap_or_else(|| state.current_epoch());
+    let expected_epoch = Some(startup_epoch);
     ensure_epoch_current(state, expected_epoch)?;
     ensure_attended_run(state)?;
     let mut driver = state.driver.lock().await;
     ensure_epoch_current(state, expected_epoch)?;
     ensure_attended_run(state)?;
+    if state.driver_epoch.load(Ordering::SeqCst) != state.current_epoch() {
+        if let Some(client) = driver.take() {
+            client.stop().await;
+        }
+    }
     if driver.is_none() {
         let path = bundled_driver_executable(app)?;
         verify_packaged_driver_signatures(state, &path, false).await?;
         driver_version(&path).await?;
-        let client = DriverClient::start(&path, None).await?;
+        // Verification can yield while Stop retires this request's epoch.
+        // Never bind stale work to whichever epoch happens to be current.
+        ensure_epoch_current(state, expected_epoch)?;
+        ensure_attended_run(state)?;
+        let client = start_driver_for_epoch(state, &path, startup_epoch).await?;
+        #[cfg(target_os = "windows")]
+        if let Ok(mut cancel) = state.driver_cancel.lock() {
+            *cancel = Some(client.cancel_handle());
+        }
         state.driver_pid.store(client.pid(), Ordering::SeqCst);
+        #[cfg(target_os = "macos")]
+        if let Ok(mut run) = state.driver_run_directory.lock() {
+            *run = Some(client.socket_dir.clone());
+        }
+        #[cfg(target_os = "macos")]
+        if let Ok(mut socket) = state.driver_socket.lock() {
+            *socket = Some(client.control_socket.clone());
+        }
+        state.driver_epoch.store(startup_epoch, Ordering::SeqCst);
+        if let Err(error) =
+            ensure_epoch_current(state, expected_epoch).and_then(|()| ensure_attended_run(state))
+        {
+            cancel_driver_processes(state);
+            client.stop().await;
+            return Err(error);
+        }
         *driver = Some(client);
     }
     ensure_epoch_current(state, expected_epoch)?;
@@ -2676,13 +3116,52 @@ async fn driver_call(
         .expect("driver inserted above")
         .call_tool(tool, arguments, &mut handle_notification)
         .await;
-    if result.is_err() {
-        state.driver_pid.store(0, Ordering::SeqCst);
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(driver_failure_retires_run)
+    {
+        invalidate_epoch(state);
+        if result.as_ref().err().is_some_and(desktop_access_was_lost) {
+            replace_runtime_ready(state, false);
+        }
+        // Broken transport or lost desktop access retires this run's authority.
+        // The same turn cannot restart a helper and reuse its public numbers.
+        if let Ok(mut runs) = state.attended_runs.lock() {
+            runs.clear();
+        }
+        cancel_driver_processes(state);
+        crate::computer_use_cursor::hide(app);
+        if let Ok(mut target) = state.target.lock() {
+            if let Some(path) = target.take().and_then(|target| target.capture_path) {
+                remove_capture(Some(&path));
+            }
+        }
+        clear_app_authorizations(state);
         if let Some(client) = driver.take() {
             client.stop().await;
         }
     }
     result
+}
+
+fn desktop_access_was_lost(error: &AppError) -> bool {
+    error.code == "computer_use_desktop_unavailable"
+        || error.details.as_ref().is_some_and(|details| {
+            details
+                .pointer("/engineReceipt/error/details/clovy_code")
+                .and_then(Value::as_str)
+                == Some("computer_use_desktop_unavailable")
+        })
+}
+
+fn driver_failure_retires_run(error: &AppError) -> bool {
+    desktop_access_was_lost(error)
+        || error.code.starts_with("computer_use_driver_")
+        || matches!(
+            error.code.as_str(),
+            "computer_use_engine_transport" | "computer_use_engine_protocol"
+        )
 }
 
 fn ensure_epoch_current(
@@ -2779,7 +3258,10 @@ async fn windows(
 }
 
 fn is_stage_manager_shelf_surface(window: &WindowTarget) -> bool {
-    window.is_on_screen && window.width < 160.0 && window.height < 160.0
+    cfg!(not(target_os = "windows"))
+        && window.is_on_screen
+        && window.width < 160.0
+        && window.height < 160.0
 }
 
 /// Stage Manager can publish both the real hidden app window and a small,
@@ -2931,7 +3413,13 @@ async fn set_clovy_stage_companion(app: &AppHandle, enabled: bool) -> Result<(),
 
     let window = handle as usize;
     let (sender, receiver) = oneshot::channel();
+    let epoch = app.state::<ComputerUseState>().current_epoch();
+    let owner = app.clone();
     app.run_on_main_thread(move || {
+        if enabled && owner.state::<ComputerUseState>().current_epoch() != epoch {
+            let _ = sender.send(());
+            return;
+        }
         let window = unsafe { &*(window as *const NSWindow) };
         if enabled {
             let current = window.collectionBehavior();
@@ -2986,11 +3474,14 @@ async fn join_target_to_clovy_stage(
     epoch: u64,
     task_generation: u64,
 ) -> Result<WindowTarget, AppError> {
+    ensure_epoch_current(state, Some(epoch))?;
+    ensure_attended_run(state)?;
     ensure_task_generation_current(state, task_generation)?;
     crate::main_window::show(app);
     set_clovy_stage_companion(app, true).await?;
     tokio::time::sleep(Duration::from_millis(250)).await;
     ensure_task_generation_current(state, task_generation)?;
+    let action_id = random_id();
     let stage_join_result = driver_call(
         app,
         state,
@@ -2998,42 +3489,48 @@ async fn join_target_to_clovy_stage(
         json!({ "pid": target.pid, "window_id": target.window_id }),
         Some(epoch),
     )
-    .await?;
-    // The driver activates the target while Clovy's main window is an AppKit
-    // Stage Manager companion. WindowManager can therefore show both apps in
-    // the active set without a cursor-moving shelf click. Keep the wait bounded
-    // while WindowServer finishes the transition and verify the exact window.
-    let native_verified = native_stage_join_verified(&stage_join_result);
-    let mut last_seen = target.clone();
-    for _ in 0..if native_verified { 2 } else { 4 } {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        ensure_task_generation_current(state, task_generation)?;
-        let restored = refresh_window_target(app, state, target, epoch).await?;
-        if !window_needs_restore(&restored) {
-            return Ok(restored);
+    .await
+    .map_err(|error| action_delivery_unknown(error, &action_id))?;
+    async {
+        // The driver activates the target while Clovy's main window is an AppKit
+        // Stage Manager companion. WindowManager can therefore show both apps in
+        // the active set without a cursor-moving shelf click. Keep the wait bounded
+        // while WindowServer finishes the transition and verify the exact window.
+        let native_verified = native_stage_join_verified(&stage_join_result);
+        let mut last_seen = target.clone();
+        for _ in 0..if native_verified { 2 } else { 4 } {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            ensure_task_generation_current(state, task_generation)?;
+            let restored = refresh_window_target(app, state, target, epoch).await?;
+            if !window_needs_restore(&restored) {
+                return Ok(restored);
+            }
+            last_seen = restored;
         }
-        last_seen = restored;
+        // Screen-sharing privacy overlays can make WindowServer keep reporting the
+        // exact window as off-screen after AppKit accepted application activation.
+        // Treat that activation as authoritative; if it is unavailable, require
+        // both exact-window SkyLight focus and Accessibility raise. Combined with
+        // Clovy's companion collection behavior, either proof avoids turning a
+        // successful stage change into a slow false failure.
+        if native_verified {
+            last_seen.is_on_screen = true;
+            last_seen.on_current_space = Some(true);
+            return Ok(last_seen);
+        }
+        Err(AppError::new(
+            "computer_use_window_restore_failed",
+            "Clovy could not add that app window to the current Stage Manager group. Do not retry this window during the current task.",
+        ))
     }
-    // Screen-sharing privacy overlays can make WindowServer keep reporting the
-    // exact window as off-screen after AppKit accepted application activation.
-    // Treat that activation as authoritative; if it is unavailable, require
-    // both exact-window SkyLight focus and Accessibility raise. Combined with
-    // Clovy's companion collection behavior, either proof avoids turning a
-    // successful stage change into a slow false failure.
-    if native_verified {
-        last_seen.is_on_screen = true;
-        last_seen.on_current_space = Some(true);
-        return Ok(last_seen);
-    }
-    Err(AppError::new(
-        "computer_use_window_restore_failed",
-        "Clovy could not add that app window to the current Stage Manager group. Do not retry this window during the current task.",
-    ))
+    .await
+    .map_err(|error| action_delivered_unverified(error, &action_id))
 }
 
 #[cfg(target_os = "macos")]
 fn app_identity(pid: i64) -> Option<AppIdentity> {
     let pid = libc::pid_t::try_from(pid).ok()?;
+    let process_creation = crate::computer_use_macos::process_creation(u32::try_from(pid).ok()?)?;
     let running =
         objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
     if running.isTerminated() {
@@ -3047,13 +3544,27 @@ fn app_identity(pid: i64) -> Option<AppIdentity> {
     if !executable_path.is_absolute() {
         return None;
     }
+    if crate::computer_use_macos::process_creation(u32::try_from(pid).ok()?)? != process_creation {
+        return None;
+    }
     Some(AppIdentity {
         bundle_id,
         executable_path,
+        process_creation,
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn app_identity(pid: i64) -> Option<AppIdentity> {
+    let identity = crate::computer_use_windows::process_identity(u32::try_from(pid).ok()?).ok()?;
+    Some(AppIdentity {
+        bundle_id: identity.path.file_name()?.to_string_lossy().to_lowercase(),
+        executable_path: identity.path,
+        process_creation: identity.creation_time,
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn app_identity(_pid: i64) -> Option<AppIdentity> {
     None
 }
@@ -3423,12 +3934,19 @@ async fn ensure_app_authorized(
     Ok(true)
 }
 
-fn store_target_selection(state: &ComputerUseState, target: &WindowTarget) -> Result<(), AppError> {
+fn store_target_selection(
+    state: &ComputerUseState,
+    target: &WindowTarget,
+    epoch: u64,
+    task_generation: u64,
+) -> Result<(), AppError> {
     let previous_capture = {
         let mut current = state
             .target
             .lock()
             .map_err(|_| AppError::new("computer_use_unavailable", "Target lock failed."))?;
+        ensure_epoch_current(state, Some(epoch))?;
+        ensure_task_generation_current(state, task_generation)?;
         current
             .replace(TargetContext {
                 pid: target.pid,
@@ -3485,6 +4003,7 @@ async fn open_app(
         true
     };
     ensure_task_generation_current(state, task_generation)?;
+    let action_id = random_id();
     let result = driver_call(
         app,
         state,
@@ -3492,117 +4011,170 @@ async fn open_app(
         json!({ "name": requested_name }),
         Some(epoch),
     )
-    .await?;
-    let launched = structured(&result).ok_or_else(|| {
-        AppError::new(
-            "computer_use_driver_invalid_response",
-            "The Computer use driver did not identify the opened app.",
-        )
-    })?;
-    let pid = launched.get("pid").and_then(Value::as_i64).ok_or_else(|| {
-        AppError::new(
-            "computer_use_driver_invalid_response",
-            "The Computer use driver did not identify the opened app process.",
-        )
-    })?;
-    let identity = app_identity(pid).ok_or_else(|| {
+    .await
+    .map_err(|error| action_delivery_unknown(error, &action_id))?;
+    async {
+        let launched = structured(&result).ok_or_else(|| {
+            AppError::new(
+                "computer_use_driver_invalid_response",
+                "The Computer use driver did not identify the opened app.",
+            )
+        })?;
+        let (pid, identity) = verified_launched_identity(
+            launched,
+            cfg!(target_os = "macos"),
+            app_identity,
+        )?;
+        let reported_name = launched
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty() && *name != "?")
+            .unwrap_or(&requested_name);
+        if blocked_target(reported_name, &identity) {
+            return Err(AppError::new(
+                "computer_use_target_blocked",
+                format!("Clovy cannot operate {reported_name} with Computer use."),
+            ));
+        }
+        ensure_task_generation_current(state, task_generation)?;
+        let identity_key = identity_app_authorization(&identity);
+        if !app_is_authorized(state, &identity_key)? {
+            if authorized_by_name || requested_name_authorized {
+                remember_app_authorization(state, identity_key.clone())?;
+            } else {
+                // A previously approved running app was expected, but LaunchServices
+                // resolved the display name to a different identity. Do not let the
+                // display-name alias widen the user's approval to that other app.
+                ensure_app_authorized(
+                    app,
+                    state,
+                    identity_key.clone(),
+                    reported_name,
+                    epoch,
+                    task_generation,
+                )
+                .await?;
+            }
+        }
+        if let Err(error) = ensure_task_generation_current(state, task_generation) {
+            if let Ok(mut authorized_apps) = state.authorized_apps.lock() {
+                authorized_apps.remove(&identity_key);
+            }
+            return Err(error);
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let matching: Vec<_> = windows(app, state, Some(epoch))
+            .await?
+            .into_iter()
+            .filter(|window| window.pid == pid && window.identity == identity)
+            .collect();
+        let selected = matching
+            .iter()
+            .find(|window| !window_needs_restore(window))
+            .or_else(|| matching.first())
+            .cloned();
+        let selected = match selected {
+            Some(target) if window_needs_restore(&target) => {
+                Some(join_target_to_clovy_stage(app, state, &target, epoch, task_generation).await?)
+            }
+            selected => selected,
+        };
+        if let Some(target) = selected.as_ref() {
+            store_target_selection(state, target, epoch, task_generation)?;
+        }
+        let available_windows: Vec<_> = matching
+            .iter()
+            .map(|window| {
+                let window = selected
+                    .as_ref()
+                    .filter(|selected| selected.window_id == window.window_id)
+                    .unwrap_or(window);
+                json!({
+                    "window_id": window.window_id,
+                    "title": sanitize_line(&window.title),
+                    "bounds": {
+                        "x": window.x,
+                        "y": window.y,
+                        "width": window.width,
+                        "height": window.height,
+                    },
+                    "is_on_screen": window.is_on_screen,
+                    "needs_restore": window_needs_restore(window),
+                })
+            })
+            .collect();
+        ensure_epoch_current(state, Some(epoch))?;
+        ensure_task_generation_current(state, task_generation)?;
+        Ok(mcp_text(json!({
+            "ok": true,
+            "action": "open_app",
+            "action_id": action_id,
+            "disposition": { "delivery": "delivered_unverified", "retry": "unsafe" },
+            "target_app": selected.as_ref().map(|window| window.app_name.as_str()).unwrap_or(reported_name),
+            "pid": pid,
+            "window_id": selected.as_ref().map(|window| window.window_id),
+            "windows": available_windows,
+            "message": if selected.is_some() {
+                "The app is ready in Clovy's current Stage Manager group. Capture the returned window before acting."
+            } else {
+                "The app opened, but no operable window appeared yet. Wait, then call list_apps."
+            },
+        })))
+    }
+    .await
+    .map_err(|mut error| {
+        let mut details = error.details.take().unwrap_or_else(|| json!({}));
+        if !details.is_object() {
+            details = json!({ "cause": details });
+        }
+        details["launchReceipt"] = result.clone();
+        error.details = Some(details);
+        action_delivered_unverified(error, &action_id)
+    })
+}
+
+// A PID lookup can verify a native launch receipt, but cannot replace its
+// authority. In particular, a reused PID must not turn a name approval for the
+// launched process into a grant for its successor.
+fn verified_launched_identity(
+    launched: &Value,
+    require_bundle_id: bool,
+    lookup: impl FnOnce(i64) -> Option<AppIdentity>,
+) -> Result<(i64, AppIdentity), AppError> {
+    let unverified = || {
         AppError::new(
             "computer_use_target_unverified",
-            "Clovy could not verify the opened app identity.",
+            "Clovy could not verify the opened app against its native launch identity. Inspect the app list before continuing.",
         )
-    })?;
-    let reported_name = launched
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|name| !name.trim().is_empty() && *name != "?")
-        .unwrap_or(&requested_name);
-    if blocked_target(reported_name, &identity) {
-        return Err(AppError::new(
-            "computer_use_target_blocked",
-            format!("Clovy cannot operate {reported_name} with Computer use."),
-        ));
-    }
-    ensure_task_generation_current(state, task_generation)?;
-    let identity_key = identity_app_authorization(&identity);
-    if !app_is_authorized(state, &identity_key)? {
-        if authorized_by_name || requested_name_authorized {
-            remember_app_authorization(state, identity_key.clone())?;
-        } else {
-            // A previously approved running app was expected, but LaunchServices
-            // resolved the display name to a different identity. Do not let the
-            // display-name alias widen the user's approval to that other app.
-            ensure_app_authorized(
-                app,
-                state,
-                identity_key.clone(),
-                reported_name,
-                epoch,
-                task_generation,
-            )
-            .await?;
-        }
-    }
-    if let Err(error) = ensure_task_generation_current(state, task_generation) {
-        if let Ok(mut authorized_apps) = state.authorized_apps.lock() {
-            authorized_apps.remove(&identity_key);
-        }
-        return Err(error);
-    }
-
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    let matching: Vec<_> = windows(app, state, Some(epoch))
-        .await?
-        .into_iter()
-        .filter(|window| window.pid == pid && window.identity == identity)
-        .collect();
-    let selected = matching
-        .iter()
-        .find(|window| !window_needs_restore(window))
-        .or_else(|| matching.first())
-        .cloned();
-    let selected = match selected {
-        Some(target) if window_needs_restore(&target) => {
-            Some(join_target_to_clovy_stage(app, state, &target, epoch, task_generation).await?)
-        }
-        selected => selected,
     };
-    if let Some(target) = selected.as_ref() {
-        store_target_selection(state, target)?;
+    let pid = launched["pid"]
+        .as_i64()
+        .filter(|pid| *pid > 0 && u32::try_from(*pid).is_ok())
+        .ok_or_else(unverified)?;
+    let expected_path = launched["executable_path"]
+        .as_str()
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(unverified)?;
+    let expected_creation = launched["process_creation_time"]
+        .as_u64()
+        .filter(|creation| *creation > 0)
+        .ok_or_else(unverified)?;
+    let expected_bundle = launched["bundle_id"]
+        .as_str()
+        .filter(|bundle| !bundle.trim().is_empty());
+    if require_bundle_id && expected_bundle.is_none() {
+        return Err(unverified());
     }
-    let available_windows: Vec<_> = matching
-        .iter()
-        .map(|window| {
-            let window = selected
-                .as_ref()
-                .filter(|selected| selected.window_id == window.window_id)
-                .unwrap_or(window);
-            json!({
-                "window_id": window.window_id,
-                "title": sanitize_line(&window.title),
-                "bounds": {
-                    "x": window.x,
-                    "y": window.y,
-                    "width": window.width,
-                    "height": window.height,
-                },
-                "is_on_screen": window.is_on_screen,
-                "needs_restore": window_needs_restore(window),
-            })
-        })
-        .collect();
-    Ok(mcp_text(json!({
-        "ok": true,
-        "action": "open_app",
-        "target_app": selected.as_ref().map(|window| window.app_name.as_str()).unwrap_or(reported_name),
-        "pid": pid,
-        "window_id": selected.as_ref().map(|window| window.window_id),
-        "windows": available_windows,
-        "message": if selected.is_some() {
-            "The app is ready in Clovy's current Stage Manager group. Capture the returned window before acting."
-        } else {
-            "The app opened, but no operable window appeared yet. Wait, then call list_apps."
-        },
-    })))
+    let current = lookup(pid).ok_or_else(unverified)?;
+    if current.executable_path != expected_path
+        || current.process_creation != expected_creation
+        || expected_bundle.is_some_and(|bundle| current.bundle_id != bundle)
+    {
+        return Err(unverified());
+    }
+    Ok((pid, current))
 }
 
 async fn focus_app(
@@ -3643,15 +4215,25 @@ async fn focus_app(
         target = refresh_window_target(app, state, &target, epoch).await?;
     }
     let joined_current_stage = raise_window || window_needs_restore(&target);
+    let action_id = random_id();
     if joined_current_stage {
         target = join_target_to_clovy_stage(app, state, &target, epoch, task_generation).await?;
     }
-    ensure_epoch_current(state, Some(epoch))?;
-    ensure_task_generation_current(state, task_generation)?;
-    store_target_selection(state, &target)?;
+    let selection = (|| {
+        ensure_epoch_current(state, Some(epoch))?;
+        ensure_task_generation_current(state, task_generation)?;
+        store_target_selection(state, &target, epoch, task_generation)
+    })();
+    if joined_current_stage {
+        selection.map_err(|error| action_delivered_unverified(error, &action_id))?;
+    } else {
+        selection?;
+    }
     Ok(mcp_text(json!({
         "ok": true,
         "action": "focus_app",
+        "action_id": action_id,
+        "disposition": if joined_current_stage { Some(json!({ "delivery": "delivered_unverified", "retry": "unsafe" })) } else { None },
         "target_app": target.app_name,
         "window_id": target.window_id,
         "raised": joined_current_stage,
@@ -3700,14 +4282,16 @@ async fn mutate(
     revalidate_target(app, state, action, arguments, &target, epoch).await?;
     ensure_epoch_current(state, Some(epoch))?;
     ensure_task_generation_current(state, task_generation)?;
-    let mut result = driver_call(app, state, tool, driver_args, Some(epoch)).await?;
+    let mut result = driver_call(app, state, tool, driver_args, Some(epoch))
+        .await
+        .map_err(|error| action_delivery_unknown(error, &action_id))?;
     add_result_metadata(&mut result, &action_id, &target.app_name);
     if arguments
         .get("capture_after")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return capture(
+        let capture_result = capture(
             app,
             state,
             &json!({
@@ -3724,8 +4308,83 @@ async fn mutate(
             add_result_metadata(&mut capture, &action_id, &target.app_name);
             capture
         });
+        return Ok(combine_action_and_capture(result, capture_result));
     }
     Ok(result)
+}
+
+// A transport or helper failure does not establish whether input reached the
+// target. Preserve any stronger evidence, otherwise require an observation
+// before the caller considers another mutation.
+fn action_delivery_unknown(mut error: AppError, action_id: &str) -> AppError {
+    let mut details = error.details.take().unwrap_or_else(|| json!({}));
+    if !details.is_object() {
+        details = json!({ "cause": details });
+    }
+    if !details.get("disposition").is_some_and(Value::is_object) {
+        details["disposition"] = json!({ "delivery": "unknown", "retry": "unsafe" });
+    } else if details["disposition"]["delivery"].as_str() != Some("not_delivered") {
+        // Unknown retry metadata is not stronger evidence than an uncertain
+        // dispatch. Preserve the native receipt, but never advertise replay.
+        if !details["disposition"]["delivery"].is_string() {
+            details["disposition"]["delivery"] = json!("unknown");
+        }
+        details["disposition"]["retry"] = json!("unsafe");
+    }
+    details["actionId"] = json!(action_id);
+    error.details = Some(details);
+    error
+}
+
+fn action_delivered_unverified(mut error: AppError, action_id: &str) -> AppError {
+    let mut details = error.details.take().unwrap_or_else(|| json!({}));
+    if !details.is_object() {
+        details = json!({ "cause": details });
+    }
+    if let Some(prior) = details.get("disposition").cloned() {
+        details["subsequentDisposition"] = prior;
+    }
+    if let Some(prior) = details.get("actionId").cloned() {
+        details["subsequentActionId"] = prior;
+    }
+    details["disposition"] = json!({ "delivery": "delivered_unverified", "retry": "unsafe" });
+    details["actionId"] = json!(action_id);
+    error.details = Some(details);
+    error
+}
+
+// Once the driver has returned an action result, a later capture cannot
+// determine whether it is safe to repeat that action. Keep its receipt even
+// when the follow-up observation fails.
+pub(crate) fn combine_action_and_capture(
+    mut action: Value,
+    capture: Result<Value, AppError>,
+) -> Value {
+    match capture {
+        Ok(mut capture) => {
+            let key = if capture.get("structuredContent").is_some() {
+                "structuredContent"
+            } else {
+                "structured_content"
+            };
+            capture[key]["action_receipt"] = action;
+            capture
+        }
+        Err(error) => {
+            let warning = json!({
+                "capture_after_error": error,
+                "message": "The action returned a result, but the follow-up capture failed. Do not repeat the action; inspect the target first."
+            });
+            if !action.get("content").is_some_and(Value::is_array) {
+                action["content"] = json!([]);
+            }
+            if let Some(parts) = action.get_mut("content").and_then(Value::as_array_mut) {
+                parts.push(json!({ "type": "text", "text": warning.to_string() }));
+            }
+            action["captureAfterError"] = warning;
+            action
+        }
+    }
 }
 
 async fn recheck_after_approval(
@@ -3783,6 +4442,7 @@ async fn revalidate_target(
             "pid": approved.pid,
             "window_id": approved.window_id,
             "capture_mode": "som",
+            "revalidate": true,
         }),
         Some(epoch),
     )
@@ -4087,9 +4747,8 @@ fn driver_action(
                 object.insert("window_id".to_string(), json!(target.window_id));
                 object.insert("x".to_string(), json!(x));
                 object.insert("y".to_string(), json!(y));
-                // cua-driver's dedicated double_click pixel path takes screen
-                // coordinates. Its click path takes the window-local screenshot
-                // coordinates exposed by Clovy and supports an exact count.
+                // Keep double-click coordinates in the screenshot-local
+                // contract. The adapter performs the physical conversion once.
                 if action == "double_click" {
                     object.insert("count".to_string(), json!(2));
                     tool = "click";
@@ -4181,8 +4840,8 @@ fn driver_action(
                 }
                 let mut values = modifiers;
                 values.push(key);
-                // Force cua-driver's exact-window NSMenu path. Its pid-only
-                // hotkey path can reach another window owned by the same app.
+                // A shortcut is always bound to the captured window, even
+                // when the application owns several windows.
                 object.insert("window_id".to_string(), json!(target.window_id));
                 object.insert("keys".to_string(), json!(values));
                 Ok(("hotkey", args))
@@ -4416,50 +5075,6 @@ fn remove_capture(path: Option<&str>) {
     }
 }
 
-fn blocked_app(app: &str) -> bool {
-    let normalized: String = app
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect();
-    [
-        "clovy",
-        "terminal",
-        "iterm",
-        "warp",
-        "alacritty",
-        "kitty",
-        "ghostty",
-        "wezterm",
-        "hyper",
-        "codex",
-        "chatgpt",
-        "systemsettings",
-        "systempreferences",
-        "universalaccessauthwarn",
-        "securityagent",
-        "keychainaccess",
-        "loginwindow",
-        "installer",
-        "activitymonitor",
-        "scripteditor",
-        "automator",
-        "shortcuts",
-        "1password",
-        "bitwarden",
-        "dashlane",
-        "keepass",
-        "keeperpassword",
-        "nordpass",
-        "protonpass",
-        "roboform",
-        "strongbox",
-        "enpass",
-    ]
-    .iter()
-    .any(|blocked| normalized.contains(blocked))
-}
-
 fn blocked_target(app_name: &str, identity: &AppIdentity) -> bool {
     let executable = identity
         .executable_path
@@ -4660,6 +5275,10 @@ fn is_recursive_rm_flag(token: &str) -> bool {
 }
 
 fn blocked_key_combo(keys: &str) -> bool {
+    blocked_key_combo_for_platform(keys, cfg!(target_os = "windows"))
+}
+
+fn blocked_key_combo_for_platform(keys: &str, windows: bool) -> bool {
     let parts: HashSet<String> = keys
         .split(['+', '-'])
         .map(|part| normalize_key(part.trim()))
@@ -4667,6 +5286,16 @@ fn blocked_key_combo(keys: &str) -> bool {
         .collect();
     let has = |required: &[&str]| required.iter().all(|key| parts.contains(*key));
     let has_any = |keys: &[&str]| keys.iter().any(|key| parts.contains(*key));
+    if windows {
+        // Windows-key chords address the shell, even with an exact app target.
+        // Clipboard and task-switching shortcuts retain the existing boundary.
+        return has_any(&["cmd", "meta", "win", "windows", "super", "printscreen"])
+            || (parts.contains("ctrl") && has_any(&["c", "v", "x", "escape", "space"]))
+            || (parts.contains("option") && has_any(&["f4", "tab", "escape", "space"]))
+            || has(&["ctrl", "option", "delete"])
+            || has(&["ctrl", "insert"])
+            || (parts.contains("shift") && has_any(&["insert", "delete"]));
+    }
     has(&["cmd", "q"])
         || has(&["cmd", "shift", "q"])
         || has(&["cmd", "ctrl", "q"])
@@ -4677,7 +5306,7 @@ fn blocked_key_combo(keys: &str) -> bool {
         || has(&["cmd", "c"])
         || has(&["cmd", "x"])
         // These shortcuts are owned by macOS, not the target app. Even if a
-        // driver release changes how it posts background events, Computer use
+        // engine release changes how it posts background events, Computer use
         // must never open Spotlight/app switching or change Mission Control,
         // keyboard input source, or the active Space.
         || (parts.contains("cmd") && has_any(&["tab", "space"]))
@@ -4779,6 +5408,13 @@ fn optional_string<'a>(arguments: &'a Value, key: &str) -> Result<Option<&'a str
 }
 
 fn validated_modifiers(arguments: &Value) -> Result<Vec<String>, AppError> {
+    validated_modifiers_for_platform(arguments, cfg!(target_os = "windows"))
+}
+
+fn validated_modifiers_for_platform(
+    arguments: &Value,
+    windows: bool,
+) -> Result<Vec<String>, AppError> {
     let Some(value) = arguments.get("modifiers") else {
         return Ok(Vec::new());
     };
@@ -4805,6 +5441,12 @@ fn validated_modifiers(arguments: &Value) -> Result<Vec<String>, AppError> {
             return Err(AppError::new(
                 "computer_use_modifier_invalid",
                 "Computer use received an unsupported or duplicate modifier.",
+            ));
+        }
+        if windows && modifier == "cmd" {
+            return Err(AppError::new(
+                "computer_use_key_blocked",
+                "Computer use cannot hold the Windows key while operating an app.",
             ));
         }
         normalized.push(modifier);
@@ -4894,10 +5536,11 @@ fn mcp_text(value: Value) -> Value {
     })
 }
 
-fn mcp_error(message: &str) -> Value {
+fn mcp_error(error: &AppError) -> Value {
     json!({
-        "content": [{ "type": "text", "text": json!({ "error": message }).to_string() }],
+        "content": [{ "type": "text", "text": json!({ "error": error.message }).to_string() }],
         "isError": true,
+        "structuredContent": { "error": error },
     })
 }
 
@@ -4924,6 +5567,240 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn stopping_an_epoch_drops_initialization_without_waiting_for_its_reply() {
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let state = Arc::new(ComputerUseState::default());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (started, ready) = oneshot::channel();
+        let owned = state.clone();
+        let observed = dropped.clone();
+        let task = tokio::spawn(async move {
+            with_epoch_guard(&owned, 0, async move {
+                let _drop = Dropped(observed);
+                let _ = started.send(());
+                std::future::pending::<Result<(), AppError>>().await
+            })
+            .await
+        });
+        ready.await.unwrap();
+        invalidate_epoch(&state);
+        let result = tokio::time::timeout(Duration::from_millis(250), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.unwrap_err().code, "computer_use_stopped");
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn action_transport_failure_is_not_marked_safe_to_repeat() {
+        let error = action_delivery_unknown(AppError::new("timeout", "Timed out."), "action-1");
+        let details = error.details.unwrap();
+        assert_eq!(details["disposition"]["delivery"], "unknown");
+        assert_eq!(details["disposition"]["retry"], "unsafe");
+        assert_eq!(details["actionId"], "action-1");
+    }
+
+    #[test]
+    fn uncertain_native_retry_metadata_never_authorizes_replay() {
+        for disposition in [
+            Value::Null,
+            json!({"delivery":"unknown","retry":"unknown"}),
+            json!({"delivery":"delivery_uncertain","retry":"safe"}),
+            json!({"delivery":"delivered_unverified","retry":"unknown"}),
+        ] {
+            let mut error = AppError::new("ACTION_FAILED", "Native result");
+            error.details =
+                Some(json!({"disposition":disposition,"engineReceipt":{"original":disposition}}));
+            let error = action_delivery_unknown(error, "uncertain-native");
+            let details = error.details.unwrap();
+            assert_eq!(details["disposition"]["retry"], "unsafe");
+            assert_eq!(details["engineReceipt"]["original"], disposition);
+        }
+    }
+
+    #[test]
+    fn transport_failure_retires_the_run_but_policy_rejection_keeps_its_namespace() {
+        for code in [
+            "computer_use_driver_timeout",
+            "computer_use_driver_stopped",
+            "computer_use_engine_transport",
+            "computer_use_engine_protocol",
+            "computer_use_desktop_unavailable",
+        ] {
+            assert!(driver_failure_retires_run(&AppError::new(code, "fixture")));
+        }
+        for code in [
+            "POLICY_DENIED",
+            "ACTION_NOT_SUPPORTED",
+            "computer_use_target_stale",
+            "unsafe_modifier_lifetime",
+        ] {
+            assert!(!driver_failure_retires_run(&AppError::new(code, "fixture")));
+        }
+    }
+
+    #[test]
+    fn lost_desktop_retires_authority_without_erasing_prior_delivery() {
+        let receipt = json!({
+            "error": {"code":"POLICY_DENIED","details":{"clovy_code":"computer_use_desktop_unavailable"}},
+            "disposition":{"delivery":"delivered_unverified","retry":"unsafe"}
+        });
+        let error = driver_result_error(&json!({"structuredContent":receipt}));
+        assert!(driver_failure_retires_run(&error));
+        let error = action_delivery_unknown(error, "desktop-lost");
+        assert_eq!(
+            error.details.unwrap()["disposition"]["delivery"],
+            "delivered_unverified"
+        );
+        let mut unrelated = AppError::new("POLICY_DENIED", "Sensitive field");
+        unrelated.details = Some(
+            json!({"engineReceipt":{"error":{"details":{"clovy_code":"computer_use_sensitive_field_blocked"}}}}),
+        );
+        assert!(!driver_failure_retires_run(&unrelated));
+    }
+
+    #[test]
+    fn engine_error_keeps_delivery_and_evidence_across_broker_error_conversion() {
+        let receipt = json!({
+            "error": { "code": "ACTION_TIMEOUT" },
+            "disposition": { "delivery": "delivered_unverified", "retry": "unsafe" },
+            "modality": "visible",
+            "evidence": { "window": "fixture-window", "dispatch": "sent" }
+        });
+        let error = driver_result_error(
+            &json!({ "isError": true, "structuredContent": receipt, "content": [{"type":"text", "text":"Timed out after dispatch."}] }),
+        );
+        assert_eq!(error.code, "ACTION_TIMEOUT");
+        let error = action_delivery_unknown(error, "action-1");
+        let details = error.details.unwrap();
+        assert_eq!(details["disposition"]["delivery"], "delivered_unverified");
+        assert_eq!(details["disposition"]["retry"], "unsafe");
+        assert_eq!(details["modality"], "visible");
+        assert_eq!(details["engineReceipt"]["evidence"]["dispatch"], "sent");
+    }
+
+    #[test]
+    fn failure_after_a_successful_action_keeps_both_delivery_dispositions() {
+        let subsequent = action_delivery_unknown(AppError::new("timeout", "Timed out."), "stage");
+        let error = action_delivered_unverified(subsequent, "launch");
+        let details = error.details.unwrap();
+        assert_eq!(details["disposition"]["retry"], "unsafe");
+        assert_eq!(details["subsequentDisposition"]["delivery"], "unknown");
+        assert_eq!(details["subsequentActionId"], "stage");
+        assert_eq!(details["actionId"], "launch");
+    }
+
+    #[test]
+    fn interleaved_turns_cannot_inherit_the_other_turns_target_or_authorization() {
+        let state = ComputerUseState::default();
+        begin_run_lease(&state, turn_lease_key("a")).unwrap();
+        begin_run_lease(&state, turn_lease_key("b")).unwrap();
+        select_turn_owner(&state, "a").unwrap();
+        let first_epoch = state.current_epoch();
+        select_turn_owner(&state, "a").unwrap();
+        assert_eq!(state.current_epoch(), first_epoch);
+        state
+            .authorized_apps
+            .lock()
+            .unwrap()
+            .insert(AppAuthorizationKey::RequestedName("Fixture".into()));
+        *state.target.lock().unwrap() = Some(TargetContext {
+            pid: 1,
+            window_id: 2,
+            app_name: "Fixture".into(),
+            identity: AppIdentity {
+                bundle_id: "org.example.fixture".into(),
+                executable_path: PathBuf::from("/fixture"),
+                process_creation: 1,
+            },
+            elements: HashMap::new(),
+            capture_path: None,
+            capture_sha256: None,
+            capture_generation: 1,
+            bounds: crate::computer_use_cursor::ScreenRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+        });
+        select_turn_owner(&state, "b").unwrap();
+        assert!(
+            state.current_epoch() > first_epoch,
+            "switching turns must retire the engine ref namespace"
+        );
+        assert!(state.target.lock().unwrap().is_none());
+        assert!(state.authorized_apps.lock().unwrap().is_empty());
+        let epoch = state.current_epoch();
+        end_turn_lease_in(&state, "b").unwrap();
+        assert!(state.current_epoch() > epoch);
+        assert!(ensure_attended_run(&state).is_err());
+        assert!(select_turn_owner(&state, "b").is_err());
+        select_turn_owner(&state, "a").unwrap();
+        assert!(ensure_attended_run(&state).is_ok());
+    }
+
+    #[test]
+    fn a_stopped_action_cannot_publish_a_new_target() {
+        let state = ComputerUseState::default();
+        let epoch = state.current_epoch();
+        let generation = state.attended_generation.load(Ordering::SeqCst);
+        let target = WindowTarget {
+            pid: 1,
+            window_id: 2,
+            app_name: "Fixture".into(),
+            identity: AppIdentity {
+                bundle_id: "org.example.fixture".into(),
+                executable_path: PathBuf::from("/fixture"),
+                process_creation: 1,
+            },
+            title: "Fixture".into(),
+            z_index: 0,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            is_on_screen: true,
+            on_current_space: Some(true),
+        };
+        state.epoch.fetch_add(1, Ordering::SeqCst);
+        assert!(store_target_selection(&state, &target, epoch, generation).is_err());
+        assert!(state.target.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn follow_up_capture_keeps_the_action_receipt_even_when_capture_fails() {
+        let action = mcp_text(json!({ "action_id": "one", "result": "dispatched" }));
+        let failed = combine_action_and_capture(
+            action.clone(),
+            Err(AppError::new("capture_failed", "Capture failed.")),
+        );
+        assert_eq!(failed["structuredContent"], action["structuredContent"]);
+        assert_eq!(
+            failed["captureAfterError"]["capture_after_error"]["code"],
+            "capture_failed"
+        );
+        assert!(failed["content"].to_string().contains("Do not repeat"));
+        let missing_content = combine_action_and_capture(
+            json!({ "structuredContent": { "action_id": "two" } }),
+            Err(AppError::new("capture_failed", "Capture failed.")),
+        );
+        assert!(missing_content["content"]
+            .to_string()
+            .contains("Do not repeat"));
+
+        let observed =
+            combine_action_and_capture(action.clone(), Ok(mcp_text(json!({ "tree": "button" }))));
+        assert_eq!(observed["structuredContent"]["action_receipt"], action);
+    }
 
     #[test]
     fn driver_prewarm_loses_to_stop_and_readiness_loss() {
@@ -4961,43 +5838,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_readiness_loss_enters_the_stop_path() {
-        let source = include_str!("computer_use.rs");
-        let start = source
-            .find("pub(crate) async fn runtime_ready")
-            .expect("runtime readiness boundary");
-        let end = source[start..]
-            .find("/// Start the persistent private driver")
-            .map(|offset| start + offset)
-            .expect("driver prewarm boundary");
-        let readiness = &source[start..end];
-
-        assert!(readiness.contains("previous == ready_state_value(true)"));
-        assert!(readiness.contains("stop_inner(app, &state).await"));
-        assert!(readiness.contains("replace_runtime_ready(&state, false)"));
-    }
-
-    #[test]
-    fn status_probe_does_not_rebind_after_stop_or_shutdown() {
-        let source = include_str!("computer_use.rs");
-        let start = source
-            .find("async fn status_with_published_readiness")
-            .expect("status readiness helper boundary");
-        let end = source[start..]
-            .find("#[tauri::command]")
-            .map(|offset| start + offset)
-            .expect("next command boundary");
-        let helper = &source[start..end];
-
-        assert!(!helper.contains("loop {"));
-        assert_eq!(
-            helper.matches("state.epoch.load(Ordering::SeqCst)").count(),
-            1
-        );
-        assert!(helper.contains("computer_use_status_superseded"));
-    }
-
-    #[test]
     fn driver_prewarm_single_flight_reopens_after_completion() {
         let in_flight = AtomicBool::new(false);
         assert!(DriverPrewarmInProgress::try_begin(&in_flight));
@@ -5005,40 +5845,6 @@ mod tests {
         assert!(!DriverPrewarmInProgress::try_begin(&in_flight));
         drop(first);
         assert!(DriverPrewarmInProgress::try_begin(&in_flight));
-    }
-
-    #[test]
-    fn status_refresh_does_not_restore_stale_readiness_on_config_error() {
-        let source = include_str!("computer_use.rs");
-        let start = source
-            .find("pub async fn computer_use_status")
-            .expect("status command boundary");
-        let end = source[start..]
-            .find("fn ready_state_value")
-            .map(|offset| start + offset)
-            .expect("readiness helper boundary");
-
-        assert!(
-            !source[start..end].contains("runtime_ready_state.store(previous"),
-            "a config error must not re-arm prewarm after observed readiness loss"
-        );
-    }
-
-    #[test]
-    fn completed_run_keeps_driver_readiness_for_immediate_retry() {
-        let source = include_str!("computer_use.rs");
-        let start = source
-            .find("async fn stop_if_idle")
-            .expect("completed-run cleanup boundary");
-        let end = source[start..]
-            .find("fn clear_app_authorizations")
-            .map(|offset| start + offset)
-            .expect("completed-run cleanup end");
-        let cleanup = &source[start..end];
-
-        assert!(!cleanup.contains("state.epoch.fetch_add"));
-        assert!(!cleanup.contains("driver.stop().await"));
-        assert!(cleanup.contains("schedule_driver_prewarm(app)"));
     }
 
     #[tokio::test]
@@ -5240,7 +6046,7 @@ mod tests {
                 .contains("run-b"),
             "a duplicate predecessor release must not remove the successor"
         );
-        assert!(ensure_attended_run(&state).is_ok());
+        assert!(has_attended_run(&state));
     }
 
     #[test]
@@ -5341,7 +6147,62 @@ mod tests {
         AppIdentity {
             bundle_id: bundle_id.to_string(),
             executable_path: PathBuf::from(executable),
+            process_creation: 1,
         }
+    }
+
+    #[test]
+    fn launch_receipt_identity_cannot_be_replaced_by_a_reused_pid() {
+        let path_a = std::env::temp_dir().join("clovy-launch-a.exe");
+        let path_b = std::env::temp_dir().join("clovy-launch-b.exe");
+        let original = fixture_identity("org.example.fixture", path_a.to_str().unwrap());
+        let receipt = json!({
+            "pid": 42,
+            "executable_path": path_a,
+            "process_creation_time": 1,
+            "bundle_id": "org.example.fixture"
+        });
+        let exact = verified_launched_identity(&receipt, true, |pid| {
+            assert_eq!(pid, 42);
+            Some(original.clone())
+        })
+        .unwrap();
+        assert_eq!(exact, (42, original.clone()));
+
+        for replacement in [
+            AppIdentity {
+                process_creation: 2,
+                ..original.clone()
+            },
+            fixture_identity("org.example.other", path_b.to_str().unwrap()),
+            fixture_identity("org.example.other", path_a.to_str().unwrap()),
+        ] {
+            assert_eq!(
+                verified_launched_identity(&receipt, true, |_| Some(replacement))
+                    .unwrap_err()
+                    .code,
+                "computer_use_target_unverified"
+            );
+        }
+        assert!(verified_launched_identity(&receipt, true, |_| None).is_err());
+        let mut pid_only = receipt.clone();
+        pid_only
+            .as_object_mut()
+            .unwrap()
+            .remove("process_creation_time");
+        assert!(verified_launched_identity(&pid_only, false, |_| {
+            panic!("a PID-only receipt must fail before adopting any current process")
+        })
+        .is_err());
+        let mut without_bundle = receipt.clone();
+        without_bundle.as_object_mut().unwrap().remove("bundle_id");
+        assert!(
+            verified_launched_identity(&without_bundle, true, |_| Some(original.clone())).is_err()
+        );
+        // Windows authority is the exact executable and process generation.
+        assert!(
+            verified_launched_identity(&without_bundle, false, |_| Some(original.clone())).is_ok()
+        );
     }
 
     fn fixture_target() -> TargetContext {
@@ -5513,6 +6374,13 @@ mod tests {
             "Codex",
             "1Password",
             "Strongbox",
+            "WindowsTerminal.exe",
+            "cmd.exe",
+            "powershell.exe",
+            "pwsh.exe",
+            "CredentialUIBroker.exe",
+            "consent.exe",
+            "LogonUI.exe",
         ] {
             assert!(blocked_app(app), "{app}");
         }
@@ -5600,6 +6468,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn stage_manager_thumbnails_and_hidden_windows_require_restore() {
         let mut window = fixture_windows().remove(0);
         assert!(!window_needs_restore(&window));
@@ -5622,6 +6491,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn stage_manager_shelf_proxy_collapses_into_the_real_hidden_window() {
         let mut document = fixture_windows().remove(0);
         document.window_id = 4460;
@@ -5741,7 +6611,7 @@ mod tests {
                 .is_err()
         );
         assert!(validate_sensitive_action("key", &json!({ "keys": "shift+a" }), &target).is_err());
-        assert!(validate_sensitive_action("key", &json!({ "keys": "cmd+s" }), &target).is_ok());
+        assert!(validate_sensitive_action("key", &json!({ "keys": "ctrl+s" }), &target).is_ok());
         assert!(validate_sensitive_action("key", &json!({ "keys": "esc" }), &target).is_ok());
     }
 
@@ -5763,10 +6633,43 @@ mod tests {
             "cmd+option+m",
             "cmd+shift+5",
         ] {
-            assert!(blocked_key_combo(keys), "{keys}");
+            assert!(blocked_key_combo_for_platform(keys, false), "{keys}");
         }
-        assert!(!blocked_key_combo("cmd+s"));
-        assert!(!blocked_key_combo("return"));
+        assert!(!blocked_key_combo_for_platform("cmd+s", false));
+        assert!(!blocked_key_combo_for_platform("return", false));
+    }
+
+    #[test]
+    fn windows_shortcuts_and_pointer_modifiers_cannot_escape_the_target() {
+        for keys in [
+            "cmd+r",
+            "win+r",
+            "meta+l",
+            "ctrl+c",
+            "control+v",
+            "ctrl+x",
+            "alt+tab",
+            "alt+f4",
+            "alt+space",
+            "ctrl+escape",
+            "ctrl+shift+escape",
+            "ctrl+alt+delete",
+            "ctrl+insert",
+            "shift+insert",
+            "shift+delete",
+            "ctrl+space",
+            "printscreen",
+        ] {
+            assert!(blocked_key_combo_for_platform(keys, true), "{keys}");
+        }
+        for keys in ["ctrl+s", "ctrl+a", "ctrl+left", "return", "shift+f10"] {
+            assert!(!blocked_key_combo_for_platform(keys, true), "{keys}");
+        }
+        assert!(validated_modifiers_for_platform(&json!({"modifiers":["cmd"]}), true).is_err());
+        assert!(
+            validated_modifiers_for_platform(&json!({"modifiers":["ctrl","shift"]}), true).is_ok()
+        );
+        assert!(validated_modifiers_for_platform(&json!({"modifiers":["cmd"]}), false).is_ok());
     }
 
     #[cfg(target_os = "macos")]
@@ -6233,14 +7136,23 @@ mod tests {
     #[test]
     fn driver_stamp_requires_version_and_source_commit() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let executable = temp.path().join("Bundle.app/Contents/MacOS/cua-driver");
+        let executable = if cfg!(target_os = "windows") {
+            temp.path().join("clovy-computer-use-driver.exe")
+        } else {
+            temp.path()
+                .join("Bundle.app/Contents/MacOS/clovy-computer-use-driver")
+        };
         std::fs::create_dir_all(executable.parent().unwrap()).expect("macos dir");
         std::fs::write(&executable, b"driver").expect("driver");
-        let resources = temp.path().join("Bundle.app/Contents/Resources");
+        let resources = if cfg!(target_os = "windows") {
+            temp.path().to_path_buf()
+        } else {
+            temp.path().join("Bundle.app/Contents/Resources")
+        };
         std::fs::create_dir_all(&resources).expect("resources");
         let pin = driver_pin();
         std::fs::write(
-            resources.join("clovy-cua-driver-pin.json"),
+            resources.join("clovy-computer-use-pin.json"),
             json!({
                 "version": pin.version,
                 "sourceCommit": pin.source_commit,
@@ -6250,7 +7162,7 @@ mod tests {
         .expect("stamp");
         assert!(driver_stamp_matches(&executable, &pin));
         std::fs::write(
-            resources.join("clovy-cua-driver-pin.json"),
+            resources.join("clovy-computer-use-pin.json"),
             json!({ "version": pin.version, "sourceCommit": "wrong" }).to_string(),
         )
         .expect("bad stamp");

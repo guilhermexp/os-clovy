@@ -1,0 +1,4474 @@
+--- a/crates/core/src/actionability/actionability_semantic_geometry_tests.rs
++++ b/crates/core/src/actionability/actionability_semantic_geometry_tests.rs
+@@ -131,6 +131,7 @@
+         Action::Clear,
+         Action::SetValue("x".into()),
+         Action::Drag(crate::DragParams {
++            modifiers: Vec::new(),
+             from: crate::Point { x: 0.0, y: 0.0 },
+             to: crate::Point { x: 1.0, y: 1.0 },
+             duration_ms: None,
+--- a/crates/core/src/actionability/requirements_tests.rs
++++ b/crates/core/src/actionability/requirements_tests.rs
+@@ -18,6 +18,7 @@
+     assert!(!hover.enabled);
+ 
+     let drag = ActionabilityRequirements::for_action(&Action::Drag(DragParams {
++        modifiers: Vec::new(),
+         from: Point { x: 0.0, y: 0.0 },
+         to: Point { x: 1.0, y: 1.0 },
+         duration_ms: None,
+--- a/crates/core/src/actions/action_tests.rs
++++ b/crates/core/src/actions/action_tests.rs
+@@ -13,6 +13,7 @@
+ 
+ fn dummy_drag() -> DragParams {
+     DragParams {
++        modifiers: Vec::new(),
+         from: Point { x: 0.0, y: 0.0 },
+         to: Point { x: 1.0, y: 1.0 },
+         duration_ms: None,
+--- a/crates/core/src/actions/post_action.rs
++++ b/crates/core/src/actions/post_action.rs
+@@ -7,16 +7,43 @@
+ pub fn execute_verified_action(
+     adapter: &dyn PlatformAdapter,
+     handle: &NativeHandle,
++    request: ActionRequest,
++    lease: &InteractionLease,
++) -> Result<ActionResult, AdapterError> {
++    execute_with_clovy_policy(
++        adapter,
++        handle,
++        request,
++        lease,
++        crate::commands::clovy_safety::supervised(),
++    )
++}
++
++fn execute_with_clovy_policy(
++    adapter: &dyn PlatformAdapter,
++    handle: &NativeHandle,
+     mut request: ActionRequest,
+     lease: &InteractionLease,
++    supervised: bool,
+ ) -> Result<ActionResult, AdapterError> {
++    crate::commands::clovy_cancel::ensure()?;
++    let guarded = if supervised {
++        let live = adapter
++            .get_live_element(handle, lease.deadline())
++            .map_err(|error| error.with_disposition(DeliverySemantics::not_delivered()))?;
++        crate::commands::clovy_safety::guard_live(&live)?;
++        Some(live)
++    } else {
++        None
++    };
+     let action = request.action.clone();
+     if !action.requires_state_readback() {
++        crate::commands::clovy_cancel::ensure()?;
+         return adapter.execute_action(handle, request, lease);
+     }
+     let deadline = lease.deadline();
+     let before = matches!(action, Action::TypeText(_) | Action::Toggle)
+-        .then(|| adapter.get_live_element(handle, deadline).ok())
++        .then(|| guarded.or_else(|| adapter.get_live_element(handle, deadline).ok()))
+         .flatten();
+     if matches!(action, Action::Toggle)
+         && let Some(checked) = before.as_ref().and_then(checked)
+@@ -38,6 +65,7 @@
+         }),
+         _ => None,
+     };
++    crate::commands::clovy_cancel::ensure()?;
+     let execution = adapter
+         .execute_action(handle, request, lease)
+         .map(|mut result| {
+--- a/crates/core/src/actions/post_action_tests.rs
++++ b/crates/core/src/actions/post_action_tests.rs
+@@ -365,3 +365,25 @@
+     assert_eq!(error.code, ErrorCode::ActionFailed);
+     assert_eq!(error.disposition, DeliverySemantics::delivered_unverified());
+ }
++
++#[test]
++fn clovy_secure_state_change_blocks_before_the_native_action() {
++    for action in [
++        Action::TypeText("never".into()),
++        Action::SetValue("never".into()),
++        Action::Click,
++    ] {
++        let native = adapter(element(None, &["secure"]), element(None, &["secure"]));
++        let error = execute_with_clovy_policy(
++            &native,
++            &NativeHandle::null(),
++            ActionRequest::headless(action),
++            &InteractionLease::guarded(Deadline::after(1000).unwrap(), ()).unwrap(),
++            true,
++        )
++        .unwrap_err();
++        assert_eq!(error.code, ErrorCode::PolicyDenied);
++        assert_eq!(error.disposition, DeliverySemantics::not_delivered());
++        assert_eq!(native.calls.load(Ordering::SeqCst), 0);
++    }
++}
+--- a/crates/core/src/commands/clovy_cancel.rs
++++ b/crates/core/src/commands/clovy_cancel.rs
+@@ -0,0 +1,88 @@
++//! Private supervised run cancellation. Only the active native input owner may
++//! acknowledge after its release guard has completed and OS state is clear.
++use crate::{AdapterError, DeliverySemantics, ErrorCode};
++use std::{
++    fs::{self, OpenOptions},
++    path::PathBuf,
++    sync::atomic::{AtomicBool, Ordering},
++};
++static STOPPED: AtomicBool = AtomicBool::new(false);
++fn paths() -> Option<(PathBuf, PathBuf)> {
++    let cancel = PathBuf::from(std::env::var_os("CLOVY_AGENT_DESKTOP_CANCEL_FILE")?);
++    let ack = PathBuf::from(std::env::var_os("CLOVY_AGENT_DESKTOP_CANCEL_ACK_FILE")?);
++    valid_paths(cancel, ack)
++}
++fn valid_paths(cancel: PathBuf, ack: PathBuf) -> Option<(PathBuf, PathBuf)> {
++    let parent = cancel.parent()?;
++    if !cancel.is_absolute()
++        || !ack.is_absolute()
++        || ack.parent() != Some(parent)
++        || cancel.file_name()? != "cancel"
++        || ack.file_name()? != "cancel-ack"
++        || !fs::symlink_metadata(parent).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
++    {
++        return None;
++    }
++    Some((cancel, ack))
++}
++pub fn supervised() -> bool {
++    std::env::var_os("CLOVY_AGENT_DESKTOP_SUPERVISED").as_deref() == Some(std::ffi::OsStr::new("1"))
++}
++pub fn cancelled() -> bool {
++    if !supervised() {
++        return false;
++    }
++    if STOPPED.load(Ordering::Acquire) {
++        return true;
++    }
++    let stopped = paths().is_none_or(|(cancel, _)| match fs::symlink_metadata(cancel) {
++        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
++        _ => true,
++    });
++    if stopped {
++        STOPPED.store(true, Ordering::Release);
++    }
++    stopped
++}
++pub fn ensure() -> Result<(), AdapterError> {
++    if !cancelled() {
++        return Ok(());
++    }
++    Err(AdapterError::new(ErrorCode::ActionFailed,"The computer-use run was stopped")
++        .with_details(serde_json::json!({"clovy_code":"computer_use_stopped","physical_delivery_started":false}))
++        .with_disposition(DeliverySemantics::not_delivered()))
++}
++/// Called exclusively by the current native input owner after verified release.
++/// This never emits input, and the sticky marker rejects all later dispatch.
++pub fn acknowledge_release(released: bool) {
++    if !released || !cancelled() {
++        return;
++    }
++    let Some((cancel, ack)) = paths() else {
++        return;
++    };
++    if !fs::symlink_metadata(cancel).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink()) {
++        return;
++    }
++    let mut options = OpenOptions::new();
++    options.write(true).create_new(true);
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::OpenOptionsExt;
++        options.mode(0o600);
++    }
++    let _ = options.open(ack);
++}
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn clovy_cancel_contract_rejects_cross_namespace_and_symlink_parent() {
++        let root = std::env::temp_dir().join(format!("clovy-cancel-{}", std::process::id()));
++        fs::create_dir_all(&root).unwrap();
++        assert!(valid_paths(root.join("cancel"), root.join("cancel-ack")).is_some());
++        assert!(valid_paths(root.join("cancel"), root.join("foreign/cancel-ack")).is_none());
++        assert!(valid_paths(root.join("other"), root.join("cancel-ack")).is_none());
++        fs::remove_dir(root).unwrap();
++    }
++}
+--- a/crates/core/src/commands/clovy_safety.rs
++++ b/crates/core/src/commands/clovy_safety.rs
+@@ -0,0 +1,317 @@
++//! Dispatch-time Clovy policy. Upstream intentionally permits secure fields;
++//! the private embedding must check live evidence after resolving the ref.
++use crate::{
++    AccessibilityNode, AdapterError, Deadline, DeliverySemantics, ErrorCode, LiveElement,
++    PlatformAdapter, Point, WindowInfo,
++};
++
++pub(crate) fn supervised() -> bool {
++    std::env::var_os("CLOVY_AGENT_DESKTOP_SUPERVISED").as_deref() == Some(std::ffi::OsStr::new("1"))
++}
++fn blocked(message: &str) -> AdapterError {
++    AdapterError::new(ErrorCode::PolicyDenied,message)
++        .with_details(serde_json::json!({"clovy_code":"computer_use_sensitive_field_blocked","physical_delivery_started":false}))
++        .with_disposition(DeliverySemantics::not_delivered())
++}
++fn sensitive(text: &str) -> bool {
++    let text = text.to_lowercase();
++    [
++        "password",
++        "passcode",
++        "securetextfield",
++        "one-time",
++        "one time",
++        "verification code",
++        "security code",
++        "auth code",
++        "otp",
++        "credit card",
++        "card number",
++        "payment",
++        "billing",
++        "expiration",
++        "expiry",
++        "cardholder",
++        "bank account",
++        "account number",
++        "routing number",
++        "sort code",
++        "iban",
++        "swift code",
++        "cvv",
++        "cvc",
++        "social security",
++        "tax identification",
++        "date of birth",
++        "cc-number",
++        "cc-exp",
++        "cc-csc",
++        "private key",
++        "api key",
++        "access token",
++        "secret",
++        "seed phrase",
++        "recovery phrase",
++        "terminal",
++        "shell prompt",
++    ]
++    .iter()
++    .any(|s| text.contains(s))
++}
++pub(crate) fn guard_live(live: &LiveElement) -> Result<(), AdapterError> {
++    super::clovy_cancel::ensure()?;
++    if !live.states_complete
++        || live.identity.name.is_unknown()
++        || live.identity.description.is_unknown()
++    {
++        return Err(blocked(
++            "The live field security state is incomplete; capture or take over before input",
++        ));
++    }
++    let secure = live
++        .state
++        .states
++        .iter()
++        .any(|s| matches!(s.as_str(), "secure" | "protected" | "password"));
++    let text = format!(
++        "{} {:?} {:?} {:?}",
++        live.state.role,
++        live.identity.name,
++        live.identity.description,
++        live.identity.identifiers.identifiers()
++    );
++    if secure || sensitive(&text) {
++        return Err(blocked(
++            "Computer use cannot operate a credential, code, payment or secret field",
++        ));
++    }
++    Ok(())
++}
++fn intersects(bounds: crate::Rect, point: &Point) -> bool {
++    point.x >= bounds.x
++        && point.y >= bounds.y
++        && point.x < bounds.x + bounds.width
++        && point.y < bounds.y + bounds.height
++}
++fn guard_tree(
++    node: &AccessibilityNode,
++    point: Option<&Point>,
++    visited: &mut usize,
++) -> Result<(), AdapterError> {
++    *visited += 1;
++    if *visited > 20_000 || node.subtree_truncated {
++        return Err(blocked("The live window security inspection is incomplete"));
++    }
++    let states = &node.presentation.states;
++    let secure = states
++        .iter()
++        .any(|s| matches!(s.as_str(), "secure" | "protected" | "password"));
++    let text = format!(
++        "{} {:?} {:?} {:?} {:?} {:?}",
++        node.role,
++        node.identity.name,
++        node.identity.description,
++        node.identity.native_id,
++        node.presentation.descriptors.subrole,
++        node.presentation.descriptors.placeholder
++    );
++    // A document title is content, not a field label. Child controls and
++    // secure states still enforce the policy in a window titled e.g. a
++    // password-policy document.
++    let labelled_sensitive =
++        !matches!(node.role.as_str(), "window" | "application") && sensitive(&text);
++    let relevant = if let Some(point) = point {
++        node.presentation
++            .bounds
++            .is_some_and(|b| intersects(b, point))
++            || (node.presentation.bounds.is_none() && (secure || labelled_sensitive))
++    } else {
++        states.iter().any(|s| s == "focused")
++    };
++    if relevant && (secure || labelled_sensitive) {
++        return Err(blocked(
++            "The input target overlaps or focuses a credential, code, payment or secret field",
++        ));
++    }
++    for child in &node.children {
++        guard_tree(child, point, visited)?;
++    }
++    Ok(())
++}
++pub(crate) fn guard_window(
++    adapter: &dyn PlatformAdapter,
++    window: &WindowInfo,
++    point: Option<&Point>,
++    deadline: Deadline,
++) -> Result<(), AdapterError> {
++    let tree=adapter.get_tree(window,&crate::TreeOptions {max_depth:50,include_bounds:true,..Default::default()},deadline)
++        .map_err(|_|blocked("The exact window's live security state could not be inspected; take over before input"))?;
++    guard_tree(&tree, point, &mut 0)
++}
++pub(crate) fn guard_ref_target(
++    adapter: &dyn PlatformAdapter,
++    entry: &crate::RefEntry,
++    handle: &crate::NativeHandle,
++    deadline: Deadline,
++) -> Result<(), AdapterError> {
++    let id = entry
++        .source
++        .source_window_id
++        .as_deref()
++        .ok_or_else(|| blocked("The live field has no exact window security scope"))?;
++    let expected = WindowInfo {
++        id: id.to_owned(),
++        title: entry.source.source_window_title.clone().unwrap_or_default(),
++        app: entry.source.source_app.clone().unwrap_or_default(),
++        pid: entry.process.pid,
++        process_instance: entry.process.process_instance.clone(),
++        bounds: None,
++        state: Default::default(),
++    };
++    let window = adapter
++        .resolve_window_strict(&expected, deadline)
++        .map_err(|_| blocked("The exact field window changed before security inspection"))?;
++    let live = adapter
++        .get_live_element(handle, deadline)
++        .map_err(|_| blocked("The live field security state could not be inspected"))?;
++    guard_live(&live)?;
++    if let Some(bounds) = live
++        .bounds
++        .filter(|bounds| bounds.width > 0.0 && bounds.height > 0.0)
++    {
++        return guard_window(
++            adapter,
++            &window,
++            Some(&Point {
++                x: bounds.x + bounds.width / 2.0,
++                y: bounds.y + bounds.height / 2.0,
++            }),
++            deadline,
++        );
++    }
++    // A nonspatial semantic target still needs the current full metadata,
++    // including provider placeholders not carried by LiveElement.
++    let tree = adapter
++        .get_tree(
++            &window,
++            &crate::TreeOptions {
++                max_depth: 50,
++                include_bounds: true,
++                ..Default::default()
++            },
++            deadline,
++        )
++        .map_err(|_| blocked("The nonspatial field security metadata is unavailable"))?;
++    let mut node = &tree;
++    for index in &entry.scope.path {
++        node = node
++            .children
++            .get(*index)
++            .ok_or_else(|| blocked("The live field security path changed"))?;
++    }
++    if node.role != entry.identity.role
++        || node.identity.native_id != entry.identity.native_id
++        || node.identity.retained_object != entry.identity.retained_object
++        || (entry.identity.native_id.is_none() && entry.identity.retained_object.is_none())
++    {
++        return Err(blocked(
++            "The nonspatial field identity cannot establish security metadata",
++        ));
++    }
++    let text = format!(
++        "{} {:?} {:?} {:?} {:?}",
++        node.role,
++        node.identity.name,
++        node.identity.description,
++        node.presentation.descriptors.subrole,
++        node.presentation.descriptors.placeholder
++    );
++    if sensitive(&text)
++        || node
++            .presentation
++            .states
++            .iter()
++            .any(|state| state == "secure" || state == "protected")
++    {
++        return Err(blocked(
++            "The live target is a credential, code, payment or secret field",
++        ));
++    }
++    Ok(())
++}
++
++pub(crate) fn guard_drag(
++    adapter: &dyn PlatformAdapter,
++    window: &WindowInfo,
++    from: &Point,
++    to: &Point,
++    deadline: Deadline,
++) -> Result<(), AdapterError> {
++    // The native cursor path can curve slightly. A conservative rectangle also
++    // catches narrow fields between sampled points without repeated AX reads.
++    let margin = 16.0;
++    let region = crate::Rect {
++        x: from.x.min(to.x) - margin,
++        y: from.y.min(to.y) - margin,
++        width: (to.x - from.x).abs() + margin * 2.0,
++        height: (to.y - from.y).abs() + margin * 2.0,
++    };
++    let tree=adapter.get_tree(window,&crate::TreeOptions{max_depth:50,include_bounds:true,..Default::default()},deadline)
++        .map_err(|_|blocked("The exact window's live security state could not be inspected; take over before input"))?;
++    fn visit(
++        node: &AccessibilityNode,
++        region: crate::Rect,
++        count: &mut usize,
++    ) -> Result<(), AdapterError> {
++        *count += 1;
++        if *count > 20_000 || node.subtree_truncated {
++            return Err(blocked("The live window security inspection is incomplete"));
++        }
++        let secure = node
++            .presentation
++            .states
++            .iter()
++            .any(|s| matches!(s.as_str(), "secure" | "protected" | "password"));
++        let text = format!(
++            "{} {:?} {:?} {:?} {:?} {:?}",
++            node.role,
++            node.identity.name,
++            node.identity.description,
++            node.identity.native_id,
++            node.presentation.descriptors.subrole,
++            node.presentation.descriptors.placeholder
++        );
++        let overlap = node.presentation.bounds.is_none_or(|b| {
++            b.x < region.x + region.width
++                && b.x + b.width > region.x
++                && b.y < region.y + region.height
++                && b.y + b.height > region.y
++        });
++        let labelled_sensitive =
++            !matches!(node.role.as_str(), "window" | "application") && sensitive(&text);
++        if overlap && (secure || labelled_sensitive) {
++            return Err(blocked(
++                "The drag path overlaps a credential, code, payment or secret field",
++            ));
++        }
++        for child in &node.children {
++            visit(child, region, count)?;
++        }
++        Ok(())
++    }
++    visit(&tree, region, &mut 0)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn newly_secure_overlay_and_incomplete_evidence_are_refused() {
++        let mut tree:AccessibilityNode=serde_json::from_value(serde_json::json!({"role":"window","name":"Password policy notes","children":[{"role":"textfield","states":["secure","focused"],"bounds":{"x":20,"y":20,"width":100,"height":20}}]})).unwrap();
++        assert!(guard_tree(&tree, Some(&Point { x: 40.0, y: 30.0 }), &mut 0).is_err());
++        assert!(guard_tree(&tree, None, &mut 0).is_err());
++        assert!(guard_tree(&tree, Some(&Point { x: 200.0, y: 200.0 }), &mut 0).is_ok());
++        tree.subtree_truncated = true;
++        assert!(guard_tree(&tree, None, &mut 0).is_err());
++    }
++}
+--- a/crates/core/src/commands/clovy_targeted.rs
++++ b/crates/core/src/commands/clovy_targeted.rs
+@@ -0,0 +1,446 @@
++//! Private exact-window input. Expected capture identity is revalidated inside
++//! the interaction lease; preparatory focus is retained as a separate effect.
++use crate::{
++    AdapterError, AppError, Deadline, DeliverySemantics, DragParams, ErrorCode, InteractionLease,
++    MouseEvent, MouseEventKind, PlatformAdapter, Point, WindowInfo, context::CommandContext,
++};
++use serde_json::{Value, json};
++
++fn unsent(message: &str) -> AppError {
++    AdapterError::new(ErrorCode::StaleRef, message)
++        .with_disposition(DeliverySemantics::not_delivered())
++        .into()
++}
++fn checked_window(expected: &WindowInfo, live: WindowInfo) -> Result<WindowInfo, AppError> {
++    if expected.id != live.id
++        || expected.pid != live.pid
++        || expected
++            .process_instance
++            .as_deref()
++            .is_none_or(str::is_empty)
++        || expected.process_instance != live.process_instance
++        || expected.title != live.title
++        || expected.bounds.is_none()
++        || expected.bounds != live.bounds
++    {
++        return Err(unsent(
++            "The exact Clovy target identity or geometry changed",
++        ));
++    }
++    Ok(live)
++}
++fn decode_window(encoded: &str) -> Result<WindowInfo, AppError> {
++    serde_json::from_str(encoded).map_err(|_| unsent("The Clovy target identity is invalid"))
++}
++fn resolve(
++    expected: &WindowInfo,
++    adapter: &dyn PlatformAdapter,
++    lease: &InteractionLease,
++) -> Result<WindowInfo, AppError> {
++    checked_window(
++        expected,
++        adapter.resolve_window_strict(expected, lease.deadline())?,
++    )
++}
++#[derive(Default)]
++struct Effects {
++    focus_attempted: bool,
++    focus_confirmed: bool,
++    window: Option<WindowInfo>,
++    input_attempted: bool,
++    input_receipt: Option<Value>,
++}
++impl Effects {
++    fn focus(
++        &mut self,
++        window: &WindowInfo,
++        adapter: &dyn PlatformAdapter,
++        lease: &InteractionLease,
++    ) -> Result<(), AppError> {
++        self.window = Some(window.clone());
++        self.focus_attempted = true;
++        adapter.focus_window(window, lease)?;
++        // The focus adapter's success is evidence, even if a subsequent guard
++        // or observation fails. Never erase this by labeling all input unsent.
++        self.focus_confirmed = true;
++        Ok(())
++    }
++    fn evidence(&self) -> Value {
++        json!({"focus":{"attempted":self.focus_attempted,"confirmed":self.focus_confirmed,
++            "window_id":self.window.as_ref().map(|w|&w.id),"pid":self.window.as_ref().map(|w|w.pid),
++            "process_instance":self.window.as_ref().and_then(|w|w.process_instance.as_ref())},
++            "target_input":{"attempted":self.input_attempted,"receipt":self.input_receipt}})
++    }
++    fn finish(&self, result: Result<Value, AppError>) -> Result<Value, AppError> {
++        match result {
++            Ok(mut value) => {
++                if let Some(fields) = value.as_object_mut() {
++                    fields.insert("preparatory_effects".into(), self.evidence());
++                }
++                Ok(value)
++            }
++            Err(error) if self.focus_attempted || self.input_receipt.is_some() => {
++                let mut error = match error {
++                    AppError::Adapter(error) => error,
++                    other => AdapterError::internal(other.to_string())
++                        .with_details(json!({"cause_code":other.code()})),
++                };
++                let mut details = error.details.take().unwrap_or_else(|| json!({}));
++                if !details.is_object() {
++                    details = json!({"native_details":details});
++                }
++                let fields = details.as_object_mut().unwrap();
++                // Overall partial delivery must not erase the native target
++                // input/guard refusal that preceded this preparatory merge.
++                fields.insert("native_disposition".into(), json!(error.disposition));
++                fields.insert("preparatory_effects".into(), self.evidence());
++                error = error.with_details(details);
++                if error.disposition.retry() != crate::RetryDisposition::Unsafe {
++                    error = error.with_disposition(
++                        if self.focus_confirmed || self.input_receipt.is_some() {
++                            DeliverySemantics::delivered_unverified()
++                        } else {
++                            DeliverySemantics::uncertain()
++                        },
++                    );
++                }
++                Err(error.into())
++            }
++            Err(error) => Err(error),
++        }
++    }
++}
++fn focused(window: &WindowInfo) -> Result<(), AppError> {
++    if !window.state.is_focused
++        || window.state.visible == Some(false)
++        || window.state.minimized == Some(true)
++    {
++        return Err(unsent(
++            "The exact Clovy target did not remain visible and focused",
++        ));
++    }
++    Ok(())
++}
++fn prepare(
++    expected: &WindowInfo,
++    adapter: &dyn PlatformAdapter,
++    context: &CommandContext,
++    effects: &mut Effects,
++    preflight: impl FnOnce(&WindowInfo, Deadline) -> Result<(), AdapterError>,
++) -> Result<(WindowInfo, InteractionLease), AppError> {
++    if !context.is_headed() {
++        return Err(unsent("Private physical input requires visible modality"));
++    }
++    if let Some(error) = adapter.physical_pointer_refusal() {
++        return Err(error.into());
++    }
++    let lease = adapter.acquire_interaction_lease(Deadline::standard()?)?;
++    let live = resolve(expected, adapter, &lease)?;
++    preflight(&live, lease.deadline())?;
++    // Reads may block or change geometry. Repeat exact validation and Stop
++    // before the first effect, while retaining the final post-focus guard.
++    let live = resolve(expected, adapter, &lease)?;
++    super::clovy_cancel::ensure()?;
++    effects.focus(&live, adapter, &lease)?;
++    super::clovy_cancel::ensure()?;
++    let live = resolve(expected, adapter, &lease)?;
++    focused(&live)?;
++    Ok((live, lease))
++}
++fn checked_point(window: &WindowInfo, point: &Point) -> Result<(), AppError> {
++    point.validate()?;
++    let b = window
++        .bounds
++        .ok_or_else(|| unsent("Missing target geometry"))?
++        .validate()?;
++    if point.x < b.x || point.y < b.y || point.x >= b.x + b.width || point.y >= b.y + b.height {
++        return Err(unsent("The input point is outside the exact Clovy target"));
++    }
++    Ok(())
++}
++pub fn mouse(
++    encoded: &str,
++    event: MouseEvent,
++    adapter: &dyn PlatformAdapter,
++    context: &CommandContext,
++) -> Result<Value, AppError> {
++    if let MouseEventKind::Click { count } = event.kind {
++        crate::validate_mouse_click_count(count)?;
++    }
++    let expected = decode_window(encoded)?;
++    checked_point(&expected, &event.point)?;
++    let mut effects = Effects::default();
++    let result = (|| {
++        let (window, lease) = prepare(
++            &expected,
++            adapter,
++            context,
++            &mut effects,
++            |window, deadline| {
++                super::clovy_safety::guard_window(adapter, window, Some(&event.point), deadline)
++            },
++        )?;
++        let point = event.point.clone();
++        crate::cursor_overlay::submit_travel(adapter, context, point.clone(), &lease, true);
++        super::clovy_safety::guard_window(adapter, &window, Some(&point), lease.deadline())?;
++        let live = resolve(&expected, adapter, &lease)?;
++        focused(&live)?;
++        super::clovy_cancel::ensure()?;
++        effects.input_attempted = true;
++        let report = adapter.mouse_event(event, &lease);
++        if crate::cursor_overlay::input_was_delivered(&report) {
++            crate::cursor_overlay::submit(
++                adapter,
++                context,
++                point,
++                None,
++                true,
++                crate::CursorPhase::Effect,
++            );
++        }
++        let report = report?;
++        effects.input_receipt = Some(serde_json::to_value(&report)?);
++        super::operation_response::operation_response(&report, json!({"window_id":window.id}))
++    })();
++    effects.finish(result)
++}
++pub fn drag(
++    encoded: &str,
++    modifiers: Vec<crate::Modifier>,
++    from: (f64, f64),
++    to: (f64, f64),
++    adapter: &dyn PlatformAdapter,
++    context: &CommandContext,
++) -> Result<Value, AppError> {
++    if !cfg!(any(target_os = "macos", target_os = "windows")) && !modifiers.is_empty() {
++        return Err(AdapterError::new(
++            ErrorCode::ActionNotSupported,
++            "Modifier drag requires per-event modifier flags unavailable on this platform",
++        )
++        .with_disposition(DeliverySemantics::not_delivered())
++        .into());
++    }
++    let expected = decode_window(encoded)?;
++    let from = Point {
++        x: from.0,
++        y: from.1,
++    };
++    let to = Point { x: to.0, y: to.1 };
++    checked_point(&expected, &from)?;
++    checked_point(&expected, &to)?;
++    let params = DragParams {
++        modifiers,
++        from: from.clone(),
++        to: to.clone(),
++        duration_ms: Some(350),
++        drop_delay_ms: Some(150),
++    };
++    params.validate(Deadline::standard()?)?;
++    let mut effects = Effects::default();
++    let result = (|| {
++        let (window, lease) = prepare(
++            &expected,
++            adapter,
++            context,
++            &mut effects,
++            |window, deadline| {
++                super::clovy_safety::guard_drag(adapter, window, &from, &to, deadline)
++            },
++        )?;
++        let cursor = crate::cursor_overlay::hold_cursor(context, lease.deadline());
++        crate::cursor_overlay::submit_travel(adapter, context, from.clone(), &lease, false);
++        crate::cursor_overlay::submit_drag(adapter, context, from.clone(), to.clone(), &lease);
++        super::clovy_safety::guard_drag(adapter, &window, &from, &to, lease.deadline())?;
++        let live = resolve(&expected, adapter, &lease)?;
++        focused(&live)?;
++        super::clovy_cancel::ensure()?;
++        effects.input_attempted = true;
++        let report = adapter.drag(params, &lease)?;
++        effects.input_receipt = Some(serde_json::to_value(&report)?);
++        if crate::cursor_overlay::confirms_delivery(report.disposition()) {
++            crate::cursor_overlay::submit_drag_effect(adapter, context, from, to);
++        }
++        drop(cursor);
++        super::operation_response::operation_response(&report, json!({"window_id":window.id}))
++    })();
++    effects.finish(result)
++}
++/// Window-key identity is the capture's authority, never a new PID adopted
++/// from a reusable handle. All resolution, focus and input share this lease.
++pub fn press_window(
++    encoded: &str,
++    raw: String,
++    adapter: &dyn PlatformAdapter,
++    context: &CommandContext,
++) -> Result<Value, AppError> {
++    let expected = decode_window(encoded)?;
++    let combo = super::combo::parse_combo_normalized(&raw)?;
++    super::combo::ensure_combo_allowed(&combo, &raw, false, adapter)?;
++    let mut effects = Effects::default();
++    let result = (|| {
++        let lease = adapter.acquire_interaction_lease(Deadline::standard()?)?;
++        let live = resolve(&expected, adapter, &lease)?;
++        super::clovy_safety::guard_window(adapter, &live, None, lease.deadline())?;
++        let mut live = resolve(&expected, adapter, &lease)?;
++        super::clovy_cancel::ensure()?;
++        if context.physical_input_policy().is_headed() {
++            effects.focus(&live, adapter, &lease)?;
++            super::clovy_cancel::ensure()?;
++            live = resolve(&expected, adapter, &lease)?;
++            focused(&live)?;
++        }
++        super::clovy_safety::guard_window(adapter, &live, None, lease.deadline())?;
++        live = resolve(&expected, adapter, &lease)?;
++        super::clovy_cancel::ensure()?;
++        effects.input_attempted = true;
++        let receipt =
++            adapter.press_key_for_window(&live, &combo, context.physical_input_policy(), &lease)?;
++        effects.input_receipt = Some(serde_json::to_value(&receipt)?);
++        crate::cursor_overlay::follow_caret_after_key(adapter, context, Some(live.pid));
++        super::helpers::apply_scoped_post_action_wait(
++            serde_json::to_value(receipt)?,
++            None,
++            Some(expected.id.clone()),
++            adapter,
++            context,
++        )
++    })();
++    effects.finish(result)
++}
++pub fn press(
++    reference: String,
++    raw: String,
++    adapter: &dyn PlatformAdapter,
++    context: &CommandContext,
++) -> Result<Value, AppError> {
++    let combo = super::combo::parse_combo_normalized(&raw)?;
++    super::combo::ensure_combo_allowed(&combo, &raw, false, adapter)?;
++    super::helpers::execute_ref_action_with_context(
++        super::helpers::RefArgs {
++            ref_id: reference,
++            timeout_ms: Some(5000),
++        },
++        adapter,
++        context.request_base(crate::Action::PressKey(combo)),
++        context,
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn changed_process_geometry_or_outside_point_cannot_deliver() {
++        let w:WindowInfo=serde_json::from_value(json!({"id":"w-7","pid":42,"process_instance":"fixture-1","title":"Synthetic","app_name":"Fixture","bounds":{"x":-200.0,"y":10.0,"width":100.0,"height":80.0},"is_focused":true,"visible":true})).unwrap();
++        let mut reused = w.clone();
++        reused.process_instance = Some("fixture-2".into());
++        assert!(checked_window(&w, reused).is_err());
++        let mut moved = w.clone();
++        moved.bounds.as_mut().unwrap().x += 1.0;
++        assert!(checked_window(&w, moved).is_err());
++        assert!(checked_point(&w, &Point { x: -150.0, y: 40.0 }).is_ok());
++        assert!(checked_point(&w, &Point { x: -100.0, y: 40.0 }).is_err());
++    }
++    struct MovesDuringSecurityRead {
++        window: std::sync::Mutex<WindowInfo>,
++        inputs: std::sync::atomic::AtomicUsize,
++    }
++    impl crate::adapter::ActionOps for MovesDuringSecurityRead {}
++    impl crate::adapter::ObservationOps for MovesDuringSecurityRead {
++        fn get_tree(
++            &self,
++            _window: &WindowInfo,
++            _options: &crate::TreeOptions,
++            _deadline: Deadline,
++        ) -> Result<crate::AccessibilityNode, AdapterError> {
++            let mut window = self.window.lock().unwrap();
++            window.bounds.as_mut().unwrap().x += 50.0;
++            Ok(crate::adapter::minimal_accessibility_node(
++                "window",
++                "Synthetic",
++            ))
++        }
++    }
++    impl crate::adapter::SystemOps for MovesDuringSecurityRead {
++        fn acquire_interaction_lease(
++            &self,
++            deadline: Deadline,
++        ) -> Result<InteractionLease, AdapterError> {
++            InteractionLease::guarded(deadline, ())
++        }
++        fn focus_window(
++            &self,
++            _window: &WindowInfo,
++            _lease: &InteractionLease,
++        ) -> Result<(), AdapterError> {
++            Ok(())
++        }
++        fn resolve_window_strict(
++            &self,
++            _window: &WindowInfo,
++            _deadline: Deadline,
++        ) -> Result<WindowInfo, AdapterError> {
++            Ok(self.window.lock().unwrap().clone())
++        }
++    }
++    impl crate::adapter::InputOps for MovesDuringSecurityRead {
++        fn mouse_event(
++            &self,
++            _event: MouseEvent,
++            _lease: &InteractionLease,
++        ) -> Result<crate::OperationReport, AdapterError> {
++            self.inputs
++                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++            Ok(crate::adapter::test_report())
++        }
++        fn drag(
++            &self,
++            _params: DragParams,
++            _lease: &InteractionLease,
++        ) -> Result<crate::OperationReport, AdapterError> {
++            self.inputs
++                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++            Ok(crate::adapter::test_report())
++        }
++    }
++    #[test]
++    fn geometry_changed_during_security_inspection_blocks_click_and_drag_before_input() {
++        let window:WindowInfo=serde_json::from_value(json!({"id":"w-7","pid":42,"process_instance":"fixture-1","title":"Synthetic","app_name":"Fixture","bounds":{"x":0.0,"y":0.0,"width":100.0,"height":100.0},"is_focused":true,"visible":true})).unwrap();
++        for gesture in [false, true] {
++            let adapter = MovesDuringSecurityRead {
++                window: std::sync::Mutex::new(window.clone()),
++                inputs: std::sync::atomic::AtomicUsize::new(0),
++            };
++            let context = CommandContext::default().with_headed(true);
++            let encoded = serde_json::to_string(&window).unwrap();
++            let result = if gesture {
++                drag(
++                    &encoded,
++                    vec![],
++                    (10.0, 10.0),
++                    (20.0, 20.0),
++                    &adapter,
++                    &context,
++                )
++            } else {
++                mouse(
++                    &encoded,
++                    MouseEvent {
++                        point: Point { x: 10.0, y: 10.0 },
++                        button: crate::MouseButton::Left,
++                        kind: MouseEventKind::Click { count: 1 },
++                        modifiers: vec![],
++                    },
++                    &adapter,
++                    &context,
++                )
++            };
++            assert_eq!(result.unwrap_err().code(), "STALE_REF");
++            assert_eq!(adapter.inputs.load(std::sync::atomic::Ordering::SeqCst), 0);
++        }
++    }
++}
++
++#[cfg(test)]
++#[path = "clovy_targeted_review_tests.rs"]
++mod review_tests;
+--- a/crates/core/src/commands/clovy_targeted_review_tests.rs
++++ b/crates/core/src/commands/clovy_targeted_review_tests.rs
+@@ -0,0 +1,405 @@
++use super::*;
++use std::sync::{
++    Arc, Mutex,
++    atomic::{AtomicBool, AtomicUsize, Ordering},
++};
++#[derive(Clone, Copy)]
++enum Change {
++    Stable,
++    ReusedAtLease,
++    ReusedBeforeResolve,
++    SecureBeforeFocus,
++    SecureAfterFocus,
++    ResolveAfterFocus,
++    CancelAfterFocus,
++    InputRefused,
++}
++struct World {
++    window: Mutex<WindowInfo>,
++    change: Change,
++    leased: Arc<AtomicBool>,
++    focuses: AtomicUsize,
++    inputs: AtomicUsize,
++    native_input_calls: AtomicUsize,
++}
++impl World {
++    fn new(change: Change) -> Self {
++        let mut initial = window();
++        if matches!(change, Change::ReusedBeforeResolve) {
++            initial.pid = crate::ProcessId::new(99);
++            initial.process_instance = Some("B:2".into());
++        }
++        Self {
++            window: Mutex::new(initial),
++            change,
++            leased: Arc::new(AtomicBool::new(false)),
++            focuses: AtomicUsize::new(0),
++            inputs: AtomicUsize::new(0),
++            native_input_calls: AtomicUsize::new(0),
++        }
++    }
++    fn in_lease(&self) {
++        assert!(
++            self.leased.load(Ordering::SeqCst),
++            "consumer accessed native authority outside lease"
++        );
++    }
++}
++struct Lease(Arc<AtomicBool>);
++impl Drop for Lease {
++    fn drop(&mut self) {
++        self.0.store(false, Ordering::SeqCst);
++    }
++}
++fn window() -> WindowInfo {
++    serde_json::from_value(json!({"id":"w-7","pid":42,"process_instance":"A:1","title":"Synthetic","app_name":"Fixture","bounds":{"x":0.0,"y":0.0,"width":100.0,"height":100.0},"is_focused":true,"visible":true})).unwrap()
++}
++impl crate::adapter::ActionOps for World {}
++impl crate::adapter::ObservationOps for World {
++    fn list_windows(
++        &self,
++        _filter: &crate::WindowFilter,
++        _deadline: Deadline,
++    ) -> Result<Vec<WindowInfo>, AdapterError> {
++        Ok(vec![self.window.lock().unwrap().clone()])
++    }
++    fn list_apps(&self, _deadline: Deadline) -> Result<Vec<crate::AppInfo>, AdapterError> {
++        let w = self.window.lock().unwrap();
++        Ok(vec![crate::AppInfo {
++            name: w.app.clone(),
++            pid: w.pid,
++            bundle_id: None,
++            process_instance: w.process_instance.clone(),
++            presentation: None,
++        }])
++    }
++    fn get_tree(
++        &self,
++        _window: &WindowInfo,
++        _options: &crate::TreeOptions,
++        _deadline: Deadline,
++    ) -> Result<crate::AccessibilityNode, AdapterError> {
++        self.in_lease();
++        let mut tree = crate::adapter::minimal_accessibility_node("window", "Synthetic");
++        if matches!(self.change, Change::SecureBeforeFocus)
++            || matches!(self.change, Change::SecureAfterFocus)
++                && self.focuses.load(Ordering::SeqCst) > 0
++        {
++            let mut child = crate::adapter::minimal_accessibility_node("textfield", "Password");
++            child.presentation.states = vec!["secure".into(), "focused".into()];
++            child.presentation.bounds = self.window.lock().unwrap().bounds;
++            tree.children.push(child);
++        }
++        Ok(tree)
++    }
++}
++impl crate::adapter::SystemOps for World {
++    fn press_key_for_app(
++        &self,
++        _process: crate::ProcessIdentity,
++        _combo: &crate::KeyCombo,
++        _policy: crate::InteractionPolicy,
++        _lease: &InteractionLease,
++    ) -> Result<crate::ActionResult, AdapterError> {
++        self.in_lease();
++        self.inputs.fetch_add(1, Ordering::SeqCst);
++        Ok(crate::ActionResult::delivered_unverified("press_key"))
++    }
++    fn acquire_interaction_lease(
++        &self,
++        deadline: Deadline,
++    ) -> Result<InteractionLease, AdapterError> {
++        assert!(!self.leased.swap(true, Ordering::SeqCst));
++        if matches!(self.change, Change::ReusedAtLease) {
++            let mut w = self.window.lock().unwrap();
++            w.pid = crate::ProcessId::new(99);
++            w.process_instance = Some("B:2".into());
++        }
++        InteractionLease::guarded(deadline, Lease(self.leased.clone()))
++    }
++    fn resolve_window_strict(
++        &self,
++        _expected: &WindowInfo,
++        _deadline: Deadline,
++    ) -> Result<WindowInfo, AdapterError> {
++        self.in_lease();
++        if matches!(self.change, Change::ResolveAfterFocus)
++            && self.focuses.load(Ordering::SeqCst) > 0
++        {
++            return Err(
++                AdapterError::stale_ref_because("Native resolve failed after focus")
++                    .with_details(json!({"clovy_code":"fixture_resolve_lost"})),
++            );
++        }
++        Ok(self.window.lock().unwrap().clone())
++    }
++    fn focus_window(
++        &self,
++        _expected: &WindowInfo,
++        _lease: &InteractionLease,
++    ) -> Result<(), AdapterError> {
++        self.in_lease();
++        self.focuses.fetch_add(1, Ordering::SeqCst);
++        self.window.lock().unwrap().state.is_focused = true;
++        if matches!(self.change, Change::CancelAfterFocus) {
++            std::fs::write(
++                std::env::var_os("CLOVY_AGENT_DESKTOP_CANCEL_FILE").unwrap(),
++                b"stop",
++            )
++            .unwrap();
++        }
++        Ok(())
++    }
++    fn press_key_for_window(
++        &self,
++        _expected: &WindowInfo,
++        _combo: &crate::KeyCombo,
++        _policy: crate::InteractionPolicy,
++        _lease: &InteractionLease,
++    ) -> Result<crate::ActionResult, AdapterError> {
++        self.in_lease();
++        self.inputs.fetch_add(1, Ordering::SeqCst);
++        Ok(crate::ActionResult::delivered_unverified("press_key"))
++    }
++}
++impl crate::adapter::InputOps for World {
++    fn mouse_event(
++        &self,
++        _event: MouseEvent,
++        _lease: &InteractionLease,
++    ) -> Result<crate::OperationReport, AdapterError> {
++        self.in_lease();
++        self.native_input_calls.fetch_add(1, Ordering::SeqCst);
++        if matches!(self.change, Change::InputRefused) {
++            return Err(AdapterError::new(
++                ErrorCode::ActionNotSupported,
++                "Native input refused before Send",
++            )
++            .with_details(json!({"native_reason":"preflight_not_attempted"}))
++            .with_disposition(DeliverySemantics::not_delivered()));
++        }
++        self.inputs.fetch_add(1, Ordering::SeqCst);
++        Ok(crate::adapter::test_report())
++    }
++    fn drag(
++        &self,
++        _params: DragParams,
++        _lease: &InteractionLease,
++    ) -> Result<crate::OperationReport, AdapterError> {
++        self.in_lease();
++        self.native_input_calls.fetch_add(1, Ordering::SeqCst);
++        if matches!(self.change, Change::InputRefused) {
++            return Err(AdapterError::new(
++                ErrorCode::ActionNotSupported,
++                "Native input refused before Send",
++            )
++            .with_details(json!({"native_reason":"preflight_not_attempted"}))
++            .with_disposition(DeliverySemantics::not_delivered()));
++        }
++        self.inputs.fetch_add(1, Ordering::SeqCst);
++        Ok(crate::adapter::test_report())
++    }
++}
++#[test]
++fn window_key_consumer_rejects_reused_handle_inside_lease_before_any_effect() {
++    for (headed, change) in [false, true].into_iter().flat_map(|headed| {
++        [Change::ReusedBeforeResolve, Change::ReusedAtLease]
++            .into_iter()
++            .map(move |change| (headed, change))
++    }) {
++        let world = World::new(change);
++        let context = CommandContext::default().with_headed(headed);
++        let result = press_window(
++            &serde_json::to_string(&window()).unwrap(),
++            "escape".into(),
++            &world,
++            &context,
++        );
++        assert_eq!(world.focuses.load(Ordering::SeqCst), 0);
++        assert_eq!(world.inputs.load(Ordering::SeqCst), 0);
++        assert!(!world.leased.load(Ordering::SeqCst));
++        let error = result.unwrap_err();
++        assert_eq!(error.code(), "STALE_REF");
++        match error {
++            AppError::Adapter(error) => {
++                assert_eq!(error.disposition, DeliverySemantics::not_delivered())
++            }
++            other => panic!("{other}"),
++        }
++    }
++}
++#[test]
++fn window_key_consumer_preserves_stable_authority_in_both_modalities() {
++    for headed in [false, true] {
++        let world = World::new(Change::Stable);
++        let context = CommandContext::default().with_headed(headed);
++        let result = press_window(
++            &serde_json::to_string(&window()).unwrap(),
++            "ctrl+f".into(),
++            &world,
++            &context,
++        )
++        .unwrap();
++        assert_eq!(world.focuses.load(Ordering::SeqCst), usize::from(headed));
++        assert_eq!(world.inputs.load(Ordering::SeqCst), 1);
++        assert_eq!(result["disposition"]["retry"], "unsafe");
++        assert!(!world.leased.load(Ordering::SeqCst));
++    }
++}
++fn gesture(world: &World, dragging: bool) -> Result<Value, AppError> {
++    let encoded = serde_json::to_string(&window()).unwrap();
++    let context = CommandContext::default().with_headed(true);
++    if dragging {
++        drag(
++            &encoded,
++            vec![],
++            (10.0, 10.0),
++            (20.0, 20.0),
++            world,
++            &context,
++        )
++    } else {
++        mouse(
++            &encoded,
++            MouseEvent {
++                point: Point { x: 10.0, y: 10.0 },
++                button: crate::MouseButton::Left,
++                kind: MouseEventKind::Click { count: 1 },
++                modifiers: vec![],
++            },
++            world,
++            &context,
++        )
++    }
++}
++fn assert_after_focus(change: Change, dragging: bool) {
++    let world = World::new(change);
++    let error = gesture(&world, dragging).unwrap_err();
++    assert_eq!(world.focuses.load(Ordering::SeqCst), 1);
++    assert_eq!(world.inputs.load(Ordering::SeqCst), 0);
++    match error {
++        AppError::Adapter(error) => {
++            assert_eq!(error.disposition.retry(), crate::RetryDisposition::Unsafe);
++            let details = error.details.unwrap();
++            assert_eq!(
++                details["native_disposition"],
++                json!(DeliverySemantics::not_delivered())
++            );
++            let focus = &details["preparatory_effects"]["focus"];
++            assert_eq!(focus["attempted"], true);
++            assert_eq!(focus["confirmed"], true);
++            assert_eq!(focus["pid"], 42);
++            assert_eq!(
++                details["preparatory_effects"]["target_input"]["attempted"],
++                false
++            );
++            if matches!(change, Change::ResolveAfterFocus) {
++                assert_eq!(details["clovy_code"], "fixture_resolve_lost");
++            }
++        }
++        other => panic!("{other}"),
++    }
++}
++#[test]
++fn guard_or_resolve_failure_after_focus_keeps_partial_delivery_and_never_sends_mouse_or_drag() {
++    for dragging in [false, true] {
++        for change in [Change::SecureAfterFocus, Change::ResolveAfterFocus] {
++            assert_after_focus(change, dragging);
++        }
++    }
++}
++#[test]
++fn refusal_before_focus_stays_not_delivered_and_safe() {
++    for dragging in [false, true] {
++        let world = World::new(Change::SecureBeforeFocus);
++        let error = gesture(&world, dragging).unwrap_err();
++        assert_eq!(world.focuses.load(Ordering::SeqCst), 0);
++        assert_eq!(world.inputs.load(Ordering::SeqCst), 0);
++        match error {
++            AppError::Adapter(error) => {
++                assert_eq!(error.disposition, DeliverySemantics::not_delivered())
++            }
++            other => panic!("{other}"),
++        }
++    }
++}
++#[test]
++fn cancellation_after_focus_preserves_partial_delivery_in_isolated_consumer_process() {
++    for dragging in [false, true] {
++        let root = std::env::var_os("CLOVY_A2_PROOF_ROOT")
++            .map(std::path::PathBuf::from)
++            .unwrap_or_else(std::env::temp_dir)
++            .join(format!(
++                "clovy-a2-{}-{}",
++                std::process::id(),
++                std::time::SystemTime::now()
++                    .duration_since(std::time::UNIX_EPOCH)
++                    .unwrap()
++                    .as_nanos()
++            ));
++        std::fs::create_dir_all(&root).unwrap();
++        let output = std::process::Command::new(std::env::current_exe().unwrap())
++            .args([
++                "--ignored",
++                "--exact",
++                "commands::clovy_targeted::review_tests::cancellation_after_focus_child",
++                "--nocapture",
++            ])
++            .env("CLOVY_AGENT_DESKTOP_SUPERVISED", "1")
++            .env("CLOVY_AGENT_DESKTOP_CANCEL_FILE", root.join("cancel"))
++            .env(
++                "CLOVY_AGENT_DESKTOP_CANCEL_ACK_FILE",
++                root.join("cancel-ack"),
++            )
++            .env("CLOVY_A2_DRAG", if dragging { "1" } else { "0" })
++            .output()
++            .unwrap();
++        assert!(
++            output.status.success(),
++            "{}\n{}",
++            String::from_utf8_lossy(&output.stdout),
++            String::from_utf8_lossy(&output.stderr)
++        );
++    }
++}
++#[test]
++#[ignore = "only the isolated consumer parent sets the private cancellation namespace"]
++fn cancellation_after_focus_child() {
++    assert_eq!(
++        std::env::var("CLOVY_AGENT_DESKTOP_SUPERVISED").unwrap(),
++        "1"
++    );
++    assert_after_focus(
++        Change::CancelAfterFocus,
++        std::env::var("CLOVY_A2_DRAG").unwrap() == "1",
++    );
++}
++
++#[test]
++fn native_input_refusal_after_focus_retains_original_disposition_without_replay() {
++    for dragging in [false, true] {
++        let world = World::new(Change::InputRefused);
++        let error = gesture(&world, dragging).unwrap_err();
++        assert_eq!(world.focuses.load(Ordering::SeqCst), 1);
++        assert_eq!(world.native_input_calls.load(Ordering::SeqCst), 1);
++        assert_eq!(world.inputs.load(Ordering::SeqCst), 0);
++        match error {
++            AppError::Adapter(error) => {
++                assert_eq!(error.code, ErrorCode::ActionNotSupported);
++                assert_eq!(error.disposition, DeliverySemantics::delivered_unverified());
++                let details = error.details.unwrap();
++                assert_eq!(
++                    details["native_disposition"],
++                    json!(DeliverySemantics::not_delivered())
++                );
++                assert_eq!(details["native_reason"], "preflight_not_attempted");
++                assert_eq!(details["preparatory_effects"]["focus"]["confirmed"], true);
++                assert_eq!(
++                    details["preparatory_effects"]["target_input"]["attempted"],
++                    true
++                );
++            }
++            other => panic!("{other}"),
++        }
++    }
++}
+--- a/crates/core/src/commands/drag.rs
++++ b/crates/core/src/commands/drag.rs
+@@ -131,6 +131,7 @@
+             })),
+         )?;
+         let params = DragParams {
++            modifiers: Vec::new(),
+             from: from.point.clone(),
+             to: to.point.clone(),
+             duration_ms: args.duration_ms,
+--- a/crates/core/src/commands/launch_cdp_test_support.rs
++++ b/crates/core/src/commands/launch_cdp_test_support.rs
+@@ -51,6 +51,7 @@
+             serve_fake_cdp_endpoint(port);
+         }
+         Ok(crate::system::launch_result::LaunchResult {
++            launch_identity: None,
+             app: "Fixture".into(),
+             pid: ProcessId::new(42),
+             process_instance: Some("42:1".into()),
+--- a/crates/core/src/commands/launch_cdp_tests.rs
++++ b/crates/core/src/commands/launch_cdp_tests.rs
+@@ -357,6 +357,7 @@
+         _lease: &crate::InteractionLease,
+     ) -> Result<crate::system::launch_result::LaunchResult, crate::AdapterError> {
+         Ok(crate::system::launch_result::LaunchResult {
++            launch_identity: None,
+             app: "Fixture".into(),
+             pid: crate::ProcessId::new(42),
+             process_instance: None,
+--- a/crates/core/src/commands/launch_tests.rs
++++ b/crates/core/src/commands/launch_tests.rs
+@@ -35,6 +35,7 @@
+         _lease: &InteractionLease,
+     ) -> Result<crate::system::launch_result::LaunchResult, AdapterError> {
+         Ok(crate::system::launch_result::LaunchResult {
++            launch_identity: None,
+             app: "Fixture".into(),
+             pid: ProcessId::new(42),
+             process_instance: Some("42:1".into()),
+--- a/crates/core/src/commands/mod.rs
++++ b/crates/core/src/commands/mod.rs
+@@ -36,6 +36,10 @@
+ pub mod maximize;
+ pub mod minimize;
+ pub mod mouse_click;
++// Private embedding guard; not an unrestricted public command.
++pub mod clovy_cancel;
++pub(crate) mod clovy_safety;
++pub mod clovy_targeted;
+ pub mod mouse_down;
+ pub mod mouse_move;
+ pub mod mouse_up;
+--- a/crates/core/src/commands/press.rs
++++ b/crates/core/src/commands/press.rs
+@@ -46,6 +46,11 @@
+                     &lease,
+                 )?,
+             };
++        }
++        if crate::commands::clovy_safety::supervised()
++            && let Some(window) = &window
++        {
++            crate::commands::clovy_safety::guard_window(adapter, window, None, lease.deadline())?;
+         }
+         if !context.physical_input_policy().is_headed()
+             && let Some(window) = &window
+--- a/crates/core/src/commands/snapshot.rs
++++ b/crates/core/src/commands/snapshot.rs
+@@ -144,6 +144,10 @@
+         "complete": result.complete,
+         "tree": tree
+     });
++    if crate::commands::clovy_safety::supervised() {
++        // Private capture identity evidence; removed by the Clovy adapter.
++        body["_clovy_refmap"] = serde_json::to_value(&result.refmap)?;
++    }
+     if !result.complete {
+         body["truncated"] = json!(true);
+         body["nodes_observed"] = json!(result.nodes_observed);
+--- a/crates/core/src/commands/type_text.rs
++++ b/crates/core/src/commands/type_text.rs
+@@ -51,7 +51,7 @@
+     adapter: &dyn PlatformAdapter,
+     context: &CommandContext,
+ ) -> Result<Value, AppError> {
+-    if args.text.len() > MAX_TEXT_LEN {
++    if args.text.chars().count() > MAX_TEXT_LEN {
+         return Err(AppError::invalid_input(format!(
+             "Text exceeds maximum length of {MAX_TEXT_LEN} characters"
+         )));
+--- a/crates/core/src/commands/type_text_tests.rs
++++ b/crates/core/src/commands/type_text_tests.rs
+@@ -274,3 +274,35 @@
+     assert_eq!(*adapter.value.lock().unwrap(), "abc");
+     assert_eq!(value["keystrokes"], 3);
+ }
++
++#[test]
++fn unicode_character_limit_reaches_the_action_without_byte_truncation() {
++    let _guard = HomeGuard::new();
++    let adapter = StaleThenOkAdapter::new(0);
++    let text = "🦀".repeat(10_000);
++    execute(
++        TypeArgs {
++            ref_id: format!("@{}:e1", snapshot_id()),
++            text: text.clone(),
++            timeout_ms: Some(0),
++            interval_ms: None,
++        },
++        &adapter,
++        &CommandContext::default(),
++    )
++    .unwrap();
++    assert_eq!(*adapter.value.lock().unwrap(), text);
++    let error = execute(
++        TypeArgs {
++            ref_id: format!("@{}:e1", snapshot_id()),
++            text: "🦀".repeat(10_001),
++            timeout_ms: Some(0),
++            interval_ms: None,
++        },
++        &adapter,
++        &CommandContext::default(),
++    )
++    .unwrap_err();
++    assert_eq!(error.code(), "INVALID_ARGS");
++    assert_eq!(*adapter.value.lock().unwrap(), text);
++}
+--- a/crates/core/src/cursor_overlay/submit.rs
++++ b/crates/core/src/cursor_overlay/submit.rs
+@@ -187,6 +187,9 @@
+         return;
+     };
+     let _scope = crate::wait::deadline::enter_scope(Some(cleanup_deadline));
++    if crate::commands::clovy_cancel::cancelled() {
++        return;
++    }
+     let Some(session_id) = enabled_session(context) else {
+         return;
+     };
+@@ -200,6 +203,9 @@
+     context: &CommandContext,
+     instruction: Result<super::CursorOverlayInstruction, AdapterError>,
+ ) -> bool {
++    if crate::commands::clovy_cancel::cancelled() {
++        return false;
++    }
+     let Some(session_id) = enabled_session(context) else {
+         return false;
+     };
+--- a/crates/core/src/input/drag_params.rs
++++ b/crates/core/src/input/drag_params.rs
+@@ -8,6 +8,9 @@
+ 
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct DragParams {
++    /// Per-event flags for embedded macOS drags; no separately held keys.
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub modifiers: Vec<crate::Modifier>,
+     pub from: Point,
+     pub to: Point,
+     #[serde(skip_serializing_if = "Option::is_none")]
+--- a/crates/core/src/ref_action/mod.rs
++++ b/crates/core/src/ref_action/mod.rs
+@@ -130,6 +130,14 @@
+         .with_verified_point(preflight.verified_point.clone())
+         .with_expected_process(expected_process.clone());
+     let final_target = ResolvedRefAction::new(target, &handle);
++    if crate::commands::clovy_safety::supervised() {
++        crate::commands::clovy_safety::guard_ref_target(
++            final_target.adapter,
++            final_target.entry,
++            final_target.handle,
++            lease.deadline(),
++        )?;
++    }
+     final_target.context.trace_lazy(
+         "action.dispatch.start",
+         || json!({ "ref": final_target.ref_id, "action": request.action.name() }),
+--- a/crates/core/src/session/mod.rs
++++ b/crates/core/src/session/mod.rs
+@@ -296,6 +296,30 @@
+     Ok(manifests)
+ }
+ 
++/// Private embedding bootstrap. The owner supplies a fresh isolated state
++/// root; an ended session is never reopened and this path enables no tracing.
++pub fn ensure_clovy_session(id: &str) -> Result<(), AppError> {
++    validate_session_id(id)?;
++    if let Some(manifest) = read_manifest(id)? {
++        if manifest.ended_at.is_some() {
++            return Err(AppError::invalid_input(
++                "The supervised Computer use session ended",
++            ));
++        }
++        return Ok(());
++    }
++    tree::create(&session_dir(id)?)?;
++    write_manifest(&SessionManifest {
++        id: id.to_owned(),
++        name: Some("Clovy".into()),
++        created_at: now_millis(),
++        ended_at: None,
++        trace: SessionTraceMode::Off,
++        artifacts: ArtifactsMode::Events,
++        cursor_overlay: CursorOverlayConfig::enabled(None, 6)?,
++    })
++}
++
+ pub fn start_session(options: StartSessionOptions) -> Result<SessionManifest, AppError> {
+     if matches!(options.trace, SessionTraceMode::Off)
+         && matches!(options.artifacts, ArtifactsMode::Full)
+--- a/crates/core/src/session/session_tests.rs
++++ b/crates/core/src/session/session_tests.rs
+@@ -365,3 +365,15 @@
+             .is_some()
+     );
+ }
++
++#[test]
++fn supervised_session_has_cursor_without_tracing_and_cannot_reopen() {
++    let _guard = HomeGuard::new();
++    ensure_clovy_session("clovy").unwrap();
++    let manifest = read_manifest("clovy").unwrap().unwrap();
++    assert!(manifest.cursor_overlay.is_enabled());
++    assert_eq!(manifest.trace, SessionTraceMode::Off);
++    ensure_clovy_session("clovy").unwrap();
++    end_session("clovy").unwrap();
++    assert!(ensure_clovy_session("clovy").is_err());
++}
+--- a/crates/core/src/system/launch_result.rs
++++ b/crates/core/src/system/launch_result.rs
+@@ -12,6 +12,8 @@
+ /// the presentation of an application that reports no window.
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct LaunchResult {
++    #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
++    pub launch_identity: Option<LaunchIdentity>,
+     pub app: String,
+     pub pid: ProcessId,
+     #[serde(skip_serializing_if = "Option::is_none")]
+@@ -33,3 +35,40 @@
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub suggestion: Option<String>,
+ }
++
++/// Identity captured from the native launch result, never a later PID adoption.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct LaunchIdentity {
++    pub executable_path: String,
++    pub process_creation_time: u64,
++    pub bundle_id: String,
++}
++#[cfg(test)]
++mod clovy_identity_tests {
++    use super::*;
++    #[test]
++    fn native_launch_authority_is_serialized_at_the_consumer_boundary() {
++        let result = LaunchResult {
++            launch_identity: Some(LaunchIdentity {
++                executable_path: "/Applications/A.app/Contents/MacOS/A".into(),
++                process_creation_time: 123456789,
++                bundle_id: "fixture.A".into(),
++            }),
++            app: "A".into(),
++            pid: ProcessId::new(42),
++            process_instance: Some("macos-proc-v1:123:456789".into()),
++            window: None,
++            cdp: None,
++            renderer: None,
++            suggestion: None,
++        };
++        let receipt = serde_json::to_value(result).unwrap();
++        assert_eq!(
++            receipt["executable_path"],
++            "/Applications/A.app/Contents/MacOS/A"
++        );
++        assert_eq!(receipt["process_creation_time"], 123456789u64);
++        assert_eq!(receipt["bundle_id"], "fixture.A");
++        assert!(receipt.get("launch_identity").is_none());
++    }
++}
+--- a/crates/core/src/system/operation_report_build_tests.rs
++++ b/crates/core/src/system/operation_report_build_tests.rs
+@@ -54,6 +54,7 @@
+ #[test]
+ fn drag_report_carries_both_endpoints_and_stays_unverified() {
+     let report = OperationReport::drag_dispatched(&DragParams {
++        modifiers: Vec::new(),
+         from: Point { x: 0.0, y: 0.0 },
+         to: Point { x: 9.0, y: 9.0 },
+         duration_ms: None,
+--- a/crates/ffi/src/apps/launch.rs
++++ b/crates/ffi/src/apps/launch.rs
+@@ -151,6 +151,7 @@
+                 .timeout_ms
+                 .store(options.timeout_ms, Ordering::SeqCst);
+             Ok(LaunchResult {
++                launch_identity: None,
+                 app: "Fixture".into(),
+                 pid: ProcessId::new(42),
+                 process_instance: Some("fixture-42".into()),
+--- a/crates/ffi/src/types/drag_params.rs
++++ b/crates/ffi/src/types/drag_params.rs
+@@ -29,6 +29,7 @@
+     /// C ABI has no `Option`; any non-zero value is passed through.
+     pub(crate) fn to_core(&self) -> CoreDragParams {
+         CoreDragParams {
++            modifiers: Vec::new(),
+             from: CorePoint {
+                 x: self.from.x,
+                 y: self.from.y,
+--- a/crates/linux/src/actions/physical_target_tests.rs
++++ b/crates/linux/src/actions/physical_target_tests.rs
+@@ -35,6 +35,7 @@
+ #[test]
+ fn hover_and_drag_are_rejected_at_the_adapter_with_nothing_sent() {
+     let drag = Action::Drag(DragParams {
++        modifiers: Vec::new(),
+         from: Point { x: 0.0, y: 0.0 },
+         to: Point { x: 1.0, y: 1.0 },
+         duration_ms: None,
+--- a/crates/linux/src/input/mouse/drag_plan.rs
++++ b/crates/linux/src/input/mouse/drag_plan.rs
+@@ -17,6 +17,13 @@
+ const MAX_STEPS: u64 = 4_096;
+ 
+ pub(crate) fn plan_drag(params: &DragParams, deadline: Deadline) -> Result<Plan, AdapterError> {
++    if !params.modifiers.is_empty() {
++        return Err(AdapterError::new(
++            ErrorCode::ActionNotSupported,
++            "Modifier drag requires platform-specific per-event modifier flags",
++        )
++        .with_disposition(DeliverySemantics::not_delivered()));
++    }
+     let origin = point_xy(&params.from)?;
+     point_xy(&params.to)?;
+     validate_timing(params)?;
+--- a/crates/linux/src/input/mouse/drag_plan_tests.rs
++++ b/crates/linux/src/input/mouse/drag_plan_tests.rs
+@@ -2,6 +2,7 @@
+ 
+ fn params(duration_ms: Option<u64>, drop_delay_ms: Option<u64>) -> DragParams {
+     DragParams {
++        modifiers: Vec::new(),
+         from: Point { x: 10.0, y: 10.0 },
+         to: Point { x: 110.0, y: 50.0 },
+         duration_ms,
+--- a/crates/linux/src/input/x11/worker.rs
++++ b/crates/linux/src/input/x11/worker.rs
+@@ -56,6 +56,7 @@
+     deadline: Deadline,
+     progress: &Progress,
+ ) -> Result<Delivery, AdapterError> {
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
+     preflight(sink, plans)?;
+     if let Some(journal) = &link.journal {
+         journal.release_stale(sink)?;
+@@ -65,27 +66,43 @@
+     for plan in plans {
+         if !gate_passed(link) {
+             let stopped = AdapterError::internal("The input call was stopped between steps");
+-            return Err(guard.abort(stopped, ABORT_SUGGESTION));
++            return Err(abort_cancelled(&mut guard, stopped, ABORT_SUGGESTION));
+         }
+         guard.set_origin(plan.release_origin);
+         let outcome = run_plan(&mut guard, plan, deadline, progress);
+         if let Err(error) = outcome {
+-            return Err(guard.abort(error, ABORT_SUGGESTION));
++            return Err(abort_cancelled(&mut guard, error, ABORT_SUGGESTION));
+         }
+     }
+     if let Err(error) = guard.finish().map_err(SinkError::into_adapter) {
+-        return Err(guard.abort(error, ABORT_SUGGESTION));
++        return Err(abort_cancelled(&mut guard, error, ABORT_SUGGESTION));
+     }
+     let touched = guard.touched().clone();
+     let delivered = guard.delivered();
+     verify::check(guard.sink(), &touched, deadline).map_err(|error| {
+         ReleaseState::resumed(delivered, false).enrich_error(error, ABORT_SUGGESTION)
+     })?;
++    agent_desktop_core::commands::clovy_cancel::acknowledge_release(true);
+     Ok(Delivery {
+         delivered_events: guard.delivered(),
+     })
+ }
+ 
++fn abort_cancelled(
++    guard: &mut ReleaseGuard<'_>,
++    error: AdapterError,
++    suggestion: &str,
++) -> AdapterError {
++    let error = guard.abort(error, suggestion);
++    if agent_desktop_core::commands::clovy_cancel::cancelled() && guard.finish().is_ok() {
++        let touched = guard.touched().clone();
++        let clean = Deadline::detached_after(40)
++            .and_then(|deadline| verify::check(guard.sink(), &touched, deadline))
++            .is_ok();
++        agent_desktop_core::commands::clovy_cancel::acknowledge_release(clean);
++    }
++    error
++}
+ fn gate_passed(link: &Link) -> bool {
+     link.reports.send(Report::Gate).is_ok() && link.proceed.recv().unwrap_or(false)
+ }
+@@ -136,6 +153,7 @@
+     deadline: Deadline,
+     progress: &Progress,
+ ) -> Result<(), AdapterError> {
++    check_alive(deadline, progress, guard.delivered())?;
+     if !matches!(step, Step::Pause(_) | Step::CheckTextState) && !progress.begin_dispatch() {
+         return Err(mark_started(
+             deadline.timeout_error(),
+@@ -165,6 +183,9 @@
+     progress: &Progress,
+     delivered: u32,
+ ) -> Result<(), AdapterError> {
++    if let Err(error) = agent_desktop_core::commands::clovy_cancel::ensure() {
++        return Err(mark_started(error, progress.has_started() || delivered > 0));
++    }
+     if progress.is_cancelled() || deadline.is_expired() {
+         return Err(mark_started(
+             deadline.timeout_error(),
+--- a/crates/linux/src/input/x11/worker_cancel_tests.rs
++++ b/crates/linux/src/input/x11/worker_cancel_tests.rs
+@@ -38,3 +38,103 @@
+         assert!(events(&fake).is_empty(), "sent {step:?} after cancellation");
+     }
+ }
++
++#[test]
++fn clovy_sticky_cancel_releases_before_ack_and_never_sends_after_ack() {
++    for fail in [false, true] {
++        let root = std::env::temp_dir().join(format!(
++            "clovy-cancel-proof-{}-{}",
++            std::process::id(),
++            fail
++        ));
++        std::fs::create_dir_all(&root).unwrap();
++        let result = std::process::Command::new(std::env::current_exe().unwrap())
++            .args([
++                "clovy_cancel_native_owner_subprocess",
++                "--ignored",
++                "--test-threads=1",
++            ])
++            .env("CLOVY_AGENT_DESKTOP_SUPERVISED", "1")
++            .env("CLOVY_AGENT_DESKTOP_CANCEL_FILE", root.join("cancel"))
++            .env(
++                "CLOVY_AGENT_DESKTOP_CANCEL_ACK_FILE",
++                root.join("cancel-ack"),
++            )
++            .env(
++                "CLOVY_TEST_RELEASE_QUERY_FAIL",
++                if fail { "1" } else { "0" },
++            )
++            .output()
++            .unwrap();
++        assert!(
++            result.status.success(),
++            "{}\n{}",
++            String::from_utf8_lossy(&result.stdout),
++            String::from_utf8_lossy(&result.stderr)
++        );
++        std::fs::remove_dir_all(root).unwrap();
++    }
++}
++
++#[test]
++#[ignore = "isolated child of clovy sticky cancellation regression"]
++fn clovy_cancel_native_owner_subprocess() {
++    use crate::input::x11::fake_sink::Recorded;
++    let cancel =
++        std::path::PathBuf::from(std::env::var_os("CLOVY_AGENT_DESKTOP_CANCEL_FILE").unwrap());
++    let ack = cancel.with_file_name("cancel-ack");
++    let mut fake = FakeSink::new();
++    let fail = std::env::var("CLOVY_TEST_RELEASE_QUERY_FAIL").unwrap() == "1";
++    let progress = Progress::default();
++    let limit = deadline(30_000);
++    fake.world().fail_verification = fail;
++    let observer = fake.clone();
++    let mut guard = ReleaseGuard::new(&mut fake);
++    run_step(
++        &mut guard,
++        &Step::Button {
++            code: 1,
++            down: true,
++        },
++        limit,
++        &progress,
++    )
++    .unwrap();
++    std::fs::write(&cancel, b"stop").unwrap();
++    let error = check_alive(limit, &progress, guard.delivered()).unwrap_err();
++    super::abort_cancelled(&mut guard, error, super::ABORT_SUGGESTION);
++    assert_eq!(ack.is_file(), !fail);
++    let count = guard.delivered();
++    let events_at_ack = events(&observer).len();
++    for _ in 0..3 {
++        assert!(
++            run_step(
++                &mut guard,
++                &Step::MoveTo { x: 120, y: 120 },
++                limit,
++                &progress
++            )
++            .is_err()
++        );
++        assert_eq!(guard.delivered(), count);
++    }
++    drop(guard);
++    let final_events = events(&fake);
++    assert_eq!(
++        final_events.len(),
++        events_at_ack,
++        "native sends after release acknowledgement"
++    );
++    assert_eq!(
++        final_events
++            .iter()
++            .filter(|e| matches!(e, Recorded::Button(1, false)))
++            .count(),
++        1
++    );
++    assert!(
++        !final_events
++            .iter()
++            .any(|e| matches!(e, Recorded::Move(120, 120)))
++    );
++}
+--- a/crates/linux/src/system/launch/mod.rs
++++ b/crates/linux/src/system/launch/mod.rs
+@@ -83,6 +83,7 @@
+         }
+     }
+     LaunchResult {
++        launch_identity: None,
+         app: owner.name.clone(),
+         pid: ProcessId::new(owner.pid),
+         process_instance: Some(owner.instance.clone()),
+@@ -237,6 +238,7 @@
+         created: bool,
+     ) -> LaunchResult {
+         LaunchResult {
++            launch_identity: None,
+             renderer: chromium_renderer(self.bus, owner.pid, self.deadline),
+             ..conclude(owner, window, self.options, created, |window| {
+                 focus_window(self.bus, window, self.lease)?;
+@@ -267,6 +269,7 @@
+     fn report_unlisted(&self, spawned: &Spawned) -> LaunchResult {
+         let facts = process_facts::read(spawned.pid);
+         LaunchResult {
++            launch_identity: None,
+             app: facts
+                 .as_ref()
+                 .map_or_else(|| self.id.to_owned(), super::listed_app_name),
+--- a/crates/linux/src/tree/live/physical_live_tests.rs
++++ b/crates/linux/src/tree/live/physical_live_tests.rs
+@@ -139,6 +139,7 @@
+     );
+     let lease = scene.lease();
+     let params = DragParams {
++        modifiers: Vec::new(),
+         from: from.clone(),
+         to: to.clone(),
+         duration_ms: Some(300),
+--- a/crates/macos/src/actions/type_text.rs
++++ b/crates/macos/src/actions/type_text.rs
+@@ -35,7 +35,9 @@
+     deadline: Deadline,
+ ) -> Result<(), AdapterError> {
+     prepare(element, deadline)?;
+-    write_selected_text(text, |attribute, value| {
++    let settable =
++        crate::actions::ax_helpers::is_attr_settable(element, "AXSelectedText", deadline)?;
++    write_selected_text(text, settable, |attribute, value| {
+         crate::actions::ax_helpers::set_ax_string_or_err(element, attribute, value, deadline)
+     })?;
+     if deadline.is_expired() {
+@@ -49,8 +51,18 @@
+ 
+ fn write_selected_text(
+     text: &str,
++    settable: bool,
+     write: impl FnOnce(&str, &str) -> Result<(), AdapterError>,
+ ) -> Result<(), AdapterError> {
++    if !settable {
++        return Err(AdapterError::new(
++            ErrorCode::ActionNotSupported,
++            "The exact field cannot insert text through AXSelectedText",
++        )
++        .with_details(serde_json::json!({"operation":"AXSelectedText","semantic_verb":"absent"}))
++        .with_disposition(DeliverySemantics::not_delivered()));
++    }
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
+     write("AXSelectedText", text)
+ }
+ 
+@@ -93,9 +105,46 @@
+     use std::cell::RefCell;
+ 
+     #[test]
++    fn unsupported_selection_insertion_never_writes_or_replaces_the_value() {
++        let writes = std::cell::Cell::new(0);
++        let error = super::write_selected_text("inserted", false, |_, _| {
++            writes.set(writes.get() + 1);
++            Ok(())
++        })
++        .unwrap_err();
++        assert_eq!(writes.get(), 0);
++        assert_eq!(
++            error.code,
++            agent_desktop_core::ErrorCode::ActionNotSupported
++        );
++        assert_eq!(
++            error.disposition,
++            agent_desktop_core::DeliverySemantics::not_delivered()
++        );
++    }
++    #[test]
++    fn uncertain_insertion_error_never_tries_another_attribute() {
++        let writes = std::cell::Cell::new(0);
++        let error = super::write_selected_text("inserted", true, |attribute, _| {
++            assert_eq!(attribute, "AXSelectedText");
++            writes.set(writes.get() + 1);
++            Err(agent_desktop_core::AdapterError::new(
++                agent_desktop_core::ErrorCode::ActionFailed,
++                "native uncertainty",
++            )
++            .with_disposition(agent_desktop_core::DeliverySemantics::uncertain()))
++        })
++        .unwrap_err();
++        assert_eq!(writes.get(), 1);
++        assert_eq!(
++            error.disposition,
++            agent_desktop_core::DeliverySemantics::uncertain()
++        );
++    }
++    #[test]
+     fn type_writes_the_current_selection_instead_of_the_whole_value() {
+         let observed = RefCell::new(None);
+-        super::write_selected_text("inserted", |attribute, value| {
++        super::write_selected_text("inserted", true, |attribute, value| {
+             observed.replace(Some((attribute.to_owned(), value.to_owned())));
+             Ok(())
+         })
+--- a/crates/macos/src/input/keyboard/keyboard_event.rs
++++ b/crates/macos/src/input/keyboard/keyboard_event.rs
+@@ -161,6 +161,7 @@
+     total: usize,
+     delivery: crate::actions::DeliveryTracker,
+ ) -> Result<(), AdapterError> {
++    agent_desktop_core::commands::clovy_cancel::ensure().map_err(|e| delivery.annotate(e))?;
+     if !deadline.is_expired() {
+         return Ok(());
+     }
+--- a/crates/macos/src/input/mouse/mod.rs
++++ b/crates/macos/src/input/mouse/mod.rs
+@@ -260,14 +260,16 @@
+         duration: std::time::Duration,
+         delivery: crate::actions::DeliveryTracker,
+     ) -> Result<(), AdapterError> {
+-        let pause = deadline
+-            .remaining_slice(duration)
+-            .map_err(|error| delivery.annotate(error))?;
+-        if pause < duration {
++        let mut left = duration;
++        while !left.is_zero() {
++            ensure_budget(deadline, delivery)?;
++            let slice = left.min(std::time::Duration::from_millis(10));
++            let pause = deadline
++                .remaining_slice(slice)
++                .map_err(|e| delivery.annotate(e))?;
+             std::thread::sleep(pause);
+-            return ensure_budget(deadline, delivery);
+-        }
+-        std::thread::sleep(duration);
++            left = left.saturating_sub(pause);
++        }
+         ensure_budget(deadline, delivery)
+     }
+ 
+@@ -275,6 +277,7 @@
+         deadline: Deadline,
+         delivery: crate::actions::DeliveryTracker,
+     ) -> Result<(), AdapterError> {
++        agent_desktop_core::commands::clovy_cancel::ensure().map_err(|e| delivery.annotate(e))?;
+         if !deadline.is_expired() {
+             return Ok(());
+         }
+--- a/crates/macos/src/input/mouse/mouse_drag.rs
++++ b/crates/macos/src/input/mouse/mouse_drag.rs
+@@ -15,7 +15,26 @@
+ pub(crate) fn synthesize_drag(params: DragParams, deadline: Deadline) -> Result<(), AdapterError> {
+     validate_drag(&params)?;
+     preflight_drag(&params, deadline)?;
+-    drag_sequence(params, deadline)
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
++    if agent_desktop_core::commands::clovy_cancel::supervised() && !left_released() {
++        return Err(AdapterError::new(
++            ErrorCode::ActionFailed,
++            "The left button is already held; take over before drag",
++        )
++        .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered()));
++    }
++    let result = drag_sequence(params, deadline);
++    if agent_desktop_core::commands::clovy_cancel::cancelled() {
++        agent_desktop_core::commands::clovy_cancel::acknowledge_release(left_released());
++    }
++    result
++}
++
++fn left_released() -> bool {
++    unsafe extern "C" {
++        fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
++    }
++    !unsafe { CGEventSourceButtonState(0, 0) }
+ }
+ 
+ fn drag_sequence(params: DragParams, deadline: Deadline) -> Result<(), AdapterError> {
+@@ -23,6 +42,7 @@
+         duration_ms = params.duration_ms.unwrap_or(DEFAULT_DURATION_MS),
+         "mouse: drag"
+     );
++    let flags = crate::input::mouse::event_flags(&params.modifiers);
+     let from = CGPoint::new(params.from.x, params.from.y);
+     let to = CGPoint::new(params.to.x, params.to.y);
+     let duration_ms = params.duration_ms.unwrap_or(DEFAULT_DURATION_MS);
+@@ -37,10 +57,10 @@
+         CGEventType::LeftMouseDown,
+         from,
+         CGMouseButton::Left,
+-        CGEventFlags::empty(),
++        flags,
+     )
+     .map_err(|error| pre_delivery.annotate(error))?;
+-    let mut release = DragReleaseGuard::prepare(&source, from, to)
++    let mut release = DragReleaseGuard::prepare(&source, from, to, flags)
+         .map_err(|error| pre_delivery.annotate(error))?;
+     crate::input::mouse::ensure_budget(deadline, pre_delivery)?;
+     release.arm();
+@@ -63,7 +83,7 @@
+                     CGEventType::LeftMouseDragged,
+                     point,
+                     CGMouseButton::Left,
+-                    CGEventFlags::empty(),
++                    flags,
+                 ),
+                 deadline,
+                 release.delivery_mut(),
+@@ -75,6 +95,7 @@
+             &source,
+             to,
+             params.drop_delay_ms.unwrap_or(DEFAULT_DROP_DELAY_MS),
++            flags,
+             deadline,
+             release.delivery_mut(),
+         )?;
+@@ -100,8 +121,8 @@
+         source: &CGEventSource,
+         origin: CGPoint,
+         destination: CGPoint,
++        flags: CGEventFlags,
+     ) -> Result<Self, AdapterError> {
+-        let flags = CGEventFlags::empty();
+         Ok(Self {
+             abort_drag: crate::input::mouse::create_event_with_source(
+                 source,
+@@ -172,6 +193,7 @@
+     source: &CGEventSource,
+     destination: CGPoint,
+     delay_ms: u64,
++    flags: CGEventFlags,
+     deadline: Deadline,
+     delivery: &mut crate::actions::DeliveryTracker,
+ ) -> Result<(), AdapterError> {
+@@ -186,7 +208,7 @@
+                 CGEventType::LeftMouseDragged,
+                 destination,
+                 CGMouseButton::Left,
+-                CGEventFlags::empty(),
++                flags,
+             ),
+             deadline,
+             delivery,
+@@ -260,6 +282,7 @@
+     #[test]
+     fn drag_limits_reject_unbounded_work() {
+         let base = DragParams {
++            modifiers: Vec::new(),
+             from: Point { x: 0.0, y: 0.0 },
+             to: Point { x: 10.0, y: 10.0 },
+             duration_ms: Some(MAX_DRAG_MS + 1),
+@@ -267,6 +290,7 @@
+         };
+         assert!(validate_drag(&base).is_err());
+         let excessive_dwell = DragParams {
++            modifiers: Vec::new(),
+             duration_ms: None,
+             drop_delay_ms: Some(MAX_DROP_DELAY_MS + 1),
+             ..base
+@@ -277,6 +301,7 @@
+     #[test]
+     fn impossible_drag_deadline_fails_before_mouse_down() {
+         let params = DragParams {
++            modifiers: Vec::new(),
+             from: Point { x: 0.0, y: 0.0 },
+             to: Point { x: 10.0, y: 10.0 },
+             duration_ms: Some(1),
+--- a/crates/macos/src/system/cursor_overlay/spawn.rs
++++ b/crates/macos/src/system/cursor_overlay/spawn.rs
+@@ -110,10 +110,15 @@
+             "Cursor overlay instruction exceeds the transport limit",
+         ));
+     }
+-    let mut child = Command::new(executable)
++    let mut command = Command::new(executable);
++    if std::env::var_os("CLOVY_AGENT_DESKTOP_SUPERVISED").as_deref()
++        != Some(std::ffi::OsStr::new("1"))
++    {
++        command.process_group(0);
++    }
++    let mut child = command
+         .env(MARKER, super::endpoint::PROTOCOL_VERSION)
+         .env(SOCKET_ENV, socket)
+-        .process_group(0)
+         .stdin(Stdio::piped())
+         .stdout(Stdio::null())
+         .stderr(Stdio::null())
+--- a/crates/macos/src/system/launch.rs
++++ b/crates/macos/src/system/launch.rs
+@@ -34,7 +34,7 @@
+         let instance = required_instance(&app).map_err(before_launch)?;
+         let pid = super::process::process_identity::to_pid_t(app.pid).map_err(before_launch)?;
+         let window = exact_window(pid, &instance, deadline).map_err(before_launch)?;
+-        return Ok(result_from_app(&app, window));
++        return result_from_app(&app, window).map_err(before_launch);
+     }
+     let target = launch_target(options, initial).map_err(before_launch)?;
+ 
+@@ -141,11 +141,27 @@
+ }
+ 
+ #[cfg(target_os = "macos")]
+-fn result_from_app(app: &AppInfo, window: Option<WindowInfo>) -> LaunchResult {
++fn result_from_app(
++    app: &AppInfo,
++    window: Option<WindowInfo>,
++) -> Result<LaunchResult, AdapterError> {
++    let pid = super::process::process_identity::to_pid_t(app.pid)?;
++    let instance = required_instance(app)?;
++    let authority = super::launch_completion::identity_for_existing(pid, &instance)?;
++    if app
++        .bundle_id
++        .as_deref()
++        .is_some_and(|expected| expected != authority.bundle_id)
++    {
++        return Err(AdapterError::stale_ref_because(
++            "The application bundle changed during attachment",
++        ));
++    }
+     let renderer = super::process::process_identity::to_pid_t(app.pid)
+         .ok()
+         .and_then(crate::system::renderer_kind::detect_chromium);
+-    LaunchResult {
++    Ok(LaunchResult {
++        launch_identity: Some(authority),
+         app: app.name.clone(),
+         pid: app.pid,
+         process_instance: app.process_instance.clone(),
+@@ -153,17 +169,18 @@
+         cdp: None,
+         renderer,
+         suggestion: None,
+-    }
++    })
+ }
+ 
+ #[cfg(target_os = "macos")]
+ fn result_from_launched(
+-    launched: &(i32, String),
++    launched: &crate::system::launch_completion::LaunchReceipt,
+     window: Option<WindowInfo>,
+     id: &str,
+ ) -> Result<LaunchResult, AdapterError> {
+     let renderer = crate::system::renderer_kind::detect_chromium(launched.0);
+     Ok(LaunchResult {
++        launch_identity: Some(launched.2.clone()),
+         app: launched_display_name(window.as_ref(), id),
+         pid: agent_desktop_core::ProcessId::try_from(launched.0)
+             .map_err(|_| AdapterError::internal("Launched process identifier is out of range"))?,
+@@ -211,7 +228,7 @@
+ #[cfg(target_os = "macos")]
+ fn validate_launched_target(
+     target: &LaunchTarget,
+-    launched: &(i32, String),
++    launched: &crate::system::launch_completion::LaunchReceipt,
+ ) -> Result<(), AdapterError> {
+     match target {
+         LaunchTarget::Existing {
+--- a/crates/macos/src/system/launch_bridge.m
++++ b/crates/macos/src/system/launch_bridge.m
+@@ -12,6 +12,10 @@
+     uint8_t errorKind;
+     const char *error;
+     size_t errorLength;
++    const char *executablePath;
++    size_t executablePathLength;
++    const char *bundleIdentifier;
++    size_t bundleIdentifierLength;
+ } AgentDesktopLaunchResult;
+ 
+ typedef void (*AgentDesktopLaunchCompletion)(void *, const AgentDesktopLaunchResult *);
+@@ -174,6 +178,10 @@
+                     return;
+                 }
+                 NSDate *launchDate = app.launchDate;
++                __attribute__((objc_precise_lifetime)) NSString *path = app.executableURL.path;
++                __attribute__((objc_precise_lifetime)) NSString *bundle = app.bundleIdentifier;
++                const char *pathBytes = path.UTF8String;
++                const char *bundleBytes = bundle.UTF8String;
+                 AgentDesktopLaunchResult result = {
+                     .application = (__bridge void *)app,
+                     .pid = app.processIdentifier,
+@@ -183,6 +191,10 @@
+                     .errorKind = 0,
+                     .error = NULL,
+                     .errorLength = 0,
++                    .executablePath = pathBytes,
++                    .executablePathLength = pathBytes == NULL ? 0 : strlen(pathBytes),
++                    .bundleIdentifier = bundleBytes,
++                    .bundleIdentifierLength = bundleBytes == NULL ? 0 : strlen(bundleBytes),
+                 };
+                 holder->_completion(holder->_releaseBox->context, &result);
+             } @catch (NSException *exception) {
+@@ -213,3 +225,39 @@
+         return 0;
+     }
+ }
++
++// Read-only attachment keeps the actual application object alive throughout
++// the synchronous callback. Rust compares its previously approved birth token.
++uint8_t agent_desktop_inspect_existing_application(
++    int32_t pid, void *context, AgentDesktopLaunchCompletion completion
++) {
++    @try {
++        __attribute__((objc_precise_lifetime)) NSRunningApplication *app =
++            [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
++        if (app == nil) { return 0; }
++        __attribute__((objc_precise_lifetime)) NSString *path = app.executableURL.path;
++        __attribute__((objc_precise_lifetime)) NSString *bundle = app.bundleIdentifier;
++        const char *pathBytes = path.UTF8String;
++        const char *bundleBytes = bundle.UTF8String;
++        NSDate *launchDate = app.launchDate;
++        AgentDesktopLaunchResult result = {
++            .application = (__bridge void *)app,
++            .pid = app.processIdentifier,
++            .launchTime = launchDate == nil ? 0.0 : launchDate.timeIntervalSince1970,
++            .terminated = app.isTerminated,
++            .deliveryStarted = 0,
++            .errorKind = 0,
++            .error = NULL,
++            .errorLength = 0,
++            .executablePath = pathBytes,
++            .executablePathLength = pathBytes == NULL ? 0 : strlen(pathBytes),
++            .bundleIdentifier = bundleBytes,
++            .bundleIdentifierLength = bundleBytes == NULL ? 0 : strlen(bundleBytes),
++        };
++        completion(context, &result);
++        return 1;
++    } @catch (NSException *exception) {
++        (void)exception;
++        return 0;
++    }
++}
+--- a/crates/macos/src/system/launch_callback_result.rs
++++ b/crates/macos/src/system/launch_callback_result.rs
+@@ -10,4 +10,8 @@
+     pub(crate) error_kind: u8,
+     pub(crate) error: *const c_char,
+     pub(crate) error_len: usize,
++    pub(crate) executable_path: *const c_char,
++    pub(crate) executable_path_len: usize,
++    pub(crate) bundle_id: *const c_char,
++    pub(crate) bundle_id_len: usize,
+ }
+--- a/crates/macos/src/system/launch_completion.rs
++++ b/crates/macos/src/system/launch_completion.rs
+@@ -7,7 +7,12 @@
+ const MAX_OUTSTANDING_LAUNCHES: usize = 16;
+ static OUTSTANDING_LAUNCHES: AtomicUsize = AtomicUsize::new(0);
+ 
+-type LaunchResult = Result<(i32, String), AdapterError>;
++pub(crate) type LaunchReceipt = (
++    i32,
++    String,
++    agent_desktop_core::system::launch_result::LaunchIdentity,
++);
++type LaunchResult = Result<LaunchReceipt, AdapterError>;
+ 
+ struct LaunchCompletion {
+     result: Mutex<Option<LaunchResult>>,
+@@ -65,9 +70,16 @@
+             .timeout_error()
+             .with_disposition(DeliverySemantics::not_delivered()));
+     }
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
+     reserve_launch()?;
+     let state = Arc::new(LaunchCompletion::new());
+     let context = Arc::into_raw(Arc::clone(&state)) as *mut c_void;
++    if let Err(error) = agent_desktop_core::commands::clovy_cancel::ensure() {
++        unsafe {
++            release_context(context);
++        }
++        return Err(error);
++    }
+     let accepted = unsafe {
+         agent_desktop_open_application(
+             request.as_ptr(),
+@@ -171,7 +183,144 @@
+             .with_details(serde_json::json!({ "pid": result.pid, "complete": false })),
+         ));
+     }
+-    Ok((result.pid, identity.token()))
++    let authority =
++        capture_authority(result, identity).map_err(|error| callback_error(result, error))?;
++    Ok((result.pid, identity.token(), authority))
++}
++
++fn copy_identity_text(
++    pointer: *const std::ffi::c_char,
++    length: usize,
++    field: &str,
++) -> Result<String, AdapterError> {
++    if pointer.is_null() || length == 0 || length > 32 * 1024 {
++        return Err(AdapterError::internal(format!(
++            "Native launch {field} is unavailable"
++        )));
++    }
++    let bytes = unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), length) };
++    if bytes.contains(&0) {
++        return Err(AdapterError::internal(format!(
++            "Native launch {field} is invalid"
++        )));
++    }
++    String::from_utf8(bytes.to_vec())
++        .map_err(|_| AdapterError::internal(format!("Native launch {field} is not UTF-8")))
++}
++fn kernel_executable(pid: i32) -> Result<String, AdapterError> {
++    let mut buffer = vec![0u8; 4096];
++    let length =
++        unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
++    if length <= 0 || length as usize > buffer.len() {
++        return Err(AdapterError::internal(
++            "The launched executable path could not be verified",
++        ));
++    }
++    buffer.truncate(length as usize);
++    if buffer.last() == Some(&0) {
++        buffer.pop();
++    }
++    String::from_utf8(buffer)
++        .map_err(|_| AdapterError::internal("The launched executable path is not UTF-8"))
++}
++fn verified_executable_path(native: &str, kernel: &str) -> Result<(), AdapterError> {
++    if !std::path::Path::new(native).is_absolute()
++        || !std::path::Path::new(kernel).is_absolute()
++        || std::fs::canonicalize(native)
++            .ok()
++            .zip(std::fs::canonicalize(kernel).ok())
++            .is_none_or(|(native, kernel)| native != kernel)
++    {
++        return Err(AdapterError::new(
++            ErrorCode::AppUnresponsive,
++            "The native application and kernel executable paths do not identify the same file",
++        ));
++    }
++    Ok(())
++}
++
++fn capture_authority(
++    result: &crate::system::launch_callback_result::LaunchCallbackResult,
++    identity: crate::system::process::process_identity::ProcessIdentity,
++) -> Result<agent_desktop_core::system::launch_result::LaunchIdentity, AdapterError> {
++    let native_path = copy_identity_text(
++        result.executable_path,
++        result.executable_path_len,
++        "executable path",
++    )?;
++    let bundle = copy_identity_text(result.bundle_id, result.bundle_id_len, "bundle identifier")?;
++    if bundle.trim().is_empty() || !std::path::Path::new(&native_path).is_absolute() {
++        return Err(AdapterError::internal(
++            "Native launch authority is incomplete",
++        ));
++    }
++    // Kernel path is representation only, after the native object's authority
++    // and birth were captured. It must denote that object's executable, and
++    // the birth and object liveness must still match after all reads.
++    let kernel_path = kernel_executable(result.pid)?;
++    verified_executable_path(&native_path, &kernel_path)?;
++    if !identity.still_matches()?
++        || unsafe { agent_desktop_running_application_is_live(result.application, result.pid) } == 0
++        || !identity.still_matches()?
++    {
++        return Err(AdapterError::new(
++            ErrorCode::AppUnresponsive,
++            "The native launch authority changed before its receipt was captured",
++        ));
++    }
++    Ok(agent_desktop_core::system::launch_result::LaunchIdentity {
++        executable_path: kernel_path,
++        process_creation_time: identity.creation_micros()?,
++        bundle_id: bundle,
++    })
++}
++pub(crate) fn identity_for_existing(
++    pid: i32,
++    expected: &str,
++) -> Result<agent_desktop_core::system::launch_result::LaunchIdentity, AdapterError> {
++    let stale = || {
++        AdapterError::new(
++            ErrorCode::AppUnresponsive,
++            "The previously identified application changed before attachment",
++        )
++        .with_disposition(DeliverySemantics::not_delivered())
++    };
++    if !crate::system::process::process_identity::matches_instance(pid, expected)? {
++        return Err(stale());
++    }
++    let mut completed: Option<LaunchResult> = None;
++    unsafe extern "C" fn receive(
++        context: *mut c_void,
++        result: *const crate::system::launch_callback_result::LaunchCallbackResult,
++    ) {
++        let _ = std::panic::catch_unwind(|| unsafe {
++            let slot = &mut *(context as *mut Option<LaunchResult>);
++            *slot = Some(
++                result
++                    .as_ref()
++                    .ok_or_else(|| AdapterError::internal("Missing native attachment identity"))
++                    .and_then(validate_result),
++            );
++        });
++    }
++    let accepted = unsafe {
++        agent_desktop_inspect_existing_application(
++            pid,
++            (&mut completed as *mut Option<LaunchResult>).cast(),
++            receive,
++        )
++    };
++    if accepted == 0 {
++        return Err(stale());
++    }
++    let receipt = completed.ok_or_else(stale)??;
++    if receipt.0 != pid
++        || receipt.1 != expected
++        || !crate::system::process::process_identity::matches_instance(pid, expected)?
++    {
++        return Err(stale());
++    }
++    Ok(receipt.2)
+ }
+ 
+ fn callback_error(
+@@ -234,6 +383,14 @@
+         ),
+         release: unsafe extern "C" fn(*mut c_void),
+     ) -> bool;
++    fn agent_desktop_inspect_existing_application(
++        pid: i32,
++        context: *mut c_void,
++        completion: unsafe extern "C" fn(
++            *mut c_void,
++            *const crate::system::launch_callback_result::LaunchCallbackResult,
++        ),
++    ) -> u8;
+     fn agent_desktop_running_application_is_live(application: *mut c_void, expected_pid: i32)
+     -> u8;
+ }
+@@ -248,7 +405,15 @@
+         let timeout = state.wait(Deadline::after(1).unwrap()).unwrap_err();
+ 
+         assert_eq!(timeout.code, ErrorCode::Timeout);
+-        state.complete(Ok((7, "generation".into())));
++        state.complete(Ok((
++            7,
++            "generation".into(),
++            agent_desktop_core::system::launch_result::LaunchIdentity {
++                executable_path: "/fixture".into(),
++                process_creation_time: 1,
++                bundle_id: "fixture".into(),
++            },
++        )));
+         assert_eq!(state.wait(Deadline::after(50).unwrap()).unwrap().0, 7);
+     }
+ 
+@@ -270,3 +435,47 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod clovy_authority_tests {
++    use super::*;
++    #[cfg(unix)]
++    #[test]
++    fn native_launch_path_requires_real_same_file_and_keeps_kernel_representation() {
++        let root = std::env::var_os("CLOVY_AUTHORITY_PROOF_ROOT")
++            .map(std::path::PathBuf::from)
++            .unwrap_or_else(std::env::temp_dir)
++            .join(format!(
++                "clovy-launch-authority-{}-{}",
++                std::process::id(),
++                std::time::SystemTime::now()
++                    .duration_since(std::time::UNIX_EPOCH)
++                    .unwrap()
++                    .as_nanos()
++            ));
++        std::fs::create_dir_all(&root).unwrap();
++        let native = root.join("A");
++        let alias = root.join("alias-A");
++        let other = root.join("B");
++        std::fs::write(&native, b"synthetic A").unwrap();
++        std::fs::write(&other, b"synthetic B").unwrap();
++        std::os::unix::fs::symlink(&native, &alias).unwrap();
++        assert!(
++            verified_executable_path(alias.to_str().unwrap(), native.to_str().unwrap()).is_ok()
++        );
++        assert!(
++            verified_executable_path(native.to_str().unwrap(), alias.to_str().unwrap()).is_ok()
++        );
++        assert!(
++            verified_executable_path(native.to_str().unwrap(), other.to_str().unwrap()).is_err()
++        );
++        assert!(
++            verified_executable_path(
++                native.to_str().unwrap(),
++                root.join("missing").to_str().unwrap()
++            )
++            .is_err()
++        );
++        assert!(verified_executable_path("relative-A", native.to_str().unwrap()).is_err());
++    }
++}
+--- a/crates/macos/src/system/launch_workspace.rs
++++ b/crates/macos/src/system/launch_workspace.rs
+@@ -4,7 +4,7 @@
+     id: &str,
+     options: &LaunchOptions,
+     deadline: Deadline,
+-) -> Result<(i32, String), AdapterError> {
++) -> Result<crate::system::launch_completion::LaunchReceipt, AdapterError> {
+     if deadline.is_expired() {
+         return Err(deadline
+             .timeout_error()
+--- a/crates/macos/src/system/permissions/permission_guide.rs
++++ b/crates/macos/src/system/permissions/permission_guide.rs
+@@ -50,10 +50,16 @@
+         command.env_remove(name);
+     }
+     hand_over(&mut command, &lock);
++    // Embedded Clovy supervision owns this descendant too, even though its
++    // private allowlist never exposes the standalone permission guide.
++    if std::env::var_os("CLOVY_AGENT_DESKTOP_SUPERVISED").as_deref()
++        != Some(std::ffi::OsStr::new("1"))
++    {
++        command.process_group(0);
++    }
+     let mut child = command
+         .env(STEPS_ENV, steps.to_string())
+         .env(HOST_ENV, host)
+-        .process_group(0)
+         .stdin(Stdio::null())
+         .stdout(Stdio::null())
+         .stderr(Stdio::null())
+--- a/crates/macos/src/system/process/mod.rs
++++ b/crates/macos/src/system/process/mod.rs
+@@ -114,7 +114,12 @@
+ 
+ fn configure_process_group(command: &mut Command) {
+     use std::os::unix::process::CommandExt;
+-    command.process_group(0);
++    // The authenticated Clovy host owns every controller and overlay.
++    if std::env::var_os("CLOVY_AGENT_DESKTOP_SUPERVISED").as_deref()
++        != Some(std::ffi::OsStr::new("1"))
++    {
++        command.process_group(0);
++    }
+ }
+ 
+ fn wait_for_status(child: &mut Child, deadline: Instant) -> Result<ExitStatus, AdapterError> {
+@@ -196,7 +201,17 @@
+     unsafe extern "C" {
+         fn kill(pid: i32, signal: i32) -> i32;
+     }
+-    if unsafe { kill(-process_group, signal) } == 0 {
++    // A controller timeout must not signal its own shared supervisor group.
++    // Production callers here spawn direct leaf utilities. The outer Clovy
++    // supervisor owns complete descendant teardown on Stop or lost transport.
++    let target = if std::env::var_os("CLOVY_AGENT_DESKTOP_SUPERVISED").as_deref()
++        == Some(std::ffi::OsStr::new("1"))
++    {
++        process_group
++    } else {
++        -process_group
++    };
++    if unsafe { kill(target, signal) } == 0 {
+         return Ok(true);
+     }
+     let error = std::io::Error::last_os_error();
+--- a/crates/macos/src/system/process/process_identity.rs
++++ b/crates/macos/src/system/process/process_identity.rs
+@@ -72,6 +72,14 @@
+ 
+     pub(crate) fn pid(self) -> i32 {
+         self.pid
++    }
++
++    pub(crate) fn creation_micros(self) -> Result<u64, AdapterError> {
++        self.start_seconds
++            .checked_mul(1_000_000)
++            .and_then(|seconds| seconds.checked_add(self.start_microseconds))
++            .filter(|value| *value > 0 && self.start_microseconds < 1_000_000)
++            .ok_or_else(|| AdapterError::internal("The launched process birth time is invalid"))
+     }
+ 
+     pub(crate) fn launch_time_seconds(self) -> f64 {
+@@ -324,3 +332,28 @@
+         assert_eq!(details["retryable"], false);
+     }
+ }
++
++#[cfg(test)]
++mod clovy_birth_tests {
++    use super::*;
++    #[test]
++    fn birth_microseconds_match_native_consumer_and_reject_invalid_authority() {
++        let identity = ProcessIdentity {
++            pid: 42,
++            start_seconds: 123,
++            start_microseconds: 456789,
++        };
++        assert_eq!(identity.creation_micros().unwrap(), 123456789);
++        for (seconds, micros) in [(0, 0), (1, 1_000_000), (u64::MAX, 0)] {
++            assert!(
++                ProcessIdentity {
++                    pid: 42,
++                    start_seconds: seconds,
++                    start_microseconds: micros
++                }
++                .creation_micros()
++                .is_err()
++            );
++        }
++    }
++}
+--- a/crates/windows/src/actions/chain.rs
++++ b/crates/windows/src/actions/chain.rs
+@@ -134,6 +134,13 @@
+         if !rung_allowed(rung, policy) {
+             continue;
+         }
++        crate::input::native_owner::ensure_interactive_desktop().map_err(|error| {
++            if delivery_occurred(&steps) {
++                error.with_disposition(exhaustion_disposition(&steps))
++            } else {
++                error
++            }
++        })?;
+         let outcome = match (rung.run)() {
+             Ok(outcome) => outcome,
+             Err(error) => {
+@@ -239,10 +246,13 @@
+ #[cfg(target_os = "windows")]
+ pub(crate) fn invoke_pattern_delivered(element: &UIAElement) -> Result<bool, AdapterError> {
+     match element.0.get_pattern::<UIInvokePattern>() {
+-        Ok(pattern) => match pattern.invoke() {
+-            Ok(()) => classify_success(),
+-            Err(error) => classify_write("Invoke", INVOKE_LABEL, &error),
+-        },
++        Ok(pattern) => {
++            crate::input::native_owner::before_semantic_effect()?;
++            match pattern.invoke() {
++                Ok(()) => classify_success(),
++                Err(error) => classify_write("Invoke", INVOKE_LABEL, &error),
++            }
++        }
+         Err(error) => classify_write("get_pattern", INVOKE_LABEL, &error),
+     }
+ }
+--- a/crates/windows/src/actions/disclosure.rs
++++ b/crates/windows/src/actions/disclosure.rs
+@@ -226,6 +226,7 @@
+         };
+         match element.0.get_pattern::<UIExpandCollapsePattern>() {
+             Ok(pattern) => {
++                crate::input::native_owner::before_semantic_effect()?;
+                 let result = if want_expanded {
+                     pattern.expand()
+                 } else {
+--- a/crates/windows/src/actions/dispatch.rs
++++ b/crates/windows/src/actions/dispatch.rs
+@@ -59,12 +59,14 @@
+         lease: &InteractionLease,
+     ) -> Result<ActionResult, AdapterError> {
+         let deadline = lease.deadline();
++        crate::input::native_owner::ensure_interactive_desktop()?;
+         if handle.is_null() {
+             return null_handle_action(&request.action, deadline);
+         }
+         let element = uia_element(handle)?;
+         deadline.ensure_remaining()?;
+         corroborate_verified_process(element)?;
++        crate::input::native_owner::ensure_interactive_desktop()?;
+         match &request.action {
+             Action::Click => execute_click(element, request.policy, deadline),
+             Action::SetFocus => focus_element(element, &request, deadline),
+@@ -250,10 +252,13 @@
+ 
+     fn legacy_default_action(element: &UIAElement) -> Result<DeliveryOutcome, AdapterError> {
+         let delivered = match element.0.get_pattern::<UILegacyIAccessiblePattern>() {
+-            Ok(pattern) => match pattern.do_default_action() {
+-                Ok(()) => classify_success()?,
+-                Err(error) => classify_write("DoDefaultAction", LEGACY_LABEL, &error)?,
+-            },
++            Ok(pattern) => {
++                crate::input::native_owner::before_semantic_effect()?;
++                match pattern.do_default_action() {
++                    Ok(()) => classify_success()?,
++                    Err(error) => classify_write("DoDefaultAction", LEGACY_LABEL, &error)?,
++                }
++            }
+             Err(error) => classify_write("get_pattern", LEGACY_LABEL, &error)?,
+         };
+         Ok(DeliveryOutcome::from_delivery(delivered, false))
+--- a/crates/windows/src/actions/dispatch_tests.rs
++++ b/crates/windows/src/actions/dispatch_tests.rs
+@@ -25,6 +25,7 @@
+ 
+ fn dummy_drag() -> DragParams {
+     DragParams {
++        modifiers: Vec::new(),
+         from: Point { x: 0.0, y: 0.0 },
+         to: Point { x: 1.0, y: 1.0 },
+         duration_ms: None,
+--- a/crates/windows/src/actions/focus.rs
++++ b/crates/windows/src/actions/focus.rs
+@@ -44,6 +44,7 @@
+     }
+ 
+     fn invoke_focus(element: &UIAElement) -> Result<bool, AdapterError> {
++        crate::input::native_owner::before_semantic_effect()?;
+         match element.0.set_focus() {
+             Ok(()) => classify_success(),
+             Err(error) => classify_mutation(SET_FOCUS_OP, SET_FOCUS_API, &failure_of(&error)),
+--- a/crates/windows/src/actions/scroll.rs
++++ b/crates/windows/src/actions/scroll.rs
+@@ -102,6 +102,7 @@
+             let Some(pattern) = pattern.as_ref() else {
+                 return Ok(());
+             };
++            crate::input::native_owner::before_semantic_effect()?;
+             let delivered = match pattern.scroll(horizontal, vertical) {
+                 Ok(()) => classify_success()?,
+                 Err(error) => classify_write("Scroll", SCROLL_LABEL, &error)?,
+--- a/crates/windows/src/actions/scroll_into_view.rs
++++ b/crates/windows/src/actions/scroll_into_view.rs
+@@ -84,7 +84,7 @@
+         let walker = client.get_raw_view_walker().ok();
+         let before = known_bounds(element);
+         let viewport = resolve_scroll_viewport(element, walker.as_ref(), deadline);
+-        let invoke_failure = match invoke_scroll_into_view(element) {
++        let invoke_failure = match invoke_scroll_into_view(element)? {
+             InvokeOutcome::EmptyPattern => {
+                 return ladder_from_terminal(unsupported_error(), element, deadline);
+             }
+@@ -276,20 +276,23 @@
+         read_one(element, TreeProperty::ScrollItemAvailable).flag() == Some(true)
+     }
+ 
+-    fn invoke_scroll_into_view(element: &UIAElement) -> InvokeOutcome {
++    fn invoke_scroll_into_view(element: &UIAElement) -> Result<InvokeOutcome, AdapterError> {
+         match element.0.get_pattern::<UIScrollItemPattern>() {
+-            Ok(pattern) => match pattern.scroll_into_view() {
+-                Ok(()) => InvokeOutcome::Succeeded,
+-                Err(error) => match failure_of(&error) {
+-                    UiaFailure::Sentinel(ERR_NONE) => InvokeOutcome::EmptyPattern,
+-                    failure => InvokeOutcome::Failed(failure),
+-                },
+-            },
+-            Err(error) => match failure_of(&error) {
++            Ok(pattern) => {
++                crate::input::native_owner::before_semantic_effect()?;
++                Ok(match pattern.scroll_into_view() {
++                    Ok(()) => InvokeOutcome::Succeeded,
++                    Err(error) => match failure_of(&error) {
++                        UiaFailure::Sentinel(ERR_NONE) => InvokeOutcome::EmptyPattern,
++                        failure => InvokeOutcome::Failed(failure),
++                    },
++                })
++            }
++            Err(error) => Ok(match failure_of(&error) {
+                 UiaFailure::Sentinel(ERR_NONE) => InvokeOutcome::EmptyPattern,
+                 other if other.is_exhaustion() => InvokeOutcome::EmptyPattern,
+                 failure => InvokeOutcome::Failed(failure),
+-            },
++            }),
+         }
+     }
+ }
+--- a/crates/windows/src/actions/scroll_ladder.rs
++++ b/crates/windows/src/actions/scroll_ladder.rs
+@@ -331,6 +331,7 @@
+         } else {
+             (-1.0, percent)
+         };
++        crate::input::native_owner::before_semantic_effect()?;
+         match pattern.set_scroll_percent(x, y) {
+             Ok(()) => {
+                 classify_success()?;
+--- a/crates/windows/src/actions/select.rs
++++ b/crates/windows/src/actions/select.rs
+@@ -184,10 +184,13 @@
+         deadline: Deadline,
+     ) -> Result<DeliveryOutcome, AdapterError> {
+         let delivered = match target.0.get_pattern::<UISelectionItemPattern>() {
+-            Ok(pattern) => match pattern.select() {
+-                Ok(()) => classify_success()?,
+-                Err(error) => classify_write("Select", SELECT_LABEL, &error)?,
+-            },
++            Ok(pattern) => {
++                crate::input::native_owner::before_semantic_effect()?;
++                match pattern.select() {
++                    Ok(()) => classify_success()?,
++                    Err(error) => classify_write("Select", SELECT_LABEL, &error)?,
++                }
++            }
+             Err(error) => classify_write("get_pattern", SELECT_LABEL, &error)?,
+         };
+         if !delivered {
+@@ -238,13 +241,16 @@
+ 
+     fn expand_container(element: &UIAElement) -> Result<(), AdapterError> {
+         match element.0.get_pattern::<UIExpandCollapsePattern>() {
+-            Ok(pattern) => match pattern.expand() {
+-                Ok(()) => Ok(()),
+-                Err(error) => {
+-                    let _ = classify_write("Expand", EXPAND_LABEL, &error)?;
+-                    Ok(())
+-                }
+-            },
++            Ok(pattern) => {
++                crate::input::native_owner::before_semantic_effect()?;
++                match pattern.expand() {
++                    Ok(()) => Ok(()),
++                    Err(error) => {
++                        let _ = classify_write("Expand", EXPAND_LABEL, &error)?;
++                        Ok(())
++                    }
++                }
++            }
+             Err(error) => {
+                 let _ = classify_write("get_pattern", EXPAND_LABEL, &error)?;
+                 Ok(())
+@@ -255,6 +261,7 @@
+     fn collapse_container(element: &UIAElement) -> Result<(), AdapterError> {
+         match element.0.get_pattern::<UIExpandCollapsePattern>() {
+             Ok(pattern) => {
++                crate::input::native_owner::before_semantic_effect()?;
+                 let _ = pattern.collapse();
+                 Ok(())
+             }
+--- a/crates/windows/src/actions/select_search.rs
++++ b/crates/windows/src/actions/select_search.rs
+@@ -134,6 +134,7 @@
+             || {
+                 deadline.ensure_remaining()?;
+                 let before = pattern.get_vertical_scroll_percent().ok();
++                crate::input::native_owner::before_semantic_effect()?;
+                 match pattern.scroll(ScrollAmount::NoAmount, ScrollAmount::SmallIncrement) {
+                     Ok(()) => {
+                         let _ = classify_success()?;
+--- a/crates/windows/src/actions/toggle_state.rs
++++ b/crates/windows/src/actions/toggle_state.rs
+@@ -258,10 +258,13 @@
+ 
+     fn pattern_toggle(element: &UIAElement) -> Result<bool, AdapterError> {
+         match element.0.get_pattern::<UITogglePattern>() {
+-            Ok(pattern) => match pattern.toggle() {
+-                Ok(()) => classify_success(),
+-                Err(error) => classify_write("Toggle", TOGGLE_LABEL, &error),
+-            },
++            Ok(pattern) => {
++                crate::input::native_owner::before_semantic_effect()?;
++                match pattern.toggle() {
++                    Ok(()) => classify_success(),
++                    Err(error) => classify_write("Toggle", TOGGLE_LABEL, &error),
++                }
++            }
+             Err(error) => classify_write("get_pattern", TOGGLE_LABEL, &error),
+         }
+     }
+--- a/crates/windows/src/actions/value_write.rs
++++ b/crates/windows/src/actions/value_write.rs
+@@ -152,10 +152,13 @@
+         value: &str,
+     ) -> Result<DeliveryOutcome, AdapterError> {
+         let delivered = match element.0.get_pattern::<UIValuePattern>() {
+-            Ok(pattern) => match pattern.set_value(value) {
+-                Ok(()) => classify_success()?,
+-                Err(error) => classify_write("SetValue", VALUE_LABEL, &error)?,
+-            },
++            Ok(pattern) => {
++                crate::input::native_owner::before_semantic_effect()?;
++                match pattern.set_value(value) {
++                    Ok(()) => classify_success()?,
++                    Err(error) => classify_write("SetValue", VALUE_LABEL, &error)?,
++                }
++            }
+             Err(error) => classify_write("get_pattern", VALUE_LABEL, &error)?,
+         };
+         if !delivered {
+@@ -188,6 +191,7 @@
+                 ));
+             }
+         }
++        crate::input::native_owner::before_semantic_effect()?;
+         let delivered = match pattern.set_value(target) {
+             Ok(()) => classify_success()?,
+             Err(error) => classify_write("SetValue", RANGE_LABEL, &error)?,
+--- a/crates/windows/src/adapter.rs
++++ b/crates/windows/src/adapter.rs
+@@ -232,7 +232,9 @@
+         request: agent_desktop_core::actions::action_request::ActionRequest,
+         lease: &InteractionLease,
+     ) -> Result<agent_desktop_core::ActionResult, AdapterError> {
+-        crate::actions::dispatch::execute_action_impl(handle, request, lease)
++        crate::input::native_owner::ensure_interactive_desktop()?;
++        let result = crate::actions::dispatch::execute_action_impl(handle, request, lease);
++        crate::input::native_owner::finish_action_result(result)
+     }
+ 
+     fn scroll_into_view(
+@@ -240,7 +242,9 @@
+         handle: &NativeHandle,
+         lease: &InteractionLease,
+     ) -> Result<(), AdapterError> {
+-        crate::actions::scroll_into_view::scroll_into_view_impl(handle, lease)
++        crate::input::native_owner::ensure_interactive_desktop()?;
++        let result = crate::actions::scroll_into_view::scroll_into_view_impl(handle, lease);
++        crate::input::native_owner::finish_unit_result(result)
+     }
+ }
+ impl InputOps for WindowsAdapter {
+--- a/crates/windows/src/input/drag.rs
++++ b/crates/windows/src/input/drag.rs
+@@ -37,7 +37,22 @@
+ pub(crate) fn synthesize_drag(params: DragParams, deadline: Deadline) -> Result<(), AdapterError> {
+     validate_drag(&params)?;
+     preflight_drag(&params, deadline)?;
+-    drag_sequence(params, deadline)
++    let mut keys = params
++        .modifiers
++        .iter()
++        .map(crate::input::keyboard::keyboard_event::modifier_vk)
++        .collect::<Vec<_>>();
++    keys.push(1);
++    let owner = crate::input::native_owner::NativeOwner::begin(keys)?;
++    let result = drag_with_modifiers(params, deadline);
++    owner.finish(result)
++}
++fn drag_with_modifiers(params: DragParams, deadline: Deadline) -> Result<(), AdapterError> {
++    let mut modifiers =
++        crate::input::mouse::mouse_modifier::press_modifiers_checked(&params.modifiers, deadline)?;
++    let result = drag_sequence(params, deadline);
++    modifiers.release();
++    result.map_err(|error| modifiers.enrich_error(error))
+ }
+ 
+ fn drag_sequence(params: DragParams, deadline: Deadline) -> Result<(), AdapterError> {
+@@ -48,8 +63,10 @@
+     let origin = mouse_coord::normalize_point(&params.from);
+     let destination = mouse_coord::normalize_point(&params.to);
+ 
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
+     deadline.ensure_remaining()?;
+     post_mouse_inputs(&[move_input(origin)]);
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
+     deadline.ensure_remaining()?;
+     sleep_bounded(deadline, Duration::from_millis(PICKUP_DELAY_MS))?;
+ 
+@@ -59,12 +76,14 @@
+     guard.mark_delivered();
+ 
+     let outcome = (|| -> Result<(), AdapterError> {
++        agent_desktop_core::commands::clovy_cancel::ensure()?;
+         deadline.ensure_remaining()?;
+         sleep_bounded(deadline, Duration::from_millis(PICKUP_DELAY_MS))?;
+ 
+         for index in 1..=steps {
+             let progress = index as f64 / steps as f64;
+             let point = interpolate(&params.from, &params.to, progress);
++            agent_desktop_core::commands::clovy_cancel::ensure()?;
+             deadline.ensure_remaining()?;
+             post_mouse_inputs(&[move_input(mouse_coord::normalize_point(&point))]);
+             guard.mark_delivered();
+@@ -73,12 +92,14 @@
+ 
+         dwell_over_destination(destination, drop_delay_ms, deadline, &mut guard)?;
+ 
++        agent_desktop_core::commands::clovy_cancel::ensure()?;
+         deadline.ensure_remaining()?;
+         post_mouse_inputs(&[move_input(destination)]);
+         guard.mark_delivered();
+         post_mouse_inputs(&[button_input(MOUSEEVENTF_LEFTUP)]);
+         guard.mark_delivered();
+         guard.disarm();
++        agent_desktop_core::commands::clovy_cancel::ensure()?;
+         deadline.ensure_remaining()
+     })();
+ 
+@@ -93,6 +114,7 @@
+ ) -> Result<(), AdapterError> {
+     let mut remaining_ms = delay_ms;
+     while remaining_ms > 0 {
++        agent_desktop_core::commands::clovy_cancel::ensure()?;
+         deadline.ensure_remaining()?;
+         post_mouse_inputs(&[move_input(destination)]);
+         guard.mark_delivered();
+--- a/crates/windows/src/input/drag_tests.rs
++++ b/crates/windows/src/input/drag_tests.rs
+@@ -5,6 +5,7 @@
+ 
+ fn drag_params(duration_ms: Option<u64>, drop_delay_ms: Option<u64>) -> DragParams {
+     DragParams {
++        modifiers: Vec::new(),
+         from: Point { x: 0.0, y: 0.0 },
+         to: Point { x: 10.0, y: 10.0 },
+         duration_ms,
+@@ -23,6 +24,7 @@
+ #[test]
+ fn drag_limits_reject_unbounded_work_and_accept_the_limits_themselves() {
+     let too_long = DragParams {
++        modifiers: Vec::new(),
+         duration_ms: Some(MAX_DRAG_MS + 1),
+         ..base_params()
+     };
+@@ -30,6 +32,7 @@
+     assert_eq!(error.code, ErrorCode::InvalidArgs);
+ 
+     let too_slow_to_release = DragParams {
++        modifiers: Vec::new(),
+         duration_ms: None,
+         drop_delay_ms: Some(MAX_DROP_DELAY_MS + 1),
+         ..base_params()
+@@ -39,12 +42,14 @@
+     assert_eq!(error.code, ErrorCode::InvalidArgs);
+ 
+     let at_the_duration_limit = DragParams {
++        modifiers: Vec::new(),
+         duration_ms: Some(MAX_DRAG_MS),
+         ..base_params()
+     };
+     assert!(validate_drag(&at_the_duration_limit).is_ok());
+ 
+     let at_the_drop_delay_limit = DragParams {
++        modifiers: Vec::new(),
+         drop_delay_ms: Some(MAX_DROP_DELAY_MS),
+         ..base_params()
+     };
+@@ -55,6 +60,7 @@
+ fn impossible_drag_deadline_fails_before_mouse_down() {
+     sink::reset();
+     let params = DragParams {
++        modifiers: Vec::new(),
+         duration_ms: Some(1),
+         drop_delay_ms: Some(0),
+         ..base_params()
+@@ -123,6 +129,7 @@
+ fn a_successful_drag_posts_down_move_and_up_with_no_corrective_release() {
+     sink::reset();
+     let params = DragParams {
++        modifiers: Vec::new(),
+         duration_ms: Some(0),
+         drop_delay_ms: Some(0),
+         ..base_params()
+@@ -167,6 +174,7 @@
+ fn a_deadline_that_covers_only_one_pickup_delay_is_refused_before_the_button_lands() {
+     sink::reset();
+     let params = DragParams {
++        modifiers: Vec::new(),
+         from: Point { x: 0.0, y: 0.0 },
+         to: Point { x: 10.0, y: 10.0 },
+         duration_ms: Some(0),
+--- a/crates/windows/src/input/keyboard/keyboard_event.rs
++++ b/crates/windows/src/input/keyboard/keyboard_event.rs
+@@ -38,14 +38,20 @@
+ };
+ 
+ pub(crate) fn synthesize_key(combo: &KeyCombo, deadline: Deadline) -> Result<(), AdapterError> {
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
+     deadline.ensure_remaining()?;
+     let resolved = keyboard_map::resolve_key(&combo.key)?;
+     let modifier_vks = chord_modifiers(combo, resolved);
+     let key_vk = resolved.vk;
+ 
++    let mut owned = modifier_vks.clone();
++    owned.push(key_vk);
++    let owner = crate::input::native_owner::NativeOwner::begin(owned)?;
+     let mut guard = KeyReleaseGuard::new();
+     let outcome = press_chord(&mut guard, &modifier_vks, key_vk, deadline);
+-    outcome.map_err(|error| guard.enrich_error(error))
++    let outcome = outcome.map_err(|error| guard.enrich_error(error));
++    drop(guard);
++    owner.finish(outcome)
+ }
+ 
+ fn press_chord(
+@@ -55,19 +61,22 @@
+     deadline: Deadline,
+ ) -> Result<(), AdapterError> {
+     for &vk in modifier_vks {
++        agent_desktop_core::commands::clovy_cancel::ensure()?;
+         deadline.ensure_remaining()?;
++        guard.note_pressed(vk);
+         post_keyboard_inputs(&[key_input(vk, false)]);
+-        guard.note_pressed(vk);
+     }
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
+     deadline.ensure_remaining()?;
++    guard.note_pressed(key_vk);
+     post_keyboard_inputs(&[key_input(key_vk, false)]);
+-    guard.note_pressed(key_vk);
+ 
+     sleep_bounded(deadline, KEY_SETTLE)?;
+ 
+     post_keyboard_inputs(&[key_input(key_vk, true)]);
+     guard.note_released(key_vk);
+     for &vk in modifier_vks.iter().rev() {
++        agent_desktop_core::commands::clovy_cancel::ensure()?;
+         deadline.ensure_remaining()?;
+         post_keyboard_inputs(&[key_input(vk, true)]);
+         guard.note_released(vk);
+@@ -140,13 +149,26 @@
+     }
+ }
+ 
++fn release_tracked_keys(
++    held: &[u16],
++    scoped: bool,
++    mut is_down: impl FnMut(u16) -> bool,
++    mut release: impl FnMut(u16),
++) {
++    for vk in held.iter().rev().copied() {
++        if scoped || is_down(vk) {
++            release(vk);
++        }
++    }
++}
+ impl Drop for KeyReleaseGuard {
+     fn drop(&mut self) {
+-        for vk in self.held.iter().rev().copied() {
+-            if key_is_down(vk) {
+-                post_keyboard_inputs(&[key_input(vk, true)]);
+-            }
+-        }
++        release_tracked_keys(
++            &self.held,
++            agent_desktop_core::commands::clovy_cancel::supervised(),
++            key_is_down,
++            |vk| post_keyboard_inputs(&[key_input(vk, true)]),
++        );
+     }
+ }
+ 
+--- a/crates/windows/src/input/keyboard/keyboard_text.rs
++++ b/crates/windows/src/input/keyboard/keyboard_text.rs
+@@ -53,7 +53,9 @@
+                 }))
+                 .with_disposition(disposition)
+         })?;
+-        post_keyboard_inputs(&chunk_events(&chunk));
++        let events = chunk_events(&chunk);
++        ensure_chunk_budget(deadline, total, delivered_chunks)?;
++        post_keyboard_inputs(&events);
+     }
+     Ok(())
+ }
+@@ -85,19 +87,21 @@
+     total: usize,
+     delivered_chunks: usize,
+ ) -> Result<(), AdapterError> {
+-    deadline.ensure_remaining().map_err(|error| {
+-        let disposition = if delivered_chunks == 0 {
+-            DeliverySemantics::not_delivered()
+-        } else {
+-            DeliverySemantics::delivered_unverified()
+-        };
+-        error
+-            .with_details(serde_json::json!({
+-                "delivered_chunks": delivered_chunks,
+-                "total_chunks": total,
+-            }))
+-            .with_disposition(disposition)
+-    })
++    agent_desktop_core::commands::clovy_cancel::ensure()
++        .and_then(|_| deadline.ensure_remaining())
++        .map_err(|error| {
++            let disposition = if delivered_chunks == 0 {
++                DeliverySemantics::not_delivered()
++            } else {
++                DeliverySemantics::delivered_unverified()
++            };
++            error
++                .with_details(serde_json::json!({
++                    "delivered_chunks": delivered_chunks,
++                    "total_chunks": total,
++                }))
++                .with_disposition(disposition)
++        })
+ }
+ 
+ fn chunk_events(chunk: &[u16]) -> Vec<KeyboardInputEvent> {
+--- a/crates/windows/src/input/mod.rs
++++ b/crates/windows/src/input/mod.rs
+@@ -36,6 +36,7 @@
+ pub(crate) mod elevation;
+ pub(crate) mod keyboard;
+ pub(crate) mod mouse;
++pub(crate) mod native_owner;
+ mod release_state;
+ 
+ #[cfg(all(test, target_os = "windows"))]
+--- a/crates/windows/src/input/mouse/mod.rs
++++ b/crates/windows/src/input/mouse/mod.rs
+@@ -22,7 +22,7 @@
+ 
+ use crate::input::mouse::mouse_click_guard::{CLICK_SUGGESTION, ClickReleaseGuard};
+ use crate::input::mouse::mouse_coord::NormalizedPoint;
+-use crate::input::mouse::mouse_modifier::press_modifiers;
++use crate::input::mouse::mouse_modifier::press_modifiers_checked;
+ use crate::input::mouse::mouse_send::{
+     MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+     MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+@@ -40,7 +40,28 @@
+ const CLICK_GAP_DELAY: Duration = Duration::from_millis(20);
+ 
+ pub(crate) fn synthesize_mouse(event: MouseEvent, deadline: Deadline) -> Result<(), AdapterError> {
+-    deadline.ensure_remaining()?;
++    event.point.validate()?;
++    if let MouseEventKind::Click { count } = event.kind {
++        validate_mouse_click_count(count)?;
++    }
++    let mut keys = event
++        .modifiers
++        .iter()
++        .map(crate::input::keyboard::keyboard_event::modifier_vk)
++        .collect::<Vec<_>>();
++    if matches!(event.kind, MouseEventKind::Click { .. }) {
++        keys.push(match &event.button {
++            MouseButton::Left => 1,
++            MouseButton::Right => 2,
++            MouseButton::Middle => 4,
++        });
++    }
++    let owner = crate::input::native_owner::NativeOwner::begin(keys)?;
++    let result = synthesize_mouse_inner(event, deadline);
++    owner.finish(result)
++}
++fn synthesize_mouse_inner(event: MouseEvent, deadline: Deadline) -> Result<(), AdapterError> {
++    ensure_input_budget(deadline)?;
+     event.point.validate()?;
+     match event.kind {
+         MouseEventKind::Down | MouseEventKind::Up => Err(standalone_state_error()),
+@@ -71,18 +92,20 @@
+ }
+ 
+ fn dispatch_move(event: &MouseEvent) -> Result<(), AdapterError> {
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
+     let normalized = mouse_coord::normalize_point(&event.point);
+     post_mouse_inputs(&[move_input(normalized)]);
+     Ok(())
+ }
+ 
+ fn dispatch_click(event: &MouseEvent, count: u32, deadline: Deadline) -> Result<(), AdapterError> {
+-    deadline.ensure_remaining()?;
++    ensure_input_budget(deadline)?;
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
+     let normalized = mouse_coord::normalize_point(&event.point);
+-    let mut modifiers = press_modifiers(&event.modifiers);
++    let mut modifiers = press_modifiers_checked(&event.modifiers, deadline)?;
+     let result = post_click_sequence(&event.button, normalized, count, deadline);
+     modifiers.release();
+-    result
++    result.map_err(|error| modifiers.enrich_error(error))
+ }
+ 
+ /// Delivery accounting spans the whole sequence while cleanup stays per
+@@ -96,11 +119,12 @@
+     count: u32,
+     deadline: Deadline,
+ ) -> Result<(), AdapterError> {
++    ensure_input_budget(deadline)?;
+     post_mouse_inputs(&[move_input(normalized)]);
+     let (down_flag, up_flag) = button_flags(button);
+     let mut sequence = ReleaseState::default();
+     for click_index in 0..count {
+-        if let Err(error) = deadline.ensure_remaining() {
++        if let Err(error) = ensure_input_budget(deadline) {
+             return Err(sequence.enrich_error(error, CLICK_SUGGESTION));
+         }
+         let mut guard = ClickReleaseGuard::new(up_flag);
+@@ -124,6 +148,7 @@
+     sequence: &mut ReleaseState,
+     deadline: Deadline,
+ ) -> Result<(), AdapterError> {
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
+     guard.arm();
+     sequence.arm();
+     post_mouse_inputs(&[button_input(down_flag)]);
+@@ -150,12 +175,14 @@
+             "Wheel delta must be non-zero",
+         ));
+     }
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
+     let normalized = mouse_coord::normalize_point(&event.point);
++    ensure_input_budget(deadline)?;
+     post_mouse_inputs(&[move_input(normalized)]);
+-    let mut modifiers = press_modifiers(&event.modifiers);
++    let mut modifiers = press_modifiers_checked(&event.modifiers, deadline)?;
+     let result = post_wheel_chunks(y_chunks, x_chunks, deadline);
+     modifiers.release();
+-    result
++    result.map_err(|error| modifiers.enrich_error(error))
+ }
+ 
+ /// A large delta is split across several events, so a deadline crossed
+@@ -174,7 +201,7 @@
+         (MOUSEEVENTF_HWHEEL, x_chunks),
+     ] {
+         for lines in chunks {
+-            if let Err(error) = deadline.ensure_remaining() {
++            if let Err(error) = ensure_input_budget(deadline) {
+                 return Err(delivered.enrich_error(error, WHEEL_SUGGESTION));
+             }
+             post_mouse_inputs(&[wheel_input(flag, lines)]);
+@@ -235,10 +262,21 @@
+     Ok(chunks)
+ }
+ 
++fn ensure_input_budget(deadline: Deadline) -> Result<(), AdapterError> {
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
++    deadline.ensure_remaining()
++}
++
+ pub(crate) fn sleep_bounded(deadline: Deadline, duration: Duration) -> Result<(), AdapterError> {
+-    let capped = deadline.remaining_slice(duration)?;
+-    std::thread::sleep(capped);
+-    deadline.ensure_remaining()
++    let mut left = duration;
++    while !left.is_zero() {
++        agent_desktop_core::commands::clovy_cancel::ensure()?;
++        let pause = deadline.remaining_slice(left.min(Duration::from_millis(10)))?;
++        std::thread::sleep(pause);
++        left = left.saturating_sub(pause);
++    }
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
++    ensure_input_budget(deadline)
+ }
+ 
+ /// Shared test fixtures for `mouse_tests.rs`, `mouse_wheel_tests.rs`, and
+@@ -272,7 +310,7 @@
+ 
+ pub(super) mod mouse_click_guard;
+ pub(super) mod mouse_coord;
+-pub(super) mod mouse_modifier;
++pub(crate) mod mouse_modifier;
+ pub(crate) mod mouse_send;
+ #[cfg(all(test, target_os = "windows"))]
+ #[path = "mouse_tests.rs"]
+--- a/crates/windows/src/input/mouse/mouse_modifier.rs
++++ b/crates/windows/src/input/mouse/mouse_modifier.rs
+@@ -13,7 +13,7 @@
+ //! cannot leave a modifier held - best-effort, like every other physical
+ //! post here: the release is sent, never verified.
+ 
+-use agent_desktop_core::Modifier;
++use agent_desktop_core::{AdapterError, Deadline, Modifier};
+ 
+ use crate::input::keyboard::keyboard_event::{key_input, modifier_vk};
+ use crate::input::keyboard::keyboard_send::post_keyboard_inputs;
+@@ -21,16 +21,27 @@
+ pub(crate) struct ModifierGuard {
+     held: Vec<u16>,
+     released: bool,
++    delivered: bool,
++    post: fn(u16, bool),
+ }
+ 
+ impl ModifierGuard {
++    pub(crate) fn enrich_error(&self, error: AdapterError) -> AdapterError {
++        if self.delivered
++            && error.disposition == agent_desktop_core::DeliverySemantics::not_delivered()
++        {
++            error.with_disposition(agent_desktop_core::DeliverySemantics::delivered_unverified())
++        } else {
++            error
++        }
++    }
+     pub(crate) fn release(&mut self) {
+         if self.released {
+             return;
+         }
+         self.released = true;
+         for vk in self.held.iter().rev().copied() {
+-            post_keyboard_inputs(&[key_input(vk, true)]);
++            (self.post)(vk, true);
+         }
+     }
+ }
+@@ -41,15 +52,59 @@
+     }
+ }
+ 
++#[cfg(all(test, target_os = "windows"))]
+ pub(crate) fn press_modifiers(modifiers: &[Modifier]) -> ModifierGuard {
+     let held: Vec<u16> = modifiers.iter().map(modifier_vk).collect();
+     for &vk in &held {
+         post_keyboard_inputs(&[key_input(vk, false)]);
+     }
+     ModifierGuard {
++        delivered: !held.is_empty(),
+         held,
+         released: false,
++        post: post_native,
+     }
++}
++
++fn post_native(vk: u16, up: bool) {
++    post_keyboard_inputs(&[key_input(vk, up)]);
++}
++pub(crate) fn press_modifiers_checked(
++    modifiers: &[Modifier],
++    deadline: Deadline,
++) -> Result<ModifierGuard, AdapterError> {
++    hold_keys_checked(
++        modifiers.iter().map(modifier_vk),
++        || {
++            agent_desktop_core::commands::clovy_cancel::ensure()
++                .and_then(|_| deadline.ensure_remaining())
++        },
++        post_native,
++    )
++}
++fn hold_keys_checked(
++    keys: impl Iterator<Item = u16>,
++    mut before_down: impl FnMut() -> Result<(), AdapterError>,
++    post: fn(u16, bool),
++) -> Result<ModifierGuard, AdapterError> {
++    let mut guard = ModifierGuard {
++        held: vec![],
++        released: false,
++        delivered: false,
++        post,
++    };
++    for vk in keys {
++        if guard.held.contains(&vk) {
++            continue;
++        }
++        if let Err(error) = before_down() {
++            return Err(guard.enrich_error(error));
++        }
++        guard.held.push(vk);
++        guard.delivered = true;
++        (guard.post)(vk, false);
++    }
++    Ok(guard)
+ }
+ 
+ #[cfg(all(test, target_os = "windows"))]
+--- a/crates/windows/src/input/native_owner.rs
++++ b/crates/windows/src/input/native_owner.rs
+@@ -0,0 +1,654 @@
++//! Scoped supervised native-input ownership. All touched keys/buttons must be
++//! initially up, on the active input desktop. Only this owner can acknowledge
++//! after its inner release guards have returned and OS state is observed clear.
++//! This owner only observes. Inner guards release their actually armed keys;
++//! the planned read set never grants permission to release an unposted key.
++//! Concurrent user input can prevent ACK and is left unchanged.
++//!
++//! GetAsyncKeyState zero is meaningful only with an active input desktop,
++//! adequate hook access and compatible foreground integrity:
++//! https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getasynckeystate
++//! SendInput insertion counts are never release/delivery evidence:
++//! https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput
++use agent_desktop_core::{AdapterError, DeliverySemantics, ErrorCode};
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::time::{Duration, Instant};
++// The private Windows host runs one CLI process per tool invocation. These
++// flags span all UIA rungs/threads in that command and never clear mid-command.
++static UIA_ATTEMPTED: AtomicBool = AtomicBool::new(false);
++static DESKTOP_LOST: AtomicBool = AtomicBool::new(false);
++
++fn with_desktop_domain(mut error: AdapterError, attempted: bool) -> AdapterError {
++    let mut details = error
++        .details
++        .take()
++        .unwrap_or_else(|| serde_json::json!({}));
++    if !details.is_object() {
++        details = serde_json::json!({"native_details":details});
++    }
++    if let Some(fields) = details.as_object_mut() {
++        fields.insert(
++            "clovy_code".into(),
++            "computer_use_desktop_unavailable".into(),
++        );
++        fields.insert("uia_effect_attempted".into(), attempted.into());
++    }
++    if attempted
++        && matches!(
++            error.disposition,
++            DeliverySemantics::NotDelivered | DeliverySemantics::Unknown
++        )
++    {
++        error = error.with_disposition(DeliverySemantics::uncertain());
++    }
++    error.with_details(details)
++}
++fn context_unavailable(message: &str) -> AdapterError {
++    if agent_desktop_core::commands::clovy_cancel::supervised() {
++        DESKTOP_LOST.store(true, Ordering::Release);
++    }
++    with_desktop_domain(unsent(message), UIA_ATTEMPTED.load(Ordering::Acquire))
++}
++/// Read-only last-moment gate. Drop native query handles and then recheck Stop
++/// so a blocking readiness query cannot be followed by a late mutation.
++pub(crate) fn ensure_interactive_desktop() -> Result<(), AdapterError> {
++    if !agent_desktop_core::commands::clovy_cancel::supervised() {
++        return Ok(());
++    }
++    let prior = UIA_ATTEMPTED.load(Ordering::Acquire);
++    agent_desktop_core::commands::clovy_cancel::ensure().map_err(|error| {
++        if prior {
++            error.with_disposition(DeliverySemantics::uncertain())
++        } else {
++            error
++        }
++    })?;
++    if DESKTOP_LOST.load(Ordering::Acquire) {
++        return Err(context_unavailable(
++            "The desktop authority was lost; start a new computer-use run",
++        ));
++    }
++    let mut state = NativeState::new();
++    let observation = state.desktop();
++    drop(state);
++    agent_desktop_core::commands::clovy_cancel::ensure().map_err(|error| {
++        if prior {
++            error.with_disposition(DeliverySemantics::uncertain())
++        } else {
++            error
++        }
++    })?;
++    observation.map(|_| ())
++}
++pub(crate) fn before_semantic_effect() -> Result<(), AdapterError> {
++    ensure_interactive_desktop()?;
++    if agent_desktop_core::commands::clovy_cancel::supervised() {
++        UIA_ATTEMPTED.store(true, Ordering::Release);
++    }
++    Ok(())
++}
++pub(crate) fn finish_action_result(
++    result: Result<agent_desktop_core::ActionResult, AdapterError>,
++) -> Result<agent_desktop_core::ActionResult, AdapterError> {
++    if !agent_desktop_core::commands::clovy_cancel::supervised() {
++        return result;
++    }
++    let _ = ensure_interactive_desktop();
++    settle_action_result(
++        result,
++        DESKTOP_LOST.load(Ordering::Acquire),
++        UIA_ATTEMPTED.load(Ordering::Acquire),
++    )
++}
++fn settle_action_result(
++    result: Result<agent_desktop_core::ActionResult, AdapterError>,
++    lost: bool,
++    attempted: bool,
++) -> Result<agent_desktop_core::ActionResult, AdapterError> {
++    if !lost {
++        return result;
++    }
++    match result {
++        Err(error) => Err(with_desktop_domain(error, attempted)),
++        Ok(prior) => {
++            let disposition = prior.disposition();
++            let mut error = with_desktop_domain(
++                unsent("Desktop authority was lost after the action"),
++                attempted,
++            );
++            if disposition.retry() == agent_desktop_core::RetryDisposition::Unsafe {
++                error = error.with_disposition(disposition);
++            }
++            if let Some(fields) = error
++                .details
++                .as_mut()
++                .and_then(serde_json::Value::as_object_mut)
++            {
++                fields.insert(
++                    "prior_action_result".into(),
++                    serde_json::to_value(prior).unwrap_or(serde_json::Value::Null),
++                );
++            }
++            Err(error)
++        }
++    }
++}
++pub(crate) fn finish_unit_result(result: Result<(), AdapterError>) -> Result<(), AdapterError> {
++    if !agent_desktop_core::commands::clovy_cancel::supervised() {
++        return result;
++    }
++    let _ = ensure_interactive_desktop();
++    if !DESKTOP_LOST.load(Ordering::Acquire) {
++        return result;
++    }
++    Err(with_desktop_domain(
++        result
++            .err()
++            .unwrap_or_else(|| unsent("Desktop authority was lost after the action")),
++        UIA_ATTEMPTED.load(Ordering::Acquire),
++    ))
++}
++
++pub(crate) trait Observations {
++    type Desktop: Clone + PartialEq;
++    fn desktop(&mut self) -> Result<Self::Desktop, AdapterError>;
++    fn down(&mut self, key: u16) -> Result<bool, AdapterError>;
++}
++struct Owner<S: Observations> {
++    state: S,
++    desktop: S::Desktop,
++    keys: Vec<u16>,
++}
++fn unsent(message: &str) -> AdapterError {
++    AdapterError::new(ErrorCode::ActionFailed, message)
++        .with_disposition(DeliverySemantics::not_delivered())
++}
++impl<S: Observations> Owner<S> {
++    fn begin(mut state: S, keys: Vec<u16>) -> Result<Self, AdapterError> {
++        let desktop = state.desktop()?;
++        let mut unique = Vec::new();
++        for key in keys {
++            if unique.contains(&key) {
++                continue;
++            }
++            if state.down(key)? {
++                return Err(unsent(
++                    "An input key or button is already held; take over before this action",
++                ));
++            }
++            unique.push(key);
++        }
++        if state.desktop()? != desktop {
++            return Err(unsent("The active input desktop changed before input"));
++        }
++        Ok(Self {
++            state,
++            desktop,
++            keys: unique,
++        })
++    }
++    fn released(&mut self) -> Result<bool, AdapterError> {
++        if self.state.desktop()? != self.desktop {
++            return Err(unsent(
++                "The input desktop changed during release observation",
++            ));
++        }
++        let mut held = Vec::new();
++        for key in &self.keys {
++            if self.state.down(*key)? {
++                held.push(*key);
++            }
++        }
++        if self.state.desktop()? != self.desktop {
++            return Err(unsent(
++                "The input desktop changed during release observation",
++            ));
++        }
++        Ok(held.is_empty())
++    }
++    fn finish(
++        mut self,
++        result: Result<(), AdapterError>,
++        acknowledge: impl FnOnce(bool),
++    ) -> Result<(), AdapterError> {
++        let limit = Instant::now() + Duration::from_millis(40);
++        let mut previous_clear = false;
++        let released = loop {
++            if Instant::now() >= limit {
++                break Err(unsent("The owned input release observation expired"));
++            }
++            let observation = self.released();
++            if Instant::now() >= limit {
++                break Err(unsent("The owned input release observation expired"));
++            }
++            match observation {
++                Ok(true) if previous_clear => break Ok(()),
++                Ok(clear) => previous_clear = clear,
++                Err(error) => break Err(error),
++            }
++            if Instant::now() >= limit {
++                break Err(unsent("Owned input was not observed released"));
++            }
++            std::thread::sleep(Duration::from_millis(2));
++        };
++        acknowledge(released.is_ok());
++        match released {
++            Ok(()) => result,
++            Err(observation) => {
++                let mut error = result.err().unwrap_or_else(|| {
++                    AdapterError::new(
++                        ErrorCode::ActionFailed,
++                        "Native input release could not be verified",
++                    )
++                });
++                let mut details = error
++                    .details
++                    .take()
++                    .unwrap_or_else(|| serde_json::json!({}));
++                if let Some(map) = details.as_object_mut() {
++                    if let Some(domain) = observation
++                        .details
++                        .as_ref()
++                        .and_then(|details| details.get("clovy_code"))
++                    {
++                        map.insert("clovy_code".into(), domain.clone());
++                    }
++                    map.insert("release_verified".into(), false.into());
++                    map.insert(
++                        "release_observation_error".into(),
++                        observation.message.into(),
++                    );
++                }
++                Err(error
++                    .with_details(details)
++                    .with_disposition(DeliverySemantics::uncertain()))
++            }
++        }
++    }
++}
++
++pub(crate) struct NativeOwner(Option<Owner<NativeState>>);
++impl NativeOwner {
++    pub(crate) fn begin(keys: Vec<u16>) -> Result<Self, AdapterError> {
++        ensure_interactive_desktop()?;
++        if !agent_desktop_core::commands::clovy_cancel::supervised() {
++            return Ok(Self(None));
++        }
++        Owner::begin(NativeState::new(), keys).map(|owner| Self(Some(owner)))
++    }
++    /// Call only after every inner button/modifier/key release guard dropped.
++    pub(crate) fn finish(self, result: Result<(), AdapterError>) -> Result<(), AdapterError> {
++        match self.0 {
++            Some(owner) => owner.finish(
++                result,
++                agent_desktop_core::commands::clovy_cancel::acknowledge_release,
++            ),
++            None => result,
++        }
++    }
++}
++struct NativeState {
++    #[cfg(target_os = "windows")]
++    input: Option<DesktopHandle>,
++}
++impl NativeState {
++    fn new() -> Self {
++        Self {
++            #[cfg(target_os = "windows")]
++            input: None,
++        }
++    }
++}
++#[cfg(target_os = "windows")]
++struct DesktopHandle(*mut std::ffi::c_void);
++#[cfg(target_os = "windows")]
++impl DesktopHandle {
++    fn open() -> Result<Self, AdapterError> {
++        #[link(name = "user32")]
++        unsafe extern "system" {
++            fn OpenInputDesktop(flags: u32, inherit: i32, access: u32) -> *mut std::ffi::c_void;
++        }
++        const DESKTOP_READOBJECTS: u32 = 0x0001;
++        const DESKTOP_HOOKCONTROL: u32 = 0x0008;
++        let handle = unsafe { OpenInputDesktop(0, 0, DESKTOP_READOBJECTS | DESKTOP_HOOKCONTROL) };
++        if handle.is_null() {
++            Err(context_unavailable(
++                "The active input desktop cannot be inspected with hook access",
++            ))
++        } else {
++            Ok(Self(handle))
++        }
++    }
++}
++#[cfg(target_os = "windows")]
++impl Drop for DesktopHandle {
++    fn drop(&mut self) {
++        #[link(name = "user32")]
++        unsafe extern "system" {
++            fn CloseDesktop(desktop: *mut std::ffi::c_void) -> i32;
++        }
++        unsafe {
++            CloseDesktop(self.0);
++        }
++    }
++}
++#[cfg(target_os = "windows")]
++impl Observations for NativeState {
++    type Desktop = (String, String);
++    fn desktop(&mut self) -> Result<Self::Desktop, AdapterError> {
++        use std::ffi::c_void;
++        #[link(name = "user32")]
++        unsafe extern "system" {
++            fn GetThreadDesktop(thread: u32) -> *mut c_void;
++            fn GetProcessWindowStation() -> *mut c_void;
++            fn GetUserObjectInformationW(
++                object: *mut c_void,
++                index: i32,
++                data: *mut c_void,
++                length: u32,
++                needed: *mut u32,
++            ) -> i32;
++        }
++        #[link(name = "kernel32")]
++        unsafe extern "system" {
++            fn GetCurrentThreadId() -> u32;
++        }
++        fn name(object: *mut c_void) -> Result<String, AdapterError> {
++            if object.is_null() {
++                return Err(context_unavailable("The input desktop is unavailable"));
++            }
++            let mut needed = 0u32;
++            unsafe {
++                GetUserObjectInformationW(object, 2, std::ptr::null_mut(), 0, &mut needed);
++            }
++            if !(2..=8192).contains(&needed) || needed % 2 != 0 {
++                return Err(context_unavailable(
++                    "The input desktop identity is unavailable",
++                ));
++            }
++            let mut data = vec![0u16; needed as usize / 2];
++            if unsafe {
++                GetUserObjectInformationW(object, 2, data.as_mut_ptr().cast(), needed, &mut needed)
++            } == 0
++            {
++                return Err(context_unavailable(
++                    "The input desktop identity is unavailable",
++                ));
++            }
++            let end = data.iter().position(|c| *c == 0).unwrap_or(data.len());
++            String::from_utf16(&data[..end])
++                .map_err(|_| context_unavailable("The input desktop identity is invalid"))
++        }
++        if self.input.is_none() {
++            self.input = Some(DesktopHandle::open()?);
++        }
++        let active = DesktopHandle::open()?;
++        let input_name = name(active.0)?;
++        let retained = self
++            .input
++            .as_ref()
++            .ok_or_else(|| context_unavailable("The owned input desktop is unavailable"))?;
++        if name(retained.0)? != input_name {
++            return Err(context_unavailable("The active input desktop changed"));
++        }
++        let thread_name = name(unsafe { GetThreadDesktop(GetCurrentThreadId()) })?;
++        let station = name(unsafe { GetProcessWindowStation() })?;
++        if !station.eq_ignore_ascii_case("WinSta0")
++            || !input_name.eq_ignore_ascii_case("Default")
++            || thread_name != input_name
++        {
++            return Err(context_unavailable(
++                "Native input requires this process's active interactive desktop",
++            ));
++        }
++        foreground_observation()?;
++        Ok((station, input_name))
++    }
++    fn down(&mut self, key: u16) -> Result<bool, AdapterError> {
++        #[link(name = "user32")]
++        unsafe extern "system" {
++            fn GetAsyncKeyState(key: i32) -> i16;
++        }
++        let before = foreground_observation()?;
++        let down = (unsafe { GetAsyncKeyState(i32::from(key)) }) & i16::MIN != 0;
++        if foreground_observation()? != before {
++            return Err(context_unavailable(
++                "The foreground changed during key-state observation",
++            ));
++        }
++        Ok(down)
++    }
++}
++#[cfg(target_os = "windows")]
++fn foreground_observation() -> Result<(usize, u32, String), AdapterError> {
++    use std::ffi::c_void;
++    #[link(name = "user32")]
++    unsafe extern "system" {
++        fn GetForegroundWindow() -> *mut c_void;
++        fn GetWindowThreadProcessId(window: *mut c_void, pid: *mut u32) -> u32;
++    }
++    let foreground = unsafe { GetForegroundWindow() };
++    let mut pid = 0u32;
++    if foreground.is_null()
++        || unsafe { GetWindowThreadProcessId(foreground, &mut pid) } == 0
++        || pid == 0
++    {
++        return Err(context_unavailable(
++            "The foreground process identity is unavailable",
++        ));
++    }
++    let process = agent_desktop_core::ProcessId::new(pid);
++    let caller = super::elevation::current_process_integrity_rid()
++        .ok_or_else(|| context_unavailable("The native input caller integrity is unknown"))?;
++    let target = super::elevation::process_integrity_rid(process)
++        .ok_or_else(|| context_unavailable("The foreground integrity is unknown"))?;
++    if target > caller {
++        return Err(context_unavailable(
++            "The foreground integrity prevents reliable key-state observation",
++        ));
++    }
++    let token = crate::system::process_identity::token_for_pid(process)
++        .map_err(|_| context_unavailable("The foreground process generation cannot be inspected"))?
++        .ok_or_else(|| context_unavailable("The foreground process generation is unknown"))?;
++    let mut after = 0u32;
++    if unsafe { GetForegroundWindow() } != foreground
++        || unsafe { GetWindowThreadProcessId(foreground, &mut after) } == 0
++        || after != pid
++    {
++        return Err(context_unavailable(
++            "The foreground process changed during input observation",
++        ));
++    }
++    Ok((foreground as usize, pid, token))
++}
++#[cfg(not(target_os = "windows"))]
++impl Observations for NativeState {
++    type Desktop = ();
++    fn desktop(&mut self) -> Result<(), AdapterError> {
++        Err(unsent("Native Windows input is unavailable"))
++    }
++    fn down(&mut self, _key: u16) -> Result<bool, AdapterError> {
++        Err(unsent("Native Windows input is unavailable"))
++    }
++}
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::{
++        cell::{Cell, RefCell},
++        rc::Rc,
++    };
++    struct Read {
++        held: Rc<RefCell<Vec<u16>>>,
++        fail: Rc<Cell<bool>>,
++        desktop: Rc<Cell<u8>>,
++        delay_ms: Rc<Cell<u64>>,
++    }
++    impl Observations for Read {
++        type Desktop = u8;
++        fn desktop(&mut self) -> Result<u8, AdapterError> {
++            std::thread::sleep(Duration::from_millis(self.delay_ms.get()));
++            if self.fail.get() {
++                Err(unsent("query failed"))
++            } else {
++                Ok(self.desktop.get())
++            }
++        }
++        fn down(&mut self, key: u16) -> Result<bool, AdapterError> {
++            Ok(self.held.borrow().contains(&key))
++        }
++    }
++    fn state() -> (Read, Rc<RefCell<Vec<u16>>>, Rc<Cell<bool>>, Rc<Cell<u8>>) {
++        let held = Rc::new(RefCell::new(vec![]));
++        let fail = Rc::new(Cell::new(false));
++        let desktop = Rc::new(Cell::new(1));
++        (
++            Read {
++                held: held.clone(),
++                fail: fail.clone(),
++                desktop: desktop.clone(),
++                delay_ms: Rc::new(Cell::new(0)),
++            },
++            held,
++            fail,
++            desktop,
++        )
++    }
++    #[test]
++    fn preheld_user_key_is_never_borrowed_or_released() {
++        let (read, held, _, _) = state();
++        held.borrow_mut().push(0x10);
++        assert!(Owner::begin(read, vec![0x10, 1]).is_err());
++        assert_eq!(*held.borrow(), [0x10]);
++    }
++    #[test]
++    fn only_released_owned_keys_can_acknowledge_and_unknown_keeps_unsafe_receipt() {
++        for failed_query in [false, true] {
++            let (read, held, fail, _) = state();
++            let owner = Owner::begin(read, vec![0x10, 0x11, 1]).unwrap();
++            held.borrow_mut().extend([0x10, 0x11, 1]);
++            // The inner guards, not this observing owner, release only keys
++            // they actually armed before returning to finish.
++            held.borrow_mut().clear();
++            fail.set(failed_query);
++            let ack = Cell::new(false);
++            let result = owner.finish(Ok(()), |released| ack.set(released));
++            assert_eq!(ack.get(), !failed_query);
++            if failed_query {
++                assert_eq!(
++                    result.unwrap_err().disposition,
++                    DeliverySemantics::uncertain()
++                );
++            } else {
++                result.unwrap();
++            }
++        }
++    }
++    #[test]
++    fn changed_desktop_or_held_key_never_acknowledges() {
++        for change_desktop in [false, true] {
++            let (read, held, _, desktop) = state();
++            let owner = Owner::begin(read, vec![0x12]).unwrap();
++            if change_desktop {
++                desktop.set(2);
++            } else {
++                held.borrow_mut().push(0x12);
++            }
++            let ack = Cell::new(false);
++            let result = owner.finish(Ok(()), |released| ack.set(released));
++            assert!(!ack.get());
++            assert_eq!(
++                result.unwrap_err().disposition,
++                DeliverySemantics::uncertain()
++            );
++        }
++    }
++    #[test]
++    fn an_unposted_planned_key_pressed_by_the_user_is_never_released() {
++        let (read, held, _, _) = state();
++        let owner = Owner::begin(read, vec![0x11, 0x41]).unwrap();
++        // Ctrl was posted and its actual inner guard released it. Stop
++        // prevented A from being posted; a concurrent human then pressed A.
++        held.borrow_mut().push(0x41);
++        let ack = Cell::new(false);
++        let outcome = owner.finish(Err(unsent("Stopped before A")), |released| {
++            ack.set(released)
++        });
++        assert!(!ack.get());
++        assert_eq!(*held.borrow(), [0x41]);
++        assert_eq!(
++            outcome.unwrap_err().disposition,
++            DeliverySemantics::uncertain()
++        );
++    }
++    #[test]
++    fn an_expired_native_observation_never_acknowledges_even_if_it_returns_clear() {
++        struct SlowSecond(u8);
++        impl Observations for SlowSecond {
++            type Desktop = u8;
++            fn desktop(&mut self) -> Result<u8, AdapterError> {
++                self.0 += 1;
++                // Begin uses reads1-2; first clear observation uses3-4.
++                // Only the second clear observation blocks past the budget.
++                if self.0 >= 5 {
++                    std::thread::sleep(Duration::from_millis(25));
++                }
++                Ok(1)
++            }
++            fn down(&mut self, _key: u16) -> Result<bool, AdapterError> {
++                Ok(false)
++            }
++        }
++        let owner = Owner::begin(SlowSecond(0), vec![0x11]).unwrap();
++        let ack = Cell::new(false);
++        let result = owner.finish(Ok(()), |released| ack.set(released));
++        assert!(!ack.get());
++        assert_eq!(
++            result.unwrap_err().disposition,
++            DeliverySemantics::uncertain()
++        );
++    }
++    #[test]
++    fn desktop_loss_preserves_domain_and_prior_delivery_at_the_outer_error() {
++        let before = with_desktop_domain(unsent("Locked"), false);
++        assert_eq!(before.disposition, DeliverySemantics::not_delivered());
++        assert_eq!(
++            before.details.as_ref().unwrap()["clovy_code"],
++            "computer_use_desktop_unavailable"
++        );
++        let scalar = with_desktop_domain(
++            unsent("Locked").with_details(serde_json::json!("native cause")),
++            false,
++        );
++        assert_eq!(
++            scalar.details.as_ref().unwrap()["clovy_code"],
++            "computer_use_desktop_unavailable"
++        );
++        assert_eq!(
++            scalar.details.as_ref().unwrap()["native_details"],
++            "native cause"
++        );
++        let after = with_desktop_domain(unsent("Locked"), true);
++        assert_eq!(after.disposition, DeliverySemantics::uncertain());
++        let unknown = with_desktop_domain(
++            unsent("Locked").with_disposition(DeliverySemantics::unknown()),
++            true,
++        );
++        assert_eq!(unknown.disposition, DeliverySemantics::uncertain());
++        let prior = agent_desktop_core::ActionResult::delivered_unverified("click");
++        let error = settle_action_result(Ok(prior), true, true).unwrap_err();
++        assert_eq!(error.disposition, DeliverySemantics::delivered_unverified());
++        assert_eq!(
++            error.details.as_ref().unwrap()["clovy_code"],
++            "computer_use_desktop_unavailable"
++        );
++        assert!(
++            error
++                .details
++                .as_ref()
++                .unwrap()
++                .get("prior_action_result")
++                .is_some()
++        );
++    }
++}
+--- a/crates/windows/src/system/adapter.rs
++++ b/crates/windows/src/system/adapter.rs
+@@ -229,7 +229,9 @@
+     }
+ 
+     fn focus_window(&self, win: &WindowInfo, lease: &InteractionLease) -> Result<(), AdapterError> {
+-        crate::system::window::window_activate::focus_window(win, lease)
++        crate::input::native_owner::ensure_interactive_desktop()?;
++        let result = crate::system::window::window_activate::focus_window(win, lease);
++        crate::input::native_owner::finish_unit_result(result)
+     }
+ 
+     fn list_displays(&self, deadline: Deadline) -> Result<Vec<DisplayInfo>, AdapterError> {
+--- a/crates/windows/src/system/launch.rs
++++ b/crates/windows/src/system/launch.rs
+@@ -75,6 +75,7 @@
+ ) -> LaunchResult {
+     let renderer = window.as_ref().and_then(detect_renderer_from_window);
+     LaunchResult {
++        launch_identity: None,
+         app: window
+             .as_ref()
+             .map(|window| window.app.clone())
+--- a/crates/windows/src/system/window/window_activate.rs
++++ b/crates/windows/src/system/window/window_activate.rs
+@@ -225,6 +225,7 @@
+         if !owned_for_write(evidence)? {
+             return Err(recycled_before_foreground());
+         }
++        crate::input::native_owner::before_semantic_effect()?;
+         if ShowWindowAsync(handle, SW_RESTORE) == 0 {
+             return Err(before_activation(hresult::win32_last_error(
+                 "ShowWindowAsync failed while restoring target",
+@@ -258,6 +259,7 @@
+             return Err(recycled_before_foreground());
+         }
+         if IsWindowVisible(handle) == 0 {
++            crate::input::native_owner::before_semantic_effect()?;
+             if ShowWindowAsync(handle, SW_SHOW) == 0 {
+                 return Err(before_activation(hresult::win32_last_error(
+                     "ShowWindowAsync failed while showing target",
+@@ -267,6 +269,7 @@
+         if !owned_for_write(evidence)? {
+             return Err(recycled_before_foreground());
+         }
++        crate::input::native_owner::before_semantic_effect()?;
+         let _ = SetForegroundWindow(handle);
+     }
+     Ok(())
+--- a/src/cli_args/actions.rs
++++ b/src/cli_args/actions.rs
+@@ -133,6 +133,12 @@
+ #[derive(Parser, Debug, Deserialize)]
+ #[serde(deny_unknown_fields)]
+ pub(crate) struct PressArgs {
++    #[arg(long = "clovy-target-json", hide = true)]
++    #[serde(default)]
++    pub clovy_target_json: Option<String>,
++    #[arg(long = "clovy-ref", hide = true)]
++    #[serde(default)]
++    pub clovy_ref: Option<String>,
+     #[arg(
+         value_name = "COMBO",
+         help = "Key combo: return, escape, cmd+c, shift+tab ..."
+@@ -214,6 +220,11 @@
+ #[derive(Parser, Debug, Deserialize)]
+ #[serde(deny_unknown_fields)]
+ pub(crate) struct MouseClickArgs {
++    /// Private Clovy target identity, never forwarded from model arguments.
++    #[arg(long = "clovy-target-json", hide = true)]
++    #[serde(default)]
++    pub clovy_target: Option<String>,
++
+     #[arg(
+         long,
+         help = "Absolute coordinates as x,y; requires --headed; write a negative value with = (--xy=-100,50)"
+--- a/src/cli_args/drag.rs
++++ b/src/cli_args/drag.rs
+@@ -29,6 +29,14 @@
+ #[derive(Parser, Debug, Deserialize)]
+ #[serde(deny_unknown_fields)]
+ pub(crate) struct DragCliArgs {
++    #[arg(long = "clovy-modifier", hide = true)]
++    #[serde(default)]
++    pub clovy_modifiers: Vec<String>,
++    /// Private Clovy target identity, never forwarded from model arguments.
++    #[arg(long = "clovy-target-json", hide = true)]
++    #[serde(default)]
++    pub clovy_target: Option<String>,
++
+     #[command(flatten)]
+     #[serde(flatten)]
+     pub target: DragTargetArgs,
+--- a/src/cli_args/mouse_wheel.rs
++++ b/src/cli_args/mouse_wheel.rs
+@@ -6,6 +6,11 @@
+ #[derive(Parser, Debug, Deserialize)]
+ #[serde(deny_unknown_fields)]
+ pub(crate) struct MouseWheelArgs {
++    /// Private Clovy target identity, never forwarded from model arguments.
++    #[arg(long = "clovy-target-json", hide = true)]
++    #[serde(default)]
++    pub clovy_target: Option<String>,
++
+     #[arg(
+         long,
+         help = "Absolute X coordinate for wheel event; write a negative value with = (--x=-100)"
+@@ -56,6 +61,7 @@
+ 
+     fn args(dx: f64, dy: Option<f64>) -> MouseWheelArgs {
+         MouseWheelArgs {
++            clovy_target: None,
+             x: 0.0,
+             y: 0.0,
+             dy,
+--- a/src/dispatch/cursor_overlay_lifecycle_tests.rs
++++ b/src/dispatch/cursor_overlay_lifecycle_tests.rs
+@@ -173,6 +173,8 @@
+ 
+     dispatch(
+         Commands::Press(PressArgs {
++            clovy_ref: None,
++            clovy_target_json: None,
+             combo: "a".into(),
+             app: None,
+             window_id: None,
+@@ -258,6 +260,8 @@
+ 
+     let result = dispatch(
+         Commands::Press(PressArgs {
++            clovy_ref: None,
++            clovy_target_json: None,
+             combo: "cmd+q".into(),
+             app: None,
+             window_id: None,
+--- a/src/dispatch/keyboard_mouse.rs
++++ b/src/dispatch/keyboard_mouse.rs
+@@ -22,6 +22,16 @@
+     adapter: &dyn PlatformAdapter,
+     context: &CommandContext,
+ ) -> Result<Value, AppError> {
++    if let Some(reference) = args.clovy_ref {
++        return agent_desktop_core::commands::clovy_targeted::press(
++            reference, args.combo, adapter, context,
++        );
++    }
++    if let Some(expected) = args.clovy_target_json {
++        return agent_desktop_core::commands::clovy_targeted::press_window(
++            &expected, args.combo, adapter, context,
++        );
++    }
+     press_command::execute(
+         press_command::PressArgs {
+             combo: args.combo,
+@@ -79,6 +89,26 @@
+     adapter: &dyn PlatformAdapter,
+     context: &CommandContext,
+ ) -> Result<Value, AppError> {
++    if let Some(expected) = args.clovy_target.as_deref() {
++        return agent_desktop_core::commands::clovy_targeted::drag(
++            expected,
++            parse_modifiers(&args.clovy_modifiers)?,
++            parse_xy(
++                args.target
++                    .from_xy
++                    .as_deref()
++                    .ok_or_else(|| AppError::invalid_input("Missing drag source"))?,
++            )?,
++            parse_xy(
++                args.target
++                    .to_xy
++                    .as_deref()
++                    .ok_or_else(|| AppError::invalid_input("Missing drag target"))?,
++            )?,
++            adapter,
++            context,
++        );
++    }
+     drag_command::execute(
+         drag_command::DragArgs {
+             from: drag_command::DragEndpoint {
+@@ -117,6 +147,19 @@
+     context: &CommandContext,
+ ) -> Result<Value, AppError> {
+     let (x, y) = parse_xy(&args.xy)?;
++    if let Some(expected) = args.clovy_target.as_deref() {
++        return agent_desktop_core::commands::clovy_targeted::mouse(
++            expected,
++            agent_desktop_core::MouseEvent {
++                point: agent_desktop_core::Point { x, y },
++                kind: agent_desktop_core::MouseEventKind::Click { count: args.count },
++                button: parse_mouse_button(&args.button)?,
++                modifiers: parse_modifiers(&args.modifiers)?,
++            },
++            adapter,
++            context,
++        );
++    }
+     mouse_click_command::execute(
+         mouse_click_command::MouseClickArgs {
+             x,
+@@ -171,6 +214,25 @@
+     adapter: &dyn PlatformAdapter,
+     context: &CommandContext,
+ ) -> Result<Value, AppError> {
++    if let Some(expected) = args.clovy_target.as_deref() {
++        return agent_desktop_core::commands::clovy_targeted::mouse(
++            expected,
++            agent_desktop_core::MouseEvent {
++                point: agent_desktop_core::Point {
++                    x: args.x,
++                    y: args.y,
++                },
++                kind: agent_desktop_core::MouseEventKind::Wheel {
++                    delta_x: args.dx,
++                    delta_y: args.vertical_lines(),
++                },
++                button: agent_desktop_core::MouseButton::Left,
++                modifiers: parse_modifiers(&args.modifiers)?,
++            },
++            adapter,
++            context,
++        );
++    }
+     mouse_wheel_command::execute(
+         mouse_wheel_command::MouseWheelArgs {
+             x: args.x,
+--- a/src/dispatch/mod.rs
++++ b/src/dispatch/mod.rs
+@@ -36,6 +36,9 @@
+     context: &CommandContext,
+ ) -> Result<Value, AppError> {
+     let read_only = !cmd.is_mutating();
++    if !read_only {
++        commands::clovy_cancel::ensure()?;
++    }
+     dispatch_command(cmd, adapter, permission_report, context)
+         .map_err(|error| disposition::settle_unknown_delivery(error, read_only))
+ }
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -185,6 +185,13 @@
+                 std::env::var("AGENT_DESKTOP_SESSION").ok().as_deref(),
+             )
+             .map_err(pre_dispatch_error)?;
++            if std::env::var_os("CLOVY_AGENT_DESKTOP_SUPERVISED").as_deref()
++                == Some(std::ffi::OsStr::new("1"))
++                && let Some(id) = session_id.as_deref()
++            {
++                agent_desktop_core::session::ensure_clovy_session(id)
++                    .map_err(pre_dispatch_error)?;
++            }
+             let context = CommandContext::new(session_id, cli.trace, cli.trace_strict)
+                 .map_err(pre_dispatch_error)?
+                 .with_headed(cli.interaction.headed)

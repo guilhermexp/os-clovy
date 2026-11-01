@@ -150,18 +150,25 @@ jobs:
           restore-keys: |
             release-cargo-registry-${{ runner.os }}-
 
+      - name: Prepare the Windows signing identity on the ephemeral runner
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: ./scripts/prepare-windows-release-certificate.ps1
+
       - name: Build and verify the installer and its updater signature
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: ./scripts/build-windows.ps1 -OutputDirectory artifacts/windows-release
+        run: ./scripts/build-windows.ps1
 
       - name: Upload Windows files
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: clovy-release-windows
-          path: artifacts/windows-release/*-setup.exe*
+          path: artifacts/windows-signed/*-setup.exe*
           if-no-files-found: error
 
   publish:

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,6 +39,7 @@ if (devAppIdentity.identifier !== defaultIdentity.identifier) {
 // (docs/development.md). Resolve it once and hand the same SHA-1 to the
 // Computer use helper, build.rs, and the runner that signs the app bundle.
 let devSigningIdentity;
+let windowsDevRunner;
 if (process.platform === "darwin") {
   try {
     devSigningIdentity = resolveDevSigningIdentity().identity;
@@ -66,16 +67,50 @@ if (process.platform === "darwin") {
   );
   if (localPrepare.status !== 0) process.exit(localPrepare.status ?? 1);
 
-  const prepare = spawnSync(process.execPath, [resolve(SCRIPT_DIR, "prepare-cua-driver.mjs")], {
+  const prepare = spawnSync(process.execPath, [resolve(SCRIPT_DIR, "prepare-computer-use.mjs")], {
     cwd: ROOT_DIR,
     env: {
       ...process.env,
       ...(developerDir ? { DEVELOPER_DIR: developerDir } : {}),
+      CLOVY_DEV_APP_IDENTIFIER: devAppIdentity.identifier,
       [DEV_SIGNING_IDENTITY_ENV]: devSigningIdentity,
     },
     stdio: "inherit",
   });
   if (prepare.status !== 0) process.exit(prepare.status ?? 1);
+}
+
+if (process.platform === "win32") {
+  const prepare = spawnSync(process.execPath, [resolve(SCRIPT_DIR, "prepare-computer-use.mjs")], {
+    cwd: ROOT_DIR,
+    env: { ...process.env, CLOVY_DEV_APP_IDENTIFIER: devAppIdentity.identifier },
+    stdio: "inherit",
+  });
+  if (prepare.status !== 0) process.exit(prepare.status ?? 1);
+  const runnerDirectory = resolve(ROOT_DIR, ".tauri-helper");
+  mkdirSync(runnerDirectory, { recursive: true });
+  windowsDevRunner = resolve(runnerDirectory, "windows-dev-runner.exe");
+  const builtRunner = spawnSync(
+    "rustc",
+    [
+      "--edition=2021",
+      resolve(ROOT_DIR, "src-tauri/native/windows-dev-runner/main.rs"),
+      "-C",
+      "opt-level=1",
+      "-o",
+      windowsDevRunner,
+    ],
+    {
+      cwd: ROOT_DIR,
+      env: {
+        ...process.env,
+        CLOVY_WINDOWS_DEV_NODE: process.execPath,
+        CLOVY_WINDOWS_DEV_SCRIPT: resolve(SCRIPT_DIR, "cargo-windows-dev-runner.mjs"),
+      },
+      stdio: "inherit",
+    },
+  );
+  if (builtRunner.status !== 0) process.exit(builtRunner.status ?? 1);
 }
 
 // A port is "free" when a connection is refused. Mirrors the probe in
@@ -144,7 +179,10 @@ writeFileSync(
   JSON.stringify({
     productName: devAppIdentity.productName,
     identifier: devAppIdentity.identifier,
-    build: { devUrl: `http://127.0.0.1:${frontendPort}` },
+    build: {
+      devUrl: `http://127.0.0.1:${frontendPort}`,
+      ...(windowsDevRunner ? { runner: windowsDevRunner } : {}),
+    },
   }),
 );
 // Merge a devUrl override last so it wins over the file configs, pointing the

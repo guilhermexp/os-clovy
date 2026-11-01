@@ -1,0 +1,40 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "clovy-agent-desktop-9eb9b296192fcb70bda25e918cd6dd66abfa3d0d",
+  "documentNamespace": "https://github.com/guilhermexp/os-clovy/sbom/agent-desktop/9eb9b296192fcb70bda25e918cd6dd66abfa3d0d/ec6a8c658b250f7d0c191159247760838036296c21d0d598a9bbf9d6a455e18d",
+  "creationInfo": {
+    "created": "2026-11-01T00:00:00Z",
+    "creators": [
+      "Organization: Clovy"
+    ]
+  },
+  "packages": [
+    {
+      "name": "agent-desktop",
+      "SPDXID": "SPDXRef-agent-desktop",
+      "versionInfo": "1.0.2",
+      "downloadLocation": "https://github.com/vercel-labs/agent-desktop.git",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "NOASSERTION",
+      "sourceInfo": "Exact commit 9eb9b296192fcb70bda25e918cd6dd66abfa3d0d with reviewed Clovy process supervision, captured window-key authority inside the interaction lease, preparatory-focus evidence retaining original native input disposition, native macOS launch identity and callback ABI, Windows modifier/key ownership and lock-time context gates, live-sensitivity guards, AX insertion preflight, Unicode parity and private presentation-session patch ec6a8c658b250f7d0c191159247760838036296c21d0d598a9bbf9d6a455e18d. Dependency resolution recorded in distributed Cargo.lock. Native macOS/Windows runtime acceptance remains pending.",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/vercel-labs/agent-desktop@9eb9b296192fcb70bda25e918cd6dd66abfa3d0d"
+        }
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-agent-desktop"
+    }
+  ]
+}

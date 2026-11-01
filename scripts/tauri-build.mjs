@@ -29,9 +29,11 @@ if (buildPlatform === "darwin") {
     { stdio: "inherit" },
   );
   if (localPrepare.status !== 0) process.exit(localPrepare.status ?? 1);
+}
+if (buildPlatform === "darwin" || buildPlatform === "win32") {
   const prepareArgs = [
-    resolve(dirname(fileURLToPath(import.meta.url)), "prepare-cua-driver.mjs"),
-    "--release",
+    resolve(dirname(fileURLToPath(import.meta.url)), "prepare-computer-use.mjs"),
+    ...(userArgs.includes("--debug") ? [] : ["--release"]),
   ];
   if (target) prepareArgs.push("--target", target);
   const prepare = spawnSync(process.execPath, prepareArgs, {

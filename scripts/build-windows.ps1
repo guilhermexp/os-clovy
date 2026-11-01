@@ -5,10 +5,12 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repoRoot "artifacts\windows-unsigned" }
+if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repoRoot "artifacts\windows-signed" }
 elseif (-not [System.IO.Path]::IsPathRooted($OutputDirectory)) { $OutputDirectory = Join-Path $repoRoot $OutputDirectory }
 $callerLocation = Get-Location
 $previousPath = $env:PATH
+$hadSignTool = Test-Path Env:WINDOWS_SIGNTOOL_PATH
+$previousSignTool = $env:WINDOWS_SIGNTOOL_PATH
 $mutexPath = [System.IO.Path]::GetFullPath($repoRoot).TrimEnd([char[]]"\/").ToUpperInvariant()
 $mutexBytes = [System.Text.Encoding]::UTF8.GetBytes($mutexPath)
 $mutexHasher = [System.Security.Cryptography.SHA256]::Create()
@@ -57,9 +59,20 @@ try {
   if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath "$targetLibDirectory" -PathType Container)) {
     throw "The $targetTriple Rust target is required."
   }
-  if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
-    throw "Unsigned Windows builds require WINDOWS_CERTIFICATE_PASSWORD to be unset."
+  if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_THUMBPRINT)) {
+    throw "WINDOWS_CERTIFICATE_THUMBPRINT is required: Computer use authenticates the signed helper, engine and Clovy host by publisher."
   }
+  if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNTOOL_PATH)) {
+    $signCommand = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if ($signCommand) { $env:WINDOWS_SIGNTOOL_PATH = $signCommand.Source }
+    else {
+      $sdkRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+      $signTools = @(Get-ChildItem -LiteralPath $sdkRoot -Filter signtool.exe -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Directory.Name -eq "x64" } | Sort-Object FullName -Descending)
+      if ($signTools.Count -eq 0) { throw "The Windows SDK SignTool is required for the nested Computer use executables." }
+      $env:WINDOWS_SIGNTOOL_PATH = $signTools[0].FullName
+    }
+  }
+  if (-not (Test-Path -LiteralPath $env:WINDOWS_SIGNTOOL_PATH -PathType Leaf)) { throw "WINDOWS_SIGNTOOL_PATH is not a usable executable." }
   $makensisCommand = Get-Command makensis.exe -ErrorAction SilentlyContinue
   $makensisCandidates = @()
   if (${env:ProgramFiles(x86)}) { $makensisCandidates += Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe" }
@@ -89,17 +102,17 @@ try {
   }
   $appExecutable = Join-Path $releaseDirectory "clovy.exe"
   Remove-Item -LiteralPath $appExecutable -Force -ErrorAction SilentlyContinue
-  # Authenticode stays off (--no-sign). With the updater key (release
-  # workflow) the installer also gets its minisign signature below: --no-sign
-  # skips Tauri's own updater signing too, so the .sig comes from
-  # `tauri signer sign`, which reads the same TAURI_SIGNING_* variables.
+  # Sign every nested executable before Tauri signs the host and installer.
+  # A current-user certificate keeps the helper and host on one publisher.
+  & node scripts/prepare-computer-use.mjs --release --target $targetTriple
+  if ($LASTEXITCODE -ne 0) { throw "Computer use helper/engine preparation failed." }
   $hasUpdaterKey = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)
-  $tauriArgs = @("--target", $targetTriple, "--no-sign")
+  $tauriArgs = @("--target", $targetTriple)
   if ($hasUpdaterKey) {
     $tauriArgs += @("--config", "src-tauri/tauri.windows.conf.json", "--config", "src-tauri/tauri.release.conf.json")
   }
   & node scripts/tauri-build.mjs @tauriArgs
-  if ($LASTEXITCODE -ne 0) { throw "Unsigned Tauri release build failed." }
+  if ($LASTEXITCODE -ne 0) { throw "Signed Tauri release build failed." }
 
   $installers = @(Get-ChildItem -LiteralPath $nsisDirectory -File -Filter "*-setup.exe")
   if ($installers.Count -ne 1) { throw "Expected exactly one release NSIS installer; found $($installers.Count)." }
@@ -123,11 +136,13 @@ try {
     Remove-Item -LiteralPath $stagedPath, "$stagedPath.sig" -Force -ErrorAction SilentlyContinue
     throw
   }
-  Write-Host "Unsigned Windows installer: $stagedPath"
+  Write-Host "Windows installer: $stagedPath"
 }
 finally {
   try {
     $env:PATH = $previousPath
+    if ($hadSignTool) { $env:WINDOWS_SIGNTOOL_PATH = $previousSignTool }
+    else { Remove-Item Env:WINDOWS_SIGNTOOL_PATH -ErrorAction SilentlyContinue }
     Set-Location -LiteralPath $callerLocation
   }
   finally {

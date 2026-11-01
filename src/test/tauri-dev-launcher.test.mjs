@@ -73,7 +73,7 @@ function createSandbox() {
   cpSync(path.join(repoRoot, "scripts"), path.join(sandbox, "scripts"), { recursive: true });
   // Native helper builds are covered separately; assert the launcher prepares them.
   writeFileSync(
-    path.join(sandbox, "scripts", "prepare-cua-driver.mjs"),
+    path.join(sandbox, "scripts", "prepare-computer-use.mjs"),
     'import { existsSync } from "node:fs"; if (!existsSync("prepared-local-transcriber")) throw new Error("Local helper resource must exist before Cargo validation");',
   );
   writeFileSync(
@@ -81,7 +81,7 @@ function createSandbox() {
     'import { writeFileSync } from "node:fs"; writeFileSync("prepared-local-transcriber", "yes"); writeFileSync("local-helper-developer-dir", process.env.DEVELOPER_DIR ?? "");',
   );
   mkdirSync(path.join(sandbox, "src-tauri"), { recursive: true });
-  for (const file of ["cua-driver-pin.json", "tauri.conf.json", "tauri.macos.conf.json"]) {
+  for (const file of ["agent-desktop-pin.json", "tauri.conf.json", "tauri.macos.conf.json"]) {
     cpSync(path.join(repoRoot, "src-tauri", file), path.join(sandbox, "src-tauri", file));
   }
   const bin = path.join(sandbox, "bin");
@@ -148,7 +148,7 @@ describe.runIf(process.platform === "darwin")("pnpm tauri:dev launcher", () => {
   it("starts Tauri while existing authorizations and signed helper copies survive", () => {
     const { sandbox, bin } = createSandbox();
     const pin = JSON.parse(
-      readFileSync(path.join(sandbox, "src-tauri", "cua-driver-pin.json"), "utf8"),
+      readFileSync(path.join(sandbox, "src-tauri", "agent-desktop-pin.json"), "utf8"),
     );
     const helperIdentifier = computerUseBundleIdentifier({
       baseIdentifier: pin.bundleIdentifier,

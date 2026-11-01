@@ -16,13 +16,13 @@ const K_IOHID_ACCESS_TYPE_UNKNOWN: u32 = 2;
 /// Probes live TCC permission states for accessibility, screen recording,
 /// and input monitoring.
 pub fn permissions() -> PermissionSnapshot {
-    let accessibility = if platform_macos::permissions::status::accessibility_granted() {
+    let accessibility = if super::native::accessibility_granted() {
         PermissionState::Granted
     } else {
         PermissionState::Denied
     };
 
-    let screen_recording = if platform_macos::permissions::status::screen_recording_granted() {
+    let screen_recording = if super::native::screen_recording_granted() {
         PermissionState::Granted
     } else {
         PermissionState::Denied
@@ -47,10 +47,10 @@ pub fn permissions() -> PermissionSnapshot {
 pub fn request_permission(permission: ActivityPermission) {
     match permission {
         ActivityPermission::Accessibility => {
-            let _ = platform_macos::permissions::status::request_accessibility();
+            let _ = super::native::request_accessibility();
         }
         ActivityPermission::ScreenRecording => {
-            let _ = platform_macos::permissions::status::request_screen_recording();
+            let _ = super::native::request_screen_recording();
         }
         ActivityPermission::InputMonitoring => unsafe {
             let _ = IOHIDRequestAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT);
