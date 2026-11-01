@@ -50,6 +50,20 @@ describe("bundled desktop engine artifact verification", () => {
       manifest.executableSha256,
     );
   });
+  it("rejects older or different runtime source generations with identical artifact bytes", () => {
+    const { directory, target, manifest, save } = artifact();
+    delete manifest.ownedRuntimeSourceSha256;
+    save();
+    expect(() => verifyEngineArtifact(directory, pin, target)).toThrow();
+    manifest.ownedRuntimeSourceSha256 = "different-generation";
+    save();
+    expect(() => verifyEngineArtifact(directory, pin, target)).toThrow();
+    manifest.ownedRuntimeSourceSha256 = pin.ownedRuntimeSourceSha256;
+    save();
+    expect(() =>
+      verifyEngineArtifact(directory, { ...pin, ownedRuntimeSourceSha256: "" }, target),
+    ).toThrow();
+  });
   it.each([
     "sourceCommit",
     "protocolVersion",

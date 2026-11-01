@@ -387,6 +387,7 @@ fn verify_computer_use_engine(
         "license",
         "licenseSha256",
         "patchSha256",
+        "ownedRuntimeSourceSha256",
         "sourceReviewSha256",
     ] {
         assert_eq!(
@@ -398,8 +399,8 @@ fn verify_computer_use_engine(
             manifest
                 .get(key)
                 .and_then(serde_json::Value::as_str)
-                .is_some(),
-            "engine manifest {key} missing"
+                .is_some_and(|value| !value.is_empty()),
+            "engine manifest {key} missing or empty"
         );
     }
     let executable = if os == "macos" {

@@ -8,6 +8,12 @@ reports version 1.0.2. The preparer verifies the commit, source tree, lock,
 license and Clovy patch; it archives a separate build checkout and preserves
 the upstream evidence checkout and its builds.
 
+The preparer also authenticates a snapshot of Clovy's shared private-browser
+runtime identity source and stages those exact bytes in the archived workspace.
+The native OS guards that will consume it, a newly prepared engine, and their
+macOS and Windows acceptance remain pending; this input binding does not prove
+those guards or qualify an existing engine artifact.
+
 The source commit is less than seven days old. The specific reason to use it
 is the Windows CLI shutdown correction in `0768da43` (the main thread's UIA
 COM client must not release after COM teardown), plus `d77f910d` (CR LF must

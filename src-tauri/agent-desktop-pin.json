@@ -12,5 +12,6 @@
   "executable": "clovy-computer-use-driver",
   "minimumMacOSVersion": "14.0",
   "patchSha256": "ec6a8c658b250f7d0c191159247760838036296c21d0d598a9bbf9d6a455e18d",
-  "sourceReviewSha256": "241eab8a63b1dd65da65e28aeaf70d8c7555043d9097507c7557c7fb1596598a"
+  "ownedRuntimeSourceSha256": "48342df75f2784ea7d32ce32b2f33bdc71f2c1865eaaf7eb084ea739e9b9740a",
+  "sourceReviewSha256": "f7fc2744fc0239fbcc1d78e1634fb0d98b03d07d2e49d77fab6b1cc734a94ef9"
 }

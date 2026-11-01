@@ -18,6 +18,7 @@ export function verifyEngineArtifact(directory, pin, target) {
     "license",
     "licenseSha256",
     "patchSha256",
+    "ownedRuntimeSourceSha256",
     "sourceReviewSha256",
   ]) {
     if (typeof pin[field] !== "string" || !pin[field] || manifest[field] !== pin[field])

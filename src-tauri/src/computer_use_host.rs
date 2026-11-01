@@ -426,9 +426,14 @@ pub fn verify_engine(executable: &std::path::Path) -> Result<()> {
         "license",
         "licenseSha256",
         "patchSha256",
+        "ownedRuntimeSourceSha256",
         "sourceReviewSha256",
     ] {
-        if manifest[field] != pin[field] || !manifest[field].is_string() {
+        let expected = pin[field]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .context("Engine pin field missing or empty")?;
+        if manifest[field].as_str() != Some(expected) {
             bail!("Engine manifest {field} does not match the compiled pin");
         }
     }
@@ -637,6 +642,18 @@ mod artifact_tests {
         let path = directory.path().join("agent-desktop-manifest.json");
         std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         verify_engine(&executable).unwrap();
+        let runtime_source = manifest["ownedRuntimeSourceSha256"].clone();
+        manifest
+            .as_object_mut()
+            .unwrap()
+            .remove("ownedRuntimeSourceSha256");
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(verify_engine(&executable).is_err());
+        manifest["ownedRuntimeSourceSha256"] = json!("different-generation");
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(verify_engine(&executable).is_err());
+        manifest["ownedRuntimeSourceSha256"] = runtime_source;
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         std::fs::write(&executable, b"tampered artifact bytes").unwrap();
         assert!(verify_engine(&executable)
             .unwrap_err()

@@ -184,9 +184,10 @@ function validateBundle() {
     "license",
     "licenseSha256",
     "patchSha256",
+    "ownedRuntimeSourceSha256",
     "sourceReviewSha256",
   ]) {
-    if (engineManifest[field] !== pin[field])
+    if (typeof pin[field] !== "string" || !pin[field] || engineManifest[field] !== pin[field])
       throw new Error(`Bundled engine ${field} differs from reviewed pin`);
   }
   if (

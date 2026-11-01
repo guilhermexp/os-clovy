@@ -23,8 +23,17 @@ const pin = JSON.parse(readFileSync(join(root, "src-tauri", "agent-desktop-pin.j
 // Snapshot mutable workspace inputs once, before any long build. Every output
 // receipt and applied patch belongs to this same immutable input generation.
 const sourceReview = readFileSync(join(root, "src-tauri", "agent-desktop", "source-review.md"));
+const ownedRuntimeBytes = readFileSync(
+  join(root, "src-tauri", "src", "computer_use_owned_runtime.rs"),
+);
 if (digest(sourceReview) !== pin.sourceReviewSha256)
   throw new Error("Source qualification digest mismatch");
+if (
+  typeof pin.ownedRuntimeSourceSha256 !== "string" ||
+  !pin.ownedRuntimeSourceSha256 ||
+  digest(ownedRuntimeBytes) !== pin.ownedRuntimeSourceSha256
+)
+  throw new Error("Owned browser runtime source digest mismatch");
 let target = process.env.TAURI_ENV_TARGET_TRIPLE || hostTriple();
 for (let i = 2; i < process.argv.length; i++) {
   const arg = process.argv[i];
@@ -161,6 +170,10 @@ run(
   ["--git-dir", sourceGitDir, "--work-tree", actualSource, "apply", appliedPatch],
   actualSource,
 );
+const stagedOwnedRuntime = join(actualSource, ".clovy-owned-runtime.rs");
+writeFileSync(stagedOwnedRuntime, ownedRuntimeBytes, { flag: "wx" });
+if (sha256(stagedOwnedRuntime) !== pin.ownedRuntimeSourceSha256)
+  throw new Error("Staged owned browser runtime source digest mismatch");
 
 const targetDir = resolve(
   process.env.AGENT_DESKTOP_TARGET_DIR ||
@@ -219,6 +232,7 @@ const manifest = {
   license: pin.license,
   licenseSha256: pin.licenseSha256,
   patchSha256: pin.patchSha256,
+  ownedRuntimeSourceSha256: pin.ownedRuntimeSourceSha256,
   sourceTree: run("git", ["rev-parse", `${commit}^{tree}`], source, true).trim(),
   recentSourceReview: pin.recentSourceReview,
   sourceReviewSha256: pin.sourceReviewSha256,
