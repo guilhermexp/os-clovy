@@ -4,6 +4,26 @@ import { defineMessages } from "../define";
 // pickers) plus the connector approvals tray and the Computer use control.
 export default defineMessages({
   en: {
+    "settingsPanels.browserUse.name": "Browser use",
+    "settingsPanels.browserUse.stateUnavailable":
+      "Browser session state is unavailable. Reopen Plugins to check again.",
+    "settingsPanels.browserUse.description":
+      "A separate Clovy browser with saved logins. Works in the background and opens a window when needed.",
+    "settingsPanels.browserUse.enableAria": "Enable browser use",
+    "settingsPanels.browserUse.privacy":
+      "Page text and screenshots may be sent to your configured AI model. Sign in yourself using Take over. Stopping keeps saved logins; routines use a separate anonymous profile.",
+    "settingsPanels.browserUse.background": "Clovy browser - background",
+    "settingsPanels.browserUse.visible": "Clovy browser - visible",
+    "settingsPanels.browserUse.paused": "Clovy browser - visible, you have control",
+    "settingsPanels.browserUse.pausedBackground": "Clovy browser - control paused",
+    "settingsPanels.browserUse.pausedBackgroundHelp":
+      "Agent actions and capture are paused. The browser window has not opened yet.",
+    "settingsPanels.browserUse.pausedHelp":
+      "Agent actions and capture are paused. Finish signing in, then explicitly resume agent control.",
+    "settingsPanels.browserUse.takeover": "Take over to sign in",
+    "settingsPanels.browserUse.resume": "Resume agent control",
+    "settingsPanels.browserUse.stop": "Stop browser task",
+
     "settingsPanels.mcp.secretMapInvalid":
       "{label} must be a JSON object whose values are strings.",
     "settingsPanels.mcp.toolsAvailable": {
@@ -430,6 +450,26 @@ export default defineMessages({
     "settingsPanels.llm.loading": "Loading LLM providers...",
   },
   "pt-BR": {
+    "settingsPanels.browserUse.name": "Uso do navegador",
+    "settingsPanels.browserUse.stateUnavailable":
+      "O estado da sessão do navegador está indisponível. Reabra Plugins para verificar de novo.",
+    "settingsPanels.browserUse.description":
+      "Um navegador separado do Clovy com logins salvos. Trabalha em segundo plano e abre uma janela quando necessário.",
+    "settingsPanels.browserUse.enableAria": "Ativar uso do navegador",
+    "settingsPanels.browserUse.privacy":
+      "Textos e capturas de tela podem ser enviados ao modelo de IA configurado. Entre na sua conta usando Assumir controle. Parar mantém os logins salvos; rotinas usam um perfil anônimo separado.",
+    "settingsPanels.browserUse.background": "Navegador do Clovy - segundo plano",
+    "settingsPanels.browserUse.visible": "Navegador do Clovy - visível",
+    "settingsPanels.browserUse.paused": "Navegador do Clovy - visível, você tem o controle",
+    "settingsPanels.browserUse.pausedBackground": "Navegador do Clovy - controle pausado",
+    "settingsPanels.browserUse.pausedBackgroundHelp":
+      "Ações e capturas do agente estão pausadas. A janela do navegador ainda não abriu.",
+    "settingsPanels.browserUse.pausedHelp":
+      "Ações e capturas do agente estão pausadas. Termine o login e retome explicitamente o controle do agente.",
+    "settingsPanels.browserUse.takeover": "Assumir controle para entrar",
+    "settingsPanels.browserUse.resume": "Retomar controle do agente",
+    "settingsPanels.browserUse.stop": "Parar tarefa do navegador",
+
     "settingsPanels.mcp.secretMapInvalid":
       "{label} precisa ser um objeto JSON cujos valores sejam strings.",
     "settingsPanels.mcp.toolsAvailable": {

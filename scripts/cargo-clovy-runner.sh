@@ -55,11 +55,11 @@ CLOVY_DEV_SIGNING_IDENTITY="$(node "$script_dir/dev-signing-identity.mjs")"
 export CLOVY_DEV_SIGNING_IDENTITY
 
 # The Computer use helper is prepared and signed separately before Tauri runs.
-# Building only Clovy, its MCP relay, and its native messaging shim here
+# Building only Clovy and its MCP relay here
 # prevents Cargo from relinking that helper with the app's lower deployment
-# target or a different active Swift toolchain. The relay and the shim sit
+# target or a different active Swift toolchain. The relay sits
 # beside the app executable (docs/mcp-server.md).
-cargo build --bin clovy --bin clovy-mcp --bin clovy-nm-shim ${cargo_args[@]+"${cargo_args[@]}"}
+cargo build --bin clovy --bin clovy-mcp ${cargo_args[@]+"${cargo_args[@]}"}
 
 target_dir="${CARGO_TARGET_DIR:-target}"
 if [[ "$target_dir" != /* ]]; then

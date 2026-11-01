@@ -221,11 +221,13 @@ pub async fn cancel_cli_run(
     turns: Option<&crate::mcp_server::turns::TurnRegistry>,
     run_id: &str,
 ) -> bool {
-    if let Some(broker) = broker {
-        broker.cancel_run(run_id).await;
-    }
+    // Revoke browser authority and kill its process tree before awaiting
+    // approval persistence. Stop must not wait behind a database/card wait.
     if let Some(turns) = turns {
         turns.revoke_run(run_id);
+    }
+    if let Some(broker) = broker {
+        broker.cancel_run(run_id).await;
     }
     host.cancel(run_id)
 }

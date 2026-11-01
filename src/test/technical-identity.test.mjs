@@ -12,27 +12,18 @@ async function read(relativePath) {
 
 describe("Clovy technical identity", () => {
   it("uses Clovy for canonical package and helper names", async () => {
-    const [
-      packageJson,
-      extensionPackage,
-      desktopCargo,
-      windowsHelperCargo,
-      legacyCryptoCargo,
-      legacyProtocolCargo,
-    ] = await Promise.all([
-      read("package.json").then(JSON.parse),
-      read("extension/package.json").then(JSON.parse),
-      read("src-tauri/Cargo.toml"),
-      read("src-tauri/native/windows-dictation-helper/Cargo.toml"),
-      read("crates/june-companion-crypto/Cargo.toml"),
-      read("crates/june-companion-protocol/Cargo.toml"),
-    ]);
+    const [packageJson, desktopCargo, windowsHelperCargo, legacyCryptoCargo, legacyProtocolCargo] =
+      await Promise.all([
+        read("package.json").then(JSON.parse),
+        read("src-tauri/Cargo.toml"),
+        read("src-tauri/native/windows-dictation-helper/Cargo.toml"),
+        read("crates/june-companion-crypto/Cargo.toml"),
+        read("crates/june-companion-protocol/Cargo.toml"),
+      ]);
 
     expect(packageJson.name).toBe("clovy");
-    expect(extensionPackage.name).toBe("clovy-extension");
     expect(desktopCargo).toMatch(/^name = "clovy"$/m);
     expect(desktopCargo).toMatch(/^name = "clovy_lib"$/m);
-    expect(desktopCargo).toMatch(/^name = "clovy-nm-shim"$/m);
     expect(windowsHelperCargo).toMatch(/^name = "clovy-windows-dictation-helper"$/m);
     expect(windowsHelperCargo).toMatch(/^name = "clovy-dictation-helper"$/m);
     expect(legacyCryptoCargo).toContain('name = "june-companion-crypto"');
@@ -80,7 +71,6 @@ describe("Clovy technical identity", () => {
       computerUseCursor,
       computerUseSelfTest,
       systemWindows,
-      managedBrowser,
       agentNotifications,
       shutdown,
       soundsDemo,
@@ -93,7 +83,6 @@ describe("Clovy technical identity", () => {
       read("src-tauri/src/computer_use_cursor.rs"),
       read("scripts/computer-use-self-test.mjs"),
       read("src-tauri/src/audio/system_windows.rs"),
-      read("src-tauri/src/browser/managed.rs"),
       read("src/lib/agent-notifications.ts"),
       read("src-tauri/src/shutdown.rs"),
       read("src/lib/clovy-sounds-demo.ts"),
@@ -127,12 +116,6 @@ describe("Clovy technical identity", () => {
     }
     expect(systemWindows).toContain("clovy-windows-system-audio");
     expect(systemWindows).not.toContain("june-windows-system-audio");
-    for (const suffix of ["Epoch", "Observer", "State"]) {
-      expect(managedBrowser).toContain(`__clovySnapshot${suffix}`);
-      expect(managedBrowser).not.toContain(`__juneSnapshot${suffix}`);
-    }
-    expect(managedBrowser).toContain("__clovyMutationVersion");
-    expect(managedBrowser).not.toContain("__juneMutationVersion");
     expect(agentNotifications).toContain("__clovyAgentNotificationTimes");
     expect(agentNotifications).not.toContain("__juneAgentNotificationTimes");
     expect(shutdown).toContain('name("clovy-shutdown-supervisor".to_string())');

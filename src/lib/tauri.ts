@@ -1015,10 +1015,6 @@ export async function revealPath(path: string) {
   return invoke<void>("reveal_path", { path });
 }
 
-export async function unpackBundledExtension() {
-  return invoke<string>("unpack_bundled_extension");
-}
-
 export async function listNotes(folderId?: string, limit?: number) {
   return invoke<ListNotesResponse>("list_notes", { request: { folderId, limit } });
 }
@@ -1402,31 +1398,38 @@ export async function latestDictationEvent() {
   return parseDictationHelperEvent(payload);
 }
 
-// --- Browser extension pairing (JUN-287) ---
+// --- Clovy-owned browser sessions ---
 
-export type ExtensionPairingStatus = {
-  paired: boolean;
-  listenerRunning: boolean;
-  extensionVersion?: string;
-  protocolVersion?: number;
+export type BrowserSession = {
+  sessionId: string;
+  mode: "background" | "visible";
+  suspended: boolean;
 };
 
-/** Emitted by the extension host whenever pairing state changes. */
-export const EXTENSION_PAIRING_CHANGED_EVENT = "clovy://extension-pairing-changed";
-
-export async function extensionPairingStatus() {
-  return invoke<ExtensionPairingStatus>("extension_pairing_status");
+export async function browserAccessGet() {
+  return invoke<boolean>("browser_access_get");
 }
 
-export type RegisterBrowserExtensionHostResult = {
-  manifestPath: string;
-  shimPath: string;
-};
+export async function browserAccessSet(enabled: boolean) {
+  return invoke<boolean>("browser_access_set", { enabled });
+}
 
-/** Writes native messaging host manifests for the supported Chromium-family
- * browsers, pinning the Clovy extension id to the bundled shim. */
-export async function registerBrowserExtensionHost() {
-  return invoke<RegisterBrowserExtensionHostResult>("register_browser_extension_host");
+export async function browserStopSession(sessionId: string) {
+  return invoke<void>("browser_stop_session", { sessionId });
+}
+
+export async function browserSessions() {
+  return invoke<BrowserSession[]>("browser_sessions");
+}
+
+/** Suspend every agent capture and action before exposing the login window. */
+export async function browserHumanTakeover(sessionId: string) {
+  return invoke<void>("browser_human_takeover", { sessionId });
+}
+
+/** Only an explicit user gesture returns control after human takeover. */
+export async function browserResumeControl(sessionId: string) {
+  return invoke<void>("browser_resume_control", { sessionId });
 }
 
 export type RoutineBrowserAccess = {
@@ -1576,16 +1579,6 @@ export type PendingConnectorApproval = {
   accountEmail: string;
   summary: string;
   argsPreview: string;
-  requestedAtMs: number;
-};
-
-/** One attended Browser use action parked in the Rust broker. Page content is
- * limited to the exact origin and element label needed for informed consent. */
-export type PendingBrowserApproval = {
-  approvalId: string;
-  site: string;
-  action: "click" | "fill" | "press";
-  elementLabel: string;
   requestedAtMs: number;
 };
 
@@ -1894,22 +1887,6 @@ export async function connectorApprovalsRespondAll(input: {
   return invoke<void>("connector_approvals_respond_all", {
     approve: input.approve,
     approvalIds: input.approvalIds,
-  });
-}
-
-export async function browserApprovalsPending() {
-  return invoke<PendingBrowserApproval[]>("browser_approvals_pending");
-}
-
-export async function browserApprovalRespond(input: {
-  approvalId: string;
-  approve: boolean;
-  allowSite?: boolean;
-}) {
-  return invoke<void>("browser_approval_respond", {
-    approvalId: input.approvalId,
-    approve: input.approve,
-    allowSite: input.allowSite ?? false,
   });
 }
 

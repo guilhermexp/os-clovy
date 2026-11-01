@@ -99,7 +99,7 @@ fn env_value_truthy(value: Option<&OsStr>) -> bool {
     })
 }
 
-/// Public because the native messaging shim (`extension_host::shim_data_dir`)
+/// Public because the MCP relay
 /// has no AppHandle and must rebuild the same dev/prod split from scratch.
 pub fn app_data_dir_for_build(
     data_dir: PathBuf,

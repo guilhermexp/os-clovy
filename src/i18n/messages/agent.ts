@@ -129,7 +129,6 @@ export default defineMessages({
     "agent.thinking.label": "Thinking…",
 
     // Approval trays
-    "agent.browserApprovals.label": "Browser approvals",
     "agent.computerUse.label": "Computer use approvals",
     "agent.computerUse.headingApp": "Clovy wants to use {app}",
     "agent.computerUse.headingApps": {
@@ -328,7 +327,6 @@ export default defineMessages({
     "agent.thinking.label": "Pensando…",
 
     // Approval trays
-    "agent.browserApprovals.label": "Aprovações do navegador",
     "agent.computerUse.label": "Aprovações de uso do computador",
     "agent.computerUse.headingApp": "O Clovy quer usar o {app}",
     "agent.computerUse.headingApps": {

@@ -163,8 +163,8 @@ CLI turn gets (15 minutes, `chat_engine::policy::CLI_TOOL_TIMEOUT`, checked at
 compile time). A clarification (`request_clarification`) is the same item
 with `kind: "clarification"`, `question`, and `choices`; the answer is the
 tool's result.
-Browser use keeps its own approval tray instead (below), so one click never
-shows two cards.
+Browser use asks this same broker for consequential actions. Its session
+controls manage takeover, resume and Stop; they do not issue approvals.
 
 ## The relay while Clovy is unreachable
 
@@ -242,8 +242,8 @@ which turns see the tool: `every turn`, `attended turns` (chat; never
 routines), or `Claude turns`. A `Claude turns` tool is listed for Claude Code
 itself, not for the model: every Claude turn with Clovy's server, attended or
 not, gets `--disallowedTools mcp__clovy__<tool>` (`chat_engine::policy`). "Broker" says what the call asks first: `yes`
-(an approval card for every call), `clarification` (a question card), `tray`
-(Browser use's own approval tray for consequential actions), or `no`. In an
+(an approval card for every call), `clarification` (a question card), `conditional`
+(the central broker for consequential browser actions), or `no`. In an
 unattended turn every `yes` and `clarification` answers
 `unattended_requires_approval` without a card.
 
@@ -261,20 +261,19 @@ unattended turn every `yes` and `clarification` answers
 | `get_obsidian_vault` | vault and skills | every turn | no | none: the selected Obsidian vault; discovery never authorizes writes (the CLI reads the files itself) |
 | `list_skills` | vault and skills | every turn | no | none: the globally enabled Clovy skills (`agent_skill_settings`) |
 | `load_skill` | vault and skills | every turn | no | `name`: instructions of one globally enabled skill; a disabled one is refused |
-| `start_session` | browser | attended turns | tray | none: starts an attended Browser use session |
-| `close_session` | browser | attended turns | tray | `session_id` |
-| `navigate` | browser | attended turns | tray | `session_id`, `url` |
-| `snapshot` | browser | attended turns | tray | `session_id`: the page as element refs |
-| `screenshot` | browser | attended turns | tray | `session_id`: the PNG as an `image` block plus the broker's result as text |
-| `click` | browser | attended turns | tray | `session_id`, `ref` |
-| `fill` | browser | attended turns | tray | `session_id`, `ref`, `value` |
-| `press` | browser | attended turns | tray | `session_id`, `key` |
-| `back` | browser | attended turns | tray | `session_id` |
-| `list_tabs` | browser | attended turns | tray | `session_id` |
-| `open_tab` | browser | attended turns | tray | `session_id`, `url` (optional) |
-| `switch_tab` | browser | attended turns | tray | `session_id`, `tab_id` |
-| `close_tab` | browser | attended turns | tray | `session_id`, `tab_id` |
-| `accept_shared_tab` | browser | attended turns | tray | `session_id`, `share_code` |
+| `start_session` | browser | attended or routine turns | no | none: returns `sessionId`, integer `tabId`, effective mode |
+| `close_session` | browser | attended or routine turns | no | `session_id`: ends control, retains dedicated logins |
+| `navigate` | browser | attended or routine turns | no | `session_id`, integer `tab_id`, `url` |
+| `snapshot` | browser | attended or routine turns | no | `session_id`, integer `tab_id`: page data and opaque refs |
+| `screenshot` | browser | attended or routine turns | no | `session_id`, integer `tab_id`: redacted PNG image plus receipt |
+| `click` | browser | attended or routine turns | conditional | `session_id`, integer `tab_id`, `ref` |
+| `fill` | browser | attended or routine turns | conditional | `session_id`, integer `tab_id`, `ref`, `text` |
+| `press` | browser | attended or routine turns | conditional | `session_id`, integer `tab_id`, `ref`, `key` |
+| `back` | browser | attended or routine turns | no | `session_id`, integer `tab_id` |
+| `list_tabs` | browser | attended or routine turns | no | `session_id` |
+| `open_tab` | browser | attended or routine turns | no | `session_id`, `url` (optional) |
+| `switch_tab` | browser | attended or routine turns | no | `session_id`, integer `tab_id` |
+| `close_tab` | browser | attended or routine turns | no | `session_id`, integer `tab_id` |
 | `computer_use` | computer use | attended turns | yes | `action` (`capture`, `list_apps`, `wait`, `open_app`, `focus_app`, `click`, `double_click`, `right_click`, `drag`, `scroll`, `type`, `key`, `set_value`) and its arguments: every call asks first (also on a linked phone, once); the turn binding opens the run's lease; the capture comes back as an `image` block |
 | `generate_image` | media | every turn | no | `prompt`: calls fal directly with the user's key; the file goes to `artifacts/` of the bound session's workspace and `agent_artifacts`, and comes back as an `image` block while under 3 MiB |
 | `edit_image` | media | every turn | no | `sourcePath` (relative to the session workspace or absolute), `instruction`: sandboxed turns require the canonical source to remain inside the workspace; same storage |
@@ -285,12 +284,16 @@ unattended turn every `yes` and `clarification` answers
 | `request_clarification` | interaction | every turn | clarification | `question`, `choices`: the user's answer is the result |
 | `approve_action` | interaction | Claude turns | yes | `tool_name`, `input`, `tool_use_id`: Claude Code's `--permission-prompt-tool`; answers `{"behavior":"allow","updatedInput":...}` or `{"behavior":"deny","message":...}`; kept from the model by `--disallowedTools` in every Claude turn |
 
-Browser use and `computer_use` are not listed to unattended turns and refuse
-them with `unattended_requires_approval`. Browser use runs over the same
-`BrowserBroker` as the legacy agent: a consequential action on an origin not
-yet allowed parks in the browser approval tray
-(`browser_approvals_pending` / `browser_approval_respond`) and answers
-`{parked: true, actionId}`; the approval broker is not asked again.
+Browser use requires a host-bound conversation/run. A routine must additionally
+resolve to its persisted routine run and hold a current dedicated browsing
+grant; it receives an anonymous profile and cannot perform consequential
+actions. Attended consequential actions use the central approval broker,
+then revalidate the owner and exact element identity. Passwords, verification
+codes and payment details require human takeover in the dedicated browser;
+capture and input remain paused until explicit resume. Stop and turn-token
+revocation terminate startup and the entire process tree without waiting for
+wire/CDP or approval locks. Dispatched actions with lost responses return
+`browser_outcome_unknown` without retry. `computer_use` remains attended-only.
 
 ### Connector tools
 

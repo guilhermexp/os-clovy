@@ -71,11 +71,11 @@ pub fn set(
         *current = settings.clone();
     }
 
-    // The extension listener normally starts during app setup. When a dark
-    // production build is unlocked at runtime, start the same listener now so
-    // the unpacked extension can pair without requiring an app relaunch.
-    if browser_use_enabled_with(crate::feature_flags::BROWSER_USE_ENABLED, &settings) {
-        crate::extension_host::ensure_listener_started(app.clone());
+    if let Some(broker) = app.try_state::<std::sync::Arc<crate::browser_broker::BrowserBroker>>() {
+        broker.set_feature_enabled(browser_use_enabled_with(
+            crate::feature_flags::BROWSER_USE_ENABLED,
+            &settings,
+        ));
     }
 
     let snapshot = snapshot(settings);

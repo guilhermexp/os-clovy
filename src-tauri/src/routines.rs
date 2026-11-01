@@ -1083,6 +1083,9 @@ pub(crate) async fn routine_browser_access_set(
                 ..previous.clone()
             };
             broker.set_routine_grant(broker_grant(&disabled));
+            // Revoke live control before awaiting database persistence. A
+            // failed save may restore the opt-in, never the ended handles.
+            broker.revoke_routine_sessions(job_id).await;
             if let Err(error) = repos.set_routine_browser_grant(&disabled).await {
                 broker.set_routine_grant(broker_grant(&previous));
                 return Err(error);
@@ -1099,8 +1102,6 @@ pub(crate) async fn routine_browser_access_set(
 fn broker_grant(grant: &RoutineBrowserGrantRecord) -> RoutineBrowserGrant {
     RoutineBrowserGrant {
         job_id: grant.job_id.clone(),
-        server_name: grant.server_name.clone(),
-        token: grant.token.clone(),
         enabled: grant.enabled,
     }
 }

@@ -64,7 +64,6 @@ const tauriMocks = vi.hoisted(() => ({
   connectorTriggersList: vi.fn(),
   connectorTriggerSet: vi.fn(),
   connectorTriggerDelete: vi.fn(),
-  browserTransportPolicy: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
@@ -197,10 +196,6 @@ beforeEach(() => {
     }),
   );
   tauriMocks.connectorTriggerDelete.mockResolvedValue(undefined);
-  tauriMocks.browserTransportPolicy.mockResolvedValue({
-    attendedEnabled: true,
-    managedEnabled: true,
-  });
   eventMocks.listen.mockResolvedValue(() => {});
 });
 
@@ -806,7 +801,9 @@ describe("RoutinesView detail", () => {
     renderView();
     await openDetail("Morning summary");
 
-    expect(await screen.findByText(/browse public pages anonymously/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/browse public pages with a separate anonymous profile/i),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("switch", { name: "Allow browser use for this routine" }),
     ).toBeEnabled();

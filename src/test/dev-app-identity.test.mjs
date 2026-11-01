@@ -97,10 +97,7 @@ describe("Clovy themed icon generation", () => {
 
 describe("Vitest resource limits", () => {
   it("keeps every frontend test command in a bounded worker-thread pool", () => {
-    const configs = [
-      readFileSync(resolve("vite.config.ts"), "utf8"),
-      readFileSync(resolve("extension/vite.config.ts"), "utf8"),
-    ];
+    const configs = [readFileSync(resolve("vite.config.ts"), "utf8")];
 
     for (const config of configs) {
       const testConfig = config.slice(config.indexOf("  test: {"));

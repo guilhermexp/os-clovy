@@ -57,3 +57,7 @@ CLAUDE.local.md
 
 # Orchestrator harness exports/uploads (session transcripts) — local only.
 /.orchestrator/
+
+# Pinned browser resources and reproducible build cache, prepared locally.
+/.tauri-agent-browser/
+/resources/agent-browser/

@@ -1,0 +1,967 @@
+#![allow(dead_code)]
+mod ca_bundle;
+mod chat;
+mod color;
+mod commands;
+mod connection;
+mod doctor;
+mod flags;
+mod install;
+mod mcp;
+#[allow(unused_imports)]
+mod native;
+mod output;
+mod plugins;
+mod read;
+mod session_files;
+mod skills;
+#[cfg(test)]
+mod test_utils;
+mod tls;
+mod upgrade;
+mod validation;
+
+mod clovy_private_launch;
+use native::{
+    browser::{BrowserManager, WaitUntil},
+    cdp::client::CdpClient,
+    element::RefMap,
+    snapshot::{take_snapshot, SnapshotOptions},
+};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::{
+    collections::HashMap,
+    io::{BufRead, Write},
+};
+const LIMIT: usize = 16 * 1024 * 1024;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Hello {
+    token: String,
+    protocol: u32,
+}
+#[derive(Deserialize)]
+struct Request {
+    id: u64,
+    #[serde(flatten)]
+    op: Operation,
+}
+#[derive(Deserialize)]
+#[serde(tag = "action", deny_unknown_fields)]
+enum Operation {
+    #[serde(rename = "start")]
+    Start {
+        #[serde(rename = "chromePath")]
+        chrome_path: String,
+        #[serde(rename = "profilePath")]
+        profile_path: String,
+        #[serde(rename = "proxyPort")]
+        proxy_port: u16,
+        persistent: bool,
+        headed: bool,
+    },
+    #[serde(rename = "navigate")]
+    Navigate { tab_id: u32, url: String },
+    #[serde(rename = "back")]
+    Back { tab_id: u32 },
+    #[serde(rename = "tab_open")]
+    TabOpen { url: Option<String> },
+    #[serde(rename = "tab_list")]
+    TabList,
+    #[serde(rename = "tab_switch")]
+    TabSwitch { tab_id: u32 },
+    #[serde(rename = "tab_close")]
+    TabClose { tab_id: u32 },
+    #[serde(rename = "snapshot")]
+    Snapshot { tab_id: u32 },
+    #[serde(rename = "screenshot")]
+    Screenshot { tab_id: u32 },
+    #[serde(rename = "inspect_reference")]
+    Inspect {
+        tab_id: u32,
+        #[serde(rename = "ref")]
+        reference: String,
+    },
+    #[serde(rename = "guarded_action")]
+    Guarded {
+        tab_id: u32,
+        #[serde(rename = "ref")]
+        reference: String,
+        operation: String,
+        text: Option<String>,
+        key: Option<String>,
+        expected: Value,
+    },
+    #[serde(rename = "suspend")]
+    Suspend,
+    #[serde(rename = "resume")]
+    Resume,
+    #[serde(rename = "takeover")]
+    Takeover,
+    #[serde(rename = "shutdown")]
+    Shutdown,
+}
+struct Host {
+    browser: Option<BrowserManager>,
+    chrome: Option<clovy_private_launch::Chrome>,
+    launch: Option<(String, String, u16, bool, bool)>,
+    suspended: bool,
+    tabs: HashMap<u32, (u32, String)>,
+    next_tab: u32,
+    refs: HashMap<String, (u32, i64, i64, String)>,
+}
+impl Host {
+    fn new() -> Self {
+        Self {
+            browser: None,
+            chrome: None,
+            launch: None,
+            suspended: false,
+            tabs: HashMap::new(),
+            next_tab: 1,
+            refs: HashMap::new(),
+        }
+    }
+    fn browser(&mut self) -> Result<&mut BrowserManager, String> {
+        self.browser.as_mut().ok_or_else(|| "not_started".into())
+    }
+    fn register(&mut self) -> Result<Value, String> {
+        let b = self.browser()?;
+        let own = b.active_tab_id().ok_or("tab_gone")?;
+        let target = b.active_target_id()?.to_owned();
+        let id = self.next_tab;
+        self.next_tab = self.next_tab.checked_add(1).ok_or("tab_limit")?;
+        self.tabs.insert(id, (own, target.clone()));
+        Ok(json!({"tabId":id,"targetId":target,"url":"about:blank"}))
+    }
+    async fn select(&mut self, tab: u32) -> Result<(), String> {
+        let (own, target) = self.tabs.get(&tab).cloned().ok_or("tab_gone")?;
+        let b = self.browser()?;
+        let targets = b
+            .client
+            .send_command_no_params("Target.getTargets", None)
+            .await?;
+        if !targets["targetInfos"]
+            .as_array()
+            .is_some_and(|ts| ts.iter().any(|t| t["targetId"] == target))
+        {
+            self.tabs.remove(&tab);
+            self.refs.retain(|_, (t, _, _, _)| *t != tab);
+            return Err("tab_gone".into());
+        }
+        // Never use ensure_page / revive-and-replace paths on a private operation.
+        b.select_private_tab(own)?;
+        if b.active_target_id()? != target {
+            return Err("tab_gone".into());
+        }
+        Ok(())
+    }
+    async fn close(&mut self) -> bool {
+        self.refs.clear();
+        self.tabs.clear();
+        if let Some(mut b) = self.browser.take() {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                b.client.send_command_no_params("Browser.close", None),
+            )
+            .await;
+            let _ = b.close().await;
+        }
+        if let Some(mut chrome) = self.chrome.take() {
+            return chrome.wait_for_exit(std::time::Duration::from_millis(100));
+        }
+        true
+    }
+    async fn launch(&mut self) -> Result<Value, String> {
+        let (c, p, port, persistent, headed) = self.launch.clone().ok_or("not_started")?;
+        let (chrome, r, w) = clovy_private_launch::launch(&c, &p, port, persistent, headed)?;
+        self.chrome = Some(chrome);
+        self.browser = Some(BrowserManager::from_private_pipe(CdpClient::from_pipe(r, w)).await?);
+        self.register()
+    }
+    async fn document(&mut self) -> Result<(i64, String), String> {
+        let browser = self.browser()?;
+        document_identity(&browser.client, browser.active_session_id()?).await
+    }
+    async fn inspect_guard(
+        &mut self,
+        tab: u32,
+        reference: &str,
+        expected: Option<Value>,
+        operation: Option<&str>,
+        text: Option<&str>,
+        key: Option<&str>,
+    ) -> Result<Value, String> {
+        let (t, node, doc, document_id) = self
+            .refs
+            .get(reference.trim_start_matches('@'))
+            .cloned()
+            .ok_or("stale_reference")?;
+        if t != tab {
+            return Err("stale_reference".into());
+        }
+        self.select(tab).await?;
+        if self.document().await? != (doc, document_id.clone()) {
+            return Err("stale_reference".into());
+        }
+        let b = self.browser()?;
+        let sid = b.active_session_id()?;
+        let tree = b
+            .client
+            .send_command_no_params("Page.getFrameTree", Some(sid))
+            .await?;
+        let frame = tree["frameTree"]["frame"]["id"]
+            .as_str()
+            .ok_or("document_unavailable")?;
+        let world=b.client.send_command("Page.createIsolatedWorld",Some(json!({"frameId":frame,"worldName":"clovy-private-guard","grantUniveralAccess":false})),Some(sid)).await?;
+        let context = world["executionContextId"]
+            .as_i64()
+            .ok_or("document_unavailable")?;
+        let obj = b
+            .client
+            .send_command(
+                "DOM.resolveNode",
+                Some(json!({"backendNodeId":node,"executionContextId":context})),
+                Some(sid),
+            )
+            .await
+            .map_err(|_| "stale_reference")?;
+        let root = b
+            .client
+            .send_command(
+                "DOM.resolveNode",
+                Some(json!({"backendNodeId":doc,"executionContextId":context})),
+                Some(sid),
+            )
+            .await?;
+        let object = obj["object"]["objectId"]
+            .as_str()
+            .ok_or("stale_reference")?;
+        let root = root["object"]["objectId"]
+            .as_str()
+            .ok_or("stale_reference")?;
+        // Recheck after resolving objects as well: a renderer can change between CDP calls.
+        if document_identity(&b.client, sid).await? != (doc, document_id.clone()) {
+            return Err("stale_reference".into());
+        }
+        let r=b.client.send_command("Runtime.callFunctionOn",Some(json!({"objectId":object,"functionDeclaration":include_str!("clovy_private_guard.js"),"arguments":[{"objectId":root},{"value":document_id},{"value":node},{"value":expected},{"value":operation},{"value":text},{"value":key}],"returnByValue":true})),Some(sid)).await?;
+        if r.get("exceptionDetails").is_some() {
+            return Err("guard_execution_failed".into());
+        }
+        let value = r["result"]["value"].clone();
+        if let Some(error) = value["error"].as_str() {
+            return Err(error.into());
+        }
+        Ok(value["inspection"].clone())
+    }
+    async fn execute(&mut self, op: Operation, attempted: &mut bool) -> Result<Value, String> {
+        match op {
+            Operation::Start {
+                chrome_path,
+                profile_path,
+                proxy_port,
+                persistent,
+                headed,
+            } => {
+                if self.launch.is_some() {
+                    return Err("already_started".into());
+                }
+                self.launch = Some((chrome_path, profile_path, proxy_port, persistent, headed));
+                *attempted = true;
+                self.launch().await
+            }
+            Operation::Suspend => {
+                self.suspended = true;
+                self.refs.clear();
+                Ok(json!({"suspended":true}))
+            }
+            Operation::Resume => {
+                self.refs.clear();
+                self.suspended = false;
+                Ok(json!({"suspended":false}))
+            }
+            Operation::Takeover => {
+                self.suspended = true;
+                self.refs.clear();
+                self.launch.as_ref().ok_or("not_started")?;
+                *attempted = true;
+                if !self.close().await {
+                    return Err("close_incomplete".into());
+                }
+                self.launch.as_mut().ok_or("not_started")?.4 = true;
+                let mut r = self.launch().await?;
+                r["mode"] = json!("visible");
+                r["suspended"] = json!(true);
+                Ok(r)
+            }
+            Operation::Shutdown => {
+                *attempted = true;
+                self.close().await;
+                Ok(json!({"closed":true}))
+            }
+            op => {
+                if self.suspended {
+                    return Err("human_takeover".into());
+                }
+                match op {
+                    Operation::TabList => {
+                        let ids: Vec<_> = self.tabs.keys().copied().collect();
+                        let mut result = Vec::new();
+                        for id in ids {
+                            match self.select(id).await {
+                                Err(e) if e == "tab_gone" => continue,
+                                Err(e) => return Err(e),
+                                Ok(()) => {}
+                            }
+                            {
+                                let target = self.tabs[&id].1.clone();
+                                let url = self.browser()?.get_url().await?;
+                                result.push(json!({"tabId":id,"targetId":target,"url":url}));
+                            }
+                        }
+                        Ok(json!({"tabs":result}))
+                    }
+                    Operation::TabOpen { url } => {
+                        if let Some(ref u) = url {
+                            validate_url(u)?;
+                        }
+                        *attempted = true;
+                        self.browser()?.tab_new(None, None).await?;
+                        let mut result = self.register()?;
+                        if let Some(u) = url {
+                            self.browser()?
+                                .navigate(&u, WaitUntil::DomContentLoaded)
+                                .await?;
+                            result["url"] = json!(self.browser()?.get_url().await?);
+                        }
+                        Ok(result)
+                    }
+                    Operation::TabSwitch { tab_id } => {
+                        self.select(tab_id).await?;
+                        Ok(json!({"tabId":tab_id,"targetId":self.tabs[&tab_id].1}))
+                    }
+                    Operation::TabClose { tab_id } => {
+                        self.select(tab_id).await?;
+                        let target = self.tabs[&tab_id].1.clone();
+                        *attempted = true;
+                        let b = self.browser()?;
+                        let result = b
+                            .client
+                            .send_command(
+                                "Target.closeTarget",
+                                Some(json!({"targetId":target})),
+                                None,
+                            )
+                            .await?;
+                        if result["success"] != true {
+                            return Err("tab_gone".into());
+                        }
+                        b.remove_page_by_target_id(&target);
+                        self.tabs.remove(&tab_id);
+                        self.refs.retain(|_, (t, _, _, _)| *t != tab_id);
+                        Ok(json!({"closed":true,"tabId":tab_id}))
+                    }
+                    Operation::Navigate { tab_id, url } => {
+                        validate_url(&url)?;
+                        self.select(tab_id).await?;
+                        self.refs.retain(|_, (t, _, _, _)| *t != tab_id);
+                        *attempted = true;
+                        self.browser()?
+                            .navigate(&url, WaitUntil::DomContentLoaded)
+                            .await?;
+                        Ok(json!({"url":self.browser()?.get_url().await?,"tabId":tab_id}))
+                    }
+                    Operation::Back { tab_id } => {
+                        self.select(tab_id).await?;
+                        let b = self.browser()?;
+                        let sid = b.active_session_id()?.to_owned();
+                        let h = b
+                            .client
+                            .send_command_no_params("Page.getNavigationHistory", Some(&sid))
+                            .await?;
+                        let i = h["currentIndex"].as_i64().ok_or("history_unavailable")?;
+                        if i <= 0 {
+                            return Err("no_history".into());
+                        }
+                        let destination = h["entries"][i as usize - 1]["url"]
+                            .as_str()
+                            .ok_or("history_unavailable")?;
+                        if destination != "about:blank" {
+                            validate_url(destination)?;
+                        }
+                        let entry = h["entries"][i as usize - 1]["id"]
+                            .as_i64()
+                            .ok_or("history_unavailable")?;
+                        self.refs.retain(|_, (t, _, _, _)| *t != tab_id);
+                        let b = self.browser()?;
+                        let mut lifecycle = b.client.subscribe();
+                        *attempted = true;
+                        b.client
+                            .send_command(
+                                "Page.navigateToHistoryEntry",
+                                Some(json!({"entryId":entry})),
+                                Some(&sid),
+                            )
+                            .await?;
+                        wait_history(b, &sid, entry, &mut lifecycle).await?;
+                        Ok(json!({"url":b.get_url().await?,"tabId":tab_id}))
+                    }
+                    Operation::Snapshot { tab_id } => {
+                        self.select(tab_id).await?;
+                        self.refs.retain(|_, (t, _, _, _)| *t != tab_id);
+                        let (doc, document_id) = self.document().await?;
+                        let b = self.browser()?;
+                        let sid = b.active_session_id()?.to_owned();
+                        let (redactions, values) = redaction_nodes(&b.client, &sid).await?;
+                        b.client.set_redacted_nodes(redactions, values);
+                        let mut refs = RefMap::new();
+                        let mut snapshot = take_snapshot(
+                            &b.client,
+                            &sid,
+                            &SnapshotOptions {
+                                selector: None,
+                                interactive: false,
+                                compact: false,
+                                depth: Some(30),
+                                urls: false,
+                            },
+                            &mut refs,
+                            None,
+                            &HashMap::new(),
+                        )
+                        .await?;
+                        let url = b.get_url().await?;
+                        if self.document().await? != (doc, document_id.clone()) {
+                            return Err("stale_reference".into());
+                        }
+                        let mut substitutions = Vec::new();
+                        for (old, entry) in refs.entries_sorted() {
+                            let reference = uuid::Uuid::new_v4().simple().to_string();
+                            if entry.frame_id.is_none() {
+                                if let Some(node) = entry.backend_node_id {
+                                    self.refs.insert(
+                                        reference.clone(),
+                                        (tab_id, node, doc, document_id.clone()),
+                                    );
+                                }
+                            }
+                            substitutions.push((old, reference));
+                        }
+                        substitutions.sort_by_key(|(old, _)| std::cmp::Reverse(old.len()));
+                        for (old, new) in substitutions {
+                            snapshot =
+                                snapshot.replace(&format!("ref={old}]"), &format!("ref={new}]"));
+                        }
+                        Ok(json!({"snapshot":snapshot,"url":url,"tabId":tab_id}))
+                    }
+                    Operation::Screenshot { tab_id } => {
+                        self.select(tab_id).await?;
+                        let document = self.document().await?;
+                        let url = self.browser()?.get_url().await?;
+                        if url != "about:blank" {
+                            validate_url(&url)?;
+                        }
+                        let mut captured = self.screenshot().await?;
+                        if self.document().await? != document
+                            || self.browser()?.get_url().await? != url
+                        {
+                            return Err("stale_reference".into());
+                        }
+                        captured["url"] = json!(url);
+                        captured["tabId"] = json!(tab_id);
+                        Ok(captured)
+                    }
+                    Operation::Inspect { tab_id, reference } => {
+                        self.inspect_guard(tab_id, &reference, None, None, None, None)
+                            .await
+                    }
+                    Operation::Guarded {
+                        tab_id,
+                        reference,
+                        operation,
+                        text,
+                        key,
+                        expected,
+                    } => {
+                        if !matches!(operation.as_str(), "click" | "fill" | "press") {
+                            return Err("unsupported_operation".into());
+                        }
+                        if text.as_ref().is_some_and(|s| s.len() > 1024 * 1024) {
+                            return Err("text_too_large".into());
+                        }
+                        // Preflight rejects stale metadata without claiming an effect was attempted.
+                        let observed = self
+                            .inspect_guard(tab_id, &reference, None, None, None, None)
+                            .await?;
+                        if observed != expected {
+                            return Err("stale_reference".into());
+                        }
+                        if operation == "fill" && text.is_none() {
+                            return Err("text_required".into());
+                        }
+                        if operation == "press"
+                            && !matches!(
+                                key.as_deref(),
+                                Some("Enter" | "Space" | "Escape" | "Backspace" | "Delete")
+                            )
+                        {
+                            return Err("unsupported_key".into());
+                        }
+                        *attempted = true;
+                        match self
+                            .inspect_guard(
+                                tab_id,
+                                &reference,
+                                Some(expected),
+                                Some(&operation),
+                                text.as_deref(),
+                                key.as_deref(),
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                Ok(json!({"tabId":tab_id,"url":self.browser()?.get_url().await?}))
+                            }
+                            Err(e)
+                                if matches!(
+                                    e.as_str(),
+                                    "stale_reference"
+                                        | "sensitive_field"
+                                        | "unsupported_operation"
+                                        | "unsupported_key"
+                                ) =>
+                            {
+                                *attempted = false;
+                                Err(e)
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                    _ => Err("invalid_operation".into()),
+                }
+            }
+        }
+    }
+    async fn screenshot(&mut self) -> Result<Value, String> {
+        use base64::Engine;
+        let b = self.browser()?;
+        let sid = b.active_session_id()?.to_owned();
+        // CDP geometry cannot be spoofed by page prototype overrides, including closed shadow roots.
+        b.client
+            .send_command_no_params("Animation.enable", Some(&sid))
+            .await?;
+        b.client
+            .send_command(
+                "Animation.setPlaybackRate",
+                Some(json!({"playbackRate":0})),
+                Some(&sid),
+            )
+            .await?;
+        b.client
+            .send_command(
+                "Emulation.setVirtualTimePolicy",
+                Some(json!({"policy":"pause"})),
+                Some(&sid),
+            )
+            .await?;
+        let capture=async {
+            let boxes=redaction_boxes(&b.client,&sid).await?;
+            let metrics=b.client.send_command_no_params("Page.getLayoutMetrics",Some(&sid)).await?;
+            let viewport=&metrics["cssVisualViewport"];
+            if viewport["scale"].as_f64().is_some_and(|v|(v-1.0).abs()>0.001)||viewport["offsetX"].as_f64().is_some_and(|v|v.abs()>0.01)||viewport["offsetY"].as_f64().is_some_and(|v|v.abs()>0.01){return Err("redaction_failed".into());}
+            let width=viewport["clientWidth"].as_f64().filter(|v|*v>0.0).ok_or("redaction_failed")?;
+            let height=viewport["clientHeight"].as_f64().filter(|v|*v>0.0).ok_or("redaction_failed")?;
+            let r=b.client.send_command("Page.captureScreenshot",Some(json!({"format":"png","captureBeyondViewport":false})),Some(&sid)).await?;
+            let captured_boxes=redaction_boxes(&b.client,&sid).await?;
+            let captured_metrics=b.client.send_command_no_params("Page.getLayoutMetrics",Some(&sid)).await?;
+            if captured_boxes!=boxes || &captured_metrics["cssVisualViewport"]!=viewport{return Err("redaction_failed".into());}
+            let data=r["data"].as_str().ok_or("screenshot_unavailable")?;let bytes=base64::engine::general_purpose::STANDARD.decode(data).map_err(|_|"screenshot_invalid")?;
+            let mut img=image::load_from_memory(&bytes).map_err(|_|"screenshot_invalid")?.to_rgba8();
+            let sx=img.width() as f64/width;let sy=img.height() as f64/height;
+            if let Some(boxes)=boxes.as_array(){for rect in boxes {let x=((rect[0].as_f64().unwrap_or(0.0)-32.0)*sx).floor().max(0.0) as u32;let y=((rect[1].as_f64().unwrap_or(0.0)-32.0)*sy).floor().max(0.0) as u32;let right=((rect[0].as_f64().unwrap_or(0.0)+rect[2].as_f64().unwrap_or(0.0)+32.0)*sx).ceil().max(0.0) as u32;let bottom=((rect[1].as_f64().unwrap_or(0.0)+rect[3].as_f64().unwrap_or(0.0)+32.0)*sy).ceil().max(0.0) as u32;for yy in y..bottom.min(img.height()){for xx in x..right.min(img.width()){img.put_pixel(xx,yy,image::Rgba([24,24,24,255]));}}}}
+            let mut output=std::io::Cursor::new(Vec::new());img.write_to(&mut output,image::ImageFormat::Png).map_err(|_|"screenshot_encoding")?;Ok::<_,String>(json!({"base64":base64::engine::general_purpose::STANDARD.encode(output.into_inner())}))
+        }.await;
+        let _ = b
+            .client
+            .send_command(
+                "Emulation.setVirtualTimePolicy",
+                Some(json!({"policy":"advance"})),
+                Some(&sid),
+            )
+            .await;
+        let _ = b
+            .client
+            .send_command(
+                "Animation.setPlaybackRate",
+                Some(json!({"playbackRate":1})),
+                Some(&sid),
+            )
+            .await;
+        capture
+    }
+}
+async fn document_identity(client: &CdpClient, sid: &str) -> Result<(i64, String), String> {
+    let document = client
+        .send_command("DOM.getDocument", Some(json!({"depth":0})), Some(sid))
+        .await?;
+    let root = document["root"]["backendNodeId"]
+        .as_i64()
+        .ok_or("document_unavailable")?;
+    let tree = client
+        .send_command_no_params("Page.getFrameTree", Some(sid))
+        .await?;
+    let frame = &tree["frameTree"]["frame"];
+    let frame_id = frame["id"]
+        .as_str()
+        .filter(|v| !v.is_empty())
+        .ok_or("document_unavailable")?;
+    let loader_id = frame["loaderId"]
+        .as_str()
+        .filter(|v| !v.is_empty())
+        .ok_or("document_unavailable")?;
+    Ok((root, json!([frame_id, loader_id, root]).to_string()))
+}
+async fn wait_history(
+    browser: &BrowserManager,
+    sid: &str,
+    entry: i64,
+    events: &mut tokio::sync::broadcast::Receiver<native::cdp::types::CdpEvent>,
+) -> Result<(), String> {
+    // Subscribe before dispatch, and confirm the actual committed history entry.
+    // A cached or same-document back may have no future DOMContentLoaded event.
+    tokio::time::timeout(std::time::Duration::from_secs(15),async {
+        loop {
+            let h=browser.client.send_command_no_params("Page.getNavigationHistory",Some(sid)).await?;
+            if let Some(index)=h["currentIndex"].as_u64(){if h["entries"][index as usize]["id"].as_i64()==Some(entry){return browser.wait_for_lifecycle_external(WaitUntil::DomContentLoaded,sid,15000).await;}}
+            tokio::select!{_=events.recv()=>{},_=tokio::time::sleep(std::time::Duration::from_millis(20))=>{}}
+        }
+    }).await.map_err(|_|"history_timeout".to_string())?
+}
+async fn redaction_boxes(client: &CdpClient, sid: &str) -> Result<Value, String> {
+    client
+        .send_command_no_params("DOM.enable", Some(sid))
+        .await?;
+    let tree = client
+        .send_command(
+            "DOM.getFlattenedDocument",
+            Some(json!({"depth":-1,"pierce":true})),
+            Some(sid),
+        )
+        .await?;
+    let nodes = tree["nodes"].as_array().ok_or("redaction_failed")?;
+    let mut boxes = Vec::new();
+    for n in nodes {
+        let tag = n["nodeName"].as_str().unwrap_or("").to_ascii_lowercase();
+        let attrs = n["attributes"].as_array();
+        let editable = attrs.is_some_and(|a| {
+            a.chunks_exact(2)
+                .any(|p| p[0] == "contenteditable" && p[1] != "false")
+        });
+        if !editable && !matches!(tag.as_str(), "input" | "textarea" | "select" | "iframe") {
+            continue;
+        }
+        let id = n["backendNodeId"].as_i64().ok_or("redaction_failed")?;
+        let quads = client
+            .send_command(
+                "DOM.getContentQuads",
+                Some(json!({"backendNodeId":id})),
+                Some(sid),
+            )
+            .await?;
+        for quad in quads["quads"].as_array().ok_or("redaction_failed")? {
+            let q = quad.as_array().ok_or("redaction_failed")?;
+            if q.len() != 8 {
+                return Err("redaction_failed".into());
+            }
+            let xs: Vec<_> = q.iter().step_by(2).filter_map(Value::as_f64).collect();
+            let ys: Vec<_> = q
+                .iter()
+                .skip(1)
+                .step_by(2)
+                .filter_map(Value::as_f64)
+                .collect();
+            if xs.len() != 4 || ys.len() != 4 {
+                return Err("redaction_failed".into());
+            }
+            let x = xs.iter().copied().fold(f64::INFINITY, f64::min) - 3.0;
+            let y = ys.iter().copied().fold(f64::INFINITY, f64::min) - 3.0;
+            let right = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max) + 3.0;
+            let bottom = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max) + 3.0;
+            boxes.push(json!([x, y, right - x, bottom - y]));
+        }
+    }
+    Ok(json!(boxes))
+}
+async fn redaction_nodes(
+    client: &CdpClient,
+    sid: &str,
+) -> Result<(std::collections::HashSet<i64>, Vec<String>), String> {
+    use std::collections::HashSet;
+    client
+        .send_command_no_params("DOM.enable", Some(sid))
+        .await?;
+    let tree = client
+        .send_command(
+            "DOM.getFlattenedDocument",
+            Some(json!({"depth":-1,"pierce":true})),
+            Some(sid),
+        )
+        .await?;
+    let nodes = tree["nodes"].as_array().ok_or("redaction_failed")?;
+    let mut blocked = HashSet::new();
+    let mut redact = HashSet::new();
+    for n in nodes {
+        let attrs = n["attributes"].as_array();
+        let editable = attrs.is_some_and(|a| {
+            a.chunks_exact(2)
+                .any(|p| p[0] == "contenteditable" && p[1] != "false")
+        });
+        if editable {
+            if let Some(id) = n["nodeId"].as_i64() {
+                blocked.insert(id);
+            }
+        }
+    }
+    loop {
+        let before = blocked.len();
+        for n in nodes {
+            if n["parentId"].as_i64().is_some_and(|p| blocked.contains(&p)) {
+                if let Some(id) = n["nodeId"].as_i64() {
+                    blocked.insert(id);
+                }
+            }
+        }
+        if before == blocked.len() {
+            break;
+        }
+    }
+    for n in nodes {
+        if n["nodeId"].as_i64().is_some_and(|id| blocked.contains(&id)) {
+            if let Some(backend) = n["backendNodeId"].as_i64() {
+                redact.insert(backend);
+            }
+        }
+    }
+    let tree = client
+        .send_command_no_params("Page.getFrameTree", Some(sid))
+        .await?;
+    let frame = tree["frameTree"]["frame"]["id"]
+        .as_str()
+        .ok_or("redaction_failed")?;
+    let world=client.send_command("Page.createIsolatedWorld",Some(json!({"frameId":frame,"worldName":"clovy-private-guard","grantUniveralAccess":false})),Some(sid)).await?;
+    let context = world["executionContextId"]
+        .as_i64()
+        .ok_or("redaction_failed")?;
+    let mut values = Vec::new();
+    let mut inspected = 0;
+    let mut value_bytes = 0usize;
+    for n in nodes {
+        let tag = n["nodeName"].as_str().unwrap_or("").to_ascii_lowercase();
+        let attrs = n["attributes"].as_array();
+        let editable = attrs.is_some_and(|a| {
+            a.chunks_exact(2)
+                .any(|p| p[0] == "contenteditable" && p[1] != "false")
+        });
+        if !editable && !matches!(tag.as_str(), "input" | "textarea" | "select") {
+            continue;
+        }
+        inspected += 1;
+        if inspected > 2000 {
+            return Err("redaction_failed".into());
+        }
+        let id = n["backendNodeId"].as_i64().ok_or("redaction_failed")?;
+        let obj = client
+            .send_command(
+                "DOM.resolveNode",
+                Some(json!({"backendNodeId":id,"executionContextId":context})),
+                Some(sid),
+            )
+            .await?;
+        let object = obj["object"]["objectId"]
+            .as_str()
+            .ok_or("redaction_failed")?;
+        let result=client.send_command("Runtime.callFunctionOn",Some(json!({"objectId":object,"functionDeclaration":"function(){if(this.tagName==='INPUT'&&['button','submit','reset','checkbox','radio','image'].includes(this.type))return '';return typeof this.value==='string'?this.value:(this.textContent||'');}","returnByValue":true})),Some(sid)).await?;
+        if result.get("exceptionDetails").is_some() {
+            return Err("redaction_failed".into());
+        }
+        let value = result["result"]["value"]
+            .as_str()
+            .ok_or("redaction_failed")?;
+        if !value.is_empty() {
+            value_bytes = value_bytes.saturating_add(value.len());
+            if value.len() > 1024 * 1024 || value_bytes > 8 * 1024 * 1024 {
+                return Err("redaction_failed".into());
+            }
+            values.push(value.to_owned());
+            let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+            if normalized != value && !normalized.is_empty() {
+                values.push(normalized);
+            }
+        }
+        let _ = client
+            .send_command(
+                "Runtime.releaseObject",
+                Some(json!({"objectId":object})),
+                Some(sid),
+            )
+            .await;
+    }
+    values.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    values.dedup();
+    Ok((redact, values))
+}
+fn host_error_code(code: &str) -> &'static str {
+    // Upstream diagnostics may contain URLs and page text. They never cross the private wire.
+    const CODES: &[&str] = &[
+        "tab_gone",
+        "stale_reference",
+        "not_started",
+        "already_started",
+        "tab_limit",
+        "document_unavailable",
+        "human_takeover",
+        "unsupported_operation",
+        "unsupported_key",
+        "sensitive_field",
+        "text_too_large",
+        "text_required",
+        "invalid_operation",
+        "invalid_url",
+        "no_history",
+        "history_unavailable",
+        "history_timeout",
+        "guard_execution_failed",
+        "redaction_failed",
+        "screenshot_unavailable",
+        "screenshot_invalid",
+        "screenshot_encoding",
+        "effect_unknown",
+        "close_incomplete",
+    ];
+    CODES
+        .iter()
+        .copied()
+        .find(|known| *known == code)
+        .unwrap_or("browser_operation_failed")
+}
+fn validate_url(u: &str) -> Result<(), String> {
+    let u = url::Url::parse(u).map_err(|_| "invalid_url")?;
+    if !matches!(u.scheme(), "http" | "https") || !u.username().is_empty() || u.password().is_some()
+    {
+        return Err("invalid_url".into());
+    }
+    Ok(())
+}
+fn line(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, String> {
+    let mut bytes = Vec::new();
+    let n = std::io::Read::take(reader, (LIMIT + 1) as u64)
+        .read_until(b'\n', &mut bytes)
+        .map_err(|_| "wire_closed")?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if bytes.len() > LIMIT || bytes.last() != Some(&b'\n') {
+        return Err("wire_limit".into());
+    }
+    Ok(Some(bytes))
+}
+fn output(value: &Value) -> Result<(), String> {
+    let bytes = serde_json::to_vec(value).map_err(|_| "wire_encoding")?;
+    if bytes.len() > LIMIT {
+        return Err("wire_limit".into());
+    }
+    let out = std::io::stdout();
+    let mut out = out.lock();
+    out.write_all(&bytes)
+        .and_then(|_| out.write_all(b"\n"))
+        .and_then(|_| out.flush())
+        .map_err(|_| "wire_closed".into())
+}
+#[tokio::main]
+async fn main() {
+    if std::env::args_os().len() != 1 {
+        std::process::exit(2);
+    }
+    if run().await.is_err() {
+        std::process::exit(1);
+    }
+}
+async fn run() -> Result<(), String> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    std::thread::spawn(move || {
+        let input = std::io::stdin();
+        let mut reader = input.lock();
+        loop {
+            let r = line(&mut reader);
+            let stop = !matches!(&r, Ok(Some(_)));
+            if tx.blocking_send(r).is_err() || stop {
+                break;
+            }
+        }
+    });
+    let bytes = rx
+        .recv()
+        .await
+        .ok_or("wire_closed")??
+        .ok_or("wire_closed")?;
+    let hello: Hello = serde_json::from_slice(&bytes).map_err(|_| "invalid_handshake")?;
+    if hello.protocol != 1
+        || hello.token.len() != 64
+        || !hello
+            .token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err("invalid_handshake".into());
+    }
+    output(&json!({"protocol":1,"token":hello.token}))?;
+    let mut host = Host::new();
+    #[cfg(unix)]
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|_| "signal_unavailable")?;
+    loop {
+        #[cfg(unix)]
+        let next =
+            tokio::select! {v=rx.recv()=>v,_=term.recv()=>{host.close().await;return Ok(());}};
+        #[cfg(not(unix))]
+        let next = rx.recv().await;
+        let Some(Ok(Some(bytes))) = next else {
+            host.close().await;
+            return Ok(());
+        };
+        let request: Request = match serde_json::from_slice(&bytes) {
+            Ok(r) => r,
+            Err(_) => {
+                output(
+                    &json!({"id":0,"delivery":"not_attempted","error":{"code":"invalid_request","message":"Invalid private host request"}}),
+                )?;
+                continue;
+            }
+        };
+        let shutdown = matches!(request.op, Operation::Shutdown);
+        let mut attempted = false;
+        #[cfg(unix)]
+        let result = tokio::select! {result=host.execute(request.op,&mut attempted)=>result,_=term.recv()=>{host.close().await;return Ok(());}};
+        #[cfg(not(unix))]
+        let result = host.execute(request.op, &mut attempted).await;
+        if result.is_err() && attempted {
+            host.refs.clear();
+        }
+        let response = match result {
+            Ok(data) => {
+                json!({"id":request.id,"delivery":if attempted{"delivered"}else{"not_attempted"},"data":data})
+            }
+            Err(code) => {
+                json!({"id":request.id,"delivery":if attempted{"unknown"}else{"not_attempted"},"error":{"code":host_error_code(&code),"message":"Browser operation failed"}})
+            }
+        };
+        if output(&response).is_err() {
+            host.close().await;
+            return Err("wire_closed".into());
+        }
+        if shutdown {
+            return Ok(());
+        }
+    }
+}

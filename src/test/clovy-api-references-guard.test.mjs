@@ -142,7 +142,7 @@ describe("retired API reference guard", () => {
       "Makefile",
       ".env.example",
       ".github/workflows/build.yml",
-      "extension/src/main.ts",
+      "docs/current.md",
     ]) {
       put(root, name, "CLOVY_API_URL");
     }

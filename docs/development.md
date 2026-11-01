@@ -105,15 +105,13 @@ The launcher never resets permissions.
   directory, does not change. A branch identity (`codex/jun-278-…`) or
   `CLOVY_DEV_APP_IDENTIFIER` gets its own bundle, for example
   `Clovy Dev permproof.app` for `dev.guilhermexp.clovy.permproof`. The browser
-  extension's native messaging host follows the compiled identity too: the
-  shim built with it reads only the release app's descriptor or the one in
-  `<identifier>-dev`, never another profile's.
-- **Bundle contents:** besides `clovy`, `clovy-mcp`, and `clovy-nm-shim`,
+  profile belongs to that isolated app identity.
+- **Bundle contents:** besides `clovy` and `clovy-mcp`,
   the bundle carries the resources `tauri.conf.json` declares for every
-  platform (browser extension files, agent skills) at their bundle paths, and
-  rebuilds when they change. Helpers are not copied in: debug builds resolve
-  the Computer use, dictation, and system audio helpers from `.tauri-helper`
-  at compile time, since the bundle runs without Cargo's runtime environment.
+  platform (private browser resources, agent skills) at their bundle paths, and
+  rebuilds when they change. The Computer use, dictation, and system audio
+  helpers resolve from `.tauri-helper` at compile time, since the bundle runs
+  without Cargo's runtime environment.
 - **Signing identity:** `CLOVY_DEV_SIGNING_IDENTITY` (a SHA-1 or exact name
   from `security find-identity -v -p codesigning`), otherwise the single valid
   Apple Development identity. Several Apple Development identities, or none,
@@ -124,7 +122,7 @@ The launcher never resets permissions.
   `APPLE_SIGNING_IDENTITY` inherited from the shell; release builds keep
   signing with `APPLE_SIGNING_IDENTITY`.
 - **One certificate everywhere:** the same identity signs `Clovy Dev.app`
-  (with `clovy-mcp` and `clovy-nm-shim` beside `clovy` in
+  (with `clovy-mcp` beside `clovy` in
   `Contents/MacOS`) and the helpers in `.tauri-helper` (Computer use driver,
   dictation helper, system audio helper). Their designated requirement is
   `identifier "<bundle id>" and anchor apple generic and certificate
@@ -308,3 +306,23 @@ lives in `src-tauri/src/agent_sessions/`; no JavaScript agent executable is
 built or packaged. Native proof uses an isolated run-owned debug identity and
 the data-safety rules in `AGENTS.md`. A CLI login and authorized model usage
 are separate from a successful desktop build.
+
+### Pinned browser resources
+
+`pnpm browser:prepare` builds the private `clovy-agent-browser` executable and
+prepares Chrome for Testing in `resources/agent-browser/<platform>/`. The dev
+launcher runs it automatically. Source commit, typed host protocol, local patches,
+Chrome version, official archive URLs and SHA-256 digests are fixed in
+`scripts/agent-browser/manifest.json`; preparation does not resolve a latest release.
+The source build uses the upstream lockfile and includes the Apache-2.0 license,
+Chrome ABOUT notice, dependency SBOM and per-file provenance in the resource tree.
+The build cache is `.tauri-agent-browser/` and can be regenerated from the pins.
+Linux builds use the shared ordered heavy-build locks and require 20 GiB free.
+
+The packaged app resolves `native/agent-browser/<platform>/` in its Tauri resources.
+The debug adapter may resolve the prepared repository resources. There is no
+runtime download or global executable lookup. Plain debug Cargo checks create
+only the empty resource directory; they do not prepare a usable browser.
+Use `pnpm browser:prepare -- --check` to verify a prepared debug resource tree.
+On macOS the dev launcher signs nested Chrome code and the private executable
+with the same selected development identity as the app.

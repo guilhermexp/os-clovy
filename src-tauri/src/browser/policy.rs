@@ -1,6 +1,6 @@
-//! Public-web-only URL policy for the managed browser (JUN-289).
+//! Public-web-only URL policy for Clovy's private browser.
 //!
-//! Per ADR 0017 and its 2026-07-13 addendum, the Rust broker is the only
+//! Per ADR 0017 and the private browser host decision, the Rust broker is the only
 //! enforcement point for browser policy. This module is the single source of
 //! truth for which destinations the managed transport may reach: a scheme and
 //! host check for a pre-navigation refusal, an address-class check that names
@@ -223,6 +223,8 @@ pub enum PolicyViolation {
     NonHttpScheme,
     /// The URL parsed with no host, or a host that is not usable.
     MissingHost,
+    /// Credentials must be entered by the person, never carried in a tool URL.
+    EmbeddedCredentials,
     /// DNS resolution failed or returned no addresses.
     ResolutionFailure,
     /// The destination resolves to a non-public address of the named class.
@@ -242,6 +244,7 @@ impl std::fmt::Display for PolicyViolation {
                 f,
                 "Navigation blocked: the address is missing a valid host. The managed browser reaches only the public web."
             ),
+            PolicyViolation::EmbeddedCredentials => write!(f,"Navigation blocked: enter credentials yourself in the dedicated browser."),
             PolicyViolation::ResolutionFailure => write!(
                 f,
                 "Navigation blocked: the destination could not be resolved. The managed browser reaches only the public web."
@@ -290,6 +293,9 @@ impl ValidatedUrl {
 /// later, at connection time, by [`resolve_validated`].
 pub fn validate_public_http_url(raw: &str) -> Result<ValidatedUrl, PolicyViolation> {
     let url = Url::parse(raw).map_err(|_| PolicyViolation::MissingHost)?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(PolicyViolation::EmbeddedCredentials);
+    }
 
     match url.scheme() {
         "http" | "https" => {}
@@ -602,6 +608,17 @@ pub async fn validate_final_public_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn embedded_credentials_never_enter_browser_navigation_or_artifacts() {
+        for raw in [
+            "https://user:synthetic-password@example.com/",
+            "http://synthetic-user@example.com/",
+        ] {
+            let violation = validate_public_http_url(raw).unwrap_err();
+            assert_eq!(violation, PolicyViolation::EmbeddedCredentials);
+            assert!(!violation.to_string().contains("synthetic"));
+        }
+    }
     use std::net::SocketAddr;
 
     /// A resolver that returns a fixed address set regardless of input, for

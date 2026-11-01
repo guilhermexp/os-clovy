@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# macOS beforeBundleCommand (tauri.macos.conf.json), after
-# scripts/bundle-nm-shim.sh: copies the compiled clovy-mcp [[bin]] (the Clovy
+# macOS beforeBundleCommand (tauri.macos.conf.json): copies the compiled clovy-mcp [[bin]] (the Clovy
 # MCP server's stdio relay, src/mcp_server/stdio.rs) into .tauri-helper/ so the
 # bundle.resources mapping ships the real binary instead of the build.rs
-# placeholder, then signs it like the shim (Developer ID when
+# placeholder, then signs it (Developer ID when
 # APPLE_SIGNING_IDENTITY is set, ad-hoc otherwise).
 #
-# Target resolution mirrors scripts/bundle-nm-shim.sh: a universal build lipo's
+# A universal build combines
 # the two real-triple binaries; anything else takes the triple's (or the bare)
 # target dir.
 set -euo pipefail

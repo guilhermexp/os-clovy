@@ -80,6 +80,10 @@ function createSandbox() {
     path.join(sandbox, "scripts", "prepare-local-transcriber.mjs"),
     'import { writeFileSync } from "node:fs"; writeFileSync("prepared-local-transcriber", "yes"); writeFileSync("local-helper-developer-dir", process.env.DEVELOPER_DIR ?? "");',
   );
+  writeFileSync(
+    path.join(sandbox, "scripts", "prepare-agent-browser.mjs"),
+    'import { writeFileSync } from "node:fs"; writeFileSync("prepared-private-browser", "synthetic launcher fixture");',
+  );
   mkdirSync(path.join(sandbox, "src-tauri"), { recursive: true });
   for (const file of ["cua-driver-pin.json", "tauri.conf.json", "tauri.macos.conf.json"]) {
     cpSync(path.join(repoRoot, "src-tauri", file), path.join(sandbox, "src-tauri", file));

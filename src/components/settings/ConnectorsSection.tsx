@@ -3,6 +3,8 @@ import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Fragment } from "react";
 import { ConnectorProviderIcon } from "../connectors/ConnectorProviderIcon";
+import { BrowserUseControl } from "../plugins/BrowserUseControl";
+import { useExperimentalFlags } from "../../lib/experimental-flags";
 import { ComputerUseControl } from "../plugins/ComputerUseControl";
 import {
   accountStatusMeta,
@@ -414,12 +416,12 @@ function connectDescription(
  * always listed) with a feature-bundle picker per provider, reconnect for
  * lapsed grants, and disconnect with optional provider-side revoke. A
  * Linear connects workspace-wide through the provider's official hosted MCP.
- * Browser use is a separate capability row because its grant and extension
- * pairing have no account, email, or scopes. Local mode only: tokens live in
+ * Browser use owns a separate browser profile with its own stored grant. Local mode only: tokens live in
  * the Mac's Keychain and provider calls originate on this device.
  */
 export function ConnectorsSection() {
   const t = useT();
+  const { browserUseEnabled } = useExperimentalFlags();
   const { policy, error: policyError } = useConnectorPolicy();
   const oauthProviders =
     policy?.providers.flatMap((definition) =>
@@ -1144,6 +1146,7 @@ export function ConnectorsSection() {
               />
             </button>
           </li>
+          {advancedOpen && browserUseEnabled ? <BrowserUseControl /> : null}
           {advancedOpen ? <ComputerUseControl /> : null}
         </ul>
       </div>

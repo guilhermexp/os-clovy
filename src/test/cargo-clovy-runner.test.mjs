@@ -51,7 +51,7 @@ const FAKE_CARGO = `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_CARGO_LOG"
 if [ -n "$FAKE_CARGO_OUTPUT" ]; then
   mkdir -p "$FAKE_CARGO_OUT_DIR"
-  for bin in clovy clovy-mcp clovy-nm-shim; do
+  for bin in clovy clovy-mcp; do
     cp "$FAKE_CARGO_OUTPUT" "$FAKE_CARGO_OUT_DIR/.$bin.new"
     mv -f "$FAKE_CARGO_OUT_DIR/.$bin.new" "$FAKE_CARGO_OUT_DIR/$bin"
   done
@@ -146,7 +146,7 @@ describe.runIf(process.platform === "darwin")("Tauri dev runner", () => {
 
     expect(first.status, first.stderr).toBe(3);
     expect(readFileSync(path.join(sandbox.root, "cargo.log"), "utf8").trim()).toBe(
-      "build --bin clovy --bin clovy-mcp --bin clovy-nm-shim --no-default-features --color always",
+      "build --bin clovy --bin clovy-mcp --no-default-features --color always",
     );
     expect(first.app).toEqual([
       {

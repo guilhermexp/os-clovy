@@ -37,8 +37,6 @@ export const ORG_REFERENCE_SCOPES = [
       "src-tauri/Cargo.toml",
       "src-tauri/Info.plist",
       "src-tauri/*.json",
-      "extension/src",
-      "extension/public",
       "index.html",
       "onboarding-preview.html",
       "styleguide.html",

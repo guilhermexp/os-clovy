@@ -66,6 +66,17 @@ if (process.platform === "darwin") {
   );
   if (localPrepare.status !== 0) process.exit(localPrepare.status ?? 1);
 
+  const browserPrepare = spawnSync(
+    process.execPath,
+    [resolve(SCRIPT_DIR, "prepare-agent-browser.mjs")],
+    {
+      cwd: ROOT_DIR,
+      env: { ...process.env, [DEV_SIGNING_IDENTITY_ENV]: devSigningIdentity },
+      stdio: "inherit",
+    },
+  );
+  if (browserPrepare.status !== 0) process.exit(browserPrepare.status ?? 1);
+
   const prepare = spawnSync(process.execPath, [resolve(SCRIPT_DIR, "prepare-cua-driver.mjs")], {
     cwd: ROOT_DIR,
     env: {
@@ -76,6 +87,15 @@ if (process.platform === "darwin") {
     stdio: "inherit",
   });
   if (prepare.status !== 0) process.exit(prepare.status ?? 1);
+}
+
+if (process.platform !== "darwin") {
+  const browserPrepare = spawnSync(
+    process.execPath,
+    [resolve(SCRIPT_DIR, "prepare-agent-browser.mjs")],
+    { cwd: ROOT_DIR, stdio: "inherit" },
+  );
+  if (browserPrepare.status !== 0) process.exit(browserPrepare.status ?? 1);
 }
 
 // A port is "free" when a connection is refused. Mirrors the probe in
