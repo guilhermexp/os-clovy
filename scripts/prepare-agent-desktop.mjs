@@ -51,6 +51,7 @@ if (run("git", ["rev-parse", "HEAD"], source, true).trim() !== pin.sourceCommit)
   throw new Error("agent-desktop source commit mismatch");
 }
 verifyHash(join(source, "Cargo.lock"), pin.cargoLockSha256);
+verifyHash(join(root, "src-tauri", "agent-desktop", "Cargo.lock"), pin.cargoLockSha256);
 verifyHash(join(source, "LICENSE"), pin.licenseSha256);
 run(
   process.env.CARGO || "cargo",
