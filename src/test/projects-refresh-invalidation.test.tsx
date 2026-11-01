@@ -15,7 +15,7 @@ import {
 } from "../lib/agent-session-drafts";
 import type { ClovyDataChange } from "../lib/clovy-data-events";
 import { resetCurrentDataPartitionForTests } from "../lib/data-partition";
-import type { FolderDto, NoteDto } from "../lib/tauri";
+import type { FolderDto, LiveTranscriptEventDto, NoteDto } from "../lib/tauri";
 
 const mocks = vi.hoisted(() => ({
   listen: vi.fn(),
@@ -96,6 +96,7 @@ function useSurfaces(selected = "b") {
   const lastStatus = useRef(undefined);
   const pendingProject = useRef(null);
   const [error, setError] = useState<string | null>(null);
+  const [liveTranscriptEvents, setLiveTranscriptEvents] = useState<LiveTranscriptEventDto[]>([]);
   const [, setOrigin] = useState<{ kind: "project"; folderId: string } | { kind: "routines" }>();
   const [, setSessionFolders] = useState<Record<string, string[]>>({});
   const [, setWorking] = useState<ReadonlySet<string>>(new Set());
@@ -120,6 +121,9 @@ function useSurfaces(selected = "b") {
     dispatch,
     noteSaveController: controller,
     notes: state.notes,
+    selectedNote: state.selectedNote,
+    liveTranscriptEvents,
+    setLiveTranscriptEvents,
     setError,
   });
   useAgentSessionSync({

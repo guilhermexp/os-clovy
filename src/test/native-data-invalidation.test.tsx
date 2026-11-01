@@ -9,6 +9,7 @@ import type { ClovyDataChange } from "../lib/clovy-data-events";
 import { resetCurrentDataPartitionForTests } from "../lib/data-partition";
 import {
   NOTE_PROCESSING_PROGRESS_EVENT,
+  type LiveTranscriptEventDto,
   type NoteDto,
   type NoteProcessingProgressDto,
 } from "../lib/tauri";
@@ -66,6 +67,7 @@ function useNotes() {
     selectedNoteId: "note",
   });
   const [error, setError] = useState<string | null>(null);
+  const [liveTranscriptEvents, setLiveTranscriptEvents] = useState<LiveTranscriptEventDto[]>([]);
   const controller = useRef(
     new NoteSaveController({
       persist: async () => {
@@ -78,6 +80,9 @@ function useNotes() {
     dispatch,
     noteSaveController: controller,
     notes: state.notes,
+    selectedNote: state.selectedNote,
+    liveTranscriptEvents,
+    setLiveTranscriptEvents,
     setError,
   });
   return { state, dispatch, controller, error };
