@@ -1,0 +1,10 @@
+{
+  "source": "https://github.com/vercel-labs/agent-desktop.git",
+  "sourceCommit": "9eb9b296192fcb70bda25e918cd6dd66abfa3d0d",
+  "version": "1.0.2",
+  "protocolVersion": "2.5",
+  "cargoLockSha256": "3be8a5fdfc899e326249e61c96ca9756bc3d4078540e316f0e011aba6d9c40d7",
+  "license": "Apache-2.0",
+  "licenseSha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+  "recentSourceReview": "This exact post-tag commit is selected for the Windows COM/UIA shutdown and CRLF fixes 0768da43 and d77f910d; it also includes intervening cursor and text changes. It is not the v1.0.2 tag. Review the full source diff and locked dependency ages before release."
+}
