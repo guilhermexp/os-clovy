@@ -38,7 +38,8 @@ const targetDir = resolve(
 );
 mkdirSync(dirname(source), { recursive: true });
 const newSource = !existsSync(source);
-if (newSource) run("git", ["clone", "--no-checkout", pin.source, source], root);
+if (newSource)
+  run("git", ["-c", "core.autocrlf=false", "clone", "--no-checkout", pin.source, source], root);
 if (
   !newSource &&
   run("git", ["status", "--porcelain", "--untracked-files=all"], source, true).trim()
@@ -46,7 +47,7 @@ if (
   throw new Error("agent-desktop source checkout has local changes; refusing to build it");
 }
 run("git", ["fetch", "--no-tags", pin.source, pin.sourceCommit], source);
-run("git", ["checkout", "--detach", pin.sourceCommit], source);
+run("git", ["-c", "core.autocrlf=false", "checkout", "--detach", pin.sourceCommit], source);
 if (run("git", ["rev-parse", "HEAD"], source, true).trim() !== pin.sourceCommit) {
   throw new Error("agent-desktop source commit mismatch");
 }
