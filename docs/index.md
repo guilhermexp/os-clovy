@@ -180,6 +180,8 @@ Per-repo config the engineering skills read before acting (see the
 - [qa/agent-driven-integration.md](qa/agent-driven-integration.md) — QA strategy (3 layers, skill-first agent-driven)
 - [qa/computer-use-parity.md](qa/computer-use-parity.md) - JUN-278 parity, stricter safety differences, evidence map, and signed/manual release matrix
 - [qa/jun-334-note-transcription-latency.md](qa/jun-334-note-transcription-latency.md) — measured baseline and proof for note transcription latency
+- [qa/windows-audio-backlog.md](qa/windows-audio-backlog.md) - pendências de áudio de reunião no Windows, com bugs identificados, reprodução e limites da investigação
+- [qa/agent-runtime-backlog.md](qa/agent-runtime-backlog.md) - pendências do chat Claude Code/Codex: aprovações, bypass, paridade das ferramentas e diagnóstico das integrações
 - `qa/feature-user-stories.tsv` — story → code → test traceability matrix
 - `qa/agent-e2e-qa-runs/` — dated end-to-end QA run logs
 
