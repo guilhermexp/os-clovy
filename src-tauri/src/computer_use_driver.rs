@@ -358,17 +358,19 @@ where
                             anyhow::bail!("Invalid parent-owned run namespace");
                         }
                         let home = run_root.join(format!("engine-{}", uuid::Uuid::new_v4()));
-                        let host = computer_use_host::CommandHost::start(executable, home).await?;
+                        let host = computer_use_host::CommandHost::start(
+                            executable,
+                            home,
+                            Arc::clone(&browser_runtime),
+                        )
+                        .await?;
                         let mut state = connection.lock().unwrap_or_else(|e| e.into_inner());
                         state.cancel = Some(host.cancel_handle());
                         if state.closed {
                             host.cancel_handle().cancel();
                             anyhow::bail!("Clovy disconnected");
                         }
-                        adapter = Some(computer_use_engine::EngineAdapter::new(
-                            host,
-                            Arc::clone(&browser_runtime),
-                        ));
+                        adapter = Some(computer_use_engine::EngineAdapter::new(host));
                     }
                     Response::ok(id, adapter.as_mut().unwrap().invoke(name, args).await)
                 }

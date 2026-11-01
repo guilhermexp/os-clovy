@@ -1,6 +1,6 @@
 //! The private Clovy/agent-desktop translation boundary. The model never sees
 //! argv, namespaces, executable paths, or upstream's unrestricted command set.
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde_json::{json, Value};
@@ -74,21 +74,15 @@ struct Capture {
 
 pub(crate) struct EngineAdapter {
     host: CommandHost,
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    browser_runtime: Arc<crate::computer_use_owned_runtime::OwnedBrowserRuntime>,
     windows: HashMap<u64, Window>,
     captures: HashMap<(i64, u64), Capture>,
     next_public_element: u32,
 }
 
 impl EngineAdapter {
-    pub(crate) fn new(
-        host: CommandHost,
-        browser_runtime: Arc<crate::computer_use_owned_runtime::OwnedBrowserRuntime>,
-    ) -> Self {
+    pub(crate) fn new(host: CommandHost) -> Self {
         Self {
             host,
-            browser_runtime,
             windows: HashMap::new(),
             captures: HashMap::new(),
             next_public_element: 1,
@@ -224,10 +218,12 @@ impl EngineAdapter {
                     })
                     .ok_or_else(invalid_arguments)?;
                 #[cfg(target_os = "windows")]
-                let result =
-                    crate::computer_use_windows::launch_app(app, Arc::clone(&self.browser_runtime))
-                        .await
-                        .map_err(|error| launch_failure(error.as_ref(), modality))?;
+                let result = crate::computer_use_windows::launch_app(
+                    app,
+                    self.host.browser_runtime().clone(),
+                )
+                .await
+                .map_err(|error| launch_failure(error.as_ref(), modality))?;
                 #[cfg(not(target_os = "windows"))]
                 let result = self
                     .engine(vec!["launch".into(), app.into()], true)

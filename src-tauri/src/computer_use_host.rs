@@ -60,6 +60,7 @@ impl HostCancel {
 }
 
 pub struct CommandHost {
+    browser_runtime: Arc<crate::computer_use_owned_runtime::OwnedBrowserRuntime>,
     #[cfg(not(target_os = "macos"))]
     executable: PathBuf,
     home: PathBuf,
@@ -72,8 +73,18 @@ pub struct CommandHost {
     stdout: BufReader<ChildStdout>,
 }
 impl CommandHost {
-    pub async fn start(executable: PathBuf, home: PathBuf) -> Result<Self> {
-        if !executable.is_absolute() || !executable.is_file() || !home.is_absolute() {
+    pub async fn start(
+        executable: PathBuf,
+        home: PathBuf,
+        browser_runtime: Arc<crate::computer_use_owned_runtime::OwnedBrowserRuntime>,
+    ) -> Result<Self> {
+        let (namespace, image) = browser_runtime.paths();
+        if !executable.is_absolute()
+            || !executable.is_file()
+            || !home.is_absolute()
+            || !namespace.is_absolute()
+            || !image.is_absolute()
+        {
             bail!("Invalid private engine paths");
         }
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -102,6 +113,7 @@ impl CommandHost {
                 job: crate::computer_use_windows::OwnedJob::new()?,
             }));
             Ok(Self {
+                browser_runtime,
                 executable,
                 home,
                 cancel,
@@ -114,7 +126,7 @@ impl CommandHost {
                 bail!("Helper must own its isolated process group");
             }
             let mut command = Command::new(&executable);
-            configure(&mut command, &home);
+            configure(&mut command, &home, &browser_runtime);
             command.env("AGENT_DESKTOP_INTERNAL_COMMAND_HOST", "1");
             let mut child = command
                 .spawn()
@@ -147,6 +159,7 @@ impl CommandHost {
                 group,
             }));
             Ok(Self {
+                browser_runtime,
                 home,
                 cancel,
                 child,
@@ -161,6 +174,7 @@ impl CommandHost {
             // group across CLI invocations. The spawn gate serializes each
             // synchronous spawn with Stop so no new member can miss the kill.
             let mut keeper = Command::new("/bin/sleep");
+            configure(&mut keeper, &home, &browser_runtime);
             keeper
                 .arg("31536000")
                 .process_group(0)
@@ -180,6 +194,7 @@ impl CommandHost {
                 group,
             }));
             Ok(Self {
+                browser_runtime,
                 executable,
                 home,
                 cancel,
@@ -189,6 +204,12 @@ impl CommandHost {
     }
     pub fn cancel_handle(&self) -> HostCancel {
         self.cancel.clone()
+    }
+    #[cfg(target_os = "windows")]
+    pub(crate) fn browser_runtime(
+        &self,
+    ) -> &Arc<crate::computer_use_owned_runtime::OwnedBrowserRuntime> {
+        &self.browser_runtime
     }
     pub async fn execute(&mut self, argv: Vec<String>) -> Result<Value> {
         if self.cancel.is_cancelled() {
@@ -238,7 +259,7 @@ impl CommandHost {
         #[cfg(target_os = "windows")]
         let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
             let mut command = Command::new(&self.executable);
-            configure(&mut command, &self.home);
+            configure(&mut command, &self.home, &self.browser_runtime);
             command.args(&argv);
             let mut child = {
                 let _gate = self
@@ -282,7 +303,7 @@ impl CommandHost {
         #[cfg(target_os = "linux")]
         let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
             let mut command = Command::new(&self.executable);
-            configure(&mut command, &self.home);
+            configure(&mut command, &self.home, &self.browser_runtime);
             command.args(&argv).process_group(self.cancel.0.group);
             let mut child = {
                 let _gate = self
@@ -333,7 +354,11 @@ impl CommandHost {
         }
     }
 }
-fn configure(command: &mut Command, home: &std::path::Path) {
+fn configure(
+    command: &mut Command,
+    home: &std::path::Path,
+    browser_runtime: &crate::computer_use_owned_runtime::OwnedBrowserRuntime,
+) {
     for (name, _) in std::env::vars_os() {
         let normalized = name.to_string_lossy().to_ascii_uppercase();
         if normalized.starts_with("AGENT_DESKTOP_")
@@ -346,7 +371,10 @@ fn configure(command: &mut Command, home: &std::path::Path) {
             command.env_remove(name);
         }
     }
+    let (namespace, image) = browser_runtime.paths();
     command
+        .env("CLOVY_COMPUTER_USE_BROWSER_NAMESPACE", namespace)
+        .env("CLOVY_COMPUTER_USE_BROWSER_IMAGE", image)
         .env("AGENT_DESKTOP_HOME", home)
         .env("AGENT_DESKTOP_SESSION", "clovy")
         .env("CLOVY_AGENT_DESKTOP_SUPERVISED", "1")
@@ -470,7 +498,12 @@ impl Drop for CommandHost {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    fn fixture() -> (PathBuf, PathBuf, PathBuf) {
+    fn fixture() -> (
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        Arc<crate::computer_use_owned_runtime::OwnedBrowserRuntime>,
+    ) {
         let root = std::env::temp_dir().join(format!(
             "clovy-supervisor-proof-{}-{}",
             std::process::id(),
@@ -480,12 +513,19 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir(&root).unwrap();
+        let namespace = root.join("chrome");
+        std::fs::create_dir(&namespace).unwrap();
+        let image = namespace.join("browser");
+        std::fs::write(&image, b"browser fixture").unwrap();
+        let browser_runtime = Arc::new(
+            crate::computer_use_owned_runtime::OwnedBrowserRuntime::new(namespace, image),
+        );
         let engine = root.join("blocking-controller");
         // A real controller fixture starts a descendant, then blocks while an
         // invocation is in flight. It deliberately never fabricates receipts.
         std::fs::write(&engine,"#!/bin/sh\nsleep 120 &\nprintf '%s' \"$!\" > \"$AGENT_DESKTOP_HOME/descendant.pid\"\nread -r request\nwait\n").unwrap();
         std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o700)).unwrap();
-        (engine, root.join("fresh-owner"), root)
+        (engine, root.join("fresh-owner"), root, browser_runtime)
     }
     fn running(pid: i32) -> bool {
         let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
@@ -496,8 +536,10 @@ mod tests {
     }
     #[tokio::test]
     async fn cancellation_reaches_descendants_while_execute_is_blocked() {
-        let (engine, home, root) = fixture();
-        let mut host = CommandHost::start(engine, home.clone()).await.unwrap();
+        let (engine, home, root, browser_runtime) = fixture();
+        let mut host = CommandHost::start(engine, home.clone(), browser_runtime)
+            .await
+            .unwrap();
         let cancel = host.cancel_handle();
         let blocked = tokio::spawn(async move { host.execute(vec!["snapshot".into()]).await });
         let pid = tokio::time::timeout(Duration::from_secs(2), async {
@@ -531,16 +573,20 @@ mod tests {
     }
     #[tokio::test]
     async fn existing_namespace_is_rejected_before_controller_start() {
-        let (engine, home, root) = fixture();
+        let (engine, home, root, browser_runtime) = fixture();
         std::fs::create_dir(&home).unwrap();
-        assert!(CommandHost::start(engine, home.clone()).await.is_err());
+        assert!(CommandHost::start(engine, home.clone(), browser_runtime)
+            .await
+            .is_err());
         assert!(!home.join("descendant.pid").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn dropping_an_inflight_invocation_cancels_its_controllers() {
-        let (engine, home, root) = fixture();
-        let mut host = CommandHost::start(engine, home.clone()).await.unwrap();
+        let (engine, home, root, browser_runtime) = fixture();
+        let mut host = CommandHost::start(engine, home.clone(), browser_runtime)
+            .await
+            .unwrap();
         let mut invocation = Box::pin(host.execute(vec!["snapshot".into()]));
         let pid = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
