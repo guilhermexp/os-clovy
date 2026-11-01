@@ -4,6 +4,21 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(any(target_os = "windows", test))]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Debug)]
+pub(crate) struct PrivateBrowserLaunchDenied;
+
+#[cfg(any(target_os = "windows", test))]
+impl std::fmt::Display for PrivateBrowserLaunchDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Use Browser use or human takeover for the private browser.")
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl std::error::Error for PrivateBrowserLaunchDenied {}
+
 /// Paths are supplied by the host's browser configuration, never by a tool call.
 /// Resolution is deferred so absent assets do not prevent application startup.
 pub(crate) struct OwnedBrowserRuntime {
@@ -14,6 +29,10 @@ pub(crate) struct OwnedBrowserRuntime {
 impl OwnedBrowserRuntime {
     pub(crate) fn new(namespace: PathBuf, image: PathBuf) -> Self {
         Self { namespace, image }
+    }
+
+    pub(crate) fn paths(&self) -> (&Path, &Path) {
+        (&self.namespace, &self.image)
     }
 
     /// Returns whether an executable belongs to the private runtime. An

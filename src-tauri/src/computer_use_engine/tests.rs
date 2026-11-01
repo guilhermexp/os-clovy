@@ -1,4 +1,36 @@
 use super::*;
+
+#[test]
+fn launch_failure_distinguishes_typed_denial_from_a_lookalike_error() {
+    let denial = crate::computer_use_policy::PrivateBrowserLaunchDenied;
+    let known_error = anyhow::Error::new(crate::computer_use_policy::PrivateBrowserLaunchDenied);
+    let known = launch_failure(known_error.as_ref(), "visible");
+    assert_eq!(known["isError"], true);
+    assert_eq!(
+        known["structuredContent"]["code"],
+        "computer_use_private_browser_blocked"
+    );
+    assert_eq!(
+        known["structuredContent"]["disposition"]["delivery"],
+        "not_delivered"
+    );
+    assert_eq!(known["structuredContent"]["disposition"]["retry"], "safe");
+    let lookalike = std::io::Error::other(denial.to_string());
+    let unknown = launch_failure(&lookalike, "visible");
+    assert_eq!(unknown["isError"], true);
+    assert_eq!(
+        unknown["structuredContent"]["code"],
+        "computer_use_launch_unverified"
+    );
+    assert_eq!(
+        unknown["structuredContent"]["disposition"]["delivery"],
+        "delivery_uncertain"
+    );
+    assert_eq!(
+        unknown["structuredContent"]["disposition"]["retry"],
+        "unsafe"
+    );
+}
 fn window() -> Window {
     Window {
         public_id: 7,

@@ -9,7 +9,7 @@ mod computer_use_host;
 #[cfg(target_os = "macos")]
 #[allow(dead_code)] // Shared helper permissions and main process-group ownership.
 mod computer_use_macos;
-#[cfg(target_os = "windows")]
+#[allow(dead_code)] // Shared with the host; not every policy is used by the helper.
 mod computer_use_policy;
 #[cfg(target_os = "windows")]
 #[allow(dead_code)] // Shared parent/client and helper/server implementation.
@@ -242,6 +242,20 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin,
 {
+    let namespace = PathBuf::from(
+        std::env::var_os("CLOVY_COMPUTER_USE_BROWSER_NAMESPACE")
+            .ok_or_else(|| anyhow::anyhow!("Missing browser authority"))?,
+    );
+    let image = PathBuf::from(
+        std::env::var_os("CLOVY_COMPUTER_USE_BROWSER_IMAGE")
+            .ok_or_else(|| anyhow::anyhow!("Missing browser authority"))?,
+    );
+    if !namespace.is_absolute() || !image.is_absolute() {
+        anyhow::bail!("Invalid browser authority");
+    }
+    let browser_runtime = Arc::new(computer_use_policy::OwnedBrowserRuntime::new(
+        namespace, image,
+    ));
     let connection = Arc::new(Mutex::new(Connection::default()));
     let reader_connection = connection.clone();
     let (sender, mut messages) = tokio::sync::mpsc::channel(16);
@@ -349,7 +363,10 @@ where
                             host.cancel_handle().cancel();
                             anyhow::bail!("Clovy disconnected");
                         }
-                        adapter = Some(computer_use_engine::EngineAdapter::new(host));
+                        adapter = Some(computer_use_engine::EngineAdapter::new(
+                            host,
+                            Arc::clone(&browser_runtime),
+                        ));
                     }
                     Response::ok(id, adapter.as_mut().unwrap().invoke(name, args).await)
                 }

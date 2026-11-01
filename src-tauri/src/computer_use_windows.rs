@@ -174,7 +174,11 @@ pub struct PrivateHelper {
     pid: u32,
 }
 impl PrivateHelper {
-    pub async fn spawn(path: &Path, capability: &str) -> Result<Self> {
+    pub async fn spawn(
+        path: &Path,
+        capability: &str,
+        browser_runtime: &crate::computer_use_policy::OwnedBrowserRuntime,
+    ) -> Result<Self> {
         if capability.len() < 32 {
             bail!("Missing private helper capability");
         }
@@ -188,10 +192,16 @@ impl PrivateHelper {
         let input = process::listener(true)?;
         let output = process::listener(false)?;
         let mut command = Command::new(path);
+        let (namespace, image) = browser_runtime.paths();
+        if !namespace.is_absolute() || !image.is_absolute() {
+            bail!("Invalid browser authority paths");
+        }
         command
             .arg("mcp")
             .env("CLOVY_COMPUTER_USE_HELPER_CAPABILITY", capability)
             .env("CLOVY_COMPUTER_USE_RUN_DIR", run_dir.path())
+            .env("CLOVY_COMPUTER_USE_BROWSER_NAMESPACE", namespace)
+            .env("CLOVY_COMPUTER_USE_BROWSER_IMAGE", image)
             .env("CLOVY_COMPUTER_USE_INPUT_PIPE", &input.name)
             .env("CLOVY_COMPUTER_USE_OUTPUT_PIPE", &output.name)
             .stdin(std::process::Stdio::piped())
@@ -1069,16 +1079,38 @@ fn same_process_account_and_session(first: HANDLE, second: HANDLE) -> Result<()>
     Ok(())
 }
 
-pub async fn launch_app(name: &str) -> Result<Value> {
+use crate::computer_use_policy::PrivateBrowserLaunchDenied;
+
+fn qualify_launch_image(
+    browser_runtime: &crate::computer_use_policy::OwnedBrowserRuntime,
+    path: &Path,
+) -> Result<()> {
+    match browser_runtime.owns(path) {
+        Ok(false) => Ok(()),
+        Ok(true) | Err(_) => Err(PrivateBrowserLaunchDenied.into()),
+    }
+}
+
+pub async fn launch_app(
+    name: &str,
+    browser_runtime: Arc<crate::computer_use_policy::OwnedBrowserRuntime>,
+) -> Result<Value> {
     let name = name.to_owned();
     tokio::task::spawn_blocking(move || {
         // Every ordinary Err precedes successful CreateProcess. Once an app
         // exists, any post-create failure becomes an explicit unsafe receipt.
         // A worker panic/join failure can occur on either side of creation.
-        launch_app_blocking(&name).unwrap_or_else(|error|json!({"version":"2.5","ok":false,"command":"launch","error":{"code":if desktop_unavailable(&error){"computer_use_desktop_unavailable"}else{"computer_use_launch_unavailable"},"message":error.to_string(),"disposition":{"delivery":"not_delivered","retry":"safe"}}}))
-    }).await.map_err(Into::into)
+        match launch_app_blocking(&name, &browser_runtime) {
+            Ok(value) => Ok(value),
+            Err(error) if error.is::<PrivateBrowserLaunchDenied>() => Err(error),
+            Err(error) => Ok(json!({"version":"2.5","ok":false,"command":"launch","error":{"code":if desktop_unavailable(&error){"computer_use_desktop_unavailable"}else{"computer_use_launch_unavailable"},"message":error.to_string(),"disposition":{"delivery":"not_delivered","retry":"safe"}}})),
+        }
+    }).await?
 }
-fn launch_app_blocking(name: &str) -> Result<Value> {
+fn launch_app_blocking(
+    name: &str,
+    browser_runtime: &crate::computer_use_policy::OwnedBrowserRuntime,
+) -> Result<Value> {
     require_desktop()?;
     let _apartment = ComApartment::enter()?;
     let path = resolve_app(name)?;
@@ -1086,6 +1118,7 @@ fn launch_app_blocking(name: &str) -> Result<Value> {
         .read(true)
         .share_mode(windows::Win32::Storage::FileSystem::FILE_SHARE_READ.0)
         .open(&path)?;
+    qualify_launch_image(browser_runtime, &path)?;
     if !path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
@@ -1131,6 +1164,7 @@ fn launch_app_blocking(name: &str) -> Result<Value> {
         if crate::computer_use_cancel::current_run_cancelled() {
             bail!("Computer use was stopped before application launch");
         }
+        qualify_launch_image(browser_runtime, &path)?;
         Ok(())
     })?;
     // CreateProcess succeeded: A is now the user's application. Keep its
@@ -1454,6 +1488,27 @@ mod tests {
         )
         .is_err());
     }
+    #[test]
+    fn launch_image_policy_rejects_private_and_indeterminate_targets() {
+        let root = tempfile::tempdir().unwrap();
+        let namespace = root.path().join("chrome");
+        std::fs::create_dir(&namespace).unwrap();
+        let image = namespace.join("chrome.exe");
+        let external = root.path().join("external.exe");
+        std::fs::write(&image, b"private").unwrap();
+        std::fs::write(&external, b"external").unwrap();
+        let runtime =
+            crate::computer_use_policy::OwnedBrowserRuntime::new(namespace, image.clone());
+        assert!(qualify_launch_image(&runtime, &external).is_ok());
+        assert!(qualify_launch_image(&runtime, &image)
+            .unwrap_err()
+            .is::<PrivateBrowserLaunchDenied>());
+        std::fs::remove_file(&image).unwrap();
+        assert!(qualify_launch_image(&runtime, &external)
+            .unwrap_err()
+            .is::<PrivateBrowserLaunchDenied>());
+    }
+
     #[test]
     fn untrusted_program_arguments_cannot_be_launch_names() {
         for name in [

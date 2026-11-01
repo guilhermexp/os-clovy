@@ -1,6 +1,6 @@
 //! The private Clovy/agent-desktop translation boundary. The model never sees
 //! argv, namespaces, executable paths, or upstream's unrestricted command set.
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde_json::{json, Value};
@@ -74,15 +74,21 @@ struct Capture {
 
 pub(crate) struct EngineAdapter {
     host: CommandHost,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    browser_runtime: Arc<crate::computer_use_policy::OwnedBrowserRuntime>,
     windows: HashMap<u64, Window>,
     captures: HashMap<(i64, u64), Capture>,
     next_public_element: u32,
 }
 
 impl EngineAdapter {
-    pub(crate) fn new(host: CommandHost) -> Self {
+    pub(crate) fn new(
+        host: CommandHost,
+        browser_runtime: Arc<crate::computer_use_policy::OwnedBrowserRuntime>,
+    ) -> Self {
         Self {
             host,
+            browser_runtime,
             windows: HashMap::new(),
             captures: HashMap::new(),
             next_public_element: 1,
@@ -218,7 +224,10 @@ impl EngineAdapter {
                     })
                     .ok_or_else(invalid_arguments)?;
                 #[cfg(target_os = "windows")]
-                let result = crate::computer_use_windows::launch_app(app).await.map_err(|_| remode_failure(failure("computer_use_launch_unverified", "The application launch could not be verified. Inspect the window list before continuing.", true),modality))?;
+                let result =
+                    crate::computer_use_windows::launch_app(app, Arc::clone(&self.browser_runtime))
+                        .await
+                        .map_err(|error| launch_failure(error.as_ref(), modality))?;
                 #[cfg(not(target_os = "windows"))]
                 let result = self
                     .engine(vec!["launch".into(), app.into()], true)
@@ -1126,6 +1135,22 @@ fn remove_external_guidance(value: &mut Value) {
         }
         _ => {}
     }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn launch_failure(error: &(dyn std::error::Error + 'static), modality: &str) -> Value {
+    let (code, message, uncertain) = if error
+        .is::<crate::computer_use_policy::PrivateBrowserLaunchDenied>()
+    {
+        (
+            "computer_use_private_browser_blocked",
+            "Use Browser use or human takeover for the private browser.",
+            false,
+        )
+    } else {
+        ("computer_use_launch_unverified", "The application launch could not be verified. Inspect the window list before continuing.", true)
+    };
+    remode_failure(failure(code, message, uncertain), modality)
 }
 
 fn remode_failure(failure: Value, modality: &str) -> Value {

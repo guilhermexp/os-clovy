@@ -121,6 +121,17 @@ pub struct ComputerUseState {
 }
 
 impl ComputerUseState {
+    fn browser_runtime(
+        &self,
+    ) -> Result<&crate::computer_use_policy::OwnedBrowserRuntime, AppError> {
+        self.browser_runtime.get().ok_or_else(|| {
+            AppError::new(
+                "computer_use_unavailable",
+                "Browser authority is unavailable.",
+            )
+        })
+    }
+
     pub(crate) fn set_browser_runtime(
         &self,
         runtime: crate::computer_use_policy::OwnedBrowserRuntime,
@@ -458,6 +469,7 @@ impl DriverClient {
     async fn start(
         path: &Path,
         permission_prompt: Option<DriverPermissionPrompt>,
+        browser_runtime: &crate::computer_use_policy::OwnedBrowserRuntime,
     ) -> Result<Self, AppError> {
         let capability = random_id();
         let run_directory = tempfile::Builder::new()
@@ -483,7 +495,13 @@ impl DriverClient {
             )?;
         }
         let socket_path = socket_dir.join("driver.sock");
-        let launch = driver_launch_spec(path, &socket_path, &capability, permission_prompt)?;
+        let launch = driver_launch_spec(
+            path,
+            &socket_path,
+            &capability,
+            permission_prompt,
+            browser_runtime,
+        )?;
         let mut command = driver_command(&launch.program);
         command.args(&launch.args);
         let output = bounded_command_output(
@@ -776,13 +794,15 @@ impl DriverClient {
     async fn start(
         path: &Path,
         _permission_prompt: Option<DriverPermissionPrompt>,
+        browser_runtime: &crate::computer_use_policy::OwnedBrowserRuntime,
     ) -> Result<Self, AppError> {
         let capability = random_id();
-        let mut helper = crate::computer_use_windows::PrivateHelper::spawn(path, &capability)
-            .await
-            .map_err(|error| {
-                AppError::new("computer_use_driver_start_failed", error.to_string())
-            })?;
+        let mut helper =
+            crate::computer_use_windows::PrivateHelper::spawn(path, &capability, browser_runtime)
+                .await
+                .map_err(|error| {
+                    AppError::new("computer_use_driver_start_failed", error.to_string())
+                })?;
         let stdin = helper.stdin.take().ok_or_else(|| {
             AppError::new(
                 "computer_use_driver_start_failed",
@@ -838,6 +858,7 @@ impl DriverClient {
     async fn start(
         _path: &Path,
         _permission_prompt: Option<DriverPermissionPrompt>,
+        _browser_runtime: &crate::computer_use_policy::OwnedBrowserRuntime,
     ) -> Result<Self, AppError> {
         Err(AppError::new(
             "computer_use_unsupported",
@@ -894,9 +915,40 @@ pub async fn run_release_self_test_host(
         Some("screen-recording") => Some(DriverPermissionPrompt::ScreenRecording),
         Some(_) => return Err("the self-test permission prompt is invalid".to_string()),
     };
-    let mut driver = DriverClient::start(&path, permission_prompt)
-        .await
+    let host_executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    let bundled = host_executable
+        .parent()
+        .and_then(Path::parent)
+        .map(|contents| contents.join("Resources/native/agent-browser"));
+    #[cfg(target_os = "windows")]
+    let bundled = host_executable
+        .parent()
+        .map(|parent| parent.join("native/agent-browser"));
+    let bundled = bundled.ok_or("Browser resources are unavailable")?;
+    let resources = if cfg!(debug_assertions) && !bundled.is_dir() {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../resources/agent-browser")
+    } else {
+        bundled
+    };
+    let (engine, chrome) = crate::browser::engine::EngineConfig::production_paths(resources);
+    let state = ComputerUseState::default();
+    state
+        .set_browser_runtime(crate::computer_use_policy::OwnedBrowserRuntime::new(
+            engine
+                .parent()
+                .ok_or("Browser resources are unavailable")?
+                .join("chrome"),
+            chrome,
+        ))
         .map_err(|error| error.message)?;
+    let mut driver = DriverClient::start(
+        &path,
+        permission_prompt,
+        state.browser_runtime().map_err(|error| error.message)?,
+    )
+    .await
+    .map_err(|error| error.message)?;
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
     let mut stdout = BufWriter::new(tokio::io::stdout());
@@ -1161,6 +1213,7 @@ fn driver_launch_spec(
     socket_path: &Path,
     capability: &str,
     permission_prompt: Option<DriverPermissionPrompt>,
+    browser_runtime: &crate::computer_use_policy::OwnedBrowserRuntime,
 ) -> Result<DriverLaunchSpec, AppError> {
     let bundle = executable
         .ancestors()
@@ -1205,6 +1258,22 @@ fn driver_launch_spec(
                 ))?
         ),
     ];
+    let (namespace, image) = browser_runtime.paths();
+    for (name, value) in [
+        ("CLOVY_COMPUTER_USE_BROWSER_NAMESPACE", namespace),
+        ("CLOVY_COMPUTER_USE_BROWSER_IMAGE", image),
+    ] {
+        let value = value
+            .to_str()
+            .filter(|_| value.is_absolute())
+            .ok_or_else(|| {
+                AppError::new(
+                    "computer_use_driver_start_failed",
+                    "Browser authority path is invalid.",
+                )
+            })?;
+        args.extend(["--env".to_string(), format!("{name}={value}")]);
+    }
     if let Some(prompt) = permission_prompt {
         args.extend([
             "--env".to_string(),
@@ -1312,6 +1381,8 @@ fn should_scrub_driver_env(name: &OsStr) -> bool {
         || name == "CLOVY_COMPUTER_USE_PERMISSION_PROMPT"
         || name == "CLOVY_COMPUTER_USE_SOCKET"
         || name == "CLOVY_COMPUTER_USE_RUN_DIR"
+        || name == "CLOVY_COMPUTER_USE_BROWSER_NAMESPACE"
+        || name == "CLOVY_COMPUTER_USE_BROWSER_IMAGE"
         || matches!(
             name.as_ref(),
             "HTTP_PROXY"
@@ -1852,11 +1923,18 @@ async fn probe_permissions(
     prompt: bool,
 ) -> Result<PermissionProbe, AppError> {
     let path = path.to_path_buf();
+    let (namespace, image) = state.browser_runtime()?.paths();
+    let namespace = namespace.to_path_buf();
+    let image = image.to_path_buf();
     state
         .permission_probe
         .run(prompt, move |prompt| {
             let path = path.clone();
-            async move { probe_permissions_uncoordinated(&path, prompt).await }
+            let runtime = crate::computer_use_policy::OwnedBrowserRuntime::new(
+                namespace.clone(),
+                image.clone(),
+            );
+            async move { probe_permissions_uncoordinated(&path, prompt, &runtime).await }
         })
         .await
 }
@@ -1864,11 +1942,12 @@ async fn probe_permissions(
 async fn probe_permissions_uncoordinated(
     path: &Path,
     prompt: bool,
+    browser_runtime: &crate::computer_use_policy::OwnedBrowserRuntime,
 ) -> Result<PermissionProbe, AppError> {
-    let initial = read_permission_probe(path, None).await?;
+    let initial = read_permission_probe(path, None, browser_runtime).await?;
     if prompt {
         if let Some(next) = next_permission_prompt(&initial) {
-            return read_permission_probe(path, Some(next)).await;
+            return read_permission_probe(path, Some(next), browser_runtime).await;
         }
     }
     Ok(initial)
@@ -1877,8 +1956,9 @@ async fn probe_permissions_uncoordinated(
 async fn read_permission_probe(
     path: &Path,
     permission_prompt: Option<DriverPermissionPrompt>,
+    browser_runtime: &crate::computer_use_policy::OwnedBrowserRuntime,
 ) -> Result<PermissionProbe, AppError> {
-    let mut client = DriverClient::start(path, permission_prompt).await?;
+    let mut client = DriverClient::start(path, permission_prompt, browser_runtime).await?;
     let mut ignore_notification = |_: &Value| {};
     let result = client
         .call_tool(
@@ -2799,7 +2879,13 @@ async fn start_driver_for_epoch(
     path: &Path,
     epoch: u64,
 ) -> Result<DriverClient, AppError> {
-    with_epoch_guard(state, epoch, DriverClient::start(path, None)).await
+    let browser_runtime = state.browser_runtime()?;
+    with_epoch_guard(
+        state,
+        epoch,
+        DriverClient::start(path, None, browser_runtime),
+    )
+    .await
 }
 
 async fn with_epoch_guard<T>(
@@ -5638,6 +5724,23 @@ mod tests {
     }
 
     #[test]
+    fn pre_dispatch_denial_keeps_its_delivery_receipt_at_the_broker() {
+        let result = json!({
+            "isError": true,
+            "content": [{"type":"text", "text":"Private browser is unavailable to desktop control."}],
+            "structuredContent": {
+                "error": {"code":"computer_use_private_browser_blocked"},
+                "disposition": {"delivery":"not_delivered", "retry":"safe"}
+            }
+        });
+        let error = action_delivery_unknown(driver_result_error(&result), "fixture-action");
+        assert_eq!(error.code, "computer_use_private_browser_blocked");
+        let details = error.details.unwrap();
+        assert_eq!(details["disposition"]["delivery"], "not_delivered");
+        assert_eq!(details["disposition"]["retry"], "safe");
+    }
+
+    #[test]
     fn uncertain_native_retry_metadata_never_authorizes_replay() {
         for disposition in [
             Value::Null,
@@ -6126,11 +6229,16 @@ mod tests {
         let executable = Path::new(
             "/tmp/Clovy Computer Use Driver.app/Contents/MacOS/clovy-computer-use-driver",
         );
+        let browser_runtime = crate::computer_use_policy::OwnedBrowserRuntime::new(
+            PathBuf::from("/tmp/browser/chrome"),
+            PathBuf::from("/tmp/browser/chrome/browser"),
+        );
         let launch = driver_launch_spec(
             executable,
             Path::new("/tmp/clovy-cua-test/driver.sock"),
             "a-secret-capability",
             Some(DriverPermissionPrompt::ScreenRecording),
+            &browser_runtime,
         )
         .expect("valid helper bundle");
 
@@ -6397,6 +6505,8 @@ mod tests {
             "JUNE_CUA_DRIVER_CMD",
             "JUNE_CUA_DRIVER_VERSION",
             "CLOVY_COMPUTER_USE_BACKEND",
+            "CLOVY_COMPUTER_USE_BROWSER_NAMESPACE",
+            "CLOVY_COMPUTER_USE_BROWSER_IMAGE",
             "HTTPS_PROXY",
         ] {
             assert!(should_scrub_driver_env(OsStr::new(name)), "{name}");

@@ -80,7 +80,7 @@ impl EngineConfig {
         self.engine.parent().map(|parent| parent.join("chrome"))
     }
 
-    pub fn production(resources: PathBuf, data: PathBuf, persistent: bool) -> Self {
+    pub(crate) fn production_paths(resources: PathBuf) -> (PathBuf, PathBuf) {
         let platform = if cfg!(target_os = "windows") {
             "win64"
         } else if cfg!(target_os = "macos") {
@@ -99,13 +99,21 @@ impl EngineConfig {
             _ => "chrome/chrome-linux64/chrome",
         };
         let resources = resources.join(platform);
-        Self {
-            engine: resources.join(if cfg!(windows) {
+        (
+            resources.join(if cfg!(windows) {
                 "clovy-agent-browser.exe"
             } else {
                 "clovy-agent-browser"
             }),
-            chrome: resources.join(chrome),
+            resources.join(chrome),
+        )
+    }
+
+    pub fn production(resources: PathBuf, data: PathBuf, persistent: bool) -> Self {
+        let (engine, chrome) = Self::production_paths(resources);
+        Self {
+            engine,
+            chrome,
             persistent_profile: data.join("browser-profile"),
             temporary_root: data.join("browser-temporary"),
             persistent,
