@@ -479,7 +479,12 @@ impl StreamTranslator {
                         // Measured: "Claude requested permissions to write to
                         // <path>, but you haven't granted it yet."
                         let needs_approval = text.contains("requested permissions");
-                        self.finish_tool(id, None, Value::Null, Some(text), needs_approval, out);
+                        let detail = self
+                            .tool_names
+                            .get(id)
+                            .and_then(|name| claude_mcp_error(name, block, &text))
+                            .unwrap_or(text);
+                        self.finish_tool(id, None, Value::Null, Some(detail), needs_approval, out);
                     } else {
                         self.finish_tool(id, None, Value::String(text), None, false, out);
                     }
@@ -559,18 +564,19 @@ impl StreamTranslator {
                             }
                             Some("mcp_tool_call") => {
                                 match item.get("error").filter(|error| !error.is_null()) {
-                                    Some(error) => (
+                                    Some(error) => {
+                                        (Value::Null, Some(codex_mcp_error(item, error)), false)
+                                    }
+                                    None if item["result"]["isError"].as_bool() == Some(true) => (
                                         Value::Null,
-                                        Some(
-                                            str_at(error, "message")
-                                                .map(str::to_string)
-                                                .unwrap_or_else(|| error.to_string()),
-                                        ),
+                                        Some(codex_mcp_error(item, &item["result"])),
                                         false,
                                     ),
-                                    None if status == Some("failed") => {
-                                        (Value::Null, Some("The tool call failed.".into()), false)
-                                    }
+                                    None if status == Some("failed") => (
+                                        Value::Null,
+                                        Some(codex_mcp_error(item, &Value::Null)),
+                                        false,
+                                    ),
                                     None => (item["result"].clone(), None, false),
                                 }
                             }
@@ -1094,6 +1100,309 @@ fn codex_tool(item: &Value) -> Option<(String, Value)> {
         "file_change" => Some(("apply_patch".into(), json!({ "changes": item["changes"] }))),
         "web_search" => Some(("web_search".into(), json!({ "query": item["query"] }))),
         _ => None,
+    }
+}
+
+/// A CLI-owned MCP connection has its own credentials and catalog. Do not
+/// infer that a failure belongs to an unrelated native Clovy provider.
+fn codex_mcp_error(item: &Value, error: &Value) -> String {
+    let server = str_at(item, "server").unwrap_or("unknown");
+    let tool = str_at(item, "tool").unwrap_or("unknown");
+    cli_mcp_error(server, tool, error, "The tool call failed.")
+}
+
+fn claude_mcp_error(name: &str, block: &Value, message: &str) -> Option<String> {
+    let (server, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
+    if server.is_empty() || tool.is_empty() {
+        return None;
+    }
+    Some(cli_mcp_error(server, tool, &block["error"], message))
+}
+
+fn cli_mcp_error(server: &str, tool: &str, error: &Value, fallback: &str) -> String {
+    let origin = if server == SERVER_KEY {
+        "clovy_gateway"
+    } else {
+        "external_cli"
+    };
+    // Only Clovy's relay owns these typed diagnostics. A CLI-inherited
+    // server cannot claim Clovy ownership by returning the same metadata.
+    if let Some(diagnostic) = error
+        .pointer("/_meta/clovy/diagnostic")
+        .filter(|_| server == SERVER_KEY)
+        .and_then(|value| {
+            serde_json::from_value::<crate::agent_mcp::AgentMcpDiagnostic>(value.clone()).ok()
+        })
+        .filter(|diagnostic| diagnostic.origin == "clovy_managed")
+    {
+        return diagnostic.into_app_error().message;
+    }
+    let content = content_text(&error["content"]);
+    let message = str_at(error, "message")
+        .or_else(|| error.as_str())
+        .or_else(|| (!content.is_empty()).then_some(content.as_str()))
+        .unwrap_or(fallback);
+    let remote_code = error
+        .get("code")
+        .and_then(|value| match value {
+            Value::String(code) => Some(code.clone()),
+            Value::Number(code) => Some(code.to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "none".to_string());
+    let action = if server == SERVER_KEY {
+        "inspect_clovy_connection"
+    } else if remote_code.eq_ignore_ascii_case("unauthorized")
+        || matches!(remote_code.as_str(), "401" | "403")
+    {
+        "check_external_connection_and_permissions"
+    } else if remote_code.eq_ignore_ascii_case("unknown_tool") || remote_code == "-32601" {
+        "inspect_external_catalog"
+    } else {
+        "inspect_external_server"
+    };
+    format!("MCP origin: {origin}; server: {server}; tool: {tool}; phase: call; code: mcp_tool_failed; remote code: {remote_code}; state: unavailable; action: {action}. {message}")
+}
+
+#[cfg(test)]
+mod mcp_origin_tests {
+    use super::*;
+
+    #[test]
+    fn codex_external_failure_keeps_origin_without_changing_healthy_managed_result() {
+        let mut translator = StreamTranslator::new(CliKind::Codex);
+        let healthy = translator.translate_line(
+            &json!({"type":"item.completed","item":{
+                "id":"healthy", "type":"mcp_tool_call", "server":SERVER_KEY,
+                "tool":"mcp_private_lookup", "status":"completed", "result":{"value":7}
+            }})
+            .to_string(),
+        );
+        assert!(healthy.iter().any(|event| matches!(event,
+            EngineEvent::ToolFinished {call_id, output, error:None, ..}
+                if call_id == "healthy" && output["value"] == 7
+        )));
+        let failed = translator.translate_line(
+            &json!({"type":"item.completed","item":{
+                "id":"external", "type":"mcp_tool_call", "server":"codex_apps",
+                "tool":"atlassian.atlassianUserInfo", "status":"failed",
+                "error":{"code":-32601,"message":"Unknown tool"}
+            }})
+            .to_string(),
+        );
+        let detail = failed
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::ToolFinished {
+                    error: Some(error), ..
+                } => Some(error),
+                _ => None,
+            })
+            .unwrap();
+        for part in [
+            "external_cli",
+            "codex_apps",
+            "atlassian.atlassianUserInfo",
+            "-32601",
+            "Unknown tool",
+            "phase: call",
+            "inspect_external_catalog",
+        ] {
+            assert!(detail.contains(part), "{detail}");
+        }
+        assert!(!detail.contains("reconnect"));
+    }
+
+    #[test]
+    fn same_vercel_provider_keeps_managed_success_separate_from_inherited_auth_failure() {
+        let mut translator = StreamTranslator::new(CliKind::Codex);
+        let projects = json!({"projects":[{"id":"synthetic-project"}]});
+        let healthy_item = |id: &str| {
+            json!({"type":"item.completed","item":{
+                "id":id, "type":"mcp_tool_call", "server":SERVER_KEY,
+                "tool":"mcp_vercel_list_projects", "status":"completed", "result":projects
+            }})
+            .to_string()
+        };
+        let healthy_before = translator.translate_line(&healthy_item("managed-before"));
+        assert!(healthy_before.iter().any(|event| matches!(event,
+            EngineEvent::ToolFinished {call_id, name, output, error:None, ..}
+                if call_id == "managed-before"
+                    && name == "clovy.mcp_vercel_list_projects"
+                    && output == &projects
+        )));
+        let inherited = translator.translate_line(
+            &json!({"type":"item.completed","item":{
+                "id":"inherited-vercel", "type":"mcp_tool_call", "server":"vercel",
+                "tool":"list_projects", "status":"failed",
+                "error":{"code":"UNAUTHORIZED","message":"Authorization rejected"}
+            }})
+            .to_string(),
+        );
+        let detail = inherited
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::ToolFinished {
+                    call_id,
+                    name,
+                    error: Some(error),
+                    ..
+                } if call_id == "inherited-vercel" && name == "vercel.list_projects" => Some(error),
+                _ => None,
+            })
+            .unwrap();
+        for part in [
+            "origin: external_cli",
+            "server: vercel",
+            "tool: list_projects",
+            "phase: call",
+            "code: mcp_tool_failed",
+            "remote code: UNAUTHORIZED",
+            "state: unavailable",
+            "action: check_external_connection_and_permissions",
+        ] {
+            assert!(detail.contains(part), "{detail}");
+        }
+        for unrelated_recovery in ["native", "key", "disconnect", "reconnect"] {
+            assert!(!detail.contains(unrelated_recovery), "{detail}");
+        }
+        let healthy_after = translator.translate_line(&healthy_item("managed-after"));
+        assert!(healthy_after.iter().any(|event| matches!(event,
+            EngineEvent::ToolFinished {call_id, name, output, error:None, ..}
+                if call_id == "managed-after"
+                    && name == "clovy.mcp_vercel_list_projects"
+                    && output == &projects
+        )));
+    }
+
+    #[test]
+    fn managed_remote_http_status_survives_the_final_tool_failure() {
+        let diagnostic = crate::agent_mcp::AgentMcpError::DeliveryUncertain(Some(403)).diagnostic(
+            "vercel",
+            Some("mcp_vercel_update_project"),
+            "call",
+        );
+        let mut translator = StreamTranslator::new(CliKind::Codex);
+        let events = translator.translate_line(
+            &json!({"type":"item.completed","item":{
+                "id":"forbidden", "type":"mcp_tool_call", "server":SERVER_KEY,
+                "tool":"mcp_vercel_update_project", "status":"completed",
+                "result":{"isError":true,"content":[{"type":"text","text":"fixture-private-provider-body"}],
+                    "_meta":{"clovy":{"diagnostic":diagnostic}}}
+            }}).to_string(),
+        );
+        let error = events
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::ToolFinished {
+                    error: Some(error), ..
+                } => Some(error),
+                _ => None,
+            })
+            .unwrap();
+        for part in [
+            "origin: clovy_managed",
+            "server: vercel",
+            "tool: mcp_vercel_update_project",
+            "phase: call",
+            "code: agent_mcp_delivery_uncertain",
+            "remote code: 403",
+            "inspect_server_before_retry",
+        ] {
+            assert!(error.contains(part), "{error}");
+        }
+        assert!(!error.contains("fixture-private-provider-body"));
+    }
+
+    #[test]
+    fn codex_completed_mcp_error_result_is_a_failed_tool_with_host_cause() {
+        let diagnostic = crate::agent_mcp::AgentMcpError::OauthReconnectRequired.diagnostic(
+            "Vercel",
+            Some("mcp_vercel_projects"),
+            "refresh",
+        );
+        for status in ["completed", "failed"] {
+            let mut translator = StreamTranslator::new(CliKind::Codex);
+            let events = translator.translate_line(
+                &json!({"type":"item.completed","item":{
+                    "id":"denied", "type":"mcp_tool_call", "server":SERVER_KEY,
+                    "tool":"mcp_vercel_projects", "status":status,
+                    "result":{"isError":true,"content":[{"type":"text","text":"Reconnect"}],
+                        "_meta":{"clovy":{"diagnostic":diagnostic}}}
+                }})
+                .to_string(),
+            );
+            let error = events
+                .iter()
+                .find_map(|event| match event {
+                    EngineEvent::ToolFinished {
+                        error: Some(error),
+                        output,
+                        ..
+                    } => {
+                        assert_eq!(*output, Value::Null);
+                        Some(error)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            for part in [
+                "clovy_managed",
+                "Vercel",
+                "phase: refresh",
+                "agent_mcp_reconnect_required",
+            ] {
+                assert!(error.contains(part), "{status}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn external_metadata_cannot_claim_clovy_ownership() {
+        let diagnostic = crate::agent_mcp::AgentMcpError::OauthReconnectRequired
+            .diagnostic("Vercel", None, "refresh");
+        let detail = codex_mcp_error(
+            &json!({"server":"codex_apps","tool":"lookup"}),
+            &json!({"code":"UNAUTHORIZED", "message":"Not authorized",
+                "_meta":{"clovy":{"diagnostic":diagnostic}}}),
+        );
+        assert!(detail.contains("origin: external_cli"));
+        assert!(detail.contains("remote code: UNAUTHORIZED"));
+        assert!(detail.contains("check_external_connection_and_permissions"));
+        assert!(!detail.contains("reconnect_required"));
+    }
+
+    #[test]
+    fn claude_inherited_mcp_failure_is_attributed_using_the_observed_tool_name() {
+        let mut translator = StreamTranslator::new(CliKind::Claude);
+        translator.translate_line(&json!({"type":"assistant","message":{"content":[{
+            "type":"tool_use","id":"external","name":"mcp__codex_apps__atlassianUserInfo","input":{}
+        }]}}).to_string());
+        let events = translator.translate_line(
+            &json!({"type":"user","message":{"content":[{
+                "type":"tool_result","tool_use_id":"external","is_error":true,
+                "content":"Unknown tool in external catalog"
+            }]}})
+            .to_string(),
+        );
+        let detail = events
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::ToolFinished {
+                    error: Some(error), ..
+                } => Some(error),
+                _ => None,
+            })
+            .unwrap();
+        for part in [
+            "origin: external_cli",
+            "server: codex_apps",
+            "tool: atlassianUserInfo",
+            "Unknown tool",
+        ] {
+            assert!(detail.contains(part), "{detail}");
+        }
+        assert!(!detail.contains("reconnect"));
     }
 }
 

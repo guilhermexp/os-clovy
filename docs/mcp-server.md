@@ -441,6 +441,141 @@ stay in the Keychain and the app's memory, never in the CLI's argv,
 environment, or files. A server that cannot be discovered drops its tools
 from the list without failing `tools/list`.
 
+Vercel's official Streamable HTTP endpoint is `https://mcp.vercel.com`.
+Its protected-resource metadata identifies `https://vercel.com` as the
+authorization server and advertises `openid`; the authorization server also
+advertises `offline_access`, but a refresh grant depends on the actual consent
+and provider response. Vercel requires clients to be reviewed and approved:
+support for the protocol and approval of a different client do not establish
+approval of Clovy. A live connection therefore requires Vercel's acceptance
+of Clovy's own client and the user's consent. See the [Vercel MCP client
+review requirements](https://vercel.com/docs/agent-resources/vercel-mcp#connecting-to-vercel-mcp).
+The Vercel preset starts disabled and requires approval for its tools. The
+host reports credential cleanup separately from remote revocation; if local
+cleanup fails, the disabled server retains a pending cleanup state for retry.
+Tool calls are not automatically repeated after a 401 or transport failure,
+because delivery of a mutation can be uncertain. A connection configured by a
+CLI is a separate origin with its own credentials and permissions.
+
+For the exact official Vercel resource, Clovy reads authorization metadata
+from `https://mcp.vercel.com/.well-known/oauth-authorization-server` and
+requires issuer `https://vercel.com`, HTTPS and the official authorization,
+token, registration and revocation endpoints. This is a host-owned resource
+profile, not a configurable discovery override. The issuer's own metadata at
+`https://vercel.com/.well-known/oauth-authorization-server` describes a
+different login contract: it advertises only `web_message.opener` and uses
+`api.vercel.com` token endpoints. Clovy does not fall back to that document.
+The MCP document omits response modes; the OAuth metadata default includes
+query, which Clovy explicitly requests. An explicit response-mode list must
+include query. These metadata checks establish protocol compatibility, not
+provider acceptance or proof of a live loopback authorization. See
+[RFC 8414 section 2](https://www.rfc-editor.org/rfc/rfc8414.html#section-2).
+
+Connect owns an operation id so cancellation can be latched before repository
+startup and a late cancellation cannot cancel a later connection. A whole-flow
+deadline covers metadata, registration, callback, code exchange and bounded,
+validated paged tool discovery. Reconnect advances the stored policy revision
+before opening the browser; existing approval receipts do not authorize the new
+connection. Before writing a new credential, SQLite records its pending
+reference. A crash before or after the secure-store write is recovered from
+that journal on list, reconnect or disconnect. Failed deletion keeps the
+reference and prevents reuse. Remote revocation failure survives restart and
+remains distinct from local cleanup. Settings never accept pasted OAuth
+identity/tokens, and changes to HTTP headers preserve the host-owned grant;
+changing its URL or transport requires disconnect first.
+
+If a refresh returns rotated credentials after cancellation/disconnect, or the
+new credentials cannot be saved, the host tries to revoke that actual rotated
+grant before discarding it. An unconfirmed result is journaled and survives
+restart; a provider's idempotent acceptance of an older token's revocation does
+not clear that warning. A successful revocation response means the provider
+accepted the request, not independent proof about an entire token family.
+Disabling or deleting a locally cleared server reports remote revocation
+separately. Delete returns `{localDeleted, remoteRevoked}` and the UI keeps a
+provider-action warning when local removal succeeds but revocation remains
+unconfirmed. Failed local secure-store cleanup retains the disabled row for
+retry, rather than dropping its credential reference.
+
+Settings Test uses the same compensated refresh path as dispatch. Disconnect
+records the remote outcome in SQLite before deleting the local grant, so a
+failed cleanup commit or restart cannot erase an observed revocation failure.
+Before a refresh request can consume a token, SQLite records conservative
+rotation uncertainty. Saving the received grant or confirming its compensation
+restores only the previous warning state; an interrupted request keeps the
+warning across restart.
+A custom HTTP server may explicitly switch back to manual headers after a
+complete OAuth teardown. Live grants, pending cleanup and unresolved remote
+warnings block that switch; the official Vercel preset keeps OAuth. Saving a
+name or configuration edit retains the backend's effective diagnostic.
+
+The managed registry retains each discovery or refresh failure without removing
+healthy servers. Settings and relay errors carry origin, server, optional tool,
+actual phase, typed code, optional numeric remote code, state and recovery
+action. The relay serializes only this safe diagnostic shape. CLI-owned MCP
+errors identify their observed server/tool and separate custody; this is not a
+complete inventory of inherited CLI connections. Tool-call errors with uncertain
+delivery preserve that uncertainty and never cause automatic redispatch.
+
+An unresolved revocation belongs to its affected credential reference and
+revision. Successful reconnect preserves that warning in host-owned history
+while activating a separately authorized grant. Settings shows the historical
+warning independently of the current connection's health, so successful Test,
+discovery, save or restart cannot erase it. A warning about an earlier grant
+does not make a valid new primary credential unusable. Revoking the new token
+does not discharge the earlier obligation.
+Grant generation stays stable when reconnect changes the policy revision.
+The previous primary's credentials remain in historical custody after a valid
+replacement. Clovy does not automatically revoke that token during reconnect,
+because it cannot assume independent token families; revocation can invalidate
+related tokens under [RFC 7009](https://www.rfc-editor.org/rfc/rfc7009#section-2.1).
+Explicit Disconnect or Delete reconciles those saved grants. Confirmation for
+one saved superseded token clears only its matching obligation, never an older
+unknown rotation or exchange associated with the same reference.
+
+Connect reserves an operation-owned credential reference before authorization.
+Admission is serialized before publishing the new operation identity or
+invalidating previous authority. A rejected overlapping Connect leaves the
+running operation's epoch, identity and useful diagnostic intact. Explicit
+Cancel, Disconnect and Delete retain their cancellation boundaries.
+Before the actual code-exchange request, its journal records that a grant may
+be issued. The returned bundle enters the reserved secure-store reference
+before catalog discovery awaits; this temporary custody does not enable the
+connection. Only valid catalog, epoch and configuration checks can activate
+that reference. Cancellation, timeout and rejected activation compensate the
+actual received bundle, or retain its recoverable reference and an honest
+warning. An exchange with an unknown outcome cannot be reported as remotely
+revoked merely because the previous primary token's revocation returned 200.
+Recovery distinguishes live operations, possible issuance and stored candidate
+credentials; it never blindly deletes a received grant. Delete retains the
+definition while live issuance or recoverable candidate custody still needs
+cleanup. Failed attempts preserve the previous primary configuration.
+
+A persisted attempt phase alone does not prove that its process owner is still
+alive. After restart, a temporary credential-store failure can leave an
+authorizing, exchange-pending or received attempt awaiting recovery. Settings
+keeps the storage diagnostic and offers Disconnect to retry cleanup without
+new authorization or deleting the configuration. It does not report an unknown
+exchange as remotely revoked. During an active Connect, the current local
+operation continues to expose correlated Cancel and the existing busy controls;
+rendering this metadata adds no cleanup or authorization request. Existing host
+recovery remains responsible for reconciling the interrupted attempt.
+
+Custom dispatch also checks the host configuration fingerprint and the epoch
+captured during discovery, so an earlier approval cannot adopt a replacement
+endpoint, credential or local safety policy between gateway check and I/O.
+The host-owned revocation warnings, historical records and temporary Connect
+bookkeeping are excluded from that authority fingerprint. The credential loader
+checks uncertainty affecting the current primary under the lifecycle gate before
+permitting use; auth mode, cleanup state, revision and local policy still bind
+the authority snapshot.
+The custom authority follows initialization, session waits and elicitation to
+the transport write boundary. Invalidation before dispatch sends no tool call;
+an already admitted call or lost elicitation session remains delivery-uncertain
+and is never replayed. The final chat error string retains the safe numeric
+remote code. OAuth callback errors retain only allowlisted provider codes:
+denied consent, client approval and provider failure remain distinct, while
+unknown codes and free-form descriptions are sanitized.
+
 ### Content blocks
 
 A tool result is one `text` block with the result as JSON, except

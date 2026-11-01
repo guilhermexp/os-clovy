@@ -10,6 +10,19 @@ export type AgentMcpSafetyPolicy = {
   approvalTools: string[];
 };
 
+/** Last observed server result, never a claim based only on a stored grant. */
+export type AgentMcpDiagnostic = {
+  origin: "clovy_managed";
+  server: string;
+  tool?: string | null;
+  phase: string;
+  code: string;
+  remoteCode?: number | null;
+  state: string;
+  action: string;
+  message: string;
+};
+
 export type AgentMcpServerDto = {
   id: string;
   name: string;
@@ -25,9 +38,10 @@ export type AgentMcpServerDto = {
     exclude: string[];
   };
   safety: AgentMcpSafetyPolicy;
+  diagnostic?: AgentMcpDiagnostic | null;
 };
 
-export type AgentMcpServerInput = Omit<AgentMcpServerDto, "id" | "secretRef"> & {
+export type AgentMcpServerInput = Omit<AgentMcpServerDto, "id" | "secretRef" | "diagnostic"> & {
   id?: string;
   secrets?: {
     env: Record<string, string>;
@@ -54,15 +68,32 @@ export function updateAgentMcpServer(input: AgentMcpServerInput & { id: string }
 }
 
 export function deleteAgentMcpServer(serverId: string) {
-  return invoke<void>("delete_agent_mcp_server", { serverId });
+  return invoke<{ localDeleted: boolean; remoteRevoked: boolean | null }>(
+    "delete_agent_mcp_server",
+    {
+      serverId,
+    },
+  );
 }
 
 export function testAgentMcpServer(serverId: string) {
   return invoke<AgentMcpToolDto[]>("test_agent_mcp_server", { serverId });
 }
 
-export function connectAgentMcpOauth(serverId: string) {
-  return invoke<AgentMcpServerDto>("connect_agent_mcp_oauth", { serverId });
+export function connectAgentMcpOauth(serverId: string, operationId?: string) {
+  return invoke<AgentMcpServerDto>("connect_agent_mcp_oauth", { serverId, operationId });
+}
+
+export function cancelAgentMcpOauth(serverId: string, operationId?: string) {
+  return invoke<void>("cancel_agent_mcp_oauth", { serverId, operationId });
+}
+
+export function disconnectAgentMcpOauth(serverId: string) {
+  return invoke<{
+    server: AgentMcpServerDto;
+    remoteRevoked: boolean | null;
+    localCleared: boolean;
+  }>("disconnect_agent_mcp_oauth", { serverId });
 }
 
 export const DEFAULT_AGENT_MCP_SAFETY: AgentMcpSafetyPolicy = {

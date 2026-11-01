@@ -505,12 +505,23 @@ pub(crate) async fn await_callback(
                 write_http(&mut stream, "400 Bad Request", "Invalid connect callback").await;
                 continue;
             }
-            CallbackOutcome::Denied => {
+            CallbackOutcome::Rejected(error_code) => {
                 write_http(&mut stream, "200 OK", "You can close this tab.").await;
-                return Err(AppError::new(
-                    "connector_connect_denied",
-                    format!("{provider_label} access was declined."),
-                ));
+                let mut error = if error_code == "access_denied" {
+                    AppError::new(
+                        "connector_connect_denied",
+                        format!("{provider_label} access was declined."),
+                    )
+                } else {
+                    AppError::new(
+                        "connector_authorization_rejected",
+                        format!(
+                            "{provider_label} could not complete authorization ({error_code})."
+                        ),
+                    )
+                };
+                error.details = Some(serde_json::json!({"oauthError":error_code}));
+                return Err(error);
             }
             CallbackOutcome::MissingCode => {
                 write_http(&mut stream, "400 Bad Request", "Missing authorization code").await;
@@ -543,8 +554,8 @@ async fn write_http(stream: &mut tokio::net::TcpStream, status: &str, body: &str
 enum CallbackOutcome {
     /// Wrong or missing state: not our callback, keep waiting.
     Ignore,
-    /// The user declined the consent screen (`error=access_denied`).
-    Denied,
+    /// A provider error with valid state; only a known error word survives.
+    Rejected(&'static str),
     MissingCode,
     Code(String),
 }
@@ -576,10 +587,41 @@ fn validate_callback(path: &str, expected_state: &str) -> CallbackOutcome {
     if state.as_deref() != Some(expected_state) {
         return CallbackOutcome::Ignore;
     }
-    if error.is_some() {
-        return CallbackOutcome::Denied;
+    if let Some(error) = error {
+        return CallbackOutcome::Rejected(classify_callback_error(&error));
     }
     code.map_or(CallbackOutcome::MissingCode, CallbackOutcome::Code)
+}
+
+fn classify_callback_error(error: &str) -> &'static str {
+    match error {
+        "access_denied" => "access_denied",
+        "unauthorized_client" => "unauthorized_client",
+        "invalid_client" => "invalid_client",
+        "invalid_request" => "invalid_request",
+        "unsupported_response_type" => "unsupported_response_type",
+        "invalid_scope" => "invalid_scope",
+        "server_error" => "server_error",
+        "temporarily_unavailable" => "temporarily_unavailable",
+        _ => "unknown_oauth_error",
+    }
+}
+
+/// The shared loopback primitive's safe provider-code contract. Callers keep
+/// AppError as their return type; free-form query values never cross it.
+pub(crate) fn oauth_callback_error_code(error: &AppError) -> Option<&'static str> {
+    match error.code.as_str() {
+        "connector_connect_denied" => Some("access_denied"),
+        "connector_authorization_rejected" => Some(classify_callback_error(
+            error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("oauthError"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+        )),
+        _ => None,
+    }
 }
 
 /// Exchange the authorization code for tokens. Google requires the Desktop
@@ -796,6 +838,102 @@ pub(crate) fn random_b64url(bytes: usize) -> String {
 mod tests {
     use super::*;
 
+    async fn callback_request(port: u16, path: &str) -> String {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        String::from_utf8(response).unwrap()
+    }
+
+    #[tokio::test]
+    async fn loopback_ignores_wrong_state_and_accepts_only_matching_callback() {
+        let listener = bind_loopback(&LoopbackPort::Ephemeral).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = async move {
+            let rejected = callback_request(port, "/callback?code=wrong&state=other").await;
+            assert!(rejected.starts_with("HTTP/1.1 400"));
+            let accepted = callback_request(port, "/callback?code=fixture&state=expected").await;
+            assert!(accepted.starts_with("HTTP/1.1 200"));
+        };
+        let (code, ()) = tokio::join!(await_callback(&listener, "expected", "Vercel"), client);
+        assert_eq!(code.unwrap(), "fixture");
+    }
+
+    #[tokio::test]
+    async fn loopback_reports_denial_only_for_matching_state() {
+        let listener = bind_loopback(&LoopbackPort::Ephemeral).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = async move {
+            let rejected =
+                callback_request(port, "/callback?error=access_denied&state=other").await;
+            assert!(rejected.starts_with("HTTP/1.1 400"));
+            let denied =
+                callback_request(port, "/callback?error=access_denied&state=expected").await;
+            assert!(denied.starts_with("HTTP/1.1 200"));
+        };
+        let (result, ()) = tokio::join!(await_callback(&listener, "expected", "Vercel"), client);
+        assert_eq!(result.unwrap_err().code, "connector_connect_denied");
+    }
+
+    #[tokio::test]
+    async fn loopback_preserves_safe_provider_error_codes_after_state_and_path_checks() {
+        for (provider_error, expected) in [
+            ("access_denied", "access_denied"),
+            ("unauthorized_client", "unauthorized_client"),
+            ("server_error", "server_error"),
+            ("temporarily_unavailable", "temporarily_unavailable"),
+            ("fixture-private-error-word", "unknown_oauth_error"),
+        ] {
+            let listener = bind_loopback(&LoopbackPort::Ephemeral).await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let client = async move {
+                let wrong_path = callback_request(
+                    port,
+                    "/callback-extra?error=unauthorized_client&state=expected",
+                )
+                .await;
+                assert!(wrong_path.starts_with("HTTP/1.1 404"));
+                let wrong_state =
+                    callback_request(port, "/callback?error=unauthorized_client&state=other").await;
+                assert!(wrong_state.starts_with("HTTP/1.1 400"));
+                let response = callback_request(port, &format!(
+                    "/callback?error={provider_error}&state=expected&error_description=fixture-private-description&code=fixture-private-code",
+                )).await;
+                assert!(response.starts_with("HTTP/1.1 200"));
+            };
+            let (result, ()) =
+                tokio::join!(await_callback(&listener, "expected", "Vercel"), client);
+            let error = result.unwrap_err();
+            assert_eq!(oauth_callback_error_code(&error), Some(expected));
+            assert_eq!(error.details.as_ref().unwrap()["oauthError"], expected);
+            assert_eq!(
+                error.code,
+                if expected == "access_denied" {
+                    "connector_connect_denied"
+                } else {
+                    "connector_authorization_rejected"
+                }
+            );
+            let encoded = serde_json::to_string(&error).unwrap();
+            for private in [
+                "fixture-private-error-word",
+                "fixture-private-description",
+                "fixture-private-code",
+            ] {
+                assert!(!encoded.contains(private), "{encoded}");
+            }
+            if expected != "access_denied" {
+                assert!(!error.message.contains("declined"));
+            }
+        }
+    }
+
     #[test]
     fn success_page_carries_the_clovy_app_tile() {
         let page = success_page("Signed in", "Signed in to Clovy", "Return to the app.");
@@ -913,7 +1051,7 @@ mod tests {
     fn callback_validation_surfaces_consent_denial() {
         assert!(matches!(
             validate_callback("/callback?error=access_denied&state=expected", "expected"),
-            CallbackOutcome::Denied
+            CallbackOutcome::Rejected("access_denied")
         ));
     }
 

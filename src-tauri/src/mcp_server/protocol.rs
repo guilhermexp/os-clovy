@@ -210,6 +210,54 @@ pub(crate) fn tool_error_for(error: &crate::domain::types::AppError) -> Value {
     result
 }
 
+/// MCP error context is host-owned. Do not forward arbitrary provider error
+/// bodies or other AppError details through the relay.
+fn app_tool_error(error: &crate::domain::types::AppError) -> Value {
+    let mut result = tool_error(&format!("{} ({})", error.message, error.code));
+    if let Some(diagnostic) = error
+        .details
+        .as_ref()
+        .and_then(|details| {
+            serde_json::from_value::<crate::agent_mcp::AgentMcpDiagnostic>(details.clone()).ok()
+        })
+        .filter(|diagnostic| {
+            diagnostic.origin == "clovy_managed"
+                && diagnostic.code == error.code
+                && matches!(
+                    diagnostic.phase.as_str(),
+                    "connect" | "discover" | "refresh" | "call" | "disconnect"
+                )
+        })
+    {
+        result["_meta"] = json!({"clovy": {"diagnostic": diagnostic}});
+    }
+    result
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use crate::{agent_mcp::AgentMcpError, domain::types::AppError};
+
+    #[test]
+    fn relay_retains_host_diagnostic_but_discards_arbitrary_details() {
+        let error = AgentMcpError::Remote(-32601)
+            .diagnostic("private", Some("lookup"), "call")
+            .into_app_error();
+        let result = app_tool_error(&error);
+        assert_eq!(result["isError"], true);
+        let diagnostic = &result["_meta"]["clovy"]["diagnostic"];
+        assert_eq!(diagnostic["server"], "private");
+        assert_eq!(diagnostic["remoteCode"], -32601);
+        assert_eq!(diagnostic["phase"], "call");
+        let mut unrelated = AppError::new("provider_failure", "Provider unavailable");
+        unrelated.details = Some(json!({"authorization": "fixture-private-payload"}));
+        let result = app_tool_error(&unrelated);
+        assert!(result.get("_meta").is_none());
+        assert!(!result.to_string().contains("fixture-private-payload"));
+    }
+}
+
 /// Answers one JSON-RPC message for a client with neither app nor turn;
 /// `None` for notifications and responses.
 pub async fn handle(data: &McpData, message: &Value) -> Option<Value> {
@@ -265,7 +313,14 @@ async fn call_tool(ctx: &ToolCtx<'_>, params: &Value) -> Result<Value, (i64, Str
         .unwrap_or_else(|| json!({}));
     Ok(match tools::call(ctx, name, &arguments).await {
         Ok(value) => tool_result(&value),
-        Err(error) => tool_error_for(&error),
+        Err(error) => {
+            let mut result = tool_error_for(&error);
+            let diagnostic = app_tool_error(&error);
+            if let Some(meta) = diagnostic.get("_meta") {
+                result["_meta"] = meta.clone();
+            }
+            result
+        }
     })
 }
 
