@@ -88,6 +88,16 @@ try {
   $nativeBin = $helper.DirectoryName.Replace('\', '/').ToLowerInvariant()
   if (-not $nativeBin.EndsWith('/native/bin')) { throw "Native helpers are not under native/bin." }
 
+  $browserEngine = Require-One "clovy-agent-browser.exe"
+  $chrome = Require-One "chrome.exe"
+  $browserPlatformRoot = $browserEngine.DirectoryName.Replace('\', '/').ToLowerInvariant()
+  if (-not $browserPlatformRoot.EndsWith('/native/agent-browser/win64')) {
+    throw "Private browser engine is not under native/agent-browser/win64."
+  }
+  $browserResourceRoot = Split-Path -Parent $browserEngine.DirectoryName
+  & node (Join-Path $PSScriptRoot "prepare-agent-browser.mjs") --release --check --platform win64 --resource-root $browserResourceRoot
+  if ($LASTEXITCODE -ne 0) { throw "Final pinned browser payload verification failed." }
+
   foreach ($item in $items) {
     if ($item.Name -like 'clovy-agent-runtime*') {
       throw "Retired agent runtime payload found: $($item.FullName)"

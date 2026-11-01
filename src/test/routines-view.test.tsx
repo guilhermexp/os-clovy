@@ -64,7 +64,6 @@ const tauriMocks = vi.hoisted(() => ({
   connectorTriggersList: vi.fn(),
   connectorTriggerSet: vi.fn(),
   connectorTriggerDelete: vi.fn(),
-  browserTransportPolicy: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
@@ -197,10 +196,6 @@ beforeEach(() => {
     }),
   );
   tauriMocks.connectorTriggerDelete.mockResolvedValue(undefined);
-  tauriMocks.browserTransportPolicy.mockResolvedValue({
-    attendedEnabled: true,
-    managedEnabled: true,
-  });
   eventMocks.listen.mockResolvedValue(() => {});
 });
 
@@ -799,17 +794,6 @@ describe("RoutinesView detail", () => {
         enabledToolsets: expect.arrayContaining(["clovy_browser_routine_abc123"]),
       }),
     );
-  });
-
-  it("explains the bounded browser access available to routines", async () => {
-    mocks.listRoutines.mockResolvedValue([job()]);
-    renderView();
-    await openDetail("Morning summary");
-
-    expect(await screen.findByText(/browse public pages anonymously/i)).toBeInTheDocument();
-    expect(
-      screen.getByRole("switch", { name: "Allow browser use for this routine" }),
-    ).toBeEnabled();
   });
 
   it("opens a routine with its full instructions", async () => {

@@ -39,7 +39,7 @@ if(process.argv.includes('--wait')){fs.writeFileSync(${JSON.stringify(ready)},'r
       `
 const fs=require('node:fs');
 if(process.env.FAIL_COMPILE)process.exit(31);
-${["clovy", "clovy-mcp", "clovy-nm-shim"]
+${["clovy", "clovy-mcp"]
   .map((name) => {
     const file = path.join(out, `${name}.cjs`);
     return `fs.writeFileSync(${JSON.stringify(file)},${JSON.stringify(executable(generation, name === "clovy"))});console.log(JSON.stringify({reason:'compiler-artifact',target:{name:${JSON.stringify(name)},kind:['bin']},executable:${JSON.stringify(file)}}));`;

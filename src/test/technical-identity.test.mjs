@@ -12,27 +12,18 @@ async function read(relativePath) {
 
 describe("Clovy technical identity", () => {
   it("uses Clovy for canonical package and helper names", async () => {
-    const [
-      packageJson,
-      extensionPackage,
-      desktopCargo,
-      windowsHelperCargo,
-      legacyCryptoCargo,
-      legacyProtocolCargo,
-    ] = await Promise.all([
-      read("package.json").then(JSON.parse),
-      read("extension/package.json").then(JSON.parse),
-      read("src-tauri/Cargo.toml"),
-      read("src-tauri/native/windows-dictation-helper/Cargo.toml"),
-      read("crates/june-companion-crypto/Cargo.toml"),
-      read("crates/june-companion-protocol/Cargo.toml"),
-    ]);
+    const [packageJson, desktopCargo, windowsHelperCargo, legacyCryptoCargo, legacyProtocolCargo] =
+      await Promise.all([
+        read("package.json").then(JSON.parse),
+        read("src-tauri/Cargo.toml"),
+        read("src-tauri/native/windows-dictation-helper/Cargo.toml"),
+        read("crates/june-companion-crypto/Cargo.toml"),
+        read("crates/june-companion-protocol/Cargo.toml"),
+      ]);
 
     expect(packageJson.name).toBe("clovy");
-    expect(extensionPackage.name).toBe("clovy-extension");
     expect(desktopCargo).toMatch(/^name = "clovy"$/m);
     expect(desktopCargo).toMatch(/^name = "clovy_lib"$/m);
-    expect(desktopCargo).toMatch(/^name = "clovy-nm-shim"$/m);
     expect(windowsHelperCargo).toMatch(/^name = "clovy-windows-dictation-helper"$/m);
     expect(windowsHelperCargo).toMatch(/^name = "clovy-dictation-helper"$/m);
     expect(legacyCryptoCargo).toContain('name = "june-companion-crypto"');

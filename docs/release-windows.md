@@ -111,3 +111,18 @@ paste into a normal app. Record from the microphone and generate a note against
 the configured Groq key and selected Notes engine. `Get-AuthenticodeSignature` must report `Valid` for this candidate; the
 Computer use peer contract also requires the helper and engine to match the
 host signing publisher. Record the signed native acceptance matrix separately.
+
+## Private browser resources
+
+The build wrapper prepares the pinned Windows x64 agent-browser host and Chrome
+for Testing before the desktop build. Resources are installed beneath
+`native/agent-browser/win64/`, including the private `clovy-agent-browser.exe`,
+`chrome/chrome-win64/chrome.exe`, licenses, dependency SBOM and provenance.
+The source commit, patches and immutable Chrome archive digest are recorded in
+`scripts/agent-browser/manifest.json`; no runtime installer or global browser
+lookup is used. The private host receives Authenticode signing through
+`scripts/windows-sign.ps1` when the Windows signing certificate is configured;
+Chrome keeps its vendor signatures. Unsigned local packaging follows the
+existing Windows release policy. `pnpm browser:prepare -- --release --check`
+verifies the exact staged files before bundling. Native installation, signature,
+process-job teardown and persistent-login acceptance remain Windows checks.

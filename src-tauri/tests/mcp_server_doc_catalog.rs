@@ -175,6 +175,7 @@ fn listed_to(audience: &str, binding: &TurnBinding) -> bool {
     match audience {
         "every turn" => true,
         "attended turns" => binding.attended,
+        "attended or routine turns" => binding.attended || binding.surface == "routine",
         "Claude turns" => binding.cli == CliKind::Claude,
         other => panic!("unknown `Listed to` value `{other}`"),
     }

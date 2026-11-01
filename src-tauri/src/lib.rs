@@ -37,7 +37,6 @@ pub mod db;
 pub mod dictation;
 pub mod domain;
 pub mod experimental_settings;
-pub mod extension_host;
 pub mod feature_flags;
 mod filesystem;
 pub(crate) mod hide_console;
@@ -230,8 +229,12 @@ pub fn run() {
             agent_recorder::resolve_agent_recorder_request,
             agent_recorder::validate_agent_recorder_request,
             dictation::claim_agent_dictation_delivery,
-            browser_broker::browser_approvals_pending,
-            browser_broker::browser_approval_respond,
+            browser_broker::browser_access_get,
+            browser_broker::browser_access_set,
+            browser_broker::browser_sessions,
+            browser_broker::browser_human_takeover,
+            browser_broker::browser_resume_control,
+            browser_broker::browser_stop_session,
             agent_mcp::list_agent_mcp_servers,
             agent_mcp::create_agent_mcp_server,
             agent_mcp::update_agent_mcp_server,
@@ -297,7 +300,6 @@ pub fn run() {
             commands::check_recording_source_readiness,
             commands::open_privacy_settings,
             commands::reveal_path,
-            commands::unpack_bundled_extension,
             commands::clovy_open_external_url,
             commands::june_open_external_url,
             commands::start_meeting_recording,
@@ -383,8 +385,6 @@ pub fn run() {
             llm::commands::llm_delete_endpoint,
             llm::commands::llm_set_usage,
             llm::commands::llm_test_provider,
-            extension_host::extension_pairing_status,
-            extension_host::register_browser_extension_host,
             connectors::commands::connectors_policy,
             connectors::commands::connectors_list,
             connectors::commands::connectors_connect,
@@ -451,11 +451,9 @@ pub fn run() {
         .manage(Arc::new(browser_broker::BrowserBroker::default()))
         .manage(computer_use::ComputerUseState::default())
         .manage(shutdown::ShutdownCoordinator::default())
-        .manage(extension_host::ExtensionHost::default())
         .manage(connectors::ConnectFlow::default())
         .manage(connectors::NotionConnectFlow::default())
         .setup(|app| {
-            browser::setup_on_app_start();
             agent_sessions::skills::seed_bundled_skills(app.handle());
             // Before any CLI turn can ask: cancels requests a previous
             // process left pending.
@@ -486,7 +484,7 @@ pub fn run() {
             agent_hud::setup(app);
             notifications::setup(app);
             meeting_detection::setup(app);
-            extension_host::setup(app);
+            browser::setup(app.handle()).map_err(|error| std::io::Error::other(error.message))?;
             routines::start_scheduler(app.handle());
             // Poll Google for the events routines subscribe to (email arrivals
             // and upcoming meetings) and wake the matching durable routine.

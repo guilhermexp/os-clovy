@@ -39,7 +39,6 @@ import {
   setLiveTranscription,
   setProviderApiKey,
   setProviderModel,
-  unpackBundledExtension,
 } from "../../lib/tauri";
 import { LANGUAGE_OPTIONS, languageLabel } from "../../lib/dictation-languages";
 import { autostartEnabled, autostartSupported, setAutostartEnabled } from "../../lib/autostart";
@@ -431,7 +430,7 @@ export function AppSettings({
     ...INITIAL_EXPERIMENTAL_UNLOCK_CLICK_STATE,
   });
   const experimentalUnlockingRef = useRef(false);
-  const [experimentalOperation, setExperimentalOperation] = useState<"flags" | "unpack">();
+  const [experimentalOperation, setExperimentalOperation] = useState<"flags">();
   const [experimentalError, setExperimentalError] = useState<string>();
   const [pickerMode, setPickerMode] = useState<ProviderModelMode>();
   const [modelPickerFlyout, setModelPickerFlyout] = useState<ModelPickerFlyout>(null);
@@ -1319,18 +1318,6 @@ export function AppSettings({
         unlocked: update.unlocked ?? experimentalFlags.unlocked,
         browser_use: update.browser_use ?? experimentalFlags.browser_use,
       });
-    } catch (error) {
-      setExperimentalError(messageFromError(error));
-    } finally {
-      setExperimentalOperation(undefined);
-    }
-  }
-
-  async function unpackExperimentalExtension() {
-    setExperimentalOperation("unpack");
-    setExperimentalError(undefined);
-    try {
-      await unpackBundledExtension();
     } catch (error) {
       setExperimentalError(messageFromError(error));
     } finally {
@@ -2284,27 +2271,6 @@ export function AppSettings({
                           void updateExperimentalFlags({ browser_use })
                         }
                       />
-                    </div>
-                  </div>
-
-                  <div className="settings-row">
-                    <div className="settings-row-info">
-                      <h3 className="settings-row-title">{t("settings.experiments.extension")}</h3>
-                      <p className="settings-row-description">
-                        {t("settings.experiments.extensionDescription")}
-                      </p>
-                    </div>
-                    <div className="settings-row-control">
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        disabled={experimentalOperation === "unpack"}
-                        onClick={() => void unpackExperimentalExtension()}
-                      >
-                        {experimentalOperation === "unpack"
-                          ? t("settings.experiments.unpacking")
-                          : t("settings.experiments.unpack")}
-                      </button>
                     </div>
                   </div>
                 </div>

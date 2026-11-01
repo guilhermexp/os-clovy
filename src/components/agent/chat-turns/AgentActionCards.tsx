@@ -3,7 +3,7 @@ import { IconCrossMedium } from "central-icons/IconCrossMedium";
 import { useState } from "react";
 import { type TFunction, useT } from "../../../i18n";
 import type { AgentApprovalChoice, AgentChatPart } from "../../../lib/agent-chat-runtime";
-import type { PendingBrowserApproval } from "../../../lib/tauri";
+import { useBrowserAccess } from "../../../lib/browser-access";
 import {
   ApproveSplitButton,
   CollapsibleActionCard,
@@ -229,64 +229,12 @@ export function AgentCliAccessCard({
 }
 
 export type AgentBrowserAccessCardProps = {
+  error?: string;
   /** undefined while the stored grant is still loading. */
   enabled?: boolean;
   submitting: boolean;
   onEnable: () => void;
 };
-
-export function BrowserApprovalCard({
-  approval,
-  submitting,
-  onRespond,
-}: {
-  approval: PendingBrowserApproval;
-  submitting: boolean;
-  onRespond: (approve: boolean, allowSite: boolean) => void;
-}) {
-  const t = useT();
-  const action = approval.action.charAt(0).toUpperCase() + approval.action.slice(1);
-  return (
-    <article className="agent-approval-card" data-status="pending">
-      <div className="agent-tool-title">
-        <span>{t("chat.browserApproval.title")}</span>
-      </div>
-      <p>
-        {t("chat.browserApproval.site", { site: approval.site })}
-        {"\n"}
-        {t("chat.browserApproval.action", { action })}
-        {"\n"}
-        {t("chat.browserApproval.element", { element: approval.elementLabel })}
-      </p>
-      <div className="agent-approval-actions">
-        <button
-          type="button"
-          className="btn btn-secondary"
-          disabled={submitting}
-          onClick={() => onRespond(true, false)}
-        >
-          {t("chat.approval.approve")}
-        </button>
-        <button
-          type="button"
-          className="btn btn-ghost"
-          disabled={submitting}
-          onClick={() => onRespond(true, true)}
-        >
-          {t("chat.browserApproval.approveSite")}
-        </button>
-        <button
-          type="button"
-          className="btn btn-ghost agent-approval-deny"
-          disabled={submitting}
-          onClick={() => onRespond(false, false)}
-        >
-          {t("chat.browserApproval.decline")}
-        </button>
-      </div>
-    </article>
-  );
-}
 
 /** Clovy asked to enable Browser use via the literal token its soul teaches
  * ([REQUEST:BROWSER_ACCESS]). The agent can never flip the setting itself —
@@ -301,13 +249,26 @@ export function AgentBrowserAccessCard({
   onDismiss,
 }: { browserAccess?: AgentBrowserAccessCardProps } & DismissibleAccessCardProps) {
   const t = useT();
+  const storedAccess = useBrowserAccess(browserAccess === undefined);
+  const access = browserAccess ?? {
+    enabled: storedAccess.enabled,
+    submitting: storedAccess.submitting,
+    onEnable: () => void storedAccess.setGrant(true),
+  };
   const [locallyDismissed, setLocallyDismissed] = useState(false);
   const dismissed = controlledDismissed ?? locallyDismissed;
-  const enabled = browserAccess?.enabled === true;
+  const enabled = access.enabled === true;
   const resolved = enabled || dismissed;
-  const busy = Boolean(browserAccess?.submitting);
+  const busy = Boolean(access.submitting);
 
-  const description = <p>{t("chat.browserAccess.description")}</p>;
+  const description = (
+    <>
+      <p>{t("chat.browserAccess.description")}</p>
+      {browserAccess?.error || storedAccess.error ? (
+        <p role="alert">{browserAccess?.error || storedAccess.error}</p>
+      ) : null}
+    </>
+  );
 
   // Resolved collapses to a quiet receipt row, expandable to the description.
   if (resolved) {
@@ -332,8 +293,8 @@ export function AgentBrowserAccessCard({
           <button
             type="button"
             className="btn btn-secondary"
-            disabled={busy || !browserAccess || browserAccess.enabled === undefined}
-            onClick={() => browserAccess?.onEnable()}
+            disabled={busy || access.enabled === undefined}
+            onClick={() => access.onEnable()}
           >
             {busy ? t("chat.access.enabling") : t("chat.browserAccess.enable")}
           </button>

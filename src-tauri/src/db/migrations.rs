@@ -2367,6 +2367,7 @@ mod tests {
                 (52, "retire_native_chat".to_string()),
                 (53, "retire_sharing_keys".to_string()),
                 (54, "dictation_app_bundle_id".to_string()),
+                (55, "agent_session_approval_mode".to_string()),
             ]
         );
         assert_latest_stamp(&pool).await;
@@ -2748,6 +2749,7 @@ mod tests {
                 (52, "retire_native_chat".to_string()),
                 (53, "retire_sharing_keys".to_string()),
                 (54, "dictation_app_bundle_id".to_string()),
+                (55, "agent_session_approval_mode".to_string()),
             ]
         );
 

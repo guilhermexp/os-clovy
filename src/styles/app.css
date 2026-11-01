@@ -27883,3 +27883,33 @@ button.connector-approvals-info {
 .background-file-name {
   overflow-wrap: anywhere;
 }
+
+/* Browser control uses the existing capability rows and approval tray. */
+.browser-use-details {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: var(--sp-3);
+}
+
+.browser-session-control {
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+}
+
+.browser-session-state {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+}
+
+.browser-session-control .agent-approval-actions {
+  flex-wrap: wrap;
+}
+
+.browser-use-control .connector-subtitle,
+.browser-session-control .connector-subtitle {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}

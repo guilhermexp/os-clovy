@@ -40,7 +40,6 @@ const _: () = assert!(
 /// an explicit leaf fallback instead of an untracked retry thread.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ShutdownDeadline {
-    #[allow(dead_code)] // Used by the managed browser transport, not wired yet.
     expires_at: Instant,
 }
 
@@ -51,12 +50,10 @@ impl ShutdownDeadline {
         }
     }
 
-    #[allow(dead_code)] // Used by the managed browser transport, not wired yet.
-    fn remaining(self) -> Duration {
+    pub(crate) fn remaining(self) -> Duration {
         self.expires_at.saturating_duration_since(Instant::now())
     }
 
-    #[allow(dead_code)] // Used by the managed browser transport, not wired yet.
     pub(crate) fn try_lock<'a, T>(self, mutex: &'a Mutex<T>) -> Option<MutexGuard<'a, T>> {
         try_lock_for(mutex, self.remaining())
     }
@@ -424,13 +421,16 @@ where
         .map(|_| ())
 }
 
-async fn run_cleanup(app: &tauri::AppHandle, _deadline: ShutdownDeadline) -> CleanupOutcome {
+async fn run_cleanup(app: &tauri::AppHandle, deadline: ShutdownDeadline) -> CleanupOutcome {
     // Renderer autosaves must drain while the webview and command runtime are
     // still alive. Keep this ordered before native child-process teardown.
     if !crate::note_save_flush::request(app).await {
         return CleanupOutcome::NoteSaveFlushFailed;
     }
 
+    if let Some(browser) = app.try_state::<std::sync::Arc<crate::browser_broker::BrowserBroker>>() {
+        browser.terminate_sessions(deadline);
+    }
     crate::providers::local_transcriber::shutdown().await;
     let dictation_app = app.clone();
     let dictation =

@@ -29,10 +29,10 @@ import {
 // can show, grant, and keep its privacy permissions across restarts and
 // rebuilds (docs/development.md). The bundle keeps the packaged layout:
 // Contents/MacOS/clovy is the main executable the Computer use helper
-// authenticates, with the MCP relay and native messaging shim beside it.
+// authenticates, with the MCP relay beside it.
 const BUNDLE_FORMAT = 1;
 const MAIN_EXECUTABLE = "clovy";
-const SIBLING_EXECUTABLES = ["clovy-mcp", "clovy-nm-shim"];
+const SIBLING_EXECUTABLES = ["clovy-mcp"];
 const BUNDLE_NAME_SUFFIX = " Dev";
 const BUNDLE_IDENTIFIER_SUFFIX = ".dev";
 const LAUNCHER = ".clovy-dev-launch";
@@ -94,7 +94,7 @@ export function prepareDevAppBundle({
   const icon = path.join(repoRoot, "src-tauri", "icons", "icon.icns");
   // Tauri resolves resources from Contents/Resources once the app runs from a
   // bundle, so the dev bundle carries the resources tauri.conf.json declares
-  // for every platform (browser extension, agent skills) at their bundle
+  // for every platform (private browser, agent skills) at their bundle
   // paths. Helpers stay out: debug builds resolve them from this checkout.
   const declaredResources = tauriConfig.bundle?.resources ?? {};
   if (Array.isArray(declaredResources)) {

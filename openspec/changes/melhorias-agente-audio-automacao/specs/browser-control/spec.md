@@ -22,6 +22,26 @@ Controle SHALL passar pelo broker Clovy com dono conversa/run, origem, aba/docum
 - **THEN** ação é recusada sem clicar/preencher o substituto
 - Test: browser real — fixture local, duas abas e troca de documento/nó
 
+#### Scenario: Página não autoriza seus próprios efeitos
+- **WHEN** um controle fora de formulário tem rótulo neutro ou localizado, mas pode executar efeito em click, input ou key handler
+- **THEN** click, fill e press exigem aprovação central vinculada ao elemento inspecionado; negar não despacha input e rotina sem pessoa não executa silenciosamente
+- Test: policy portável — rótulos e operações; native broker/MCP — aprovação negada e zero dispatch; browser real — handlers e nó exato
+
+#### Scenario: Alvo concreto na aprovação
+- **WHEN** dois elementos da mesma aba e origem têm rótulos Delete draft e Delete account
+- **THEN** a card central distingue os alvos por rótulo inspecionado sanitizado, capado e explicitamente não confiável, sem valor de campo, e preserva a revalidação exata após a decisão
+- Test: frontend — consumer AgentWorkspace real en/pt e decisão no id correto; native broker — preview e efeito recusado
+
+#### Scenario: Campo sensível mostrado como texto
+- **WHEN** campo text usa autocomplete current-password ou new-password, inclusive com outros tokens
+- **THEN** click, fill e press exigem takeover humano e não disparam handlers do campo
+- Test: browser real — contador de eventos zero; policy portável — tokens combinados; native broker — sem card ou input
+
+#### Scenario: Conteúdo editável não sai por captura ou metadados
+- **WHEN** texto editável transborda a caixa ancestral ou um campo muda entre inventário e captura AX
+- **THEN** imagem e snapshot não emitem conteúdo de campo nem nomes acessíveis que o reproduzem; se a fronteira consistente não pode ser estabelecida a operação falha fechada
+- Test: browser real — descendente editável distante, snapshot com mutação intercalada e input novo, controle de contexto público legível
+
 ### Requirement: Rede e encerramento supervisionados
 O app SHALL preservar políticas de rede e bloqueio privado/DNS pinning aplicáveis às rotinas e grants assistidos, sem substituir proteção por allowlist genérica. Stop/revogação/shutdown MUST encerrar daemon e descendentes desde startup; resultado perdido após mutação MUST permanecer incerto sem replay. Perfil ocupado por outra tarefa MUST ser recusado explicitamente.
 
@@ -29,6 +49,11 @@ O app SHALL preservar políticas de rede e bloqueio privado/DNS pinning aplicáv
 - **WHEN** startup é cancelado ou a resposta se perde depois do dispatch
 - **THEN** processos não sobrevivem autorizados e a mutação não é reenviada
 - Test: integration — supervisor real, processo filho e fixture de conexão interrompida
+
+#### Scenario: Rede muda após efeito entregue
+- **WHEN** o host entrega uma mutação e a validação posterior encontra destino privado ou erro DNS
+- **THEN** tarefa e handles são encerrados e o recibo durável permanece incerto com instrução de não repetir, em vez de recusa anterior ao efeito
+- Test: browser/adapter reais — resolver controlado e contador um; native broker — ledger unknown, handles inválidos e controle pré-efeito zero/refused
 
 ### Requirement: Integração completa e modo efetivo
 A capacidade autorizada SHALL executar transporte real em produção, com navegador/motor pinados e empacotados para macOS/Windows, erros acionáveis e fluxo nos dois CLIs. Segundo plano é padrão; modo visível é permitido quando background não suporta a ação e antes de despacho incerto. Dependência exclusiva de extensão/pareamento e backend antigo MUST ser retirados após cutover, preservando utilidades compartilhadas.

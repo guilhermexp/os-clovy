@@ -13,9 +13,6 @@ const mocks = vi.hoisted(() => ({
   connectorsDisconnect: vi.fn(),
   connectorsGithubCliDetect: vi.fn(),
   connectorsGithubCliConnect: vi.fn(),
-  extensionPairingStatus: vi.fn(),
-  registerBrowserExtensionHost: vi.fn(),
-  browserTransportPolicy: vi.fn(),
   connectorsLinearTeams: vi.fn(),
   connectorsSetSelectedTeams: vi.fn(),
   obsidianStatus: vi.fn(),
@@ -50,10 +47,6 @@ vi.mock("../lib/tauri", async (importOriginal) => ({
   connectorsDisconnect: mocks.connectorsDisconnect,
   connectorsGithubCliDetect: mocks.connectorsGithubCliDetect,
   connectorsGithubCliConnect: mocks.connectorsGithubCliConnect,
-  extensionPairingStatus: mocks.extensionPairingStatus,
-  registerBrowserExtensionHost: mocks.registerBrowserExtensionHost,
-  browserTransportPolicy: mocks.browserTransportPolicy,
-  EXTENSION_PAIRING_CHANGED_EVENT: "clovy://extension-pairing-changed",
   connectorsLinearTeams: mocks.connectorsLinearTeams,
   connectorsSetSelectedTeams: mocks.connectorsSetSelectedTeams,
   obsidianStatus: mocks.obsidianStatus,
@@ -137,15 +130,6 @@ beforeEach(() => {
   mocks.connectorsCancelConnect.mockResolvedValue(undefined);
   mocks.connectorsLinearTeams.mockResolvedValue({ teams: [], truncated: false });
   mocks.connectorsSetSelectedTeams.mockResolvedValue(linearAccount());
-  mocks.extensionPairingStatus.mockResolvedValue({ paired: false, listenerRunning: true });
-  mocks.registerBrowserExtensionHost.mockResolvedValue({
-    manifestPath: "/tmp/co.opensoftware.clovy.extension.json",
-    shimPath: "/tmp/clovy-nm-shim",
-  });
-  mocks.browserTransportPolicy.mockResolvedValue({
-    attendedEnabled: true,
-    managedEnabled: true,
-  });
   mocks.obsidianStatus.mockResolvedValue({ connected: false });
   mocks.obsidianConfigure.mockResolvedValue({
     connected: true,

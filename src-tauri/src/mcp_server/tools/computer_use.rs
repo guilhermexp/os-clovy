@@ -1,9 +1,9 @@
 //! The computer use group: `computer_use` for an attended CLI turn (change
-//! `cli-substitui-agente-nativo`, slice 2.6). Every call is one approval:
+//! `cli-substitui-agente-nativo`, slice 2.6). Each call follows the turn’s effective approval policy:
 //!
 //! 1. the turn binding opens the run's Computer use lease
 //!    (`crate::computer_use::begin_turn_lease`), in place of the chat surface;
-//! 2. the approval broker shows the card on the Mac; the first answer
+//! 2. the approval broker records the decision; when a card is shown, the first answer
 //!    settles it and any later one is refused;
 //! 3. only then the existing Computer use broker runs the action, and the
 //!    per-app authorization of the Computer use broker still applies
@@ -122,9 +122,9 @@ impl ComputerUseTools {
                     tool: COMPUTER_USE_TOOL.to_string(),
                     call_id: Some(call_id.clone()),
                     kind: ApprovalKind::Approval {
-                        title: "Use this Mac".into(),
+                        title: "Use this computer".into(),
                         description: format!(
-                            "Clovy runs one Computer use action ({action}) on this Mac."
+                            "Clovy runs one Computer use action ({action}) on this computer."
                         ),
                         arguments: arguments.clone(),
                         preview: None,

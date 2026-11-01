@@ -35,14 +35,14 @@ fn main() {
     prepare_computer_use_driver();
     ensure_local_transcriber_resource();
     build_windows_dictation_helper();
-    ensure_bundled_extension_dir();
-    ensure_nm_shim_placeholder();
+    ensure_agent_browser_resources();
+    ensure_mcp_relay_placeholder();
     export_app_identifier();
     tauri_build::build();
 }
 
 /// Compiles the app identifier into `CLOVY_APP_IDENTIFIER` for code without an
-/// AppHandle (the native messaging shim). Mirrors Tauri's config merge for this
+/// AppHandle (the MCP relay). Mirrors Tauri's config merge for this
 /// key: the `--config` overlays the Tauri CLI passes in `TAURI_CONFIG` (where
 /// `CLOVY_DEV_APP_IDENTIFIER` lands), then the platform file, then
 /// `tauri.conf.json`.
@@ -144,33 +144,36 @@ fn link_swift_runtime() {
     );
 }
 
-/// `tauri_build::build()` validates resource source directories during every
-/// Cargo invocation, while `extension/dist` is intentionally gitignored.
-/// Ordinary tests and rust-analyzer only need the directory to exist. Tauri
-/// packaging runs `pnpm extension:build` first and replaces its contents with
-/// the fresh extension whose manifest retains the pinned development key.
-fn ensure_bundled_extension_dir() {
+/// Plain debug Cargo checks need the resource directory, but must never fetch
+/// or build a browser. Release builds fail closed unless preparation verified
+/// the pinned engine, Chrome, patches, provenance and complete file inventory.
+fn ensure_agent_browser_resources() {
     let manifest_dir = std::path::PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"),
     );
-    let Some(extension_dir) = manifest_dir
+    let repo = manifest_dir
         .parent()
-        .map(|repo_dir| repo_dir.join("extension").join("dist"))
-    else {
-        return;
-    };
-    println!(
-        "cargo:rerun-if-changed={}",
-        manifest_dir
-            .parent()
-            .expect("src-tauri should have a repository parent")
-            .join("extension")
-            .join("public")
-            .join("manifest.json")
-            .display()
-    );
-    if let Err(error) = std::fs::create_dir_all(&extension_dir) {
-        println!("cargo:warning=could not create extension resource directory: {error}");
+        .expect("repository parent should exist");
+    let resources = repo.join("resources/agent-browser");
+    for relative in ["scripts/agent-browser", "scripts/prepare-agent-browser.mjs"] {
+        println!("cargo:rerun-if-changed={}", repo.join(relative).display());
+    }
+    println!("cargo:rerun-if-changed={}", resources.display());
+    if std::env::var("PROFILE").ok().as_deref() == Some("release") {
+        let target = std::env::var("TARGET").expect("Cargo target should be set");
+        let status = std::process::Command::new("node")
+            .arg(repo.join("scripts/prepare-agent-browser.mjs"))
+            .args(["--check", "--release", "--target", &target])
+            .current_dir(repo)
+            .status()
+            .expect("node is required to verify prepared private browser resources");
+        assert!(
+            status.success(),
+            "Pinned browser resources missing or invalid; run pnpm browser:prepare -- --release"
+        );
+    } else {
+        std::fs::create_dir_all(resources)
+            .expect("debug browser resource directory should be created");
     }
 }
 
@@ -594,39 +597,27 @@ fn sign_computer_use_driver(app_dir: &std::path::Path) {
     }
 }
 
-/// `tauri_build::build()` validates every `bundle.resources` source path at
-/// compile time, but the native messaging shim and the `clovy-mcp` relay are
-/// sibling `[[bin]]`s of this crate — they do not exist yet while build.rs
-/// runs. These placeholders keep the mappings valid for every cargo
-/// invocation; `scripts/bundle-nm-shim.sh` and `bundle-clovy-mcp.sh` (the
-/// macOS `beforeBundleCommand`) replace them with the real signed binaries
-/// after compilation and fail the bundle if they cannot.
-fn ensure_nm_shim_placeholder() {
+/// The MCP relay is compiled beside the app after build.rs runs. The macOS
+/// beforeBundleCommand replaces this placeholder with the real signed relay.
+fn ensure_mcp_relay_placeholder() {
     if std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() != Some("macos") {
         return;
     }
     let manifest_dir = std::path::PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"),
     );
-    let Some(helper_dir) = manifest_dir
+    let helper_dir = manifest_dir
         .parent()
-        .map(|repo_dir| repo_dir.join(".tauri-helper"))
-    else {
-        return;
-    };
-    for name in ["clovy-nm-shim", "clovy-mcp"] {
-        let shim = helper_dir.join(name);
-        if shim.exists() {
-            continue;
-        }
-        if let Err(error) = std::fs::create_dir_all(&helper_dir).and_then(|_| {
-            std::fs::write(
-                &shim,
-                b"placeholder: replaced by the macOS beforeBundleCommand\n",
-            )
-        }) {
-            println!("cargo:warning=could not create {name} placeholder: {error}");
-        }
+        .expect("repository parent should exist")
+        .join(".tauri-helper");
+    let relay = helper_dir.join("clovy-mcp");
+    if !relay.exists() {
+        std::fs::create_dir_all(helper_dir).expect("helper directory should be created");
+        std::fs::write(
+            relay,
+            b"placeholder: replaced by the macOS beforeBundleCommand\n",
+        )
+        .expect("MCP relay placeholder should be written");
     }
 }
 

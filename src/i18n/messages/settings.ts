@@ -259,11 +259,6 @@ export default defineMessages({
     "settings.experiments.browserUseDescription":
       "Enable Browser use on this install while the public feature remains off. Turning it off applies fully after Clovy restarts.",
     "settings.experiments.browserUseAria": "Enable experimental Browser use",
-    "settings.experiments.extension": "Browser extension (unpacked)",
-    "settings.experiments.extensionDescription":
-      "Open chrome://extensions, turn on Developer mode, choose Load unpacked, and select the revealed folder.",
-    "settings.experiments.unpacking": "Unpacking...",
-    "settings.experiments.unpack": "Unpack and reveal folder",
 
     "settings.startup.hideDock": "Hide from Dock",
     "settings.startup.hideDockDescription": "Hide the Dock icon when the main window is closed.",
@@ -622,11 +617,6 @@ export default defineMessages({
     "settings.experiments.browserUseDescription":
       "Ativa o uso do navegador nesta instalação enquanto o recurso público continua desativado. Desativar só tem efeito completo depois que o Clovy reiniciar.",
     "settings.experiments.browserUseAria": "Ativar o uso do navegador experimental",
-    "settings.experiments.extension": "Extensão do navegador (descompactada)",
-    "settings.experiments.extensionDescription":
-      "Abra chrome://extensions, ative o Modo do desenvolvedor, escolha Carregar sem compactação e selecione a pasta exibida.",
-    "settings.experiments.unpacking": "Descompactando...",
-    "settings.experiments.unpack": "Descompactar e mostrar a pasta",
 
     "settings.startup.hideDock": "Ocultar do Dock",
     "settings.startup.hideDockDescription":

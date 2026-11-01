@@ -230,6 +230,7 @@ if [[ "$updater" == "on" ]]; then
   tauri_build_args+=(--config src-tauri/tauri.release.conf.json)
 fi
 # Cargo validates every bundled helper resource before the Tauri build hook.
+pnpm browser:prepare -- --release --target "$computer_use_target"
 pnpm local-transcriber:prepare -- --release
 pnpm computer-use:prepare -- "${computer_use_prepare_args[@]}"
 # Trailing args after `--` reach the cargo runner; --locked keeps the
@@ -262,6 +263,8 @@ if [[ "${#apps[@]}" -ne 1 ]]; then
   exit 1
 fi
 app="${apps[0]}"
+node scripts/prepare-agent-browser.mjs --release --check --target "$computer_use_target" \
+  --resource-root "$app/Contents/Resources/native/agent-browser"
 if find "$app/Contents/Resources" \( -iname '*hermes*' -o -iname 'python.exe' -o -iname 'python3' \) -print -quit | grep -q .; then
   echo "The app still contains a Hermes or Python payload." >&2
   exit 1

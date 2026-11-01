@@ -1290,6 +1290,9 @@ export function AgentWorkspace({
         }
       }
       let activeSession = session;
+      if (isAgentSessionDeleted(activeSession.id)) {
+        throw new Error(t("agent.error.conversationDeleted"));
+      }
       const pendingMode =
         pendingApprovalRef.current?.sessionId === activeSession.id
           ? pendingApprovalRef.current.mode
@@ -1316,6 +1319,7 @@ export function AgentWorkspace({
         if (selectedIdRef.current === activeSession.id) {
           setProjection((current) => ({ ...current, session: activeSession }));
         }
+      }
       if (isAgentSessionDeleted(activeSession.id)) {
         throw new Error(t("agent.error.conversationDeleted"));
       }

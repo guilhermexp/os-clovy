@@ -306,6 +306,10 @@ pub fn is_known_tool(name: &str) -> bool {
     groups().into_iter().any(|group| group.owns(name))
 }
 
+pub(crate) fn is_gateway_tool(name: &str) -> bool {
+    gateway::GATEWAY.owns(name)
+}
+
 /// Runs a tool. A bound-only tool on an unbound connection answers
 /// `turn_required` without running.
 pub async fn call(ctx: &ToolCtx<'_>, name: &str, arguments: &Value) -> Result<Value, AppError> {

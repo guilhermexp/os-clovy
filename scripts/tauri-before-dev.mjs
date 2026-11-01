@@ -62,6 +62,13 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => exitFromChild(0, signal));
 }
 
+const browserHelper = spawnSync(
+  process.execPath,
+  [path.join(rootDir, "scripts/prepare-agent-browser.mjs")],
+  { cwd: rootDir, env: process.env, stdio: "inherit" },
+);
+if (browserHelper.status !== 0) process.exit(browserHelper.status ?? 1);
+
 const localHelper = spawnSync(
   process.execPath,
   [path.join(rootDir, "scripts/prepare-local-transcriber.mjs")],

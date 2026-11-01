@@ -134,7 +134,7 @@ fn signal_group(group: Option<u32>, signal: GroupSignal) {
 }
 
 #[cfg(windows)]
-mod windows_job {
+pub(crate) mod windows_job {
     use std::io;
     use windows::core::PCWSTR;
     use windows::Win32::{
@@ -145,8 +145,10 @@ mod windows_job {
                 THREADENTRY32,
             },
             JobObjects::{
-                AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-                SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
+                JobObjectExtendedLimitInformation, QueryInformationJobObject,
+                SetInformationJobObject, TerminateJobObject,
+                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
                 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             },
             Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
@@ -201,6 +203,22 @@ mod windows_job {
             unsafe {
                 let _ = TerminateJobObject(self.handle(), 1);
             }
+        }
+
+        /// Reaping the leader alone does not prove all descendants have
+        /// exited. Browser profile leases stay held until the Job is empty.
+        pub(crate) fn is_empty(&self) -> io::Result<bool> {
+            let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+            unsafe {
+                QueryInformationJobObject(
+                    Some(self.handle()),
+                    JobObjectBasicAccountingInformation,
+                    std::ptr::from_mut(&mut accounting).cast(),
+                    std::mem::size_of_val(&accounting) as u32,
+                    None,
+                )
+            }?;
+            Ok(accounting.ActiveProcesses == 0)
         }
     }
 

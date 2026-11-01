@@ -7,6 +7,17 @@ use tauri::{AppHandle, Manager};
 
 const USE_PROD_DATA_DIR_ENV: &str = "OS_CLOVY_USE_PROD_DATA_DIR";
 
+/// The installed macOS app's data directory, used by debug helpers to avoid
+/// accessing the release profile when they do not have an AppHandle.
+pub(crate) fn production_app_data_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join(crate::app_identity::RELEASE_APP_IDENTIFIER)
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct AppPaths {
     pub data_dir: PathBuf,
@@ -88,7 +99,7 @@ fn env_value_truthy(value: Option<&OsStr>) -> bool {
     })
 }
 
-/// Public because the native messaging shim (`extension_host::shim_data_dir`)
+/// Public because the MCP relay
 /// has no AppHandle and must rebuild the same dev/prod split from scratch.
 pub fn app_data_dir_for_build(
     data_dir: PathBuf,

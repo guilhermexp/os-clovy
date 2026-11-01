@@ -48,7 +48,6 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
   const [discardRevision, setDiscardRevision] = useState(0);
   const selectedNoteRef = useRef(selectedNote);
   selectedNoteRef.current = selectedNote;
-  const { dispatch, noteSaveController, notes, setError } = dependencies;
   const visibleNotesRef = useRef(notes);
   visibleNotesRef.current = notes;
   const activeNotesRef = useRef(new Map<string, NoteListItemDto>());

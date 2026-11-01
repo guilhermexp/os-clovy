@@ -145,3 +145,32 @@ localized Clovy value.
 
 The desktop no longer needs V8 executable-memory entitlements for an agent
 process. Preserve the entitlements required by the remaining native helpers.
+
+## Private browser resources
+
+The build wrapper prepares both pinned browser artifacts before the desktop
+crate or native helpers are built. `pnpm browser:prepare -- --release` compiles
+the audited agent-browser source commit with the upstream lockfile and Clovy's
+private host patches; it downloads Chrome only from the fixed, digest-checked
+Chrome for Testing URL in `scripts/agent-browser/manifest.json`.
+For a universal bundle, pass `--target universal-apple-darwin` to prepare both
+native platform subtrees. Each architecture keeps its matching Chrome tree and
+engine executable under `native/agent-browser/<platform>/`.
+
+Preparation signs Mach-O files, nested frameworks and apps from the inside out
+with `APPLE_SIGNING_IDENTITY`, or ad hoc when absent, preserving Chrome's
+entitlements. The engine is signed with the same build identity. The staged
+provenance hashes cover the signed output, including symlinks and permissions.
+The dependency SBOM and license notices ship beside the executable. Release
+Cargo builds reject missing or modified resources; plain debug Cargo directory
+creation cannot make a release browser-ready. Validate the prepared resources
+with `pnpm browser:prepare -- --release --check` (and the matching `--target`
+for a universal release). macOS signature/notarization and live persistent-login
+acceptance must be performed on a Mac; Linux preparation does not prove them.
+
+Signing does not change Chromium's native Safe Storage namespace. The current
+pinned source/packaging does not establish the required `-dev` Keychain service
+for persistent development/proof runs. Keep those runs blocked before launch
+until a supported namespace integration is reviewed and qualified; changing
+only the bundle id/profile path or using persistent mock/basic crypto does not
+meet that boundary. See the development runbook's pinned-browser section.

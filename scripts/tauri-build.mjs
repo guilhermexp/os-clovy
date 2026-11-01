@@ -19,6 +19,13 @@ const rawUserArgs = process.argv.slice(2);
 const userArgs = rawUserArgs[0] === "--" ? rawUserArgs.slice(1) : rawUserArgs;
 const target = optionValue(userArgs, "--target");
 const buildPlatform = platformForTarget(target) ?? process.platform;
+const browserPrepareArgs = [
+  resolve(dirname(fileURLToPath(import.meta.url)), "prepare-agent-browser.mjs"),
+  "--release",
+];
+if (target) browserPrepareArgs.push("--target", target);
+const browserPrepare = spawnSync(process.execPath, browserPrepareArgs, { stdio: "inherit" });
+if (browserPrepare.status !== 0) process.exit(browserPrepare.status ?? 1);
 if (buildPlatform === "darwin") {
   const localPrepare = spawnSync(
     process.execPath,

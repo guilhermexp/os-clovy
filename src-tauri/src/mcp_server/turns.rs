@@ -54,7 +54,10 @@ struct Live {
 #[derive(Clone, Default)]
 pub struct TurnRegistry {
     turns: Arc<Mutex<HashMap<String, Live>>>,
+    on_revoke: Arc<Mutex<Vec<RevokeHook>>>,
 }
+
+type RevokeHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 impl std::fmt::Debug for TurnRegistry {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -93,6 +96,25 @@ impl TurnRegistry {
         self.turns().values().any(|live| *live.binding == *binding)
     }
 
+    /// Revocation also cancels browser startup and in-flight control before
+    /// the CLI connection is dropped. No tool/dispatch mutex is acquired.
+    pub(crate) fn add_revoke_hook(&self, hook: RevokeHook) {
+        self.on_revoke
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(hook);
+    }
+
+    fn notify_revoked(&self, run_id: &str) {
+        let hooks = self
+            .on_revoke
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        for hook in hooks {
+            hook(run_id);
+        }
+    }
     fn turns(&self) -> MutexGuard<'_, HashMap<String, Live>> {
         self.turns.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -132,8 +154,10 @@ impl TurnRegistry {
     /// Revokes `token` and closes its connections. `false` when it was not
     /// live.
     pub fn revoke(&self, token: &str) -> bool {
-        if let Some(live) = self.turns().remove(token) {
+        let live = self.turns().remove(token);
+        if let Some(live) = live {
             live.binding.authority.revoke();
+            self.notify_revoked(&live.binding.run_id);
             true
         } else {
             false
@@ -153,15 +177,24 @@ impl TurnRegistry {
                 true
             }
         });
-        before - turns.len()
+        let removed = before - turns.len();
+        drop(turns);
+        self.notify_revoked(run_id);
+        removed
     }
 
     /// Revokes every token (the app is quitting).
     pub fn revoke_all(&self) {
-        let mut turns = self.turns();
-        for live in turns.values() {
-            live.binding.authority.revoke();
+        let runs: Vec<_> = self
+            .turns()
+            .drain()
+            .map(|(_, live)| {
+                live.binding.authority.revoke();
+                live.binding.run_id.clone()
+            })
+            .collect();
+        for run in runs {
+            self.notify_revoked(&run);
         }
-        turns.clear();
     }
 }

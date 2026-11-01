@@ -14,7 +14,7 @@ describe("Clovy repository branding", () => {
       ".github/ISSUE_TEMPLATE/config.yml",
       ".github/ISSUE_TEMPLATE/feature_request.yml",
       "docs/private-connectors-implementation-plan.md",
-      "docs/release-extension.md",
+      "docs/plugins/browser-use-prd.md",
       "docs/telemetry-p3a-implementation-plan.md",
       "scripts/check-cargo-release-age.py",
       "scripts/check-pnpm-release-age.py",

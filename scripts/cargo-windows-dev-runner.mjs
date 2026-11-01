@@ -6,7 +6,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const scripts = dirname(fileURLToPath(import.meta.url));
-const binaries = ["clovy", "clovy-mcp", "clovy-nm-shim"];
+const binaries = ["clovy", "clovy-mcp"];
 
 export async function runWindowsDevCargo(
   argv,

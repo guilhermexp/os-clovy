@@ -1,9 +1,8 @@
 # pnpm settings (pnpm 11 no longer reads the "pnpm" field in package.json).
 
-# Workspace packages: the app root plus the browser extension (JUN-287).
+# Workspace package: the desktop app.
 packages:
   - '.'
-  - 'extension'
 
 # Keep the patched schema parser pinned for any remaining consumers.
 overrides:

@@ -14,7 +14,11 @@ import {
   hasAgentCliAccessRequest,
   stripAgentCliAccessRequest,
 } from "../../../lib/agent-cli-access";
-import { hasBrowserAccessRequest, stripBrowserAccessRequest } from "../../../lib/browser-access";
+import {
+  hasBrowserAccessRequest,
+  stripBrowserAccessRequest,
+  useBrowserAccess,
+} from "../../../lib/browser-access";
 import { intlLocale, useT } from "../../../i18n";
 import { agentFilePreview } from "../../../lib/tauri";
 import { CopyStateIcon } from "../../ui/CopyStateIcon";
@@ -125,6 +129,18 @@ export function AgentChatTurnRow({
   turn: AgentChatTurn;
 }) {
   const t = useT();
+  const requestsBrowserAccess = turn.parts.some(
+    (part) => part.type === "text" && hasBrowserAccessRequest(part.text),
+  );
+  const storedBrowserAccess = useBrowserAccess(
+    browserAccess === undefined && requestsBrowserAccess,
+  );
+  const effectiveBrowserAccess = browserAccess ?? {
+    enabled: storedBrowserAccess.enabled,
+    submitting: storedBrowserAccess.submitting,
+    error: storedBrowserAccess.error,
+    onEnable: () => void storedBrowserAccess.setGrant(true),
+  };
   const textParts = turn.parts.filter(
     (part): part is Extract<AgentChatPart, { type: "text" }> => part.type === "text",
   );
@@ -273,7 +289,7 @@ export function AgentChatTurnRow({
         cliAccess?.enabled !== true &&
         !dismissedAccessRequestCards.has(accessRequestCardKey(turn.id, index, "cli"))) ||
       (hasBrowserAccessRequest(part.text) &&
-        browserAccess?.enabled !== true &&
+        effectiveBrowserAccess.enabled !== true &&
         !dismissedAccessRequestCards.has(accessRequestCardKey(turn.id, index, "browser")))
     );
   });
@@ -508,7 +524,7 @@ export function AgentChatTurnRow({
                 ) : null}
                 {hasBrowserAccessRequest(part.text) ? (
                   <AgentBrowserAccessCard
-                    browserAccess={browserAccess}
+                    browserAccess={effectiveBrowserAccess}
                     dismissed={dismissedAccessRequestCards.has(
                       accessRequestCardKey(turn.id, index, "browser"),
                     )}

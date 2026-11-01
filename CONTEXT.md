@@ -344,12 +344,15 @@ or reads the retired runtime after a successful import.
 _Avoid_: runtime home, active profile.
 
 **Browser use**:
-The consent-gated capability (JUN-278, ADR 0017) that lets the agent operate
-a live browser. Attended sessions drive the user's own Chromium-family
-browser through the Clovy extension, in task-owned or explicitly user-shared
-tabs; sandboxed routines get a Clovy-managed, anonymous, ephemeral headless
-browser limited to the public web. All actions flow through the Rust browser
-broker; consequential actions park for approval.
+The consent-gated capability that lets the agent operate Clovy's own pinned
+browser through a private agent-browser host. Attended tasks use an exclusive
+persistent profile with logins separate from the user's usual browser.
+Routines use anonymous ephemeral profiles and their own public-web grants.
+Every tab and reference belongs to one conversation/run; Stop ends control
+and processes while retaining the attended profile. Clicks, fills and key
+presses use the central approval broker because page metadata cannot prove an
+input event harmless. Background is the default; human takeover opens
+the dedicated browser visibly and suspends agent capture/input until resume.
 _Avoid_: web browsing (that is `june_web` search/fetch), browser toolset
 (the upstream runtime feature Clovy does not expose).
 
@@ -361,7 +364,7 @@ _Avoid_: browser permission, browser toggle.
 
 **Routine Browser use opt-in**:
 The default-off, per-routine grant that lets one sandboxed routine use Clovy's
-anonymous managed browser for public pages. It is distinct from the attended
+anonymous ephemeral browser for public pages. It is distinct from the attended
 Browser access grant and never exposes the user's signed-in browser session.
 _Avoid_: routine browser permission, global routine browsing.
 
@@ -847,7 +850,9 @@ turn asks before acting: it records an approval or clarification card in the
 session, waits up to 10 minutes for one decision, and turns denial, expiry,
 or cancellation into the tool's error (`user_denied`, `approval_timed_out`,
 `run_cancelled`). Unattended turns are refused without a card
-(`unattended_requires_approval`). Browser use keeps its own approval tray.
+(`unattended_requires_approval`). Browser use asks this same broker for
+all click, fill and key-press actions; its separate session controls only manage human takeover,
+resume and Stop.
 See [docs/mcp-server.md](docs/mcp-server.md#approval-broker).
 _Avoid_: permission prompt (that is the CLI's own; claude's is routed to the
 broker through `approve_action`), interruption (the item the broker writes,

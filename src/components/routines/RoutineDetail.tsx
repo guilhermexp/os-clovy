@@ -118,7 +118,6 @@ export function RoutineDetail({
   const [unrestricted, setUnrestricted] = useState(() => routineUnrestricted(routine));
   const [storedBrowserAccess, setStoredBrowserAccess] = useState<RoutineBrowserAccess | null>(null);
   const [browserAccess, setBrowserAccess] = useState(false);
-  const managedTransportEnabled = true;
   // Connector trust + trigger. All loads degrade quietly: a routine without
   // a trust record (or a build without the connectors module) reads as
   // read only with no trigger, which is exactly the stored default.
@@ -723,15 +722,13 @@ export function RoutineDetail({
                     <div className="settings-row-info">
                       <div className="settings-row-title">{t("routines.detail.browserUse")}</div>
                       <div className="settings-row-description">
-                        {managedTransportEnabled
-                          ? t("routines.detail.browserUseDescription")
-                          : t("routines.detail.browserUseUnavailable")}
+                        {t("routines.detail.browserUseDescription")}
                       </div>
                     </div>
                     <div className="settings-row-control">
                       <Switch
                         checked={browserAccess}
-                        disabled={storedBrowserAccess === null || !managedTransportEnabled}
+                        disabled={storedBrowserAccess === null}
                         aria-label={t("routines.detail.browserUseToggle")}
                         onCheckedChange={setBrowserAccess}
                       />

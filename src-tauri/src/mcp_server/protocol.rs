@@ -234,6 +234,14 @@ fn app_tool_error(error: &crate::domain::types::AppError) -> Value {
     result
 }
 
+fn call_tool_error(name: &str, error: &crate::domain::types::AppError) -> Value {
+    if tools::is_gateway_tool(name) {
+        app_tool_error(error)
+    } else {
+        tool_error_for(error)
+    }
+}
+
 #[cfg(test)]
 mod diagnostic_tests {
     use super::*;
@@ -255,6 +263,18 @@ mod diagnostic_tests {
         let result = app_tool_error(&unrelated);
         assert!(result.get("_meta").is_none());
         assert!(!result.to_string().contains("fixture-private-payload"));
+        let result = call_tool_error("mcp_example_read", &unrelated);
+        assert!(!result.to_string().contains("fixture-private-payload"));
+
+        let mut native = AppError::new("turn_expired", "Turn expired");
+        native.details = Some(json!({"retrySafe": false}));
+        let result = call_tool_error("computer_use", &native);
+        assert_eq!(
+            result["structuredContent"]["error"]["details"]["retrySafe"],
+            false
+        );
+        let result = call_tool_error("mcp_example_read", &error);
+        assert_eq!(result["_meta"]["clovy"]["diagnostic"]["remoteCode"], -32601);
     }
 }
 
@@ -313,14 +333,7 @@ async fn call_tool(ctx: &ToolCtx<'_>, params: &Value) -> Result<Value, (i64, Str
         .unwrap_or_else(|| json!({}));
     Ok(match tools::call(ctx, name, &arguments).await {
         Ok(value) => tool_result(&value),
-        Err(error) => {
-            let mut result = tool_error_for(&error);
-            let diagnostic = app_tool_error(&error);
-            if let Some(meta) = diagnostic.get("_meta") {
-                result["_meta"] = meta.clone();
-            }
-            result
-        }
+        Err(error) => call_tool_error(name, &error),
     })
 }
 
@@ -493,5 +506,5 @@ The catalog is authoritative for this connection. Routine toolsets restrict disc
 - Recorder: start_recording/recording_status/stop_recording/pause_recording/resume_recording/recover_recording/retry_note_processing/list_recording_artifacts. IDs, source mode and duration refer to the actual session. Recovery is explicitly validate or discard. Finalizing/retrying can use configured transcription and note providers; listing metadata does not grant paths. Recording controls use the real main-window bridge and may need native permissions.
 - Skills: list_skills/load_skill describe active skills; list_skill_settings/read_skill also inspect disabled settings for administration. update_skill/enable_skill/disable_skill use approval. Only managed skills are editable; global roots are read-only. Reading presence or content does not execute instructions. Hidden entries and objective editor backups are excluded; legitimate foo-backup names remain valid.
 
-Reads above are local and do not activate capture, login, permissions or a feature. Native mutations ask the approval broker; clarification always requires an answer. Browser actions use their own policy/tray. Media generation/editing is the existing exception: direct provider usage can be charged without another broker card. Status is not authorization. Inspect error codes and delivery state; never resend an effect whose delivery is uncertain.
+Reads above are local and do not activate capture, login, permissions or a feature. Native mutations and browser input use the approval broker's effective policy; clarification always requires an answer. Browser ownership, network and target guards also apply. Media generation/editing is the existing exception: direct provider usage can be charged without another broker card. Status is not authorization. Inspect error codes and delivery state; never resend an effect whose delivery is uncertain.
 "#;
