@@ -66,13 +66,23 @@ if (process.platform === "darwin") {
   );
   if (localPrepare.status !== 0) process.exit(localPrepare.status ?? 1);
 
-  const prepare = spawnSync(process.execPath, [resolve(SCRIPT_DIR, "prepare-cua-driver.mjs")], {
+  const prepare = spawnSync(process.execPath, [resolve(SCRIPT_DIR, "prepare-computer-use.mjs")], {
     cwd: ROOT_DIR,
     env: {
       ...process.env,
       ...(developerDir ? { DEVELOPER_DIR: developerDir } : {}),
+      CLOVY_DEV_APP_IDENTIFIER: devAppIdentity.identifier,
       [DEV_SIGNING_IDENTITY_ENV]: devSigningIdentity,
     },
+    stdio: "inherit",
+  });
+  if (prepare.status !== 0) process.exit(prepare.status ?? 1);
+}
+
+if (process.platform === "win32") {
+  const prepare = spawnSync(process.execPath, [resolve(SCRIPT_DIR, "prepare-computer-use.mjs")], {
+    cwd: ROOT_DIR,
+    env: { ...process.env, CLOVY_DEV_APP_IDENTIFIER: devAppIdentity.identifier },
     stdio: "inherit",
   });
   if (prepare.status !== 0) process.exit(prepare.status ?? 1);

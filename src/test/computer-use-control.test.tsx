@@ -30,7 +30,7 @@ function status(overrides: Partial<ComputerUseStatusDto> = {}): ComputerUseStatu
     platformSupported: true,
     grantEnabled: false,
     driverAvailable: true,
-    driverVersion: "0.5.0",
+    driverVersion: "1.0.2",
     accessibility: false,
     screenRecording: false,
     ready: false,
@@ -58,6 +58,21 @@ afterEach(() => {
 });
 
 describe("ComputerUseControl", () => {
+  it("shows Windows desktop requirements and preserves Stop without macOS setup", async () => {
+    tauriMocks.computerUseStatus.mockResolvedValue(
+      status({ platform: "windows", grantEnabled: true, state: "permission_missing" }),
+    );
+    render(<ComputerUseControl />);
+    expect(await screen.findByText("Desktop unavailable")).toBeInTheDocument();
+    expect(screen.getByText(/Unlock your Windows session/)).toBeInTheDocument();
+    expect(screen.getByText(/Uses the background when supported/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open Accessibility settings" })).toBeNull();
+    expect(screen.queryByText("Screen recording")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Stop current task" }));
+    expect(tauriMocks.computerUseStop).toHaveBeenCalledOnce();
+    expect(tauriMocks.computerUseRequestPermissions).not.toHaveBeenCalled();
+  });
+
   it("enables the Clovy grant without prompting for macOS access", async () => {
     render(<ComputerUseControl />);
     const toggle = await screen.findByRole("switch", { name: "Enable Computer use" });
@@ -407,7 +422,7 @@ describe("ComputerUseControl", () => {
     expect(await screen.findByText(/driver did not respond in time/)).toBeInTheDocument();
   });
 
-  it("keeps the switch unavailable off macOS", async () => {
+  it("keeps the switch unavailable on unsupported platforms", async () => {
     tauriMocks.computerUseStatus.mockResolvedValue(
       status({ platformSupported: false, driverAvailable: false, state: "unsupported" }),
     );
@@ -415,7 +430,7 @@ describe("ComputerUseControl", () => {
 
     const toggle = await screen.findByRole("switch", { name: "Enable Computer use" });
     await waitFor(() => expect(toggle).toBeDisabled());
-    expect(screen.getByText(/available on macOS only/)).toBeInTheDocument();
+    expect(screen.getByText(/requires macOS or Windows/)).toBeInTheDocument();
   });
 
   it("renders Computer use as a plugin row without a Pro tag", async () => {

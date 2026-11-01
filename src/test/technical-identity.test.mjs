@@ -48,27 +48,27 @@ describe("Clovy technical identity", () => {
   it("uses Clovy for generated build metadata and local build coordination", async () => {
     const [prepareDriver, selfTest, desktopBuild, windowsBuild, windowsQualification, sbom] =
       await Promise.all([
-        read("scripts/prepare-cua-driver.mjs"),
+        read("scripts/prepare-computer-use-helper.mjs"),
         read("scripts/computer-use-self-test.mjs"),
         read("src-tauri/build.rs"),
         read("scripts/build-windows.ps1"),
         read("scripts/qualify-windows-build.ps1"),
-        read("src-tauri/cua-driver-sbom.spdx.json").then(JSON.parse),
+        read("src-tauri/agent-desktop/sbom.spdx.json").then(JSON.parse),
       ]);
 
     for (const source of [prepareDriver, selfTest, desktopBuild]) {
-      expect(source).toContain("clovy-cua-driver-pin.json");
+      expect(source).toContain("clovy-computer-use-pin.json");
       expect(source).not.toContain("june-cua-driver-pin.json");
     }
     for (const source of [prepareDriver, selfTest]) {
-      expect(source).toContain("clovy-cua-driver.spdx.json");
+      expect(source).toContain("agent-desktop.spdx.json");
       expect(source).toContain("clovyBuild");
       expect(source).not.toContain("juneBuild");
     }
     expect(windowsBuild).toContain("ClovyWindowsBuild");
     expect(windowsQualification).toContain("ClovyWindowsBuild");
     expect(windowsQualification).toContain("firstPathRestored");
-    expect(sbom.name).toBe("clovy-cua-driver-0.5.0");
+    expect(sbom.name).toMatch(/^clovy-agent-desktop-[0-9a-f]{40}$/);
   });
 
   it("uses canonical Clovy names for private runtime and Windows helper concepts", async () => {
@@ -112,16 +112,15 @@ describe("Clovy technical identity", () => {
     ]) {
       expect(dictation).toContain(field);
     }
-    expect(computerUse).toContain('format!("clovy-cua-{}", random_id())');
+    expect(computerUse).toContain('prefix("clovy-desktop-")');
     expect(computerUse).not.toContain('format!("june-cua-{}", random_id())');
     for (const source of [computerUse, computerUseDriver]) {
       expect(source).toContain("clovyComputerUseCapability");
-      expect(source).toContain("juneComputerUseCapability");
     }
     expect(computerUseSelfTest).toContain("dev.guilhermexp.clovy.computer-use-self-test.${role}");
     expect(computerUseDriver).toContain("clovy-helper-child-reaper");
     expect(computerUseDriver).not.toContain("june-helper-child-reaper");
-    for (const source of [computerUseDriver, computerUseCursor]) {
+    for (const source of [computerUseCursor]) {
       expect(source).toContain('"clovy/pointer"');
       expect(source).not.toContain('"june/pointer"');
     }
@@ -239,7 +238,7 @@ describe("Clovy technical identity", () => {
       read("src-tauri/src/meeting_detection.rs"),
       read("src-tauri/src/obsidian.rs"),
       read("src-tauri/src/http_client.rs"),
-      read("src-tauri/cua-driver-contract.json").then(JSON.parse),
+      read("src-tauri/computer-use-contract.json").then(JSON.parse),
       read("src/lib/dnd.ts"),
     ]);
 
@@ -247,7 +246,7 @@ describe("Clovy technical identity", () => {
     expect(notifications).toContain('const LEGACY_SESSION_ID_KEY: &str = "juneAgentSessionId"');
     expect(routines).toContain('format!("clovy_browser_routine_{}"');
     expect(routines).not.toContain('format!("june_browser_routine_{}"');
-    expect(computerUseDriver).toContain("fn parent_is_clovy()");
+    expect(computerUseDriver).toContain("socket_peer_audit_token(&stream)");
     expect(computerUseDriver).toContain("fn process_is_clovy(");
     expect(computerUseDriver).not.toContain("fn parent_is_june()");
     expect(computerUseDriver).not.toContain("fn process_is_june(");

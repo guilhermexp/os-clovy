@@ -10,13 +10,13 @@ use core_foundation::url::CFURLRef;
 use objc2_app_kit::NSWorkspace;
 
 use crate::activity::filter::{has_private_window_marker, normalize_browser_url};
-use crate::activity::macos::screens::{active_displays, display_id_for_rect, main_display_id};
-use crate::activity::platform::WindowDescriptor;
-use platform_macos::ax::bindings::{
+use crate::activity::macos::native::{
     ax_get_window_id, copy_ax_windows, copy_children, copy_string_attr, element_screen_rect,
     enable_chromium_accessibility, kAXErrorSuccess, AXUIElementCopyAttributeValue,
     AXUIElementCreateApplication, AXUIElementRef,
 };
+use crate::activity::macos::screens::{active_displays, display_id_for_rect, main_display_id};
+use crate::activity::platform::WindowDescriptor;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
@@ -361,7 +361,7 @@ pub fn focused_window(chromium_settled_pids: &mut HashSet<i32>) -> Option<Window
 
     // Fallback: match window_id via CG visible windows for this pid
     if window_id.is_none() {
-        let visible = platform_macos::windows::visible_windows();
+        let visible = crate::activity::macos::native::visible_windows();
         if let Some(matching) = visible
             .iter()
             .find(|w| w.pid == pid && w.layer == 0 && w.is_on_screen)

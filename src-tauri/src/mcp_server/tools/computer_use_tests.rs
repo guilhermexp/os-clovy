@@ -335,7 +335,7 @@ struct LocalProbe {
 }
 
 impl EligibilityProbe for LocalProbe {
-    fn macos(&self) -> bool {
+    fn platform_supported(&self) -> bool {
         true
     }
     fn grant_enabled(&self) -> BoxedBool<'_> {

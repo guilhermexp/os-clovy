@@ -26,7 +26,7 @@ $safeBranch = $Branch -replace '[^A-Za-z0-9._-]', '-'
 $repoParent = Split-Path -Parent $repo
 $caller = Join-Path $repoParent "Clovy Windows Qualification"
 if ($caller -eq $repo) { $caller = Join-Path $repoParent "Clovy Windows Qualification Runner" }
-$outputDirectory = Join-Path $repo "artifacts\windows-unsigned"
+$outputDirectory = Join-Path $repo "artifacts\windows-signed"
 if (-not $EvidenceDirectory) {
   $EvidenceDirectory = Join-Path $repo ".tmp\windows-qualification\$safeBranch\$shortSha"
 } elseif (-not [System.IO.Path]::IsPathRooted($EvidenceDirectory)) {

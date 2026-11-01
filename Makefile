@@ -3,7 +3,7 @@
 .PHONY: help install \
 	dev \
 	check format typecheck test-web \
-	tauri-fmt tauri-fmt-check tauri-lint tauri-test \
+	computer-use-prepare tauri-fmt tauri-fmt-check tauri-lint tauri-test \
 	companion-fmt companion-fmt-check companion-lint companion-test \
 	fmt fmt-check lint test verify org-references-check clovy-api-references-check \
 	local-ci signoff-pr signoff-frontend signoff-rust-macos
@@ -44,10 +44,13 @@ tauri-fmt:  ## rustfmt (write)
 tauri-fmt-check:  ## rustfmt (check only)
 	cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
-tauri-lint:  ## clippy (warnings = errors)
+computer-use-prepare:  ## Prepare the real pinned Computer use engine and helper
+	node scripts/prepare-computer-use.mjs
+
+tauri-lint: computer-use-prepare  ## clippy (warnings = errors)
 	cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
 
-tauri-test:  ## cargo test
+tauri-test: computer-use-prepare  ## cargo test
 	cargo test --manifest-path src-tauri/Cargo.toml --locked
 
 # --- Companion protocol and crypto crates (crates/clovy-companion-*) ---

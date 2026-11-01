@@ -17,8 +17,17 @@ pub mod claude_projects;
 pub mod coding_agents;
 pub mod commands;
 pub mod computer_use;
+#[allow(dead_code)] // Shared by the native helper and desktop ownership paths.
+mod computer_use_cancel;
 mod computer_use_cursor;
+#[cfg(target_os = "macos")]
+#[allow(dead_code)] // Permission entry points are used by the helper binary.
+mod computer_use_macos;
 mod computer_use_permission_drag;
+mod computer_use_policy;
+#[cfg(target_os = "windows")]
+#[allow(dead_code)] // Native server and client share the same audited module.
+mod computer_use_windows;
 pub mod connectors;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod credentials;

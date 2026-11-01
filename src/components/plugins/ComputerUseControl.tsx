@@ -27,6 +27,8 @@ function statusLabel(status?: ComputerUseStatusDto) {
     return translate("settingsPanels.computerUse.status.driverUnavailable");
   if (!status.grantEnabled) return translate("settingsPanels.computerUse.status.off");
   if (status.ready) return translate("settingsPanels.computerUse.status.ready");
+  if (status.platform === "windows")
+    return translate("settingsPanels.computerUse.status.needsInteractiveDesktop");
   if (!status.accessibility || !status.screenRecording)
     return translate("settingsPanels.computerUse.status.needsMacosAccess");
   return translate("settingsPanels.computerUse.status.unavailable");
@@ -205,10 +207,14 @@ export function ComputerUseControl() {
 
   const enabled = status?.grantEnabled === true;
   const supported = status?.platformSupported !== false;
+  const windows = status?.platform === "windows";
   const driverReady = status?.driverAvailable !== false;
   const statusErrorShownInline = supported && !driverReady && status !== undefined;
   const permissionsMissing =
-    enabled && status !== undefined && (!status.accessibility || !status.screenRecording);
+    !windows &&
+    enabled &&
+    status !== undefined &&
+    (!status.accessibility || !status.screenRecording);
   const nextPermission: MacOSPermission = status?.accessibility
     ? "screenRecording"
     : "accessibility";
@@ -283,7 +289,7 @@ export function ComputerUseControl() {
           <InlineNotice
             tone="info"
             icon={<IconExclamationCircle size={16} />}
-            body={t("settingsPanels.computerUse.macosOnly")}
+            body={t("settingsPanels.computerUse.supportedPlatforms")}
           />
         ) : null}
 
@@ -298,6 +304,17 @@ export function ComputerUseControl() {
 
         {enabled ? (
           <div className="computer-use-setup">
+            <p className="computer-use-message">{t("settingsPanels.computerUse.inputMode")}</p>
+            {windows ? (
+              <InlineNotice
+                tone="info"
+                body={
+                  status?.ready
+                    ? t("settingsPanels.computerUse.windowsReady")
+                    : status?.error || t("settingsPanels.computerUse.windowsRequirements")
+                }
+              />
+            ) : null}
             {permissionsMissing ? (
               <section
                 className="computer-use-permission-assistant"
@@ -378,43 +395,48 @@ export function ComputerUseControl() {
               </section>
             ) : null}
 
-            <section
-              className="computer-use-requirements"
-              aria-labelledby="computer-use-requirements"
-            >
-              <h4 id="computer-use-requirements" className="computer-use-requirements-heading">
-                {t("settingsPanels.computerUse.setupProgress")}
-              </h4>
-              <div className="computer-use-requirement">
-                <span className="computer-use-requirement-icon" data-ready={status?.accessibility}>
-                  {status?.accessibility ? (
-                    <IconCircleCheck size={15} aria-hidden />
-                  ) : (
-                    <IconExclamationCircle size={15} aria-hidden />
-                  )}
-                </span>
-                <span className="computer-use-requirement-copy">
-                  <strong>{t("settingsPanels.computerUse.accessibility")}</strong>
-                  <span>{requirementState(status?.accessibility === true, enabled)}</span>
-                </span>
-              </div>
-              <div className="computer-use-requirement">
-                <span
-                  className="computer-use-requirement-icon"
-                  data-ready={status?.screenRecording}
-                >
-                  {status?.screenRecording ? (
-                    <IconCircleCheck size={15} aria-hidden />
-                  ) : (
-                    <IconExclamationCircle size={15} aria-hidden />
-                  )}
-                </span>
-                <span className="computer-use-requirement-copy">
-                  <strong>{t("settingsPanels.computerUse.screenRecording")}</strong>
-                  <span>{requirementState(status?.screenRecording === true, enabled)}</span>
-                </span>
-              </div>
-            </section>
+            {!windows ? (
+              <section
+                className="computer-use-requirements"
+                aria-labelledby="computer-use-requirements"
+              >
+                <h4 id="computer-use-requirements" className="computer-use-requirements-heading">
+                  {t("settingsPanels.computerUse.setupProgress")}
+                </h4>
+                <div className="computer-use-requirement">
+                  <span
+                    className="computer-use-requirement-icon"
+                    data-ready={status?.accessibility}
+                  >
+                    {status?.accessibility ? (
+                      <IconCircleCheck size={15} aria-hidden />
+                    ) : (
+                      <IconExclamationCircle size={15} aria-hidden />
+                    )}
+                  </span>
+                  <span className="computer-use-requirement-copy">
+                    <strong>{t("settingsPanels.computerUse.accessibility")}</strong>
+                    <span>{requirementState(status?.accessibility === true, enabled)}</span>
+                  </span>
+                </div>
+                <div className="computer-use-requirement">
+                  <span
+                    className="computer-use-requirement-icon"
+                    data-ready={status?.screenRecording}
+                  >
+                    {status?.screenRecording ? (
+                      <IconCircleCheck size={15} aria-hidden />
+                    ) : (
+                      <IconExclamationCircle size={15} aria-hidden />
+                    )}
+                  </span>
+                  <span className="computer-use-requirement-copy">
+                    <strong>{t("settingsPanels.computerUse.screenRecording")}</strong>
+                    <span>{requirementState(status?.screenRecording === true, enabled)}</span>
+                  </span>
+                </div>
+              </section>
+            ) : null}
 
             <div className="computer-use-actions">
               <button

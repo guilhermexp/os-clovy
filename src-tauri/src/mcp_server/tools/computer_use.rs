@@ -33,7 +33,33 @@ const DESCRIPTION: &str =
     "Operate the attended computer-use session through Clovy's permission and approval broker.";
 
 fn parameters() -> Value {
-    json!({ "type": "object", "properties": { "action": { "type": "string" }, "arguments": {} }, "required": ["action"], "additionalProperties": true })
+    let coordinate = json!({ "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 100000 }, "minItems": 2, "maxItems": 2 });
+    json!({
+        "type": "object",
+        "properties": {
+            "action": { "type": "string", "enum": ["capture", "list_apps", "wait", "open_app", "focus_app", "click", "double_click", "right_click", "drag", "scroll", "type", "key", "set_value"] },
+            "app": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "window_id": { "type": "integer", "minimum": 1 },
+            "mode": { "type": "string", "enum": ["ax", "vision", "som"] },
+            "max_elements": { "type": "integer", "minimum": 1, "maximum": 1000 },
+            "element": { "type": "integer", "minimum": 0 },
+            "coordinate": coordinate,
+            "from_coordinate": coordinate,
+            "to_coordinate": coordinate,
+            "button": { "type": "string", "enum": ["left", "right"] },
+            "modifiers": { "type": "array", "items": { "type": "string", "enum": ["cmd", "ctrl", "shift", "option", "fn"] }, "uniqueItems": true },
+            "text": { "type": "string", "minLength": 1, "maxLength": 10000 },
+            "value": { "type": "string", "maxLength": 10000 },
+            "keys": { "type": "string", "maxLength": 64 },
+            "direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
+            "amount": { "type": "integer", "minimum": 1, "maximum": 50 },
+            "seconds": { "type": "number", "minimum": 0, "maximum": 30 },
+            "raise_window": { "type": "boolean" },
+            "capture_after": { "type": "boolean" }
+        },
+        "required": ["action"],
+        "additionalProperties": false
+    })
 }
 
 /// What the group needs from the app: the lease and the Computer use broker.
@@ -129,7 +155,7 @@ impl ToolGroup for ComputerUseTools {
         vec![json!({
             "name": COMPUTER_USE_TOOL,
             "description": format!(
-                "{DESCRIPTION} Each call asks the user first. `action` is one of capture, list_apps, wait, open_app, focus_app, click, double_click, right_click, drag, scroll, type, key, set_value; its other arguments (app, window_id, element, text, value, keys, modifiers, direction, amount, seconds, capture_after) go beside it. Start with capture of the app to act on; the capture comes back as an image with its numbered element list."
+                "{DESCRIPTION} Your effective approval policy and exact app/window grants apply to every call. Start with list_apps, then capture an exact window_id. Captures return an image and numbered elements. Prefer semantic element actions in the background; an operation that requires focus or pointer input can use visible mode in that authorized window. Inspect effective_modality and disposition in the result. Never repeat delivered or uncertain input; observe the window first. `type` inserts text; `set_value` replaces it. Passwords, one-time codes and payment fields require user takeover. All arguments go beside action."
             ),
             "inputSchema": parameters(),
             "annotations": { "readOnlyHint": false, "destructiveHint": true, "openWorldHint": true },

@@ -1592,6 +1592,7 @@ export type PendingBrowserApproval = {
 /** Local facts only: the grant, the bundled driver and macOS access
  * (ADR-0067). No plan, vision model or remote rollout. */
 export type ComputerUseStatusDto = {
+  platform?: "macos" | "windows" | "unsupported";
   platformSupported: boolean;
   grantEnabled: boolean;
   driverAvailable: boolean;

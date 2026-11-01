@@ -14,7 +14,7 @@ describe("Windows updater artifacts", () => {
     expect(build).toContain('"src-tauri/tauri.release.conf.json"');
     expect(build).toContain('"src-tauri/tauri.windows.conf.json"');
     expect(build).toContain('"$($installers[0].FullName).sig"');
-    // --no-sign also skips Tauri's updater signing, so the script signs itself.
+    // The staged installer explicitly retains the updater signature independently of Authenticode.
     expect(build).toContain("& pnpm tauri signer sign $installers[0].FullName");
   });
 
@@ -27,8 +27,9 @@ describe("Windows updater artifacts", () => {
     expect(verify).toContain("The updater signature is missing");
   });
 
-  it("still requires an installer without Authenticode", () => {
-    expect(verify).toContain("SignatureStatus]::NotSigned");
-    expect(build).toContain("--no-sign");
+  it("requires Authenticode signing for the private Computer use peer contract", () => {
+    expect(verify).toContain("SignatureStatus]::Valid");
+    expect(build).toContain("WINDOWS_CERTIFICATE_THUMBPRINT");
+    expect(build).not.toContain("--no-sign");
   });
 });

@@ -1,20 +1,38 @@
 #!/usr/bin/env node
-
-// Build-time source preparation only. No engine download happens at runtime.
-import { createHash } from "node:crypto";
+// Build-time preparation. The app never downloads an engine at runtime.
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  chmodSync,
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sha256, verifyEngineArtifact } from "./agent-desktop-artifact.mjs";
+import { signatureSatisfies } from "./dev-signing-identity.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pin = JSON.parse(readFileSync(join(root, "src-tauri", "agent-desktop-pin.json"), "utf8"));
-const args = process.argv.slice(2);
-const index = args.indexOf("--target");
-if (args.length !== 0 && (args.length !== 2 || index !== 0 || !args[1])) {
-  throw new Error("Usage: prepare-agent-desktop.mjs [--target <triple>]");
+// Snapshot mutable workspace inputs once, before any long build. Every output
+// receipt and applied patch belongs to this same immutable input generation.
+const sourceReview = readFileSync(join(root, "src-tauri", "agent-desktop", "source-review.md"));
+if (digest(sourceReview) !== pin.sourceReviewSha256)
+  throw new Error("Source qualification digest mismatch");
+let target = process.env.TAURI_ENV_TARGET_TRIPLE || hostTriple();
+for (let i = 2; i < process.argv.length; i++) {
+  const arg = process.argv[i];
+  if (arg === "--" || arg === "--release") continue;
+  if (arg === "--target" && process.argv[i + 1]) target = process.argv[++i];
+  else if (arg.startsWith("--target=")) target = arg.slice(9);
+  else throw new Error(`Unknown agent-desktop preparation argument: ${arg}`);
 }
-const target = index < 0 ? hostTriple() : args[index + 1];
 const supported = [
   "aarch64-apple-darwin",
   "x86_64-apple-darwin",
@@ -30,60 +48,146 @@ if (target.includes("apple-darwin") && process.platform !== "darwin")
 if (
   target.includes("windows") &&
   (process.platform !== "win32" || !process.env.WINDOWS_CERTIFICATE_THUMBPRINT)
-)
-  throw new Error("Windows engine signing requires Windows and WINDOWS_CERTIFICATE_THUMBPRINT");
-const source = join(root, ".tauri-helper", "agent-desktop-source");
-const output = join(root, ".tauri-helper", "agent-desktop", target);
-const targetDir = resolve(
-  process.env.CARGO_TARGET_DIR || join(root, "src-tauri", "target", "agent-desktop"),
-);
-mkdirSync(dirname(source), { recursive: true });
-const newSource = !existsSync(source);
-if (newSource)
-  run("git", ["-c", "core.autocrlf=false", "clone", "--no-checkout", pin.source, source], root);
-if (
-  !newSource &&
-  run(
-    "git",
-    [
-      "-c",
-      "core.autocrlf=false",
-      "status",
-      "--porcelain",
-      "--untracked-files=all",
-      "--ignored=matching",
-    ],
-    source,
-    true,
-  ).trim()
 ) {
-  throw new Error("agent-desktop source checkout has local changes; refusing to build it");
+  throw new Error(
+    "Windows Computer use requires Windows and WINDOWS_CERTIFICATE_THUMBPRINT for same-publisher authenticated helpers",
+  );
 }
-run("git", ["fetch", "--no-tags", pin.source, pin.sourceCommit], source);
-run("git", ["-c", "core.autocrlf=false", "checkout", "--detach", pin.sourceCommit], source);
-if (run("git", ["rev-parse", "HEAD"], source, true).trim() !== pin.sourceCommit) {
-  throw new Error("agent-desktop source commit mismatch");
-}
-verifyHash(join(source, "Cargo.lock"), pin.cargoLockSha256);
-verifyHash(join(root, "src-tauri", "agent-desktop", "Cargo.lock"), pin.cargoLockSha256);
-verifyHash(join(source, "LICENSE"), pin.licenseSha256);
+const patch = join(
+  root,
+  "src-tauri",
+  "agent-desktop",
+  "patches",
+  "clovy-supervised-processes.patch",
+);
+const patchBytes = readFileSync(patch);
+if (digest(patchBytes) !== pin.patchSha256) throw new Error("Audited engine patch digest mismatch");
 const buildTargets =
   target === "universal-apple-darwin" ? ["aarch64-apple-darwin", "x86_64-apple-darwin"] : [target];
-for (const buildTarget of buildTargets) {
+const output = join(root, ".tauri-helper", "agent-desktop", target);
+try {
+  const manifest = verifyEngineArtifact(output, pin, target);
+  const cachedExecutable = join(output, manifest.executable);
+  verifySignature(cachedExecutable);
+  if (target.includes("apple-darwin")) {
+    const needsSigning = !signatureSatisfies(
+      cachedExecutable,
+      process.env.APPLE_SIGNING_IDENTITY || process.env.CLOVY_DEV_SIGNING_IDENTITY || "-",
+    );
+    const hashes = needsSigning ? undefined : signedCodeDirectoryHashes(cachedExecutable);
+    if (needsSigning || JSON.stringify(manifest.codeDirectoryHashes) !== JSON.stringify(hashes)) {
+      const resigned = mkdtempSync(join(dirname(output), `.${target}-resign-`));
+      cpSync(output, resigned, { recursive: true });
+      const resignedExecutable = join(resigned, manifest.executable);
+      if (needsSigning) signExecutable(resignedExecutable);
+      verifySignature(resignedExecutable);
+      manifest.executableSha256 = sha256(resignedExecutable);
+      manifest.codeDirectoryHashes = signedCodeDirectoryHashes(resignedExecutable);
+      writeFileSync(
+        join(resigned, "agent-desktop-manifest.json"),
+        `${JSON.stringify(manifest, null, 2)}\n`,
+      );
+      verifyEngineArtifact(resigned, pin, target);
+      renameSync(output, `${output}.previous-${Date.now()}`);
+      renameSync(resigned, output);
+    }
+  }
+  console.error(`Reusing verified agent-desktop ${pin.sourceCommit} for ${target}`);
+  process.exit(0);
+} catch {
+  /* Missing, changed or differently signed artifacts are rebuilt. */
+}
+
+// A supplied immutable repository is read through git archive. Never patch it,
+// checkout another revision in it, or modify its ignored build/evidence files.
+const source = resolve(
+  process.env.AGENT_DESKTOP_SOURCE || join(root, ".tauri-helper", "agent-desktop-source"),
+);
+if (!existsSync(source)) {
+  mkdirSync(dirname(source), { recursive: true });
+  run("git", ["-c", "core.autocrlf=false", "clone", "--no-checkout", pin.source, source], root);
+}
+const sourceGitDir = run("git", ["rev-parse", "--absolute-git-dir"], source, true).trim();
+const commit = run("git", ["rev-parse", `${pin.sourceCommit}^{commit}`], source, true).trim();
+if (commit !== pin.sourceCommit) throw new Error("Engine source commit mismatch");
+const lock = run("git", ["show", `${commit}:Cargo.lock`], source, true);
+if (sha256(join(root, "src-tauri", "agent-desktop", "Cargo.lock")) !== pin.cargoLockSha256)
+  throw new Error("Vendored engine lock digest mismatch");
+// Build from a fresh archive with only this reviewed patch. Do not reuse a
+// writable checkout: a clean Git status does not authenticate ignored files.
+const buildSource = join(
+  root,
+  ".tauri-helper",
+  "agent-desktop-build",
+  `${commit}-${pin.patchSha256}`,
+);
+if (!process.env.AGENT_DESKTOP_BUILD_DIR && existsSync(buildSource)) {
+  throw new Error(
+    `Previous engine build checkout exists; preserve it and set AGENT_DESKTOP_BUILD_DIR to a fresh run-owned path: ${buildSource}`,
+  );
+}
+const actualSource = resolve(process.env.AGENT_DESKTOP_BUILD_DIR || buildSource);
+if (existsSync(actualSource))
+  throw new Error(`Refusing to overwrite engine build checkout: ${actualSource}`);
+mkdirSync(actualSource, { recursive: true });
+const archive = spawnSync("git", ["archive", "--format=tar", commit], {
+  cwd: source,
+  maxBuffer: 64 * 1024 * 1024,
+});
+if (archive.error || archive.status !== 0)
+  throw archive.error || new Error("Could not archive immutable engine source");
+const unpack = spawnSync("tar", ["-xf", "-", "-C", actualSource], {
+  input: archive.stdout,
+  stdio: ["pipe", "inherit", "inherit"],
+});
+if (unpack.error || unpack.status !== 0)
+  throw unpack.error || new Error("Could not unpack engine source");
+if (readFileSync(join(actualSource, "Cargo.lock"), "utf8") !== lock)
+  throw new Error("Archived lock differs from pinned source");
+if (
+  sha256(join(actualSource, "Cargo.lock")) !== pin.cargoLockSha256 ||
+  sha256(join(actualSource, "LICENSE")) !== pin.licenseSha256
+)
+  throw new Error("Pinned source lock/license digest mismatch");
+const appliedPatch = join(actualSource, ".clovy-audited.patch");
+writeFileSync(appliedPatch, patchBytes);
+run(
+  "git",
+  ["--git-dir", sourceGitDir, "--work-tree", actualSource, "apply", "--check", appliedPatch],
+  actualSource,
+);
+run(
+  "git",
+  ["--git-dir", sourceGitDir, "--work-tree", actualSource, "apply", appliedPatch],
+  actualSource,
+);
+
+const targetDir = resolve(
+  process.env.AGENT_DESKTOP_TARGET_DIR ||
+    process.env.CARGO_TARGET_DIR ||
+    join(root, "src-tauri", "target", "agent-desktop"),
+);
+for (const triple of buildTargets) {
   run(
     process.env.CARGO || "cargo",
-    ["build", "--locked", "--release", "--package", "agent-desktop", "--target", buildTarget],
-    source,
+    ["build", "--locked", "--release", "--package", "agent-desktop", "--target", triple],
+    actualSource,
     false,
-    { ...process.env, CARGO_TARGET_DIR: targetDir },
+    {
+      ...process.env,
+      CARGO_TARGET_DIR: targetDir,
+      CARGO_INCREMENTAL: "0",
+      CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP: "none",
+    },
   );
 }
 const executableName = target.includes("windows") ? "agent-desktop.exe" : "agent-desktop";
-mkdirSync(output, { recursive: true });
-const executable = join(output, executableName);
-if (buildTargets.length === 1) {
+mkdirSync(dirname(output), { recursive: true });
+const preparedOutput = mkdtempSync(join(dirname(output), `.${target}-`));
+const executable = join(preparedOutput, executableName);
+if (buildTargets.length === 1)
   copyFileSync(join(targetDir, target, "release", executableName), executable);
-} else {
+else
   run(
     "/usr/bin/lipo",
     [
@@ -94,28 +198,11 @@ if (buildTargets.length === 1) {
     ],
     root,
   );
-}
-if (target.includes("apple-darwin")) {
-  run(
-    "/usr/bin/codesign",
-    [
-      "--force",
-      "--sign",
-      process.env.APPLE_SIGNING_IDENTITY || process.env.CLOVY_DEV_SIGNING_IDENTITY || "-",
-      executable,
-    ],
-    root,
-  );
-  run("/usr/bin/codesign", ["--verify", "--strict", executable], root);
-} else if (target.includes("windows")) {
-  run(
-    "signtool",
-    ["sign", "/sha1", process.env.WINDOWS_CERTIFICATE_THUMBPRINT, "/fd", "sha256", executable],
-    root,
-  );
-  run("signtool", ["verify", "/pa", executable], root);
-}
-copyFileSync(join(source, "LICENSE"), join(output, "LICENSE"));
+chmodSync(executable, 0o755);
+signExecutable(executable);
+verifySignature(executable);
+copyFileSync(join(actualSource, "LICENSE"), join(preparedOutput, "LICENSE"));
+writeFileSync(join(preparedOutput, "source-review.md"), sourceReview);
 const manifest = {
   source: pin.source,
   sourceCommit: pin.sourceCommit,
@@ -124,21 +211,103 @@ const manifest = {
   target,
   buildTargets,
   executable: executableName,
-  executableSha256: hash(executable),
+  executableSha256: sha256(executable),
+  ...(target.includes("apple-darwin")
+    ? { codeDirectoryHashes: signedCodeDirectoryHashes(executable) }
+    : {}),
   cargoLockSha256: pin.cargoLockSha256,
   license: pin.license,
   licenseSha256: pin.licenseSha256,
+  patchSha256: pin.patchSha256,
+  sourceTree: run("git", ["rev-parse", `${commit}^{tree}`], source, true).trim(),
+  recentSourceReview: pin.recentSourceReview,
+  sourceReviewSha256: pin.sourceReviewSha256,
 };
-writeFileSync(join(output, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+writeFileSync(
+  join(preparedOutput, "agent-desktop-manifest.json"),
+  `${JSON.stringify(manifest, null, 2)}\n`,
+);
+verifyEngineArtifact(preparedOutput, pin, target);
+// Publish only a complete verified generation. Preserve any earlier output,
+// including failed historical staging, instead of overwriting evidence.
+if (existsSync(output)) renameSync(output, `${output}.previous-${Date.now()}`);
+renameSync(preparedOutput, output);
 console.error(
   `Prepared agent-desktop ${pin.sourceCommit} for ${target}: ${manifest.executableSha256}`,
 );
 
-function hash(path) {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
+function signedCodeDirectoryHashes(executable) {
+  const hashes = {};
+  for (const triple of buildTargets) {
+    const architecture = triple.startsWith("aarch64-") ? "arm64" : "x86_64";
+    const result = spawnSync(
+      "/usr/bin/codesign",
+      ["-d", "--verbose=4", "--arch", architecture, executable],
+      { encoding: "utf8", shell: false },
+    );
+    if (result.error || result.status !== 0)
+      throw result.error || new Error("Could not read signed engine CodeDirectory identity");
+    const hash = `${result.stdout || ""}\n${result.stderr || ""}`.match(
+      /^CDHash=([a-fA-F0-9]{40})$/m,
+    )?.[1];
+    if (!hash) throw new Error(`Signed engine has no ${architecture} CDHash`);
+    hashes[architecture] = hash.toLowerCase();
+  }
+  return hashes;
 }
-function verifyHash(path, expected) {
-  if (hash(path) !== expected) throw new Error(`Source hash mismatch: ${path}`);
+
+function signExecutable(executable) {
+  if (target.includes("apple-darwin")) {
+    run(
+      "/usr/bin/codesign",
+      [
+        "--force",
+        "--sign",
+        process.env.APPLE_SIGNING_IDENTITY || process.env.CLOVY_DEV_SIGNING_IDENTITY || "-",
+        "--options",
+        "runtime",
+        executable,
+      ],
+      root,
+    );
+  } else if (target.includes("windows")) {
+    run(
+      process.env.WINDOWS_SIGNTOOL_PATH || "signtool",
+      [
+        "sign",
+        "/sha1",
+        process.env.WINDOWS_CERTIFICATE_THUMBPRINT,
+        "/fd",
+        "sha256",
+        "/td",
+        "sha256",
+        "/tr",
+        process.env.WINDOWS_SIGNING_TIMESTAMP_URL || "http://timestamp.digicert.com",
+        executable,
+      ],
+      root,
+    );
+  }
+}
+function verifySignature(executable) {
+  if (target.includes("apple-darwin"))
+    run("/usr/bin/codesign", ["--verify", "--strict", executable], root);
+  else if (target.includes("windows")) {
+    run(process.env.WINDOWS_SIGNTOOL_PATH || "signtool", ["verify", "/pa", executable], root);
+    const thumbprint = run(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-Command",
+        "(Get-AuthenticodeSignature -LiteralPath $args[0]).SignerCertificate.Thumbprint",
+        executable,
+      ],
+      root,
+      true,
+    ).trim();
+    if (thumbprint.toUpperCase() !== process.env.WINDOWS_CERTIFICATE_THUMBPRINT.toUpperCase())
+      throw new Error("Cached engine signing publisher differs from current helper publisher");
+  }
 }
 function run(command, argv, cwd, capture = false, env = process.env) {
   const result = spawnSync(command, argv, {
@@ -164,4 +333,8 @@ function hostTriple() {
           ? "unknown-linux-gnu"
           : "unsupported";
   return `${arch}-${os}`;
+}
+
+function digest(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
 }

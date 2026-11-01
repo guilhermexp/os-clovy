@@ -46,8 +46,9 @@ fn main() {
 /// key: the `--config` overlays the Tauri CLI passes in `TAURI_CONFIG` (where
 /// `CLOVY_DEV_APP_IDENTIFIER` lands), then the platform file, then
 /// `tauri.conf.json`.
-fn export_app_identifier() {
+fn app_identifier_for_build() -> String {
     println!("cargo:rerun-if-env-changed=TAURI_CONFIG");
+    println!("cargo:rerun-if-env-changed=CLOVY_DEV_APP_IDENTIFIER");
     let manifest_dir = std::path::PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"),
     );
@@ -71,6 +72,12 @@ fn export_app_identifier() {
         .ok()
         .and_then(|overlay| identifier_in(&overlay))
         .or_else(|| {
+            (std::env::var("PROFILE").ok().as_deref() == Some("debug"))
+                .then(|| std::env::var("CLOVY_DEV_APP_IDENTIFIER").ok())
+                .flatten()
+                .filter(|value| !value.is_empty())
+        })
+        .or_else(|| {
             platform_config
                 .and_then(|name| std::fs::read_to_string(manifest_dir.join(name)).ok())
                 .and_then(|json| identifier_in(&json))
@@ -81,6 +88,17 @@ fn export_app_identifier() {
                 .and_then(|json| identifier_in(&json))
         })
         .expect("tauri.conf.json should declare an identifier");
+    assert!(
+        identifier
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-'),
+        "invalid compiled app identifier"
+    );
+    identifier
+}
+
+fn export_app_identifier() {
+    let identifier = app_identifier_for_build();
     println!("cargo:rustc-env=CLOVY_APP_IDENTIFIER={identifier}");
 }
 
@@ -198,67 +216,268 @@ fn ensure_local_transcriber_resource() {
     println!("cargo:rerun-if-changed={}", contents.display());
 }
 
-/// Keep the Tauri resource source present for ordinary `cargo test` and
-/// rust-analyzer runs. Packaging entry points run
-/// `scripts/prepare-cua-driver.mjs` first and replace this placeholder with the
-/// authenticated narrow helper built from the locked upstream source commit.
-/// A real bundle is re-signed here so its nested signature matches Clovy's
-/// build identity.
+/// Packaging prepares the real engine and helper before the desktop build.
+/// Helper bootstrap creates only the resource directory required by Tauri's
+/// compile-time resource glob; it never fabricates an executable or manifest.
 fn prepare_computer_use_driver() {
-    if std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() != Some("macos") {
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if os != "macos" && os != "windows" {
         return;
     }
-    let manifest_dir = std::path::PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"),
+    let manifest_dir =
+        std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
+    let root = manifest_dir.parent().expect("repository root");
+    let pin: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(manifest_dir.join("agent-desktop-pin.json")).expect("helper identity pin"),
+    )
+    .expect("helper identity pin JSON");
+    let helper_identifier = helper_bundle_identifier(
+        &manifest_dir,
+        pin["bundleIdentifier"]
+            .as_str()
+            .expect("helper bundle identifier"),
     );
-    println!(
-        "cargo:rerun-if-changed={}",
-        manifest_dir.join("cua-driver-pin.json").display()
-    );
-    for source in ["src/computer_use_driver.rs", "Cargo.toml", "Cargo.lock"] {
-        println!(
-            "cargo:rerun-if-changed={}",
-            manifest_dir.join(source).display()
+    println!("cargo:rerun-if-env-changed=CLOVY_COMPUTER_USE_HELPER_IDENTIFIER");
+    if let Ok(provided) = std::env::var("CLOVY_COMPUTER_USE_HELPER_IDENTIFIER") {
+        assert_eq!(
+            provided, helper_identifier,
+            "prepared and compiled helper identities differ"
         );
     }
-    let app_dir = manifest_dir
-        .parent()
-        .expect("src-tauri should have a repository parent")
-        .join(".tauri-helper")
-        .join("Clovy Computer Use Driver.app");
-    let executable = app_dir
-        .join("Contents")
-        .join("MacOS")
-        .join("clovy-computer-use-driver");
-    let stamp = app_dir
-        .join("Contents")
-        .join("Resources")
-        .join("clovy-cua-driver-pin.json");
-    println!("cargo:rerun-if-changed={}", executable.display());
-    println!("cargo:rerun-if-changed={}", stamp.display());
-    if !executable.exists() {
-        let placeholder = app_dir
-            .join("Contents")
-            .join("Resources")
-            .join("PLACEHOLDER.md");
-        if let Some(parent) = placeholder.parent() {
-            std::fs::create_dir_all(parent)
-                .expect("computer use driver placeholder directory should be created");
+    println!("cargo:rustc-env=CLOVY_COMPUTER_USE_HELPER_IDENTIFIER={helper_identifier}");
+    let resource = if os == "macos" {
+        root.join(".tauri-helper/Clovy Computer Use Driver.app")
+    } else {
+        root.join(".tauri-helper/computer-use")
+    };
+    println!("cargo:rerun-if-env-changed=CLOVY_PREPARING_COMPUTER_USE");
+    println!("cargo:rerun-if-env-changed=CLOVY_PREPARED_AGENT_DESKTOP_SHA256");
+    println!("cargo:rerun-if-env-changed=CLOVY_PREPARED_AGENT_DESKTOP_TARGET");
+    if std::env::var("CLOVY_PREPARING_COMPUTER_USE")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        std::fs::create_dir_all(&resource).expect("helper bootstrap resource directory");
+        let prepared_target = std::env::var("CLOVY_PREPARED_AGENT_DESKTOP_TARGET")
+            .unwrap_or_else(|_| std::env::var("TARGET").expect("Cargo target"));
+        let prepared = root
+            .join(".tauri-helper/agent-desktop")
+            .join(prepared_target);
+        let digest = verify_computer_use_engine(&manifest_dir, &prepared, &prepared, &os);
+        if let Ok(expected) = std::env::var("CLOVY_PREPARED_AGENT_DESKTOP_SHA256") {
+            assert_eq!(
+                digest, expected,
+                "prepared engine generation changed before helper compilation"
+            );
         }
-        std::fs::write(
-            placeholder,
-            "No cua-driver in this non-packaging build. Run pnpm computer-use:prepare on macOS.\n",
-        )
-        .expect("computer use driver placeholder should be written");
+        println!("cargo:rustc-env=CLOVY_AGENT_DESKTOP_EXECUTABLE_SHA256={digest}");
         return;
+    }
+    let (binary_dir, resource_dir) = if os == "macos" {
+        (
+            resource.join("Contents/MacOS"),
+            resource.join("Contents/Resources"),
+        )
+    } else {
+        (resource.clone(), resource.clone())
+    };
+    let executable = binary_dir.join(if os == "macos" {
+        "clovy-computer-use-driver"
+    } else {
+        "clovy-computer-use-driver.exe"
+    });
+    let stamp = resource_dir.join("clovy-computer-use-pin.json");
+    let engine_manifest = resource_dir.join("agent-desktop-manifest.json");
+    for path in [&executable, &stamp, &engine_manifest] {
+        println!("cargo:rerun-if-changed={}", path.display());
+        assert!(path.is_file(), "Computer use artifact missing: {}. Run pnpm computer-use:prepare before building Clovy", path.display());
     }
     verify_computer_use_driver_source(
         &manifest_dir,
-        &manifest_dir.join("cua-driver-pin.json"),
+        &manifest_dir.join("agent-desktop-pin.json"),
         &stamp,
         &executable,
     );
-    sign_computer_use_driver(&app_dir);
+    let engine_digest = verify_computer_use_engine(&manifest_dir, &binary_dir, &resource_dir, &os);
+    let helper_stamp: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&stamp).expect("helper stamp"))
+            .expect("helper stamp JSON");
+    assert_eq!(
+        helper_stamp
+            .pointer("/clovyBuild/engineSha256")
+            .and_then(serde_json::Value::as_str),
+        Some(engine_digest.as_str()),
+        "helper was compiled for another engine generation; prepare it again"
+    );
+    if os == "windows" {
+        println!("cargo:rustc-env=CLOVY_AGENT_DESKTOP_EXECUTABLE_SHA256={engine_digest}");
+    }
+    if os == "macos" {
+        sign_computer_use_driver(&resource);
+    }
+    if os == "macos" {
+        let architecture = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+            Ok("aarch64") => "arm64",
+            Ok("x86_64") => "x86_64",
+            _ => panic!("unsupported macOS helper architecture"),
+        };
+        let output = std::process::Command::new("/usr/bin/codesign")
+            .args(["-d", "--verbose=4", "--arch", architecture])
+            .arg(&resource)
+            .output()
+            .expect("read signed helper CodeDirectory identity");
+        assert!(
+            output.status.success(),
+            "could not read signed helper CDHash"
+        );
+        let details = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let cdhash = details
+            .lines()
+            .find_map(|line| line.strip_prefix("CDHash="))
+            .expect("signed helper CDHash");
+        assert!(
+            cdhash.len() == 40 && cdhash.bytes().all(|value| value.is_ascii_hexdigit()),
+            "invalid signed helper CDHash"
+        );
+        println!("cargo:rustc-env=CLOVY_COMPUTER_USE_HELPER_CDHASH={cdhash}");
+    }
+    // Bind the signed helper bytes, after any macOS identity reconciliation.
+    // The bootstrap cannot bind itself; the ordinary desktop build can.
+    use sha2::{Digest, Sha256};
+    let helper_digest = format!(
+        "{:x}",
+        Sha256::digest(std::fs::read(&executable).expect("signed helper bytes"))
+    );
+    println!("cargo:rustc-env=CLOVY_COMPUTER_USE_HELPER_SHA256={helper_digest}");
+}
+
+fn verify_computer_use_engine(
+    manifest_dir: &std::path::Path,
+    binary_dir: &std::path::Path,
+    resource_dir: &std::path::Path,
+    os: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let pin: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(manifest_dir.join("agent-desktop-pin.json")).expect("engine pin"),
+    )
+    .expect("engine pin JSON");
+    println!(
+        "cargo:rerun-if-changed={}",
+        resource_dir.join("agent-desktop-manifest.json").display()
+    );
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(resource_dir.join("agent-desktop-manifest.json")).expect("engine manifest"),
+    )
+    .expect("engine manifest JSON");
+    for key in [
+        "source",
+        "sourceCommit",
+        "version",
+        "protocolVersion",
+        "cargoLockSha256",
+        "license",
+        "licenseSha256",
+        "patchSha256",
+        "sourceReviewSha256",
+    ] {
+        assert_eq!(
+            manifest.get(key),
+            pin.get(key),
+            "engine manifest {key} differs from reviewed pin"
+        );
+        assert!(
+            manifest
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
+            "engine manifest {key} missing"
+        );
+    }
+    let executable = if os == "macos" {
+        "agent-desktop"
+    } else {
+        "agent-desktop.exe"
+    };
+    assert_eq!(
+        manifest["executable"].as_str(),
+        Some(executable),
+        "engine path must be adjacent to the helper"
+    );
+    let binary = binary_dir.join(executable);
+    println!("cargo:rerun-if-changed={}", binary.display());
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(std::fs::read(&binary).expect("bundled real engine"))
+    );
+    assert_eq!(
+        manifest["executableSha256"].as_str(),
+        Some(digest.as_str()),
+        "bundled engine digest mismatch"
+    );
+    for (name, field) in [
+        (
+            if os == "macos" && resource_dir.ends_with("Resources") {
+                "agent-desktop-LICENSE"
+            } else {
+                "LICENSE"
+            },
+            "licenseSha256",
+        ),
+        ("source-review.md", "sourceReviewSha256"),
+    ] {
+        let path = resource_dir.join(name);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let value = format!(
+            "{:x}",
+            Sha256::digest(std::fs::read(path).expect("engine attribution bytes"))
+        );
+        assert_eq!(
+            pin[field].as_str(),
+            Some(value.as_str()),
+            "engine {field} attribution mismatch"
+        );
+    }
+    if os == "macos" {
+        let architecture = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+            Ok("aarch64") => "arm64",
+            Ok("x86_64") => "x86_64",
+            _ => panic!("unsupported macOS engine architecture"),
+        };
+        let cdhash = manifest["codeDirectoryHashes"][architecture]
+            .as_str()
+            .expect("signed engine per-architecture CDHash");
+        assert!(
+            cdhash.len() == 40 && cdhash.bytes().all(|value| value.is_ascii_hexdigit()),
+            "invalid signed engine CDHash"
+        );
+        println!("cargo:rustc-env=CLOVY_AGENT_DESKTOP_CDHASH={cdhash}");
+    }
+    let expected_target = std::env::var("TARGET").expect("Cargo target");
+    let declared = manifest["target"].as_str().expect("engine target");
+    assert!(
+        declared == expected_target
+            || (declared == "universal-apple-darwin" && expected_target.ends_with("-apple-darwin")),
+        "engine target mismatch"
+    );
+    let lock_digest = format!(
+        "{:x}",
+        Sha256::digest(
+            std::fs::read(manifest_dir.join("agent-desktop/Cargo.lock"))
+                .expect("pinned engine lock")
+        )
+    );
+    assert_eq!(
+        pin["cargoLockSha256"].as_str(),
+        Some(lock_digest.as_str()),
+        "engine lock mismatch"
+    );
+    digest
 }
 
 fn verify_computer_use_driver_source(
@@ -309,19 +528,43 @@ fn verify_computer_use_driver_source(
         &std::fs::read(stamp_path).expect("computer use driver stamp should be readable"),
     )
     .expect("computer use driver stamp should be valid JSON");
+    let expected_profile = std::env::var("PROFILE").expect("Cargo build profile");
+    assert_eq!(
+        stamp
+            .pointer("/clovyBuild/profile")
+            .and_then(serde_json::Value::as_str),
+        Some(expected_profile.as_str()),
+        "computer use helper profile differs; prepare for this build profile first"
+    );
+    let expected_app_identifier = app_identifier_for_build();
+    assert_eq!(
+        stamp
+            .pointer("/clovyBuild/appIdentifier")
+            .and_then(serde_json::Value::as_str),
+        Some(expected_app_identifier.as_str()),
+        "computer use helper parent identity differs from this compiled app"
+    );
     let mut source_hash = Sha256::new();
-    for (relative, source) in [
-        (
-            "src-tauri/src/computer_use_driver.rs",
-            manifest_dir.join("src/computer_use_driver.rs"),
-        ),
-        ("src-tauri/Cargo.toml", manifest_dir.join("Cargo.toml")),
-        ("src-tauri/Cargo.lock", manifest_dir.join("Cargo.lock")),
-    ] {
+    let inputs: Vec<String> = serde_json::from_slice(
+        &std::fs::read(manifest_dir.join("computer-use-build-inputs.json"))
+            .expect("helper build inputs"),
+    )
+    .expect("helper build inputs JSON");
+    for relative in inputs {
+        println!(
+            "cargo:rerun-if-changed={}",
+            manifest_dir
+                .parent()
+                .expect("root")
+                .join(&relative)
+                .display()
+        );
         source_hash.update(relative.as_bytes());
         source_hash.update(b"\0");
-        source_hash
-            .update(std::fs::read(source).expect("computer use helper source should be readable"));
+        source_hash.update(
+            std::fs::read(manifest_dir.parent().expect("root").join(&relative))
+                .expect("helper source"),
+        );
         source_hash.update(b"\0");
     }
     let expected_source_hash = format!("{:x}", source_hash.finalize());
@@ -340,7 +583,7 @@ fn sign_computer_use_driver(app_dir: &std::path::Path) {
         return;
     }
     let mut command = std::process::Command::new("codesign");
-    command.arg("--force").arg("--deep");
+    command.arg("--force");
     signing.add_signing_args(&mut command);
     let status = command.arg(app_dir).status();
     if !matches!(status, Ok(status) if status.success()) {

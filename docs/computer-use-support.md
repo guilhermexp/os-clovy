@@ -1,7 +1,25 @@
 # Computer use support runbook
 
+Computer use now packages the pinned agent-desktop engine behind the authenticated
+Clovy helper on macOS and Windows. The source commit, protocol, target, reviewed
+patch and actual signed executable digest are in the bundled
+`agent-desktop-manifest.json`; upstream version 1.0.2 alone does not identify
+this post-tag source. Source qualification and Apache-2.0 licensing are shipped
+with the engine. The app never downloads a control engine at runtime.
+
+Signed native acceptance remains pending for this cutover. The previous
+macOS driver evidence does not establish agent-desktop behavior. Follow
+[the native acceptance matrix](qa/computer-use-parity.md) with a fresh synthetic
+profile and run-owned app identity before accepting a candidate.
+
+Background semantic delivery is the default. An operation that cannot run in
+background may use visible mode, as authorized by the owner; Clovy reports the
+effective mode and still validates the exact window. A delivered or uncertain
+action is not replayed in another mode. Visible mode grants no administrator,
+UAC, TCC, login, password or OTP authority.
+
 Computer use has independent local gates: Clovy's stored grant, the pinned
-signed helper, macOS access for it, and a visible attended CLI turn
+signed helper and engine, native access in an interactive session, and a visible attended CLI turn
 ([ADR-0067](adr/0067-computer-use-depends-only-on-local-gates.md): no plan,
 Clovy vision model or remote rollout). Do not treat one as proof that the
 others are enabled.
@@ -13,15 +31,15 @@ Names and identifiers below follow
 
 | State | Meaning | Action |
 | --- | --- | --- |
-| `unsupported` | This is not macOS. | Computer use is not shipped on Windows. |
-| `off` | The Clovy grant is off. The helper may still have macOS grants. | Enable from Plugins after reading the permission explanation. |
+| `unsupported` | This platform is neither macOS nor Windows. | Use a supported native platform; the Linux engine smoke does not add Linux desktop support. |
+| `off` | The Clovy grant is off. Native permissions may remain enabled. | Enable from Plugins after reading the permission explanation. |
 | `driver_missing` | The signed app does not contain the pinned helper/stamp. | Reinstall or update Clovy. Do not run an upstream installer. |
-| `driver_mismatch` | The helper version does not match the repo pin. | Stop rollout and inspect the build provenance/SBOM. |
-| `permission_missing` | Accessibility, Screen Recording, or the live capture probe is absent. | Use Continue to macOS access, then the separate Open settings links. |
+| `driver_mismatch` | A helper, engine, source/patch/protocol, signature or compiled digest does not match the prepared build. | Hold the candidate and inspect its manifest and signed executable bytes. |
+| `permission_missing` | A required native permission or readiness probe is unavailable. | On macOS, inspect the separate privacy grants; on Windows, use an unlocked, non-elevated interactive session. |
 | `ready` | Every local gate is satisfied. | Start an attended task on an agent CLI with Clovy's MCP server. |
 | `error` | The helper could not start, handshake, or probe. | Stop the task, inspect logs and signature, then run the self-test. |
 
-## User recovery
+## macOS recovery
 
 1. Press Stop current task before changing permissions or reinstalling.
 2. Confirm the intended helper exists in the installed app at
@@ -103,12 +121,18 @@ cargo build --manifest-path src-tauri/Cargo.toml --bin clovy --locked
 pnpm computer-use:self-test
 ```
 
+Preparation builds the engine from the pinned source lock plus its reviewed
+patch, then builds and signs the helper. Ordinary macOS and Windows native
+Cargo builds and tests require this preparation first. The helper-only
+bootstrap flag is internal to that build; it never creates a placeholder
+executable.
+
 The gate checks the exact upstream commit, Clovy helper source fingerprint,
-bundle metadata, declared architecture slices, signature, SPDX SBOM, MIT
+bundle metadata, declared architecture slices, signature, SPDX source record, Apache-2.0
 notice, direct-launch rejection, authenticated Clovy-parent handshake, narrow
 driver schemas, and Clovy MCP schema. A schema failure means the pin cannot be
 upgraded without reviewing `computer_use.rs`, `computer_use_driver.rs`, and
-`cua-driver-contract.json` together.
+`computer-use-contract.json` together.
 
 After a signed universal app build, run the actual nested helper gate:
 
@@ -117,7 +141,12 @@ After a signed universal app build, run the actual nested helper gate:
 ```
 
 Live mode requires an interactive login plus Accessibility and Screen Recording
-for the stable Developer ID helper. On a new desktop release runner, use the
+for the stable Developer ID helper. Set explicit `APPLE_SIGNING_IDENTITY` or
+`CLOVY_DEV_SIGNING_IDENTITY` for the fixture; absent or ad hoc identities are
+refused. The fixture must carry its exact signed fixture identifier and the
+same non-ad-hoc Apple Team as the host. Renaming another app or changing its
+Info.plist cannot satisfy that check. An ad hoc release supports static checks
+only and an explicit live request fails clearly. On a new desktop release runner, use the
 same command with `--prompt-permissions` passed directly to
 `computer-use-self-test.mjs`, approve the two macOS dialogs, then rerun without
 prompting. macOS does not provide a supported command that fabricates these
@@ -150,3 +179,44 @@ release runner or diagnosing a signed-build regression.
 Computer use depends on local readiness and approval (ADR-0067). The retired
 server rollout route is gone; there is no server override or deployment step.
 Release decisions use the native proof and rollback criteria above.
+
+## Windows preparation and proof
+
+Set `WINDOWS_CERTIFICATE_THUMBPRINT` to a usable current-user signing
+certificate, and put `signtool.exe` on PATH (or set `WINDOWS_SIGNTOOL_PATH`).
+The helper, engine and Clovy host must all have valid Authenticode signatures
+from that publisher. The helper also embeds the prepared engine digest at
+compile time, and Clovy embeds the staged helper digest, so editing an adjacent
+manifest cannot substitute an older signed executable. `scripts/build-windows.ps1` prepares and signs the nested
+artifacts before Tauri signs the host and installer. It fails clearly when the
+certificate is unavailable. An updater minisign key is a separate contract.
+
+The staged `.tauri-helper/computer-use` directory is bundled at
+`native/bin/computer-use`; it contains the helper executable, engine,
+`agent-desktop-manifest.json`, the helper source stamp, Apache-2.0 notice and
+source SPDX record. Native peer verification also binds the helper to the
+expected parent process image and creation identity. Readiness requires an
+unlocked, ordinary interactive desktop and a non-elevated process. There are
+no macOS privacy buttons or UAC elevation path on Windows.
+
+Run the deterministic self-test with the exact signed host and helper resource
+directory:
+
+```powershell
+node scripts/computer-use-self-test.mjs --bundle <computer-use-resource-directory> --host <signed-clovy.exe>
+node scripts/computer-use-self-test.mjs --live --bundle <computer-use-resource-directory> --host <signed-clovy.exe>
+```
+
+The live mode compiles the checked-in WinForms fixture through the installed
+.NET Framework C# compiler, signs it with the same certificate, and stages it
+at the fixed QA-only `native/fixtures/clovy-computer-use-fixture.exe` beside
+the specified host. It does not ship that fixture in the production package.
+The host also verifies the fixture's signed product/title markers, so renaming
+another signed executable to the fixture filename is refused.
+Use a fresh run-owned build directory: the test refuses to overwrite a prior
+fixture. It proves two synthetic windows, an exact-window capture and a
+semantic click without moving the pointer or foreground app. It preserves
+its synthetic state directory as evidence. Text insertion, physical input,
+mixed DPI, locked/secure desktops, identity reuse, Stop and Job Object teardown
+still require the broader native acceptance matrix. These tests have not run
+on the Linux implementation box.

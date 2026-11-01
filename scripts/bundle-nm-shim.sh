@@ -5,7 +5,7 @@
 # way the Swift helpers are signed (Developer ID when APPLE_SIGNING_IDENTITY
 # is set, ad-hoc otherwise). Runs after cargo build and before bundling.
 #
-# Target resolution mirrors scripts/prepare-cua-driver.mjs: the release
+# Target resolution mirrors scripts/prepare-computer-use.mjs: the release
 # pipeline builds --target universal-apple-darwin, a pseudo-triple cargo
 # never populates with [[bin]] outputs - tauri lipo's only the main binary
 # into it. The shim must therefore be lipo'd here from the two real-triple

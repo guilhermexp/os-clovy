@@ -8,19 +8,28 @@ installer and its `.sig`. You can also build the installer locally with
 `scripts/build-windows.ps1` (prerequisites in `AGENTS.md`) and validate it
 with the checks below.
 
-The installer has no Authenticode signature, so SmartScreen warns on the first
-run ("More info", then "Run anyway"). Updates are verified by the updater's own
-minisign signature, not by Authenticode:
+Computer use now requires signed native artifacts. Set
+`WINDOWS_CERTIFICATE_THUMBPRINT` to an available current-user signing
+certificate and provide `signtool.exe` on PATH (or `WINDOWS_SIGNTOOL_PATH`).
+The builder signs the bundled agent-desktop engine and authenticated helper
+before Tauri signs Clovy and the installer. Payload verification requires a
+valid matching publisher on the host, Computer use helper and engine, plus
+matching engine manifest, source, protocol, patch, target, binary and license
+hashes. Missing signing credentials fail the build; unsigned executables cannot
+satisfy the private helper's peer contract.
 
-- With `TAURI_SIGNING_PRIVATE_KEY` (and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`)
-  set, `build-windows.ps1` adds `src-tauri/tauri.release.conf.json`, and the
-  output directory holds `Clovy_<version>_x64-setup.exe` and
-  `Clovy_<version>_x64-setup.exe.sig`. `verify-windows-artifacts.ps1` then
-  requires that `.sig` (a minisign signature) next to the installer.
-- Without the key the build is the same unsigned installer with no `.sig`, and
-  the verifier does not look for one.
-
-Either way the verifier still requires `NotSigned` from Authenticode.
+Updater minisign signing remains separate: with `TAURI_SIGNING_PRIVATE_KEY`
+(and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) the installer also has a `.sig`.
+Without that key the Authenticode-signed installer has no updater `.sig`.
+The hosted Windows release workflow imports the owner-provided
+`WINDOWS_CERTIFICATE` (base64 PFX) with `WINDOWS_CERTIFICATE_PASSWORD` into
+its disposable current-user certificate store and exports the resulting
+thumbprint. The import script refuses local or self-hosted execution using
+[GitHub's runner environment marker](https://docs.github.com/en/actions/reference/workflows-and-actions/variables). Those
+real owner secrets must be configured before the workflow can produce this
+candidate; no certificate was imported on the implementation box. This native build and its
+interactive Computer use acceptance have not run on the Linux implementation
+box; see [computer-use-support.md](computer-use-support.md).
 
 The installer installs `clovy.exe` under `$env:LOCALAPPDATA\Clovy` with the owner
 as publisher, per
@@ -43,7 +52,7 @@ relay for Clovy tools, not a model-and-tool loop. CLI execution policy and
 Clovy's local approval broker govern each turn; see
 [llm-providers.md](llm-providers.md#cli-chat-engine).
 
-## Qualifying an unsigned build on native Windows
+## Qualifying a signed build on native Windows
 
 Before merging Windows build changes, run the tracked qualification helper in
 PowerShell 7 on a native x64 Windows machine. Pass the standalone repository,
@@ -62,8 +71,8 @@ $expectedSha = "<exact-40-character-commit-sha>"
 
 The helper fetches `origin`, synchronizes the named GitButler branch to its
 remote state, and fails unless both resolve to the expected SHA.
-It then runs two complete unsigned builders and an additional explicit artifact
-verification after each build. It does not install dependencies, sign or upload
+It then runs two complete signed builders and an additional explicit artifact
+verification after each build. It does not install dependencies or upload
 artifacts, push branches, or discard source changes.
 
 The default evidence directory is
@@ -87,6 +96,6 @@ The installed app is branded as Clovy, but the current Windows binary on disk is
 
 Confirm the app launches as Clovy and an installed CLI starts with its own login, and Windows dictation can record from the microphone and
 paste into a normal app. Record from the microphone and generate a note against
-the configured Groq key and selected Notes engine. `Get-AuthenticodeSignature` reports `Valid` only for a
-build signed with your own Authenticode certificate; an unsigned build reports
-`NotSigned`.
+the configured Groq key and selected Notes engine. `Get-AuthenticodeSignature` must report `Valid` for this candidate; the
+Computer use peer contract also requires the helper and engine to match the
+host signing publisher. Record the signed native acceptance matrix separately.
