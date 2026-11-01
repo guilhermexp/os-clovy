@@ -726,7 +726,47 @@ pub fn permission_result() -> Value {
     let accessible = ready.is_ok();
     json!({"content":[{"type":"text","text":match ready {Ok(())=>"The standard interactive Windows desktop is ready.".to_owned(),Err(error)=>error.to_string()}}],"structuredContent":{"accessibility":accessible,"screen_recording":accessible,"screen_recording_capturable":accessible,"interactive_desktop":accessible,"platform":"windows","code":if accessible{Value::Null}else{json!("computer_use_desktop_unavailable")},"disposition":{"delivery":"not_delivered","retry":"safe"},"source":{"attribution":"driver-process","pid":std::process::id(),"executable":std::env::current_exe().ok().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default()}},"isError":!accessible})
 }
-pub fn focus_window_result(args: &Value) -> Value {
+#[derive(Debug)]
+struct PrivateBrowserFocusDenied;
+
+impl std::fmt::Display for PrivateBrowserFocusDenied {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "This window cannot be controlled here. Use Browser use or take over manually.",
+        )
+    }
+}
+
+impl std::error::Error for PrivateBrowserFocusDenied {}
+
+fn qualify_focus_target(
+    runtime: &crate::computer_use_owned_runtime::OwnedBrowserRuntime,
+    process: HANDLE,
+    expected: &str,
+    previous: Option<&ProcessIdentity>,
+) -> Result<ProcessIdentity> {
+    let identity = process_identity_from_handle(process).map_err(|_| PrivateBrowserFocusDenied)?;
+    let ticks = identity.creation_time;
+    if expected
+        != format!(
+            "windows-proc-v1:{}:{}",
+            ticks / 10_000_000,
+            ticks % 10_000_000
+        )
+        || previous.is_some_and(|previous| previous != &identity)
+    {
+        bail!("The authorized process generation changed");
+    }
+    match runtime.owns(&identity.path) {
+        Ok(false) => Ok(identity),
+        Ok(true) | Err(_) => Err(PrivateBrowserFocusDenied.into()),
+    }
+}
+
+pub fn focus_window_result(
+    args: &Value,
+    runtime: &crate::computer_use_owned_runtime::OwnedBrowserRuntime,
+) -> Value {
     let mut dispatched = false;
     let result = (|| -> Result<(u32, u64, bool, bool)> {
         require_desktop()?;
@@ -750,23 +790,6 @@ pub fn focus_window_result(args: &Value) -> Value {
             .context("Missing expected process generation")?;
         let process =
             unsafe { Handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)?) };
-        let mut created = FILETIME::default();
-        let mut exited = FILETIME::default();
-        let mut kernel = FILETIME::default();
-        let mut user = FILETIME::default();
-        unsafe {
-            GetProcessTimes(process.0, &mut created, &mut exited, &mut kernel, &mut user)?;
-        }
-        let ticks = ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
-        if expected
-            != format!(
-                "windows-proc-v1:{}:{}",
-                ticks / 10_000_000,
-                ticks % 10_000_000
-            )
-        {
-            bail!("The authorized process generation changed");
-        }
         unsafe {
             GetWindowThreadProcessId(hwnd, Some(&mut actual));
         }
@@ -779,6 +802,7 @@ pub fn focus_window_result(args: &Value) -> Value {
         if crate::computer_use_cancel::current_run_cancelled() {
             bail!("Computer use was stopped before window restoration");
         }
+        let identity = qualify_focus_target(runtime, process.0, expected, None)?;
         let restored = unsafe { IsIconic(hwnd) }.as_bool()
             && unsafe { ShowWindowAsync(hwnd, SW_RESTORE) }.as_bool();
         dispatched |= restored;
@@ -794,6 +818,7 @@ pub fn focus_window_result(args: &Value) -> Value {
         if crate::computer_use_cancel::current_run_cancelled() {
             bail!("Computer use was stopped before focusing the window");
         }
+        qualify_focus_target(runtime, process.0, expected, Some(&identity))?;
         let focused = unsafe { SetForegroundWindow(hwnd) }.as_bool();
         dispatched |= focused;
         Ok((pid, id, focused, restored))
@@ -803,7 +828,7 @@ pub fn focus_window_result(args: &Value) -> Value {
             json!({"content":[{"type":"text","text":if raised{"Focused the authorized window."}else{"Windows refused to focus the authorized window."}}],"structuredContent":{"pid":pid,"window_id":window_id,"raised":raised,"restored":restored,"disposition":{"delivery":if dispatched{"delivered_unverified"}else{"not_delivered"},"retry":if dispatched{"unsafe"}else{"safe"}}},"isError":!raised})
         }
         Err(error) => {
-            json!({"content":[{"type":"text","text":error.to_string()}],"structuredContent":{"raised":false,"code":if desktop_unavailable(&error){json!("computer_use_desktop_unavailable")}else if error.downcast_ref::<TargetIntegrityDenied>().is_some(){json!("computer_use_target_blocked")}else{Value::Null},"disposition":{"delivery":if dispatched{"delivered_unverified"}else{"not_delivered"},"retry":if dispatched{"unsafe"}else{"safe"}}},"isError":true})
+            json!({"content":[{"type":"text","text":error.to_string()}],"structuredContent":{"raised":false,"code":if desktop_unavailable(&error){json!("computer_use_desktop_unavailable")}else if error.downcast_ref::<TargetIntegrityDenied>().is_some() || error.downcast_ref::<PrivateBrowserFocusDenied>().is_some(){json!("computer_use_target_blocked")}else{Value::Null},"disposition":{"delivery":if dispatched{"delivered_unverified"}else{"not_delivered"},"retry":if dispatched{"unsafe"}else{"safe"}}},"isError":true})
         }
     }
 }

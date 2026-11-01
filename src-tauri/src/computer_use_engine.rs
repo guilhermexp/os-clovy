@@ -247,7 +247,10 @@ impl EngineAdapter {
                 {
                     let mut scoped = args.clone();
                     scoped["expected_process_instance"] = window.raw["process_instance"].clone();
-                    let mut result = crate::computer_use_windows::focus_window_result(&scoped);
+                    let mut result = crate::computer_use_windows::focus_window_result(
+                        &scoped,
+                        self.host.browser_runtime(),
+                    );
                     if let Some(data) = result.get_mut("structuredContent") {
                         data["effective_modality"] = json!("visible");
                     }
