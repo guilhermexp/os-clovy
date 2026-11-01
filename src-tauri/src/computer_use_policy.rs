@@ -28,23 +28,23 @@ impl OwnedBrowserRuntime {
         let namespace = std::fs::canonicalize(&self.namespace)?;
         let image = std::fs::canonicalize(&self.image)?;
         let candidate = std::fs::canonicalize(candidate)?;
-        if !std::fs::metadata(&namespace)?.is_dir()
-            || !std::fs::metadata(&image)?.is_file()
-            || !std::fs::metadata(&candidate)?.is_file()
-        {
+        let namespace_info = file_info(&namespace)?;
+        let image_info = file_info(&image)?;
+        let candidate_info = file_info(&candidate)?;
+        if !namespace_info.is_dir || !image_info.is_file || !candidate_info.is_file {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Invalid runtime identity",
             ));
         }
-        let namespace_id = file_identity(&namespace)?;
+        let namespace_id = namespace_info.identity;
         if !has_ancestor_identity(&image, namespace_id)? {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Image outside runtime namespace",
             ));
         }
-        Ok(file_identity(&candidate)? == file_identity(&image)?
+        Ok(candidate_info.identity == image_info.identity
             || has_ancestor_identity(&candidate, namespace_id)?)
     }
 }
@@ -54,7 +54,7 @@ fn has_ancestor_identity(path: &Path, identity: FileIdentity) -> io::Result<bool
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing parent"))?;
     for directory in parent.ancestors() {
-        if file_identity(directory)? == identity {
+        if file_info(directory)?.identity == identity {
             return Ok(true);
         }
     }
@@ -64,21 +64,32 @@ fn has_ancestor_identity(path: &Path, identity: FileIdentity) -> io::Result<bool
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FileIdentity(u64, u64);
 
+struct FileInfo {
+    identity: FileIdentity,
+    is_file: bool,
+    is_dir: bool,
+}
+
 #[cfg(unix)]
-fn file_identity(path: &Path) -> io::Result<FileIdentity> {
+fn file_info(path: &Path) -> io::Result<FileInfo> {
     use std::os::unix::fs::MetadataExt;
     let metadata = std::fs::metadata(path)?;
-    Ok(FileIdentity(metadata.dev(), metadata.ino()))
+    Ok(FileInfo {
+        identity: FileIdentity(metadata.dev(), metadata.ino()),
+        is_file: metadata.is_file(),
+        is_dir: metadata.is_dir(),
+    })
 }
 
 #[cfg(windows)]
-fn file_identity(path: &Path) -> io::Result<FileIdentity> {
+fn file_info(path: &Path) -> io::Result<FileInfo> {
     use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
     use windows::Win32::{
         Foundation::HANDLE,
         Storage::FileSystem::{
-            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
-            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DEVICE,
+            FILE_ATTRIBUTE_DIRECTORY, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
         },
     };
 
@@ -90,10 +101,16 @@ fn file_identity(path: &Path) -> io::Result<FileIdentity> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }
         .map_err(io::Error::other)?;
-    Ok(FileIdentity(
-        info.dwVolumeSerialNumber as u64,
-        ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
-    ))
+    let is_dir = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
+    let is_device = info.dwFileAttributes & FILE_ATTRIBUTE_DEVICE.0 != 0;
+    Ok(FileInfo {
+        identity: FileIdentity(
+            info.dwVolumeSerialNumber as u64,
+            ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+        ),
+        is_file: !is_dir && !is_device,
+        is_dir,
+    })
 }
 
 pub(crate) fn blocked_app(app: &str) -> bool {
