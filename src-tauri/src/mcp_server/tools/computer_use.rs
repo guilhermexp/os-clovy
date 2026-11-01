@@ -43,7 +43,7 @@ pub(crate) trait ComputerUseHost: Send + Sync {
     fn begin_turn(&self, binding: &TurnBinding) -> Result<(), AppError>;
 
     /// Runs the approved action. Returns the broker's MCP-shaped result.
-    fn execute(&self, arguments: Value) -> BoxFuture<'_, Value>;
+    fn execute(&self, run_id: String, arguments: Value) -> BoxFuture<'_, Value>;
 }
 
 /// The app's Computer use broker.
@@ -56,9 +56,9 @@ impl ComputerUseHost for AppHost<'_> {
         crate::computer_use::begin_turn_lease(self.app, binding)
     }
 
-    fn execute(&self, arguments: Value) -> BoxFuture<'_, Value> {
+    fn execute(&self, run_id: String, arguments: Value) -> BoxFuture<'_, Value> {
         Box::pin(crate::computer_use::handle_cli_action_for_call(
-            self.app, arguments,
+            self.app, run_id, arguments,
         ))
     }
 }
@@ -107,7 +107,9 @@ impl ComputerUseTools {
             )
             .await;
         decision.map_err(|denial| AppError::new(denial.code(), denial.message()))?;
-        let result = host.execute(arguments.clone()).await;
+        let result = host
+            .execute(binding.run_id.clone(), arguments.clone())
+            .await;
         if is_error(&result) {
             return Err(AppError::new("computer_use_failed", error_text(&result)));
         }

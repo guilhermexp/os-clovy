@@ -43,7 +43,7 @@ impl ComputerUseHost for FakeHost {
         Ok(())
     }
 
-    fn execute(&self, arguments: Value) -> BoxFuture<'_, Value> {
+    fn execute(&self, _run_id: String, arguments: Value) -> BoxFuture<'_, Value> {
         Box::pin(async move {
             self.executed.lock().unwrap().push(arguments);
             self.driver_result

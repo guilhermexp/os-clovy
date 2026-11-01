@@ -89,6 +89,10 @@ pub struct ComputerUseState {
     signature_verification: AsyncMutex<Option<CachedBundleSignature>>,
     driver_pid: AtomicU32,
     target: Mutex<Option<TargetContext>>,
+    /// Owner of the transient target and authorizations while an operation is
+    /// running. Access is serialized by `operation`; the lease remains the
+    /// authority and is rechecked after each asynchronous boundary.
+    active_turn: Mutex<Option<String>>,
     approvals: Mutex<HashMap<String, PendingEntry>>,
     authorized_apps: Mutex<HashSet<AppAuthorizationKey>>,
     attended_runs: Mutex<HashSet<String>>,
@@ -2207,7 +2211,20 @@ pub(crate) fn end_turn_lease_in(
 ) -> Result<Option<u64>, AppError> {
     let mut leases = turn_leases(state)?;
     leases.insert(run_id.to_string(), TurnLease::Ended);
+    let mut owner = state
+        .active_turn
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "Turn owner lock failed."))?;
     let ended = end_run_lease(state, &turn_lease_key(run_id));
+    if owner.as_deref() == Some(run_id) {
+        // Termination must not wait behind a driver call holding its mutex.
+        // Invalidate its epoch and kill the owned process before allowing a
+        // different turn to select its own target.
+        state.epoch.fetch_add(1, Ordering::SeqCst);
+        force_stop_pid(state.driver_pid.swap(0, Ordering::SeqCst));
+        *owner = None;
+    }
+    drop(owner);
     drop(leases);
     ended
 }
@@ -2272,7 +2289,10 @@ fn is_terminal_event_of(payload: &str, run_id: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) fn has_attended_run(state: &ComputerUseState) -> bool {
-    ensure_attended_run(state).is_ok()
+    state
+        .attended_runs
+        .lock()
+        .is_ok_and(|runs| !runs.is_empty())
 }
 
 /// Stop for tests without an app: clears every lease, as [`stop_inner`].
@@ -2474,9 +2494,13 @@ fn emit_approvals_changed(app: &AppHandle, state: &ComputerUseState) {
 
 /// Runs a CLI turn's Computer use action through the broker and the per-app
 /// authorization. CLI turns are the only callers (ADR-0067).
-pub(crate) async fn handle_cli_action_for_call(app: &AppHandle, arguments: Value) -> Value {
+pub(crate) async fn handle_cli_action_for_call(
+    app: &AppHandle,
+    run_id: String,
+    arguments: Value,
+) -> Value {
     let state = app.state::<ComputerUseState>();
-    match handle_action(app, &state, arguments).await {
+    match handle_action(app, &state, &run_id, arguments).await {
         Ok(result) => result,
         Err(error) => mcp_error(&error.message),
     }
@@ -2517,10 +2541,13 @@ pub(crate) fn normalized_action(arguments: &Value) -> Result<String, AppError> {
 async fn handle_action(
     app: &AppHandle,
     state: &ComputerUseState,
+    run_id: &str,
     arguments: Value,
 ) -> Result<Value, AppError> {
     let _operation = state.operation.lock().await;
     let epoch = state.epoch.load(Ordering::SeqCst);
+    select_turn_owner(state, run_id)?;
+    ensure_epoch_current(state, Some(epoch))?;
     ensure_attended_run(state)?;
     let task_generation = state.attended_generation.load(Ordering::SeqCst);
     ensure_action_eligible(app).await?;
@@ -2557,11 +2584,18 @@ async fn handle_action(
 }
 
 fn ensure_attended_run(state: &ComputerUseState) -> Result<(), AppError> {
-    let attended = !state
+    let owner = state
+        .active_turn
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "Turn owner lock failed."))?
+        .clone();
+    let runs = state
         .attended_runs
         .lock()
-        .map_err(|_| AppError::new("computer_use_unavailable", "Run lease lock failed."))?
-        .is_empty();
+        .map_err(|_| AppError::new("computer_use_unavailable", "Run lease lock failed."))?;
+    let attended = owner
+        .as_ref()
+        .is_some_and(|owner| runs.contains(&turn_lease_key(owner)));
     if attended {
         Ok(())
     } else {
@@ -2570,6 +2604,37 @@ fn ensure_attended_run(state: &ComputerUseState) -> Result<(), AppError> {
             "Computer use is available only during a turn started from Clovy chat.",
         ))
     }
+}
+
+// The old broker stores a single active target and app authorization set.
+// Never carry either across CLI turns. An interleaved turn must capture again.
+fn select_turn_owner(state: &ComputerUseState, run_id: &str) -> Result<(), AppError> {
+    let mut owner = state
+        .active_turn
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "Turn owner lock failed."))?;
+    let runs = state
+        .attended_runs
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "Run lease lock failed."))?;
+    if !runs.contains(&turn_lease_key(run_id)) {
+        return Err(attended_run_required());
+    }
+    if owner.as_deref() != Some(run_id) {
+        let mut target = state
+            .target
+            .lock()
+            .map_err(|_| AppError::new("computer_use_unavailable", "Target lock failed."))?;
+        let mut apps = state.authorized_apps.lock().map_err(|_| {
+            AppError::new("computer_use_unavailable", "App authorization lock failed.")
+        })?;
+        if let Some(path) = target.take().and_then(|target| target.capture_path) {
+            remove_capture(Some(&path));
+        }
+        apps.clear();
+        *owner = Some(run_id.to_owned());
+    }
+    Ok(())
 }
 
 fn ensure_task_generation_current(
@@ -4955,6 +5020,48 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn interleaved_turns_cannot_inherit_the_other_turns_target_or_authorization() {
+        let state = ComputerUseState::default();
+        begin_run_lease(&state, turn_lease_key("a")).unwrap();
+        begin_run_lease(&state, turn_lease_key("b")).unwrap();
+        select_turn_owner(&state, "a").unwrap();
+        state
+            .authorized_apps
+            .lock()
+            .unwrap()
+            .insert(AppAuthorizationKey::RequestedName("Fixture".into()));
+        *state.target.lock().unwrap() = Some(TargetContext {
+            pid: 1,
+            window_id: 2,
+            app_name: "Fixture".into(),
+            identity: AppIdentity {
+                bundle_id: "org.example.fixture".into(),
+                executable_path: PathBuf::from("/fixture"),
+            },
+            elements: HashMap::new(),
+            capture_path: None,
+            capture_sha256: None,
+            capture_generation: 1,
+            bounds: crate::computer_use_cursor::ScreenRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+        });
+        select_turn_owner(&state, "b").unwrap();
+        assert!(state.target.lock().unwrap().is_none());
+        assert!(state.authorized_apps.lock().unwrap().is_empty());
+        let epoch = state.current_epoch();
+        end_turn_lease_in(&state, "b").unwrap();
+        assert!(state.current_epoch() > epoch);
+        assert!(ensure_attended_run(&state).is_err());
+        assert!(select_turn_owner(&state, "b").is_err());
+        select_turn_owner(&state, "a").unwrap();
+        assert!(ensure_attended_run(&state).is_ok());
+    }
+
+    #[test]
     fn follow_up_capture_keeps_the_action_receipt_even_when_capture_fails() {
         let action = mcp_text(json!({ "action_id": "one", "result": "dispatched" }));
         let failed = combine_action_and_capture(
@@ -5288,7 +5395,7 @@ mod tests {
                 .contains("run-b"),
             "a duplicate predecessor release must not remove the successor"
         );
-        assert!(ensure_attended_run(&state).is_ok());
+        assert!(has_attended_run(&state));
     }
 
     #[test]
