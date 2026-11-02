@@ -156,9 +156,12 @@ The private adapter accepts a closed set of tool names and constructs engine
 arguments itself: the standalone shell and notification CLI commands are not
 exposed through that route. An incomplete ancestor read reports stale unless
 the actual deadline has expired. Keyboard focus preparation retains the
-element authority through the focus read. Exact-window key dispatch now retains
-and requalifies its window and owner before starting the key sequence, but
-individual keyboard and mouse sends and native acceptance remain pending.
+element authority through the focus read. Key-down and Unicode sends retain
+the original foreground and focused process generations and qualify them at
+each send; exact-window and ref paths also requalify their original target.
+Owned key-up cleanup is separate from new input. Mouse modifier sends qualify
+the actual keyboard receiver but do not yet carry the original pointer target
+through the mouse adapter. Mouse sends and native acceptance remain pending.
 
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:

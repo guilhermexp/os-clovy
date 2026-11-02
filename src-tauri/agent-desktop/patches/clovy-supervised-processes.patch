@@ -4622,8 +4622,107 @@ index c116c7e..84c0fbd 100644
          match element.0.set_focus() {
              Ok(()) => classify_success(),
              Err(error) => classify_mutation(SET_FOCUS_OP, SET_FOCUS_API, &failure_of(&error)),
+diff --git a/crates/windows/src/actions/physical_keyboard.rs b/crates/windows/src/actions/physical_keyboard.rs
+index 24f7bda..a47bbc1 100644
+--- a/crates/windows/src/actions/physical_keyboard.rs
++++ b/crates/windows/src/actions/physical_keyboard.rs
+@@ -26,11 +26,9 @@ pub(crate) fn type_text_steps(
+     ensure_keyboard_policy(policy)?;
+     preflight_text(text, deadline)?;
+     let focus_ready = ensure_keyboard_delivery_ready(element, deadline)?;
++    let receiver = crate::actions::physical_target::KeyboardReceiver::capture(element, deadline)?;
+     type_text_from_gate(text, focus_ready, deadline, |deadline| {
+-        match ensure_keyboard_delivery_ready(element, deadline)? {
+-            true => Ok(()),
+-            false => Err(focus_lost_before_delivery()),
+-        }
++        receiver.qualify(element, deadline)
+     })
+     .map(|step| vec![step])
+ }
+@@ -44,7 +42,11 @@ pub(crate) fn press_key_element_steps(
+     ensure_keyboard_policy(policy)?;
+     deadline.ensure_remaining()?;
+     let focus_ready = ensure_keyboard_delivery_ready(element, deadline)?;
+-    press_key_from_gate(combo, focus_ready, deadline).map(|step| vec![step])
++    let receiver = crate::actions::physical_target::KeyboardReceiver::capture(element, deadline)?;
++    press_key_from_gate(combo, focus_ready, deadline, |deadline| {
++        receiver.qualify(element, deadline)
++    })
++    .map(|step| vec![step])
+ }
+
+ pub(crate) fn press_key_global(
+@@ -52,7 +54,10 @@ pub(crate) fn press_key_global(
+     deadline: Deadline,
+ ) -> Result<ActionResult, AdapterError> {
+     deadline.ensure_remaining()?;
+-    synthesize_key(combo, deadline)?;
++    let receiver = crate::actions::physical_target::KeyboardReceiver::capture_native(deadline)?;
++    synthesize_key(combo, deadline, |deadline| {
++        receiver.qualify_native(deadline)
++    })?;
+     Ok(ActionResult::from_execution(
+         &Action::PressKey(combo.clone()),
+         vec![physical_step(PRESS_KEY_LABEL)],
+@@ -64,11 +69,11 @@ pub(crate) fn press_key_global(
+ /// is a parameter rather than a fixed closure because it is the only part
+ /// a caller can legitimately vary; the focus gate below it is not optional,
+ /// and a test-only copy of this function would leave it unguarded.
+-pub(crate) fn type_text_from_gate(
++pub(crate) fn type_text_from_gate<G>(
+     text: &str,
+     focus_ready: bool,
+     deadline: Deadline,
+-    verify_target: impl FnMut(Deadline) -> Result<(), AdapterError>,
++    verify_target: impl FnMut(Deadline) -> Result<G, AdapterError>,
+ ) -> Result<ActionStep, AdapterError> {
+     if !focus_ready {
+         return Err(focus_lost_before_delivery());
+@@ -77,15 +82,16 @@ pub(crate) fn type_text_from_gate(
+     Ok(physical_step(TYPE_TEXT_LABEL))
+ }
+
+-pub(crate) fn press_key_from_gate(
++pub(crate) fn press_key_from_gate<G>(
+     combo: &KeyCombo,
+     focus_ready: bool,
+     deadline: Deadline,
++    verify: impl FnMut(Deadline) -> Result<G, AdapterError>,
+ ) -> Result<ActionStep, AdapterError> {
+     if !focus_ready {
+         return Err(focus_lost_before_delivery());
+     }
+-    synthesize_key(combo, deadline)?;
++    synthesize_key(combo, deadline, verify)?;
+     Ok(physical_step(PRESS_KEY_LABEL))
+ }
+
+diff --git a/crates/windows/src/actions/physical_keyboard_tests.rs b/crates/windows/src/actions/physical_keyboard_tests.rs
+index f937e4d..e1d7f86 100644
+--- a/crates/windows/src/actions/physical_keyboard_tests.rs
++++ b/crates/windows/src/actions/physical_keyboard_tests.rs
+@@ -46,7 +46,7 @@ fn type_text_with_focus_ready_synthesizes() {
+ fn press_key_element_gate_synthesizes_when_focus_ready() {
+     key_sink::reset();
+
+-    let step = press_key_from_gate(&combo(), true, deadline(5_000)).expect("press");
++    let step = press_key_from_gate(&combo(), true, deadline(5_000), |_| Ok(())).expect("press");
+
+     assert_eq!(step.label(), "SendInput.press_key");
+     assert_eq!(step.mechanism(), Some(StepMechanism::PhysicalSynthetic));
+@@ -73,7 +73,8 @@ fn press_key_global_synthesizes_without_focus_gate() {
+ fn press_key_lost_focus_fails_not_delivered_with_zero_injection() {
+     key_sink::reset();
+
+-    let error = press_key_from_gate(&combo(), false, deadline(5_000)).expect_err("lost focus");
++    let error =
++        press_key_from_gate(&combo(), false, deadline(5_000), |_| Ok(())).expect_err("lost focus");
+
+     assert_eq!(error.code, ErrorCode::ActionFailed);
+     assert_eq!(
 diff --git a/crates/windows/src/actions/physical_target.rs b/crates/windows/src/actions/physical_target.rs
-index 37447ec..8c7b8ef 100644
+index 37447ec..6114fd5 100644
 --- a/crates/windows/src/actions/physical_target.rs
 +++ b/crates/windows/src/actions/physical_target.rs
 @@ -59,7 +59,7 @@ pub(crate) fn ensure_click_delivery_ready(
@@ -4635,7 +4734,7 @@ index 37447ec..8c7b8ef 100644
      ensure_elevation_allows(element)?;
      target_window_is_foreground(element, deadline)
  }
-@@ -69,8 +69,11 @@ pub(crate) fn ensure_keyboard_delivery_ready(
+@@ -69,11 +69,164 @@ pub(crate) fn ensure_keyboard_delivery_ready(
      deadline: Deadline,
  ) -> Result<bool, AdapterError> {
      deadline.ensure_remaining()?;
@@ -4648,6 +4747,159 @@ index 37447ec..8c7b8ef 100644
      crate::actions::focus::keyboard_focus_ready(element)
  }
 
++#[cfg(target_os = "windows")]
++pub(crate) struct KeyboardReceiver {
++    foreground: isize,
++    focus: isize,
++    foreground_process: crate::private_browser_guard::QualifiedProcess,
++    focus_process: crate::private_browser_guard::QualifiedProcess,
++}
++
++#[cfg(target_os = "windows")]
++pub(crate) struct KeyboardReadAuthority {
++    _element: crate::tree::element::ElementAuthority,
++    _foreground: crate::private_browser_guard::QualifiedProcess,
++    _focus: crate::private_browser_guard::QualifiedProcess,
++}
++
++#[cfg(target_os = "windows")]
++fn keyboard_windows() -> Result<(isize, isize), AdapterError> {
++    use windows_sys::Win32::UI::WindowsAndMessaging::{
++        GUITHREADINFO, GetForegroundWindow, GetGUIThreadInfo,
++    };
++    let foreground = unsafe { GetForegroundWindow() };
++    let mut info = GUITHREADINFO {
++        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
++        ..Default::default()
++    };
++    if foreground.is_null()
++        || unsafe { GetGUIThreadInfo(0, &mut info) } == 0
++        || info.hwndFocus.is_null()
++    {
++        return Err(focus_lost_before_delivery());
++    }
++    Ok((foreground as isize, info.hwndFocus as isize))
++}
++
++#[cfg(target_os = "windows")]
++impl KeyboardReceiver {
++    pub(crate) fn capture(element: &UIAElement, deadline: Deadline) -> Result<Self, AdapterError> {
++        let _element = crate::tree::element::qualify_verified(element, deadline)?;
++        if !ensure_keyboard_delivery_ready(element, deadline)?
++            || !target_window_is_foreground(element, deadline)?
++        {
++            return Err(focus_lost_before_delivery());
++        }
++        Self::capture_native(deadline)
++    }
++
++    pub(crate) fn capture_native(deadline: Deadline) -> Result<Self, AdapterError> {
++        deadline.ensure_remaining()?;
++        let (foreground, focus) = keyboard_windows()?;
++        let owner = crate::system::window::window_identity::live_window_owner;
++        let foreground_pid = owner(foreground as _).ok_or_else(focus_lost_before_delivery)?;
++        let focus_pid = owner(focus as _).ok_or_else(focus_lost_before_delivery)?;
++        let foreground_process = crate::private_browser_guard::qualify(foreground_pid)?;
++        deadline.ensure_remaining()?;
++        let focus_process = crate::private_browser_guard::qualify(focus_pid)?;
++        deadline.ensure_remaining()?;
++        if keyboard_windows()? != (foreground, focus)
++            || owner(foreground as _) != Some(foreground_pid)
++            || owner(focus as _) != Some(focus_pid)
++        {
++            return Err(focus_lost_before_delivery());
++        }
++        Ok(Self {
++            foreground,
++            focus,
++            foreground_process,
++            focus_process,
++        })
++    }
++
++    pub(crate) fn qualify(
++        &self,
++        element: &UIAElement,
++        deadline: Deadline,
++    ) -> Result<KeyboardReadAuthority, AdapterError> {
++        deadline.ensure_remaining()?;
++        crate::input::native_owner::ensure_interactive_desktop()?;
++        let _initial_authority = crate::tree::element::qualify_verified(element, deadline)?;
++        if !ensure_keyboard_delivery_ready(element, deadline)?
++            || !target_window_is_foreground(element, deadline)?
++        {
++            return Err(focus_lost_before_delivery());
++        }
++        let foreground = crate::private_browser_guard::qualify_expected(
++            self.foreground_process.pid(),
++            self.foreground_process.token(),
++        )?;
++        deadline.ensure_remaining()?;
++        let focus = crate::private_browser_guard::qualify_expected(
++            self.focus_process.pid(),
++            self.focus_process.token(),
++        )?;
++        deadline.ensure_remaining()?;
++        let owner = crate::system::window::window_identity::live_window_owner;
++        if keyboard_windows()? != (self.foreground, self.focus)
++            || owner(self.foreground as _) != Some(foreground.pid())
++            || owner(self.focus as _) != Some(focus.pid())
++        {
++            return Err(focus_lost_before_delivery());
++        }
++        let element_authority = crate::tree::element::qualify_verified(element, deadline)?;
++        if keyboard_windows()? != (self.foreground, self.focus)
++            || owner(self.foreground as _) != Some(foreground.pid())
++            || owner(self.focus as _) != Some(focus.pid())
++        {
++            return Err(focus_lost_before_delivery());
++        }
++        agent_desktop_core::commands::clovy_cancel::ensure()?;
++        deadline.ensure_remaining()?;
++        Ok(KeyboardReadAuthority {
++            _element: element_authority,
++            _foreground: foreground,
++            _focus: focus,
++        })
++    }
++
++    pub(crate) fn qualify_native(
++        &self,
++        deadline: Deadline,
++    ) -> Result<
++        (
++            crate::private_browser_guard::QualifiedProcess,
++            crate::private_browser_guard::QualifiedProcess,
++        ),
++        AdapterError,
++    > {
++        deadline.ensure_remaining()?;
++        crate::input::native_owner::ensure_interactive_desktop()?;
++        let foreground = crate::private_browser_guard::qualify_expected(
++            self.foreground_process.pid(),
++            self.foreground_process.token(),
++        )?;
++        deadline.ensure_remaining()?;
++        let focus = crate::private_browser_guard::qualify_expected(
++            self.focus_process.pid(),
++            self.focus_process.token(),
++        )?;
++        let owner = crate::system::window::window_identity::live_window_owner;
++        if keyboard_windows()? != (self.foreground, self.focus)
++            || owner(self.foreground as _) != Some(foreground.pid())
++            || owner(self.focus as _) != Some(focus.pid())
++        {
++            return Err(focus_lost_before_delivery());
++        }
++        agent_desktop_core::commands::clovy_cancel::ensure()?;
++        deadline.ensure_remaining()?;
++        Ok((foreground, focus))
++    }
++}
++
+ pub(crate) fn delivery_point(
+     bounds: Rect,
+     verified: Option<&Point>,
 diff --git a/crates/windows/src/actions/scroll.rs b/crates/windows/src/actions/scroll.rs
 index 5b27aeb..b31bc07 100644
 --- a/crates/windows/src/actions/scroll.rs
@@ -5182,6 +5434,483 @@ index 3dd15a6..da6422e 100644
          let delivered = match pattern.set_value(target) {
              Ok(()) => classify_success()?,
              Err(error) => classify_write("SetValue", RANGE_LABEL, &error)?,
+diff --git a/crates/windows/src/input/keyboard/keyboard_event.rs b/crates/windows/src/input/keyboard/keyboard_event.rs
+index fa38e1c..a9b2db2 100644
+--- a/crates/windows/src/input/keyboard/keyboard_event.rs
++++ b/crates/windows/src/input/keyboard/keyboard_event.rs
+@@ -13,7 +13,7 @@ use agent_desktop_core::{AdapterError, Deadline, KeyCombo, Modifier};
+
+ use crate::input::keyboard::keyboard_map;
+ use crate::input::keyboard::keyboard_send::{
+-    KeyboardInputEvent, key_is_down, post_keyboard_inputs,
++    KeyboardInputEvent, key_is_down, post_keyboard_inputs, release_owned_key,
+ };
+ use crate::input::mouse::sleep_bounded;
+ use crate::input::release_state::ReleaseState;
+@@ -37,7 +37,11 @@ const _: () = {
+     assert!(KEYEVENTF_KEYUP == win32::KEYEVENTF_KEYUP);
+ };
+
+-pub(crate) fn synthesize_key(combo: &KeyCombo, deadline: Deadline) -> Result<(), AdapterError> {
++pub(crate) fn synthesize_key<G>(
++    combo: &KeyCombo,
++    deadline: Deadline,
++    mut verify: impl FnMut(Deadline) -> Result<G, AdapterError>,
++) -> Result<(), AdapterError> {
+     agent_desktop_core::commands::clovy_cancel::ensure()?;
+     deadline.ensure_remaining()?;
+     let resolved = keyboard_map::resolve_key(&combo.key)?;
+@@ -48,37 +52,44 @@ pub(crate) fn synthesize_key(combo: &KeyCombo, deadline: Deadline) -> Result<(),
+     owned.push(key_vk);
+     let owner = crate::input::native_owner::NativeOwner::begin(owned)?;
+     let mut guard = KeyReleaseGuard::new();
+-    let outcome = press_chord(&mut guard, &modifier_vks, key_vk, deadline);
++    let outcome = press_chord(&mut guard, &modifier_vks, key_vk, deadline, &mut verify);
+     let outcome = outcome.map_err(|error| guard.enrich_error(error));
+     drop(guard);
+     owner.finish(outcome)
+ }
+
+-fn press_chord(
++fn press_chord<G>(
+     guard: &mut KeyReleaseGuard,
+     modifier_vks: &[u16],
+     key_vk: u16,
+     deadline: Deadline,
++    verify: &mut impl FnMut(Deadline) -> Result<G, AdapterError>,
+ ) -> Result<(), AdapterError> {
+     for &vk in modifier_vks {
+         agent_desktop_core::commands::clovy_cancel::ensure()?;
+         deadline.ensure_remaining()?;
+-        guard.note_pressed(vk);
+-        post_keyboard_inputs(&[key_input(vk, false)]);
++        post_keyboard_inputs(&[key_input(vk, false)], || {
++            let authority = verify(deadline)?;
++            guard.note_pressed(vk);
++            Ok(authority)
++        })?;
+     }
+     agent_desktop_core::commands::clovy_cancel::ensure()?;
+     deadline.ensure_remaining()?;
+-    guard.note_pressed(key_vk);
+-    post_keyboard_inputs(&[key_input(key_vk, false)]);
++    post_keyboard_inputs(&[key_input(key_vk, false)], || {
++        let authority = verify(deadline)?;
++        guard.note_pressed(key_vk);
++        Ok(authority)
++    })?;
+
+     sleep_bounded(deadline, KEY_SETTLE)?;
+
+-    post_keyboard_inputs(&[key_input(key_vk, true)]);
++    release_owned_key(key_vk);
+     guard.note_released(key_vk);
+     for &vk in modifier_vks.iter().rev() {
+         agent_desktop_core::commands::clovy_cancel::ensure()?;
+         deadline.ensure_remaining()?;
+-        post_keyboard_inputs(&[key_input(vk, true)]);
++        release_owned_key(vk);
+         guard.note_released(vk);
+     }
+     Ok(())
+@@ -145,7 +156,12 @@ impl KeyReleaseGuard {
+     }
+
+     pub(crate) fn enrich_error(&self, error: AdapterError) -> AdapterError {
+-        self.state.enrich_error(error, KEY_RELEASE_SUGGESTION)
++        let error = self.state.enrich_error(error, KEY_RELEASE_SUGGESTION);
++        if self.state.delivered_units() > 0 {
++            error.with_disposition(agent_desktop_core::DeliverySemantics::uncertain())
++        } else {
++            error
++        }
+     }
+ }
+
+@@ -167,7 +183,7 @@ impl Drop for KeyReleaseGuard {
+             &self.held,
+             agent_desktop_core::commands::clovy_cancel::supervised(),
+             key_is_down,
+-            |vk| post_keyboard_inputs(&[key_input(vk, true)]),
++            release_owned_key,
+         );
+     }
+ }
+diff --git a/crates/windows/src/input/keyboard/keyboard_event_tests.rs b/crates/windows/src/input/keyboard/keyboard_event_tests.rs
+index 6fa95e0..cd180ba 100644
+--- a/crates/windows/src/input/keyboard/keyboard_event_tests.rs
++++ b/crates/windows/src/input/keyboard/keyboard_event_tests.rs
+@@ -16,8 +16,12 @@ fn a_chord_presses_and_releases_every_modifier_around_the_key() {
+         key: "a".into(),
+         modifiers: vec![Modifier::Ctrl, Modifier::Shift],
+     };
+-    synthesize_key(&combo, Deadline::after(5_000).expect("bounded deadline"))
+-        .expect("an ample deadline must succeed");
++    synthesize_key(
++        &combo,
++        Deadline::after(5_000).expect("bounded deadline"),
++        |_| Ok(()),
++    )
++    .expect("an ample deadline must succeed");
+
+     let recorded = sink::recorded();
+     let key_vk = keyboard_map::resolve_key("a").expect("'a' resolves").vk;
+@@ -47,8 +51,12 @@ fn an_unknown_key_name_is_rejected_before_any_injection() {
+         key: "hyperkey".into(),
+         modifiers: Vec::new(),
+     };
+-    let error = synthesize_key(&combo, Deadline::after(5_000).expect("bounded deadline"))
+-        .expect_err("unknown key names must be rejected");
++    let error = synthesize_key(
++        &combo,
++        Deadline::after(5_000).expect("bounded deadline"),
++        |_| Ok(()),
++    )
++    .expect_err("unknown key names must be rejected");
+
+     assert_eq!(error.code, ErrorCode::InvalidArgs);
+     assert!(sink::recorded().is_empty());
+@@ -61,13 +69,49 @@ fn an_expired_deadline_rejects_before_any_injection() {
+         key: "a".into(),
+         modifiers: Vec::new(),
+     };
+-    let error = synthesize_key(&combo, Deadline::after(0).expect("zero-length deadline"))
+-        .expect_err("an expired deadline must be rejected");
++    let error = synthesize_key(
++        &combo,
++        Deadline::after(0).expect("zero-length deadline"),
++        |_| Ok(()),
++    )
++    .expect_err("an expired deadline must be rejected");
+
+     assert_eq!(error.code, ErrorCode::Timeout);
+     assert!(sink::recorded().is_empty());
+ }
+
++#[test]
++fn refused_second_down_releases_only_the_owned_modifier() {
++    reset();
++    key_state::set_down(VK_CONTROL);
++    let combo = KeyCombo {
++        key: "a".into(),
++        modifiers: vec![Modifier::Ctrl],
++    };
++    let mut calls = 0;
++    let error = synthesize_key(&combo, Deadline::after(5_000).unwrap(), |_| {
++        calls += 1;
++        if calls == 1 {
++            Ok(())
++        } else {
++            Err(AdapterError::new(
++                ErrorCode::PolicyDenied,
++                "receiver denied",
++            ))
++        }
++    })
++    .expect_err("the second key-down must be refused");
++    assert_eq!(error.code, ErrorCode::PolicyDenied);
++    assert_eq!(error.disposition, DeliverySemantics::uncertain());
++    let recorded = sink::recorded();
++    assert_eq!(recorded.len(), 2);
++    assert_eq!((recorded[0].vk, recorded[0].flags), (VK_CONTROL, 0));
++    assert_eq!(
++        (recorded[1].vk, recorded[1].flags),
++        (VK_CONTROL, KEYEVENTF_KEYUP)
++    );
++}
++
+ /// The release-guard sweep, inverted: only a virtual key the OS still
+ /// reports down gets an emergency release; a key this guard's own
+ /// bookkeeping still lists as held but that nothing confirms is actually
+@@ -134,13 +178,13 @@ fn enrich_error_reports_not_delivered_when_nothing_was_pressed() {
+ }
+
+ #[test]
+-fn enrich_error_reports_delivered_unverified_with_emergency_release_when_still_held() {
++fn enrich_error_reports_uncertain_with_emergency_release_when_still_held() {
+     let mut guard = KeyReleaseGuard::new();
+     guard.note_pressed(VK_CONTROL);
+
+     let error = guard.enrich_error(AdapterError::timeout("deadline"));
+
+-    assert_eq!(error.disposition, DeliverySemantics::delivered_unverified());
++    assert_eq!(error.disposition, DeliverySemantics::uncertain());
+     let details = error.details.expect("enriched details");
+     assert_eq!(details["delivered_events"], 1);
+     assert_eq!(details["emergency_release_posted"], true);
+@@ -155,7 +199,7 @@ fn enrich_error_omits_emergency_release_when_everything_was_released() {
+
+     let error = guard.enrich_error(AdapterError::timeout("deadline"));
+
+-    assert_eq!(error.disposition, DeliverySemantics::delivered_unverified());
++    assert_eq!(error.disposition, DeliverySemantics::uncertain());
+     let details = error.details.expect("enriched details");
+     assert_eq!(details["delivered_events"], 2);
+     assert!(details.get("emergency_release_posted").is_none());
+diff --git a/crates/windows/src/input/keyboard/keyboard_send.rs b/crates/windows/src/input/keyboard/keyboard_send.rs
+index 9ed4803..741150f 100644
+--- a/crates/windows/src/input/keyboard/keyboard_send.rs
++++ b/crates/windows/src/input/keyboard/keyboard_send.rs
+@@ -28,8 +28,24 @@ pub(crate) struct KeyboardInputEvent {
+     pub(crate) flags: u32,
+ }
+
+-pub(crate) fn post_keyboard_inputs(events: &[KeyboardInputEvent]) {
++pub(crate) fn post_keyboard_inputs<G>(
++    events: &[KeyboardInputEvent],
++    verify: impl FnOnce() -> Result<G, agent_desktop_core::AdapterError>,
++) -> Result<(), agent_desktop_core::AdapterError> {
++    let _authority = verify()?;
+     imp::post_keyboard_inputs(events);
++    Ok(())
++}
++
++/// Release a key already armed by the current input owner. This operation is
++/// deliberately separate from posting new input: cleanup must remain possible
++/// after cancellation or loss of target authority.
++pub(crate) fn release_owned_key(vk: u16) {
++    imp::post_keyboard_inputs(&[KeyboardInputEvent {
++        vk,
++        scan: 0,
++        flags: 0x0002,
++    }]);
+ }
+
+ pub(crate) fn key_is_down(vk: u16) -> bool {
+diff --git a/crates/windows/src/input/keyboard/keyboard_text.rs b/crates/windows/src/input/keyboard/keyboard_text.rs
+index 62c04cd..7cf572f 100644
+--- a/crates/windows/src/input/keyboard/keyboard_text.rs
++++ b/crates/windows/src/input/keyboard/keyboard_text.rs
+@@ -30,32 +30,32 @@ const _: () = {
+     assert!(KEYEVENTF_KEYUP == win32::KEYEVENTF_KEYUP);
+ };
+
+-pub(crate) fn synthesize_text(
++pub(crate) fn synthesize_text<G>(
+     text: &str,
+     deadline: Deadline,
+-    mut verify_target: impl FnMut(Deadline) -> Result<(), AdapterError>,
++    mut verify_target: impl FnMut(Deadline) -> Result<G, AdapterError>,
+ ) -> Result<(), AdapterError> {
+     let chunk_count = preflight_text(text, deadline)?;
+     let chunks = text_chunks(text, Some(chunk_count))?;
+     let total = chunks.len();
+     for (delivered_chunks, chunk) in chunks.into_iter().enumerate() {
+         ensure_chunk_budget(deadline, total, delivered_chunks)?;
+-        verify_target(deadline).map_err(|error| {
+-            let disposition = if delivered_chunks == 0 {
+-                DeliverySemantics::not_delivered()
+-            } else {
+-                DeliverySemantics::delivered_unverified()
+-            };
+-            error
+-                .with_details(serde_json::json!({
+-                    "delivered_chunks": delivered_chunks,
+-                    "total_chunks": total,
+-                }))
+-                .with_disposition(disposition)
+-        })?;
+         let events = chunk_events(&chunk);
+-        ensure_chunk_budget(deadline, total, delivered_chunks)?;
+-        post_keyboard_inputs(&events);
++        post_keyboard_inputs(&events, || {
++            verify_target(deadline).map_err(|error| {
++                let disposition = if delivered_chunks == 0 {
++                    DeliverySemantics::not_delivered()
++                } else {
++                    DeliverySemantics::uncertain()
++                };
++                error
++                    .with_details(serde_json::json!({
++                        "delivered_chunks": delivered_chunks,
++                        "total_chunks": total,
++                    }))
++                    .with_disposition(disposition)
++            })
++        })?;
+     }
+     Ok(())
+ }
+@@ -93,7 +93,7 @@ pub(crate) fn ensure_chunk_budget(
+             let disposition = if delivered_chunks == 0 {
+                 DeliverySemantics::not_delivered()
+             } else {
+-                DeliverySemantics::delivered_unverified()
++                DeliverySemantics::uncertain()
+             };
+             error
+                 .with_details(serde_json::json!({
+diff --git a/crates/windows/src/input/keyboard/keyboard_text_tests.rs b/crates/windows/src/input/keyboard/keyboard_text_tests.rs
+index 9f1677b..8984b3a 100644
+--- a/crates/windows/src/input/keyboard/keyboard_text_tests.rs
++++ b/crates/windows/src/input/keyboard/keyboard_text_tests.rs
+@@ -62,13 +62,13 @@ fn pre_delivery_chunk_budget_check_reports_not_delivered_when_nothing_sent() {
+ /// never claim nothing was delivered - inverted against the pre-delivery
+ /// case above.
+ #[test]
+-fn mid_text_chunk_budget_check_reports_delivered_unverified_with_counts() {
++fn mid_text_chunk_budget_check_reports_uncertain_with_counts() {
+     let deadline = Deadline::after(1).unwrap();
+     std::thread::sleep(Duration::from_millis(15));
+
+     let error = ensure_chunk_budget(deadline, 5, 2).expect_err("expired deadline must fail");
+
+-    assert_eq!(error.disposition, DeliverySemantics::delivered_unverified());
++    assert_eq!(error.disposition, DeliverySemantics::uncertain());
+     let details = error.details.expect("timeout carries chunk accounting");
+     assert_eq!(details["delivered_chunks"], 2);
+     assert_eq!(details["total_chunks"], 5);
+@@ -164,7 +164,7 @@ fn verify_failure_after_partial_delivery_enriches_chunk_counts() {
+     .expect_err("verify must fail on second chunk");
+
+     assert_eq!(error.code, ErrorCode::ActionFailed);
+-    assert_eq!(error.disposition, DeliverySemantics::delivered_unverified());
++    assert_eq!(error.disposition, DeliverySemantics::uncertain());
+     let details = error.details.expect("chunk accounting");
+     assert_eq!(details["delivered_chunks"], 1);
+     assert_eq!(details["total_chunks"], 3);
+@@ -176,7 +176,7 @@ fn verify_failure_before_first_chunk_posts_zero_injection() {
+     sink::reset();
+
+     let error = synthesize_text("hello", ample_deadline(), |_| {
+-        Err(AdapterError::new(
++        Err::<(), _>(AdapterError::new(
+             ErrorCode::ActionFailed,
+             "Focus lost before first chunk",
+         ))
+diff --git a/crates/windows/src/input/keyboard/mod.rs b/crates/windows/src/input/keyboard/mod.rs
+index 30078da..2414d46 100644
+--- a/crates/windows/src/input/keyboard/mod.rs
++++ b/crates/windows/src/input/keyboard/mod.rs
+@@ -14,17 +14,21 @@ use agent_desktop_core::{AdapterError, Deadline, ErrorCode, KeyCombo};
+ /// check by design - `actions/physical_keyboard` composes it with the
+ /// policy gate and the focus verify - so the primitive stays usable by any
+ /// caller that has already established those.
+-pub(crate) fn synthesize_key(combo: &KeyCombo, deadline: Deadline) -> Result<(), AdapterError> {
+-    crate::input::keyboard::keyboard_event::synthesize_key(combo, deadline)
++pub(crate) fn synthesize_key<G>(
++    combo: &KeyCombo,
++    deadline: Deadline,
++    verify: impl FnMut(Deadline) -> Result<G, AdapterError>,
++) -> Result<(), AdapterError> {
++    crate::input::keyboard::keyboard_event::synthesize_key(combo, deadline, verify)
+ }
+
+ /// The chunked UTF-16 `type_text` primitive, kept policy-free the same way
+ /// `synthesize_key` is. The physical `type` leg supplies the per-chunk
+ /// verifier that re-checks focus between chunks.
+-pub(crate) fn synthesize_text(
++pub(crate) fn synthesize_text<G>(
+     text: &str,
+     deadline: Deadline,
+-    verify_target: impl FnMut(Deadline) -> Result<(), AdapterError>,
++    verify_target: impl FnMut(Deadline) -> Result<G, AdapterError>,
+ ) -> Result<(), AdapterError> {
+     crate::input::keyboard::keyboard_text::synthesize_text(text, deadline, verify_target)
+ }
+diff --git a/crates/windows/src/input/mouse/mouse_modifier.rs b/crates/windows/src/input/mouse/mouse_modifier.rs
+index 66391b9..0f31a8e 100644
+--- a/crates/windows/src/input/mouse/mouse_modifier.rs
++++ b/crates/windows/src/input/mouse/mouse_modifier.rs
+@@ -16,13 +16,12 @@
+ use agent_desktop_core::{AdapterError, Deadline, Modifier};
+
+ use crate::input::keyboard::keyboard_event::{key_input, modifier_vk};
+-use crate::input::keyboard::keyboard_send::post_keyboard_inputs;
++use crate::input::keyboard::keyboard_send::{post_keyboard_inputs, release_owned_key};
+
+ pub(crate) struct ModifierGuard {
+     held: Vec<u16>,
+     released: bool,
+     delivered: bool,
+-    post: fn(u16, bool),
+ }
+
+ impl ModifierGuard {
+@@ -41,7 +40,7 @@ impl ModifierGuard {
+         }
+         self.released = true;
+         for vk in self.held.iter().rev().copied() {
+-            (self.post)(vk, true);
++            release_owned_key(vk);
+         }
+     }
+ }
+@@ -56,53 +55,51 @@ impl Drop for ModifierGuard {
+ pub(crate) fn press_modifiers(modifiers: &[Modifier]) -> ModifierGuard {
+     let held: Vec<u16> = modifiers.iter().map(modifier_vk).collect();
+     for &vk in &held {
+-        post_keyboard_inputs(&[key_input(vk, false)]);
++        post_keyboard_inputs(&[key_input(vk, false)], || Ok(())).expect("test verifier");
+     }
+     ModifierGuard {
+         delivered: !held.is_empty(),
+         held,
+         released: false,
+-        post: post_native,
+     }
+ }
+
+-fn post_native(vk: u16, up: bool) {
+-    post_keyboard_inputs(&[key_input(vk, up)]);
+-}
+ pub(crate) fn press_modifiers_checked(
+     modifiers: &[Modifier],
+     deadline: Deadline,
+ ) -> Result<ModifierGuard, AdapterError> {
+-    hold_keys_checked(
+-        modifiers.iter().map(modifier_vk),
+-        || {
+-            agent_desktop_core::commands::clovy_cancel::ensure()
+-                .and_then(|_| deadline.ensure_remaining())
+-        },
+-        post_native,
+-    )
++    if modifiers.is_empty() {
++        return Ok(ModifierGuard {
++            held: vec![],
++            released: false,
++            delivered: false,
++        });
++    }
++    let receiver = crate::actions::physical_target::KeyboardReceiver::capture_native(deadline)?;
++    hold_keys_checked(modifiers.iter().map(modifier_vk), || {
++        deadline.ensure_remaining()?;
++        receiver.qualify_native(deadline)
++    })
+ }
+-fn hold_keys_checked(
++fn hold_keys_checked<G>(
+     keys: impl Iterator<Item = u16>,
+-    mut before_down: impl FnMut() -> Result<(), AdapterError>,
+-    post: fn(u16, bool),
++    mut before_down: impl FnMut() -> Result<G, AdapterError>,
+ ) -> Result<ModifierGuard, AdapterError> {
+     let mut guard = ModifierGuard {
+         held: vec![],
+         released: false,
+         delivered: false,
+-        post,
+     };
+     for vk in keys {
+         if guard.held.contains(&vk) {
+             continue;
+         }
+-        if let Err(error) = before_down() {
+-            return Err(guard.enrich_error(error));
+-        }
+-        guard.held.push(vk);
+-        guard.delivered = true;
+-        (guard.post)(vk, false);
++        post_keyboard_inputs(&[key_input(vk, false)], || {
++            let authority = before_down().map_err(|error| guard.enrich_error(error))?;
++            guard.held.push(vk);
++            guard.delivered = true;
++            Ok(authority)
++        })?;
+     }
+     Ok(guard)
+ }
 diff --git a/crates/windows/src/input/native_owner.rs b/crates/windows/src/input/native_owner.rs
 index 36e690e..e849a52 100644
 --- a/crates/windows/src/input/native_owner.rs
@@ -6193,7 +6922,7 @@ index 75b4c76..b091e04 100644
          },
          deadline,
 diff --git a/crates/windows/src/system/key_dispatch.rs b/crates/windows/src/system/key_dispatch.rs
-index 4281d59..fae5331 100644
+index 4281d59..4beb301 100644
 --- a/crates/windows/src/system/key_dispatch.rs
 +++ b/crates/windows/src/system/key_dispatch.rs
 @@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
@@ -6205,7 +6934,7 @@ index 4281d59..fae5331 100644
  };
 
  use crate::input::elevation::ensure_target_integrity_allows_input;
-@@ -12,6 +12,46 @@ use crate::system::process_identity;
+@@ -12,6 +12,62 @@ use crate::system::process_identity;
  const KEYBOARD_FOCUS_WAIT: Duration = Duration::from_millis(500);
  const KEYBOARD_FOCUS_POLL: Duration = Duration::from_millis(5);
 
@@ -6245,13 +6974,63 @@ index 4281d59..fae5331 100644
 +    deadline.ensure_remaining()?;
 +    agent_desktop_core::commands::clovy_cancel::ensure()?;
 +    deadline.ensure_remaining()?;
-+    run_synthesize(combo, deadline)?;
++    let receiver = crate::actions::physical_target::KeyboardReceiver::capture_native(deadline)?;
++    run_synthesize(combo, deadline, |deadline| {
++        let window_authority = super::window::window_identity::qualify_window(window, deadline)?;
++        if window_authority.owner_pid() != expected.owner_pid()
++            || window_authority.owner_token() != expected.owner_token()
++        {
++            return Err(focus_lost_before_delivery(process.pid));
++        }
++        let receiver_authority = receiver.qualify_native(deadline)?;
++        if !super::window::window_ops::is_foreground_window(
++            super::window::window_ops::parse_handle(&window.id),
++        ) {
++            return Err(focus_lost_before_delivery(process.pid));
++        }
++        deadline.ensure_remaining()?;
++        Ok((window_authority, receiver_authority))
++    })?;
 +    post_delivery_process_result(&process)
 +}
 +
  /// Delivers a key combo to a named process by composing the keyboard primitive
  /// under a verify-only focus gate. Core's headed path already activated before
  /// this runs; this method never calls window activation.
+@@ -39,7 +95,15 @@ pub(crate) fn press_for_app_impl(
+         return Err(focus_lost_before_delivery(process.pid));
+     }
+     require_process(&process)?;
+-    run_synthesize(combo, deadline)?;
++    let receiver = crate::actions::physical_target::KeyboardReceiver::capture_native(deadline)?;
++    run_synthesize(combo, deadline, |deadline| {
++        let receiver_authority = receiver.qualify_native(deadline)?;
++        if !process_owns_foreground(process.pid, &process.instance)? {
++            return Err(focus_lost_before_delivery(process.pid));
++        }
++        deadline.ensure_remaining()?;
++        Ok(receiver_authority)
++    })?;
+     post_delivery_process_result(&process)
+ }
+
+@@ -149,10 +213,14 @@ fn bounded_instant(deadline: Deadline, maximum: Duration) -> Result<Instant, Ada
+         .ok_or_else(|| AdapterError::new(ErrorCode::InvalidArgs, "Deadline is out of range"))
+ }
+
+-fn run_synthesize(combo: &KeyCombo, deadline: Deadline) -> Result<(), AdapterError> {
++fn run_synthesize<G>(
++    combo: &KeyCombo,
++    deadline: Deadline,
++    verify: impl FnMut(Deadline) -> Result<G, AdapterError>,
++) -> Result<(), AdapterError> {
+     #[cfg(all(test, target_os = "windows"))]
+     synthesis_probe::note();
+-    synthesize_key(combo, deadline)
++    synthesize_key(combo, deadline, verify)
+ }
+
+ fn focus_verify_failed(pid: ProcessId) -> AdapterError {
 diff --git a/crates/windows/src/system/runtime/hresult.rs b/crates/windows/src/system/runtime/hresult.rs
 index d176588..3d558cd 100644
 --- a/crates/windows/src/system/runtime/hresult.rs
