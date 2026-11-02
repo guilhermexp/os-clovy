@@ -4532,6 +4532,20 @@ index 4198836..d577021 100644
              from: Point { x: 0.0, y: 0.0 },
              to: Point { x: 10.0, y: 10.0 },
              duration_ms: Some(1),
+diff --git a/crates/macos/src/lib.rs b/crates/macos/src/lib.rs
+index 3012d7f..7b7e14c 100644
+--- a/crates/macos/src/lib.rs
++++ b/crates/macos/src/lib.rs
+@@ -2,6 +2,9 @@
+
+ mod actions;
+ mod adapter;
++#[cfg(target_os = "macos")]
++#[path = "../../../.clovy-owned-runtime.rs"]
++mod computer_use_owned_runtime;
+ mod input;
+ mod notifications;
+ mod system;
 diff --git a/crates/macos/src/system/cursor_overlay/spawn.rs b/crates/macos/src/system/cursor_overlay/spawn.rs
 index d962b69..9c3f568 100644
 --- a/crates/macos/src/system/cursor_overlay/spawn.rs
@@ -4555,19 +4569,61 @@ index d962b69..9c3f568 100644
          .stdout(Stdio::null())
          .stderr(Stdio::null())
 diff --git a/crates/macos/src/system/launch.rs b/crates/macos/src/system/launch.rs
-index e762159..c6f5f4f 100644
+index e762159..c072268 100644
 --- a/crates/macos/src/system/launch.rs
 +++ b/crates/macos/src/system/launch.rs
-@@ -34,7 +34,7 @@ pub(crate) fn launch_app_impl(
+@@ -33,16 +33,47 @@ pub(crate) fn launch_app_impl(
+         let app = initial[0].clone();
          let instance = required_instance(&app).map_err(before_launch)?;
          let pid = super::process::process_identity::to_pid_t(app.pid).map_err(before_launch)?;
++        qualify_existing(pid, &instance).map_err(before_launch)?;
          let window = exact_window(pid, &instance, deadline).map_err(before_launch)?;
 -        return Ok(result_from_app(&app, window));
-+        return result_from_app(&app, window).map_err(before_launch);
++        qualify_existing(pid, &instance).map_err(before_launch)?;
++        let result = result_from_app(&app, window).map_err(before_launch)?;
++        qualify_existing(pid, &instance).map_err(before_launch)?;
++        return Ok(result);
      }
      let target = launch_target(options, initial).map_err(before_launch)?;
 
-@@ -141,11 +141,27 @@ fn launched_display_name(window: Option<&WindowInfo>, id: &str) -> String {
+-    let launched = crate::system::launch_workspace::open(id, options, deadline)?;
++    let existing = match &target {
++        LaunchTarget::Existing {
++            pid,
++            process_instance,
++        } => {
++            qualify_existing(*pid, process_instance).map_err(before_launch)?;
++            Some((*pid, process_instance.as_str()))
++        }
++        LaunchTarget::New { .. } => None,
++    };
++    let launched = crate::system::launch_workspace::open(id, options, deadline, existing)?;
+     validate_launched_target(&target, &launched).map_err(after_launch)?;
++    qualify_existing(launched.0, &launched.1).map_err(after_launch)?;
+     let window =
+         settled_window(launched.0, &launched.1, options, deadline).map_err(after_launch)?;
+-    result_from_launched(&launched, window, id).map_err(after_launch)
++    qualify_existing(launched.0, &launched.1).map_err(after_launch)?;
++    let result = result_from_launched(&launched, window, id).map_err(after_launch)?;
++    qualify_existing(launched.0, &launched.1).map_err(after_launch)?;
++    Ok(result)
++}
++
++#[cfg(target_os = "macos")]
++fn qualify_existing(pid: i32, instance: &str) -> Result<(), AdapterError> {
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
++    let identity = super::launch_completion::identity_for_existing(pid, instance)?;
++    super::private_browser_guard::qualify(std::path::Path::new(&identity.executable_path))?;
++    if !super::process::process_identity::matches_instance(pid, instance)? {
++        return Err(AdapterError::stale_ref_because(
++            "The application changed during qualification",
++        ));
++    }
++    Ok(())
+ }
+
+ /// Waits only for the windows the launch itself produces. Starting up is what
+@@ -141,11 +172,33 @@ fn launched_display_name(window: Option<&WindowInfo>, id: &str) -> String {
  }
 
  #[cfg(target_os = "macos")]
@@ -4579,6 +4635,12 @@ index e762159..c6f5f4f 100644
 +    let pid = super::process::process_identity::to_pid_t(app.pid)?;
 +    let instance = required_instance(app)?;
 +    let authority = super::launch_completion::identity_for_existing(pid, &instance)?;
++    super::private_browser_guard::qualify(std::path::Path::new(&authority.executable_path))?;
++    if !super::process::process_identity::matches_instance(pid, &instance)? {
++        return Err(AdapterError::stale_ref_because(
++            "The application changed during attachment",
++        ));
++    }
 +    if app
 +        .bundle_id
 +        .as_deref()
@@ -4597,7 +4659,7 @@ index e762159..c6f5f4f 100644
          app: app.name.clone(),
          pid: app.pid,
          process_instance: app.process_instance.clone(),
-@@ -153,17 +169,18 @@ fn result_from_app(app: &AppInfo, window: Option<WindowInfo>) -> LaunchResult {
+@@ -153,17 +206,18 @@ fn result_from_app(app: &AppInfo, window: Option<WindowInfo>) -> LaunchResult {
          cdp: None,
          renderer,
          suggestion: None,
@@ -4618,7 +4680,7 @@ index e762159..c6f5f4f 100644
          app: launched_display_name(window.as_ref(), id),
          pid: agent_desktop_core::ProcessId::try_from(launched.0)
              .map_err(|_| AdapterError::internal("Launched process identifier is out of range"))?,
-@@ -211,7 +228,7 @@ fn launch_target(
+@@ -211,7 +265,7 @@ fn launch_target(
  #[cfg(target_os = "macos")]
  fn validate_launched_target(
      target: &LaunchTarget,
@@ -4628,10 +4690,18 @@ index e762159..c6f5f4f 100644
      match target {
          LaunchTarget::Existing {
 diff --git a/crates/macos/src/system/launch_bridge.m b/crates/macos/src/system/launch_bridge.m
-index 90595b4..97ad2db 100644
+index 90595b4..f7a2a79 100644
 --- a/crates/macos/src/system/launch_bridge.m
 +++ b/crates/macos/src/system/launch_bridge.m
-@@ -12,6 +12,10 @@ typedef struct {
+@@ -2,6 +2,7 @@
+ #include <stdbool.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <time.h>
+
+ typedef struct {
+     void *application;
+@@ -12,10 +13,15 @@ typedef struct {
      uint8_t errorKind;
      const char *error;
      size_t errorLength;
@@ -4642,7 +4712,49 @@ index 90595b4..97ad2db 100644
  } AgentDesktopLaunchResult;
 
  typedef void (*AgentDesktopLaunchCompletion)(void *, const AgentDesktopLaunchResult *);
-@@ -174,6 +178,10 @@ bool agent_desktop_open_application(
+ typedef void (*AgentDesktopLaunchRelease)(void *);
++extern uint8_t agent_desktop_qualify_launch_image(const char *, int32_t, const char *);
+
+ typedef struct {
+     void *context;
+@@ -112,6 +118,7 @@ bool agent_desktop_open_application(
+     box->context = context;
+     box->releaseContext = releaseContext;
+     AgentDesktopLaunchContext *holder = nil;
++    bool deliveryStarted = false;
+     @try {
+         holder = [AgentDesktopLaunchContext new];
+         if (holder == nil) {
+@@ -160,6 +167,28 @@ bool agent_desktop_open_application(
+         configuration.createsNewApplicationInstance = [request[@"new_instance"] boolValue];
+         configuration.arguments = arguments;
+         configuration.environment = environment;
++        NSURL *executableURL = [NSBundle bundleWithURL:url].executableURL;
++        const char *executable = executableURL.fileSystemRepresentation;
++        int32_t expectedPID = [request[@"expected_pid"] intValue];
++        id instance = request[@"expected_instance"];
++        const char *expectedInstance = [instance isKindOfClass:[NSString class]] ? [instance UTF8String] : NULL;
++        uint8_t qualification = executable == NULL ? 0 : agent_desktop_qualify_launch_image(executable, expectedPID, expectedInstance);
++        if (qualification == 2) {
++            completeError(holder, @"The computer-use run was stopped", 6, 0);
++            return true;
++        }
++        if (qualification != 1) {
++            completeError(holder, @"This target cannot be controlled here. Use Browser use or take over manually.", 5, 0);
++            return true;
++        }
++        struct timespec now;
++        uint64_t deadline = [request[@"deadline_uptime_ms"] unsignedLongLongValue];
++        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0 || deadline == 0 ||
++            (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000 >= deadline) {
++            completeError(holder, @"The launch deadline expired before opening the application", 7, 0);
++            return true;
++        }
++        deliveryStarted = true;
+         [workspace openApplicationAtURL:url
+                          configuration:configuration
+                      completionHandler:^(NSRunningApplication *app, NSError *error) {
+@@ -174,6 +203,10 @@ bool agent_desktop_open_application(
                      return;
                  }
                  NSDate *launchDate = app.launchDate;
@@ -4653,7 +4765,7 @@ index 90595b4..97ad2db 100644
                  AgentDesktopLaunchResult result = {
                      .application = (__bridge void *)app,
                      .pid = app.processIdentifier,
-@@ -183,6 +191,10 @@ bool agent_desktop_open_application(
+@@ -183,6 +216,10 @@ bool agent_desktop_open_application(
                      .errorKind = 0,
                      .error = NULL,
                      .errorLength = 0,
@@ -4664,7 +4776,16 @@ index 90595b4..97ad2db 100644
                  };
                  holder->_completion(holder->_releaseBox->context, &result);
              } @catch (NSException *exception) {
-@@ -213,3 +225,39 @@ uint8_t agent_desktop_running_application_is_live(void *application, int32_t exp
+@@ -192,7 +229,7 @@ bool agent_desktop_open_application(
+     } @catch (NSException *exception) {
+         if (holder != nil && holder->_releaseBox != NULL) {
+             @try {
+-                completeError(holder, exception.reason ?: @"Launch bridge exception", 3, 0);
++                completeError(holder, exception.reason ?: @"Launch bridge exception", 3, deliveryStarted ? 1 : 0);
+             } @catch (NSException *completionException) {
+                 (void)completionException;
+             }
+@@ -213,3 +250,39 @@ uint8_t agent_desktop_running_application_is_live(void *application, int32_t exp
          return 0;
      }
  }
@@ -4718,7 +4839,7 @@ index 7fb2439..8a76e68 100644
 +    pub(crate) bundle_id_len: usize,
  }
 diff --git a/crates/macos/src/system/launch_completion.rs b/crates/macos/src/system/launch_completion.rs
-index 31d33fa..7c9a6d0 100644
+index 31d33fa..396e9ca 100644
 --- a/crates/macos/src/system/launch_completion.rs
 +++ b/crates/macos/src/system/launch_completion.rs
 @@ -7,7 +7,12 @@ const MAX_ERROR_BYTES: usize = 64 * 1024;
@@ -4752,7 +4873,38 @@ index 31d33fa..7c9a6d0 100644
      let accepted = unsafe {
          agent_desktop_open_application(
              request.as_ptr(),
-@@ -171,7 +183,144 @@ fn validate_result(
+@@ -112,6 +124,30 @@ fn validate_result(
+     result: &crate::system::launch_callback_result::LaunchCallbackResult,
+ ) -> LaunchResult {
+     if result.pid <= 0 {
++        if result.error_kind == 7 {
++            return Err(callback_error(
++                result,
++                AdapterError::new(
++                    ErrorCode::Timeout,
++                    "The launch deadline expired before opening the application",
++                ),
++            ));
++        }
++        if result.error_kind == 6 {
++            return Err(callback_error(result, AdapterError::new(
++                ErrorCode::ActionFailed, "The computer-use run was stopped"
++            ).with_details(serde_json::json!({"clovy_code":"computer_use_stopped","physical_delivery_started":false}))));
++        }
++        if result.error_kind == 5 {
++            return Err(callback_error(
++                result,
++                AdapterError::new(
++                    ErrorCode::PolicyDenied,
++                    "This target cannot be controlled here",
++                )
++                .with_suggestion("Use Browser use or take over manually."),
++            ));
++        }
+         let code = if result.error_kind == 1 {
+             ErrorCode::AppNotFound
+         } else {
+@@ -171,7 +207,144 @@ fn validate_result(
              .with_details(serde_json::json!({ "pid": result.pid, "complete": false })),
          ));
      }
@@ -4898,7 +5050,7 @@ index 31d33fa..7c9a6d0 100644
  }
 
  fn callback_error(
-@@ -234,6 +383,14 @@ unsafe extern "C" {
+@@ -234,6 +407,14 @@ unsafe extern "C" {
          ),
          release: unsafe extern "C" fn(*mut c_void),
      ) -> bool;
@@ -4913,7 +5065,7 @@ index 31d33fa..7c9a6d0 100644
      fn agent_desktop_running_application_is_live(application: *mut c_void, expected_pid: i32)
      -> u8;
  }
-@@ -248,7 +405,15 @@ mod tests {
+@@ -248,7 +429,15 @@ mod tests {
          let timeout = state.wait(Deadline::after(1).unwrap()).unwrap_err();
 
          assert_eq!(timeout.code, ErrorCode::Timeout);
@@ -4930,7 +5082,7 @@ index 31d33fa..7c9a6d0 100644
          assert_eq!(state.wait(Deadline::after(50).unwrap()).unwrap().0, 7);
      }
 
-@@ -270,3 +435,47 @@ mod tests {
+@@ -270,3 +459,47 @@ mod tests {
          }
      }
  }
@@ -4979,18 +5131,63 @@ index 31d33fa..7c9a6d0 100644
 +    }
 +}
 diff --git a/crates/macos/src/system/launch_workspace.rs b/crates/macos/src/system/launch_workspace.rs
-index 07ef440..f7ec5e8 100644
+index 07ef440..2abf2d5 100644
 --- a/crates/macos/src/system/launch_workspace.rs
 +++ b/crates/macos/src/system/launch_workspace.rs
-@@ -4,7 +4,7 @@ pub(crate) fn open(
+@@ -4,7 +4,8 @@ pub(crate) fn open(
      id: &str,
      options: &LaunchOptions,
      deadline: Deadline,
 -) -> Result<(i32, String), AdapterError> {
++    existing: Option<(i32, &str)>,
 +) -> Result<crate::system::launch_completion::LaunchReceipt, AdapterError> {
      if deadline.is_expired() {
          return Err(deadline
              .timeout_error()
+@@ -13,6 +14,20 @@ pub(crate) fn open(
+     crate::system::cocoa_runtime::ensure_cocoa_multithreaded().map_err(|error| {
+         error.with_disposition(agent_desktop_core::DeliverySemantics::not_delivered())
+     })?;
++    let mut now = libc::timespec {
++        tv_sec: 0,
++        tv_nsec: 0,
++    };
++    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 || now.tv_sec < 0 {
++        return Err(
++            AdapterError::internal("Could not read the launch deadline clock")
++                .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered()),
++        );
++    }
++    let monotonic_ms = (now.tv_sec as u64)
++        .saturating_mul(1_000)
++        .saturating_add((now.tv_nsec as u64) / 1_000_000);
++    let deadline_uptime_ms = monotonic_ms.saturating_add(deadline.remaining_ms());
+     let request = serde_json::to_vec(&serde_json::json!({
+         "identifier": id,
+         "bundle_id": super::launch::looks_like_bundle_id(id),
+@@ -22,6 +37,9 @@ pub(crate) fn open(
+         "prompts": false,
+         "substitution": false,
+         "new_instance": creates_new_instance(options),
++        "expected_pid": existing.map(|(pid, _)| pid).unwrap_or(0),
++        "expected_instance": existing.map(|(_, instance)| instance),
++        "deadline_uptime_ms": deadline_uptime_ms,
+     }))
+     .map_err(|error| {
+         AdapterError::internal(format!("Encode launch request: {error}"))
+diff --git a/crates/macos/src/system/mod.rs b/crates/macos/src/system/mod.rs
+index 17ef849..35210ba 100644
+--- a/crates/macos/src/system/mod.rs
++++ b/crates/macos/src/system/mod.rs
+@@ -12,6 +12,8 @@ pub(crate) mod launch_callback_result;
+ pub(crate) mod launch_completion;
+ pub(crate) mod launch_workspace;
+ pub(crate) mod permissions;
++#[cfg(target_os = "macos")]
++pub(crate) mod private_browser_guard;
+ pub(crate) mod process;
+ pub(crate) mod renderer_activation;
+ pub(crate) mod renderer_kind;
 diff --git a/crates/macos/src/system/permissions/permission_guide.rs b/crates/macos/src/system/permissions/permission_guide.rs
 index 030b252..fc29f77 100644
 --- a/crates/macos/src/system/permissions/permission_guide.rs
@@ -5013,6 +5210,103 @@ index 030b252..fc29f77 100644
          .stdin(Stdio::null())
          .stdout(Stdio::null())
          .stderr(Stdio::null())
+diff --git a/crates/macos/src/system/private_browser_guard.rs b/crates/macos/src/system/private_browser_guard.rs
+new file mode 100644
+index 0000000..f7c6173
+--- /dev/null
++++ b/crates/macos/src/system/private_browser_guard.rs
+@@ -0,0 +1,91 @@
++//! Host-provided browser identity, evaluated afresh at each native boundary.
++use agent_desktop_core::{AdapterError, ErrorCode};
++use std::{
++    path::{Path, PathBuf},
++    sync::OnceLock,
++};
++
++fn denied() -> AdapterError {
++    AdapterError::new(
++        ErrorCode::PolicyDenied,
++        "This target cannot be controlled here",
++    )
++    .with_suggestion("Use Browser use or take over manually.")
++}
++
++fn runtime() -> Result<&'static crate::computer_use_owned_runtime::OwnedBrowserRuntime, AdapterError>
++{
++    static RUNTIME: OnceLock<Option<crate::computer_use_owned_runtime::OwnedBrowserRuntime>> =
++        OnceLock::new();
++    RUNTIME
++        .get_or_init(|| {
++            let namespace =
++                PathBuf::from(std::env::var_os("CLOVY_COMPUTER_USE_BROWSER_NAMESPACE")?);
++            let image = PathBuf::from(std::env::var_os("CLOVY_COMPUTER_USE_BROWSER_IMAGE")?);
++            if !namespace.is_absolute() || !image.is_absolute() {
++                return None;
++            }
++            Some(crate::computer_use_owned_runtime::OwnedBrowserRuntime::new(
++                namespace, image,
++            ))
++        })
++        .as_ref()
++        .ok_or_else(denied)
++}
++
++pub(crate) fn qualify(path: &Path) -> Result<(), AdapterError> {
++    match runtime()?.owns(path) {
++        Ok(false) => Ok(()),
++        Ok(true) | Err(_) => Err(denied()),
++    }
++}
++
++// Only the native launch bridge calls this; paths and birth tokens are never
++// supplied by tool arguments. Null and invalid inputs refuse the operation.
++#[unsafe(no_mangle)]
++pub(crate) unsafe extern "C" fn agent_desktop_qualify_launch_image(
++    path: *const std::ffi::c_char,
++    expected_pid: i32,
++    expected_instance: *const std::ffi::c_char,
++) -> u8 {
++    use std::os::unix::ffi::OsStrExt;
++    use std::os::unix::fs::MetadataExt;
++    if agent_desktop_core::commands::clovy_cancel::ensure().is_err() {
++        return 2;
++    }
++    std::panic::catch_unwind(|| {
++        if path.is_null() || expected_pid < 0 {
++            return false;
++        }
++        let bytes = unsafe { std::ffi::CStr::from_ptr(path) }.to_bytes();
++        let selected = Path::new(std::ffi::OsStr::from_bytes(bytes));
++        if qualify(selected).is_err() {
++            return false;
++        }
++        if expected_pid == 0 {
++            return true;
++        }
++        if expected_instance.is_null() {
++            return false;
++        }
++        let Ok(instance) = unsafe { std::ffi::CStr::from_ptr(expected_instance) }.to_str() else {
++            return false;
++        };
++        let Ok(identity) = super::launch_completion::identity_for_existing(expected_pid, instance)
++        else {
++            return false;
++        };
++        let existing = Path::new(&identity.executable_path);
++        if qualify(existing).is_err() {
++            return false;
++        }
++        let (Ok(a), Ok(b)) = (std::fs::metadata(selected), std::fs::metadata(existing)) else {
++            return false;
++        };
++        a.dev() == b.dev()
++            && a.ino() == b.ino()
++            && super::process::process_identity::matches_instance(expected_pid, instance)
++                .unwrap_or(false)
++    })
++    .unwrap_or(false) as u8
++}
 diff --git a/crates/macos/src/system/process/mod.rs b/crates/macos/src/system/process/mod.rs
 index 98cc130..99b3f23 100644
 --- a/crates/macos/src/system/process/mod.rs

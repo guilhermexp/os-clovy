@@ -187,6 +187,11 @@ Ref actions preserve preparatory focus and scroll evidence when a later target
 guard or dispatch fails. The target refusal keeps its own disposition in the
 error details, while the aggregate is unsafe to retry after a possible effect.
 
+The macOS launch bridge qualifies the executable from its resolved application
+URL before asking NSWorkspace to open it. Attachment rechecks the selected
+process generation and executable before and after window waits. This source
+review does not establish Cocoa or native macOS behavior.
+
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:
 local Git signature verification was unavailable. It does not establish
