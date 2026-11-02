@@ -5008,21 +5008,25 @@ index bc0a543..64a00a7 100644
 
  fn select_containing_item(element: &AXElement, deadline: Deadline) -> Result<bool, AdapterError> {
 diff --git a/crates/macos/src/actions/chain/chain_value_write.rs b/crates/macos/src/actions/chain/chain_value_write.rs
-index 860c488..0302a63 100644
+index 860c488..3e04b56 100644
 --- a/crates/macos/src/actions/chain/chain_value_write.rs
 +++ b/crates/macos/src/actions/chain/chain_value_write.rs
-@@ -21,7 +21,9 @@ mod imp {
+@@ -21,8 +21,12 @@ mod imp {
              if error.disposition != agent_desktop_core::DeliverySemantics::uncertain() {
                  return Err(error);
              }
 -            let observed = crate::tree::copy_value_typed(element, deadline);
+-            let role = ax_helpers::element_role(element, deadline).ok().flatten();
 +            let observed = crate::tree::copy_value_typed(element, deadline).map_err(|failure| {
-+                failure.with_disposition(agent_desktop_core::DeliverySemantics::uncertain())
++                super::super::uncertain_verification::verification_after_uncertain(failure, &error)
 +            })?;
-             let role = ax_helpers::element_role(element, deadline).ok().flatten();
++            let role = ax_helpers::element_role(element, deadline).map_err(|failure| {
++                super::super::uncertain_verification::verification_after_uncertain(failure, &error)
++            })?;
              let verified = chain_verify::dynamic_write_had_effect(
                  attribute,
-@@ -40,7 +42,8 @@ mod imp {
+                 role.as_deref(),
+@@ -40,7 +44,8 @@ mod imp {
          prepare(element, deadline).map_err(|error| delivery.annotate(error))?;
          let role = ax_helpers::element_role(element, deadline)
              .map_err(|error| delivery.annotate(error))?;
@@ -5032,7 +5036,7 @@ index 860c488..0302a63 100644
          Ok(DeliveryOutcome::from_delivery(
              true,
              chain_verify::dynamic_write_had_effect(
-@@ -128,13 +131,15 @@ mod imp {
+@@ -128,13 +133,15 @@ mod imp {
          prepare(element, deadline)?;
          let delivered = match ax_helpers::set_ax_bool_or_err(element, attribute, value, deadline) {
              Ok(delivered) => delivered,
@@ -5053,7 +5057,7 @@ index 860c488..0302a63 100644
          };
          if !delivered {
              return Ok(DeliveryOutcome::NotDelivered);
-@@ -142,9 +147,13 @@ mod imp {
+@@ -142,9 +149,13 @@ mod imp {
          let mut delivery = crate::actions::DeliveryTracker::default();
          delivery.mark_delivered();
          prepare(element, deadline).map_err(|error| delivery.annotate(error))?;
@@ -5069,7 +5073,7 @@ index 860c488..0302a63 100644
          Ok(DeliveryOutcome::from_delivery(
              delivered,
              delivered && verified,
-@@ -160,15 +169,18 @@ mod imp {
+@@ -160,15 +171,18 @@ mod imp {
          attribute: &str,
          value: bool,
          deadline: Deadline,
@@ -5093,7 +5097,7 @@ index 860c488..0302a63 100644
      }
 
      pub(crate) fn increment_action(current: &str, target: &str) -> Option<&'static str> {
-@@ -210,7 +222,7 @@ mod imp {
+@@ -210,7 +224,7 @@ mod imp {
          deadline: Deadline,
      ) -> Result<Option<(f64, String)>, AdapterError> {
          prepare(element, deadline)?;
@@ -5102,6 +5106,19 @@ index 860c488..0302a63 100644
              .and_then(|value| finite_target(&value).map(|number| (number, value))))
      }
 
+diff --git a/crates/macos/src/actions/chain/mod.rs b/crates/macos/src/actions/chain/mod.rs
+index 811e983..6d42709 100644
+--- a/crates/macos/src/actions/chain/mod.rs
++++ b/crates/macos/src/actions/chain/mod.rs
+@@ -5,6 +5,8 @@ use agent_desktop_core::{AdapterError, ErrorCode};
+ use crate::actions::chain::chain_delivery::DeliveryOutcome;
+ use crate::tree::AXElement;
+
++mod uncertain_verification;
++
+ pub(crate) use super::chain::chain_context::ChainContext;
+ pub(crate) use super::chain::chain_def::ChainDef;
+ pub(crate) use super::chain::chain_step::ChainStep;
 diff --git a/crates/macos/src/actions/chain/press_selection.rs b/crates/macos/src/actions/chain/press_selection.rs
 index 037ce59..91fc894 100644
 --- a/crates/macos/src/actions/chain/press_selection.rs
@@ -5159,6 +5176,31 @@ index 037ce59..91fc894 100644
              }
              std::thread::sleep(deadline.remaining().min(std::time::Duration::from_millis(
                  crate::actions::select::container_select::SELECTION_POLL_MS,
+diff --git a/crates/macos/src/actions/chain/uncertain_verification.rs b/crates/macos/src/actions/chain/uncertain_verification.rs
+new file mode 100644
+index 0000000..6cfaa06
+--- /dev/null
++++ b/crates/macos/src/actions/chain/uncertain_verification.rs
+@@ -0,0 +1,19 @@
++use agent_desktop_core::{AdapterError, DeliverySemantics};
++
++pub(crate) fn verification_after_uncertain(
++    mut verification: AdapterError,
++    mutation: &AdapterError,
++) -> AdapterError {
++    let mut details = serde_json::json!({"verification_details": verification.details.take()});
++    details["uncertain_mutation"] = serde_json::json!({
++        "code": mutation.code.as_str(),
++        "message": mutation.message,
++        "suggestion": mutation.suggestion,
++        "platform_detail": mutation.platform_detail,
++        "details": mutation.details,
++        "disposition": mutation.disposition,
++    });
++    verification
++        .with_details(details)
++        .with_disposition(DeliverySemantics::uncertain())
++}
 diff --git a/crates/macos/src/actions/dispatch.rs b/crates/macos/src/actions/dispatch.rs
 index 920d34c..b339bce 100644
 --- a/crates/macos/src/actions/dispatch.rs
@@ -5185,10 +5227,59 @@ index 3f1b878..8e74fa5 100644
          }
          if deadline.is_expired() {
 diff --git a/crates/macos/src/actions/physical_keyboard.rs b/crates/macos/src/actions/physical_keyboard.rs
-index 8fa71be..fb48582 100644
+index 8fa71be..59d8045 100644
 --- a/crates/macos/src/actions/physical_keyboard.rs
 +++ b/crates/macos/src/actions/physical_keyboard.rs
-@@ -79,7 +79,7 @@ fn prepare_target(
+@@ -21,12 +21,13 @@ pub(crate) fn press_sequence(
+     let mut delivery = crate::actions::DeliveryTracker::default();
+     let identity = prepare_target(element, policy, deadline, &mut delivery)
+         .map_err(|error| delivery.annotate(error))?;
+-    let pid = identity.pid();
+     for combo in combos {
+         verify_delivery_target(element, identity, deadline)
+             .map_err(|error| delivery.annotate(error))?;
+-        crate::input::keyboard::synthesize_key(combo, Some(pid), deadline)
+-            .map_err(|error| delivery.annotate(error))?;
++        crate::input::keyboard::synthesize_key_guarded(combo, identity, deadline, |deadline| {
++            verify_delivery_target(element, identity, deadline)
++        })
++        .map_err(|error| delivery.annotate(error))?;
+         delivery.mark_delivered();
+     }
+     Ok(())
+@@ -42,8 +43,7 @@ pub(crate) fn type_text(
+     let mut delivery = crate::actions::DeliveryTracker::default();
+     let identity = prepare_target(element, policy, deadline, &mut delivery)
+         .map_err(|error| delivery.annotate(error))?;
+-    let pid = identity.pid();
+-    crate::input::keyboard::synthesize_text(text, pid, deadline, |deadline| {
++    crate::input::keyboard::synthesize_text(text, identity, deadline, |deadline| {
+         verify_delivery_target(element, identity, deadline)
+     })
+     .map_err(|error| delivery.annotate(error))
+@@ -61,25 +61,14 @@ fn prepare_target(
+             policy,
+         ));
+     }
+-    let pid = crate::system::app::app_ops::pid_from_element(element, deadline)
+-        .filter(|pid| *pid > 0)
+-        .ok_or_else(|| {
+-            AdapterError::new(
+-                ErrorCode::StaleRef,
+-                "Keyboard target no longer has a valid owning process",
+-            )
+-        })?;
+-    let identity = crate::system::process::process_identity::ProcessIdentity::capture(pid)?
+-        .ok_or_else(|| {
+-            AdapterError::new(
+-                ErrorCode::StaleRef,
+-                "Keyboard target process exited before physical input preparation",
+-            )
+-        })?;
++    element.qualify(crate::tree::locator_deadline::from_operation(deadline)?)?;
++    let identity =
++        crate::system::process::process_identity::require_core(element.owner_identity()?)?;
++    let pid = identity.pid();
      if let Some(window) = target_window(element, deadline)? {
          crate::system::focus::verify_window_main(&window, deadline)?;
      }
@@ -5197,7 +5288,7 @@ index 8fa71be..fb48582 100644
      prepare(element, deadline)?;
      if !crate::actions::ax_helpers::ax_focus_or_err(element, deadline)? {
          return Err(AdapterError::new(
-@@ -90,7 +90,7 @@ fn prepare_target(
+@@ -90,7 +79,7 @@ fn prepare_target(
      }
      delivery.mark_delivered();
      wait_for_focused_element(element, pid, deadline)?;
@@ -5206,7 +5297,7 @@ index 8fa71be..fb48582 100644
      verify_delivery_target(element, identity, deadline)?;
      Ok(identity)
  }
-@@ -114,12 +114,11 @@ fn target_window(
+@@ -114,12 +103,11 @@ fn target_window(
      element: &AXElement,
      deadline: Deadline,
  ) -> Result<Option<AXElement>, AdapterError> {
@@ -5224,7 +5315,7 @@ index 8fa71be..fb48582 100644
  }
 
  fn wait_for_focused_element(
-@@ -149,7 +148,7 @@ fn verify_focused_element(
+@@ -149,7 +137,7 @@ fn verify_focused_element(
      pid: i32,
      deadline: Deadline,
  ) -> Result<(), AdapterError> {
@@ -5233,7 +5324,7 @@ index 8fa71be..fb48582 100644
      if focused_element_matches(expected, pid, deadline)? {
          return Ok(());
      }
-@@ -165,43 +164,13 @@ fn focused_element_matches(
+@@ -165,43 +153,13 @@ fn focused_element_matches(
      pid: i32,
      deadline: Deadline,
  ) -> Result<bool, AdapterError> {
@@ -5951,10 +6042,111 @@ index 1f8a933..a283355 100644
              Ok(())
          })
 diff --git a/crates/macos/src/input/keyboard/keyboard_event.rs b/crates/macos/src/input/keyboard/keyboard_event.rs
-index e0296ef..a94ae99 100644
+index e0296ef..bec19b0 100644
 --- a/crates/macos/src/input/keyboard/keyboard_event.rs
 +++ b/crates/macos/src/input/keyboard/keyboard_event.rs
-@@ -161,6 +161,7 @@ fn ensure_budget(
+@@ -27,7 +27,7 @@ pub(crate) fn post_key(
+
+ pub(crate) fn post_text(
+     text: &str,
+-    target_pid: i32,
++    identity: crate::system::process::process_identity::ProcessIdentity,
+     deadline: Deadline,
+     mut verify_target: impl FnMut(Deadline) -> Result<(), AdapterError>,
+ ) -> Result<(), AdapterError> {
+@@ -49,11 +49,90 @@ pub(crate) fn post_text(
+         down.set_string_from_utf16_unchecked(&chunk);
+         let up = create_key_event(&source, 0, false, CGEventFlags::empty())
+             .map_err(|error| delivery.annotate(error))?;
+-        post_pair((down, up), Some(target_pid), deadline, &mut delivery, total)?;
++        post_guarded_pair(
++            (down, up),
++            identity,
++            deadline,
++            &mut delivery,
++            total,
++            &mut verify_target,
++        )?;
+     }
+     Ok(())
+ }
+
++pub(crate) fn post_key_guarded(
++    key_code: u16,
++    flags: CGEventFlags,
++    identity: crate::system::process::process_identity::ProcessIdentity,
++    deadline: Deadline,
++    mut verify_target: impl FnMut(Deadline) -> Result<(), AdapterError>,
++) -> Result<(), AdapterError> {
++    let mut delivery = crate::actions::DeliveryTracker::default();
++    ensure_budget(deadline, 1, delivery)?;
++    let source = event_source().map_err(|error| delivery.annotate(error))?;
++    let down = create_key_event(&source, key_code, true, flags)
++        .map_err(|error| delivery.annotate(error))?;
++    let up = create_key_event(&source, key_code, false, flags)
++        .map_err(|error| delivery.annotate(error))?;
++    post_guarded_pair(
++        (down, up),
++        identity,
++        deadline,
++        &mut delivery,
++        1,
++        &mut verify_target,
++    )
++}
++
++fn post_guarded_pair(
++    (down, up): (CGEvent, CGEvent),
++    identity: crate::system::process::process_identity::ProcessIdentity,
++    deadline: Deadline,
++    delivery: &mut crate::actions::DeliveryTracker,
++    total: usize,
++    verify_target: &mut impl FnMut(Deadline) -> Result<(), AdapterError>,
++) -> Result<(), AdapterError> {
++    ensure_budget(deadline, total, *delivery)?;
++    verify_target(deadline).map_err(|error| delivery.annotate(error))?;
++    let mut release = TextReleaseGuard {
++        event: Some(up),
++        identity,
++    };
++    down.post_to_pid(identity.pid());
++    delivery.mark_delivered();
++    sleep_bounded(deadline, KEY_SETTLE, *delivery, total)?;
++    if identity
++        .still_matches()
++        .map_err(|error| delivery.annotate(error))?
++    {
++        if let Some(up) = release.event.take() {
++            up.post_to_pid(identity.pid());
++        }
++    } else {
++        release.event.take();
++        return Err(delivery.annotate(AdapterError::stale_ref_because(
++            "Keyboard target generation changed",
++        )));
++    }
++    ensure_budget(deadline, total, *delivery)
++}
++
++struct TextReleaseGuard {
++    event: Option<CGEvent>,
++    identity: crate::system::process::process_identity::ProcessIdentity,
++}
++
++impl Drop for TextReleaseGuard {
++    fn drop(&mut self) {
++        if let Some(event) = self.event.take()
++            && self.identity.still_matches().unwrap_or(false)
++        {
++            event.post_to_pid(self.identity.pid());
++        }
++    }
++}
++
+ pub(crate) fn preflight_text(text: &str, deadline: Deadline) -> Result<(), AdapterError> {
+     let chunks = planned_chunk_count(text)?;
+     let multiplier = u32::try_from(chunks)
+@@ -161,6 +240,7 @@ fn ensure_budget(
      total: usize,
      delivery: crate::actions::DeliveryTracker,
  ) -> Result<(), AdapterError> {
@@ -5962,6 +6154,63 @@ index e0296ef..a94ae99 100644
      if !deadline.is_expired() {
          return Ok(());
      }
+diff --git a/crates/macos/src/input/keyboard/mod.rs b/crates/macos/src/input/keyboard/mod.rs
+index 80a3bd4..d9ad7dd 100644
+--- a/crates/macos/src/input/keyboard/mod.rs
++++ b/crates/macos/src/input/keyboard/mod.rs
+@@ -22,6 +22,23 @@ pub(crate) fn synthesize_key(
+     )
+ }
+
++#[cfg(target_os = "macos")]
++pub(crate) fn synthesize_key_guarded(
++    combo: &KeyCombo,
++    identity: crate::system::process::process_identity::ProcessIdentity,
++    deadline: Deadline,
++    verify_target: impl FnMut(Deadline) -> Result<(), AdapterError>,
++) -> Result<(), AdapterError> {
++    let key_code = crate::input::keyboard::keyboard_map::key_name_to_code(&combo.key)?;
++    keyboard_event::post_key_guarded(
++        key_code,
++        crate::input::mouse::event_flags(&combo.modifiers),
++        identity,
++        deadline,
++        verify_target,
++    )
++}
++
+ #[cfg(target_os = "macos")]
+ pub(crate) fn reject_standalone_key_state(
+     _combo: &KeyCombo,
+@@ -43,16 +60,16 @@ pub(crate) fn reject_standalone_key_state(
+ #[cfg(target_os = "macos")]
+ pub(crate) fn synthesize_text(
+     text: &str,
+-    target_pid: i32,
++    identity: crate::system::process::process_identity::ProcessIdentity,
+     deadline: Deadline,
+     verify_target: impl FnMut(Deadline) -> Result<(), AdapterError>,
+ ) -> Result<(), AdapterError> {
+     tracing::debug!(
+         characters = text.chars().count(),
+-        target_pid,
++        target_pid = identity.pid(),
+         "keyboard: synthesize Unicode text"
+     );
+-    crate::input::keyboard::keyboard_event::post_text(text, target_pid, deadline, verify_target)
++    crate::input::keyboard::keyboard_event::post_text(text, identity, deadline, verify_target)
+ }
+
+ #[cfg(target_os = "macos")]
+@@ -80,7 +97,7 @@ pub(crate) fn reject_standalone_key_state(
+ #[cfg(not(target_os = "macos"))]
+ pub(crate) fn synthesize_text(
+     _text: &str,
+-    _target_pid: i32,
++    _identity: crate::system::process::process_identity::ProcessIdentity,
+     _deadline: Deadline,
+     _verify_target: impl FnMut(Deadline) -> Result<(), AdapterError>,
+ ) -> Result<(), AdapterError> {
 diff --git a/crates/macos/src/input/mouse/mod.rs b/crates/macos/src/input/mouse/mod.rs
 index ec255cd..94ce9ad 100644
 --- a/crates/macos/src/input/mouse/mod.rs
@@ -6288,7 +6537,7 @@ index 2b078a3..cc9293c 100644
  }
 
 diff --git a/crates/macos/src/system/key_dispatch.rs b/crates/macos/src/system/key_dispatch.rs
-index b618ed4..9555b6d 100644
+index b618ed4..d7eb9b6 100644
 --- a/crates/macos/src/system/key_dispatch.rs
 +++ b/crates/macos/src/system/key_dispatch.rs
 @@ -28,7 +28,12 @@ fn press_for_app(
@@ -6305,7 +6554,7 @@ index b618ed4..9555b6d 100644
 
      if uses_menu_shortcut(combo, policy) {
          match menu::try_menu_bar_shortcut(&app, combo, deadline) {
-@@ -51,7 +56,7 @@ fn press_for_app(
+@@ -51,12 +56,25 @@ fn press_for_app(
      crate::input::keyboard::keyboard_map::key_name_to_code(&combo.key)?;
      if policy.allow_focus_steal {
          crate::system::process::process_identity::require_core(&process)?;
@@ -6313,8 +6562,28 @@ index b618ed4..9555b6d 100644
 +        crate::system::focus::verify_app_focused(&app, deadline)?;
      }
      crate::system::process::process_identity::require_core(&process)?;
-     require_focused_element(&app, policy, deadline)?;
-@@ -88,7 +93,7 @@ fn try_simple_key_action(
+-    require_focused_element(&app, policy, deadline)?;
++    let focused = require_focused_element(&app, policy, deadline)?;
+     crate::system::process::process_identity::require_core(&process)?;
+-    crate::input::keyboard::synthesize_key(combo, Some(pid), deadline)?;
++    crate::input::keyboard::synthesize_key_guarded(combo, identity, deadline, |deadline| {
++        crate::system::process::process_identity::require_core(&process)?;
++        let current =
++            focused_element(&app, deadline)?.ok_or_else(|| no_focused_element_error(policy))?;
++        let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++        focused.qualify(instant)?;
++        current.qualify(instant)?;
++        if !crate::tree::same_element(&focused, &current) {
++            return Err(AdapterError::stale_ref_because(
++                "Focused keyboard element changed",
++            ));
++        }
++        Ok(())
++    })?;
+     post_delivery_process_result(
+         &process,
+         ActionStep::succeeded("CGEventPostToPid")
+@@ -88,7 +106,7 @@ fn try_simple_key_action(
      let Some(focused) = focused_element(app, deadline)? else {
          return Ok(false);
      };
@@ -6323,7 +6592,7 @@ index b618ed4..9555b6d 100644
          return Ok(false);
      }
      crate::actions::ax_helpers::try_ax_action_or_err(&focused, action, deadline)
-@@ -130,6 +135,7 @@ fn require_focused_element(
+@@ -130,6 +148,7 @@ fn require_focused_element(
  ) -> Result<AXElement, AdapterError> {
      let local_deadline = local_deadline(deadline, Duration::from_millis(500))?;
      loop {
@@ -6331,7 +6600,7 @@ index b618ed4..9555b6d 100644
          if let Some(focused) = focused_element(app, deadline)? {
              return Ok(focused);
          }
-@@ -151,10 +157,11 @@ fn element_attribute(
+@@ -151,10 +170,11 @@ fn element_attribute(
      attribute: &str,
      deadline: Deadline,
  ) -> Result<Option<AXElement>, AdapterError> {
@@ -9077,14 +9346,14 @@ index 7dee59c..f18085f 100644
 
      fn get_live_element(
 diff --git a/crates/macos/src/tree/ax_element.rs b/crates/macos/src/tree/ax_element.rs
-index a0fcaf4..2f009c5 100644
+index a0fcaf4..04d54d6 100644
 --- a/crates/macos/src/tree/ax_element.rs
 +++ b/crates/macos/src/tree/ax_element.rs
-@@ -1,68 +1,311 @@
+@@ -1,68 +1,325 @@
 +use agent_desktop_core::{AdapterError, NativeHandle, ProcessIdentity, RefEntry, WindowInfo};
 +use std::{sync::Arc, time::Instant};
 +
-+#[derive(Clone)]
++#[derive(Clone, PartialEq, Eq)]
 +pub(crate) struct Binding {
 +    root: Arc<ProcessIdentity>,
 +    owner: Arc<ProcessIdentity>,
@@ -9099,8 +9368,7 @@ index a0fcaf4..2f009c5 100644
 +pub(crate) type RawElement = accessibility_sys::AXUIElementRef;
 +#[cfg(not(target_os = "macos"))]
 +pub(crate) type RawElement = *const std::ffi::c_void;
-
--    pub struct AXElement(pub(crate) AXUIElementRef);
++
 +pub(crate) struct AXElement {
 +    raw: RawElement,
 +    binding: Option<Arc<Binding>>,
@@ -9115,6 +9383,24 @@ index a0fcaf4..2f009c5 100644
 +    pub(crate) fn raw(&self) -> RawElement {
 +        self.raw
 +    }
+
+-    pub struct AXElement(pub(crate) AXUIElementRef);
++    pub(crate) fn same_binding(&self, other: &Self) -> bool {
++        self.binding == other.binding
++    }
+
+-    impl AXElement {
+-        pub(crate) fn into_native_handle(self) -> NativeHandle {
+-            NativeHandle::new(self)
++    #[cfg(target_os = "macos")]
++    pub(crate) fn owner_identity(&self) -> Result<&ProcessIdentity, AdapterError> {
++        self.binding
++            .as_ref()
++            .map(|binding| binding.owner.as_ref())
++            .ok_or_else(|| {
++                AdapterError::stale_ref_because("Accessibility owner identity is unavailable")
++            })
++    }
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn bind_process(
 +        &mut self,
@@ -9124,10 +9410,7 @@ index a0fcaf4..2f009c5 100644
 +    ) -> Result<(), AdapterError> {
 +        self.bind_process_scoped(pid, instance, None, deadline)
 +    }
-
--    impl AXElement {
--        pub(crate) fn into_native_handle(self) -> NativeHandle {
--            NativeHandle::new(self)
++
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn bind_process_scoped(
 +        &mut self,
@@ -9366,13 +9649,13 @@ index a0fcaf4..2f009c5 100644
 +            return Err(AdapterError::stale_ref_because(
 +                "Accessibility owner changed",
 +            ));
-         }
++        }
 +        if owner_pid != root_pid {
 +            crate::system::private_browser_guard::require_pid(
 +                owner_pid,
 +                Some(&binding.owner.instance),
 +            )?;
-+        }
+         }
 +        crate::tree::locator_deadline::remaining(deadline)?;
 +        if crate::tree::properties::ax_ipc::pid(self, deadline).ok() != Some(owner_pid) {
 +            return Err(AdapterError::stale_ref_because(
@@ -10762,7 +11045,7 @@ index ebe335e..864a439 100644
      }
  }
 diff --git a/crates/macos/src/tree/properties/text_insertion.rs b/crates/macos/src/tree/properties/text_insertion.rs
-index c042717..2ceeeee 100644
+index c042717..b895512 100644
 --- a/crates/macos/src/tree/properties/text_insertion.rs
 +++ b/crates/macos/src/tree/properties/text_insertion.rs
 @@ -62,66 +62,134 @@ fn new_line_caret(
@@ -10788,7 +11071,7 @@ index c042717..2ceeeee 100644
 +                (
 +                    crate::tree::element_for_pid(pid),
 +                    pid,
-+                    process.instance.clone(),
++                    std::borrow::Cow::Borrowed(process.instance.as_str()),
 +                )
 +            }
 +            None => {
@@ -10799,7 +11082,7 @@ index c042717..2ceeeee 100644
 +                    AdapterError::stale_ref_because("Focused application identity is unavailable")
 +                })?;
 +                let instance = crate::system::private_browser_guard::require_pid(pid, None)?;
-+                (app, pid, instance)
++                (app, pid, std::borrow::Cow::Owned(instance))
 +            }
          };
 -        let focused = super::super::attributes::copy_element_attr_result(
@@ -11046,15 +11329,21 @@ index c042717..2ceeeee 100644
      ) -> Result<Option<Rect>, AdapterError> {
          Err(AdapterError::not_supported("get_focused_insertion_caret"))
 diff --git a/crates/macos/src/tree/query/child_read.rs b/crates/macos/src/tree/query/child_read.rs
-index 43839e4..62baa98 100644
+index 43839e4..b5e462b 100644
 --- a/crates/macos/src/tree/query/child_read.rs
 +++ b/crates/macos/src/tree/query/child_read.rs
-@@ -132,12 +132,15 @@ mod imp {
+@@ -126,18 +126,20 @@ mod imp {
+     ) -> ChildRead {
+         let budget = budget.into();
+         let (max_elements, boundary) = (budget.max_elements, budget.boundary);
+-        let count_deadline = super::super::child_read_budget::count_deadline(boundary, deadline);
+         let mut status = ChildReadStatus::default();
+         if check_deadline(deadline, &mut status).is_err() {
              return ChildRead::failed(status);
          }
          status.attempts += 1;
 -        let count = match child_count(element, attribute, count_deadline) {
-+        let count = match guarded_count(element, attribute, count_deadline, &mut status) {
++        let count = match guarded_count(element, attribute, deadline, Some(boundary), &mut status) {
              Ok(count) => count,
              Err(error) if is_absent_error(error) => {
                  return ChildRead::unavailable(status);
@@ -11066,7 +11355,7 @@ index 43839e4..62baa98 100644
                  telemetry::record(&mut status, attribute, "initial_count", error, None);
                  return read_without_count(element, attribute, max_elements, deadline, status);
              }
-@@ -147,6 +150,9 @@ mod imp {
+@@ -147,6 +149,9 @@ mod imp {
          let mut elements = match read_prefix(element, attribute, requested, deadline, &mut status) {
              Ok(elements) => elements,
              Err(error) => {
@@ -11076,16 +11365,16 @@ index 43839e4..62baa98 100644
                  telemetry::record(&mut status, attribute, "prefix", error, Some(count));
                  complete = false;
                  Vec::new()
-@@ -187,7 +193,7 @@ mod imp {
+@@ -187,7 +192,7 @@ mod imp {
              return ChildRead::failed(status);
          }
          status.attempts += 1;
 -        let initial_count = match child_count(element, attribute, deadline) {
-+        let initial_count = match guarded_count(element, attribute, deadline, &mut status) {
++        let initial_count = match guarded_count(element, attribute, deadline, None, &mut status) {
              Ok(count) => count,
              Err(error) if is_absent_error(error) => return ChildRead::unavailable(status),
              Err(error) => {
-@@ -197,7 +203,7 @@ mod imp {
+@@ -197,7 +202,7 @@ mod imp {
          };
          let elements = if index < initial_count {
              status.attempts += 1;
@@ -11094,7 +11383,7 @@ index 43839e4..62baa98 100644
                  Ok(elements) => elements,
                  Err(error) => {
                      telemetry::record(
-@@ -216,6 +222,9 @@ mod imp {
+@@ -216,6 +221,9 @@ mod imp {
          if index < initial_count && elements.is_empty() {
              status.cursor_stalled = true;
          }
@@ -11104,7 +11393,7 @@ index 43839e4..62baa98 100644
          let final_count = stable_count(element, attribute, deadline, &mut status);
          if let Err(error) = final_count {
              telemetry::record(
-@@ -285,7 +294,7 @@ mod imp {
+@@ -285,7 +293,7 @@ mod imp {
              check_deadline(deadline, status)
                  .map_err(|_| accessibility_sys::kAXErrorCannotComplete)?;
              status.attempts += 1;
@@ -11113,12 +11402,12 @@ index 43839e4..62baa98 100644
          })?;
          status.cursor_stalled |= result.stalled;
          Ok(result.elements)
-@@ -299,7 +308,44 @@ mod imp {
+@@ -299,7 +307,50 @@ mod imp {
      ) -> Result<usize, i32> {
          check_deadline(deadline, status).map_err(|_| accessibility_sys::kAXErrorCannotComplete)?;
          status.attempts += 1;
 -        child_count(element, attribute, deadline)
-+        guarded_count(element, attribute, deadline, status)
++        guarded_count(element, attribute, deadline, None, status)
 +    }
 +
 +    fn authority(
@@ -11126,21 +11415,27 @@ index 43839e4..62baa98 100644
 +        deadline: std::time::Instant,
 +        status: &mut ChildReadStatus,
 +    ) -> Result<(), i32> {
-+        element.qualify(deadline).map_err(|error| {
-+            status.authority_error = Some(error);
-+            i32::MIN
-+        })
++        agent_desktop_core::commands::clovy_cancel::ensure()
++            .and_then(|()| element.qualify(deadline))
++            .map_err(|error| {
++                status.authority_error = Some(error);
++                i32::MIN
++            })
 +    }
 +
 +    fn guarded_count(
 +        element: &AXElement,
 +        attribute: &str,
-+        deadline: std::time::Instant,
++        authority_deadline: std::time::Instant,
++        boundary: Option<bool>,
 +        status: &mut ChildReadStatus,
 +    ) -> Result<usize, i32> {
-+        authority(element, deadline, status)?;
-+        let result = child_count(element, attribute, deadline);
-+        authority(element, deadline, status)?;
++        authority(element, authority_deadline, status)?;
++        let count_deadline = boundary.map_or(authority_deadline, |boundary| {
++            super::super::child_read_budget::count_deadline(boundary, authority_deadline)
++        });
++        let result = child_count(element, attribute, count_deadline);
++        authority(element, authority_deadline, status)?;
 +        result
 +    }
 +
@@ -12144,7 +12439,7 @@ index cb0a56b..70fe073 100644
      validate(Some(token))?;
      Ok(STORE.with(|slot| {
 diff --git a/crates/macos/src/tree/resolve/retained_store.rs b/crates/macos/src/tree/resolve/retained_store.rs
-index 5295f95..eb95a7a 100644
+index 5295f95..42e58a8 100644
 --- a/crates/macos/src/tree/resolve/retained_store.rs
 +++ b/crates/macos/src/tree/resolve/retained_store.rs
 @@ -17,7 +17,7 @@ mod tests {
@@ -12170,7 +12465,15 @@ index 5295f95..eb95a7a 100644
      pub(in crate::tree) fn new(generation: String) -> Self {
          Self {
              generation,
-@@ -85,7 +92,7 @@ impl RetainedStore {
+@@ -80,12 +87,14 @@ impl RetainedStore {
+         self.buckets
+             .get(&element_hash(element))?
+             .iter()
+-            .find(|(_, saved)| crate::tree::same_element(saved, element))
++            .find(|(_, saved)| {
++                saved.same_binding(element) && crate::tree::same_element(saved, element)
++            })
+             .map(|(token, _)| token.as_str())
      }
 
      pub(in crate::tree) fn capture(&mut self, element: &AXElement) -> Result<String, AdapterError> {

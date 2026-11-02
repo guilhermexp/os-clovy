@@ -223,6 +223,15 @@ paths. Verification after an effect preserves its delivery disposition.
 The portable subprocess proof and Rust metadata checks do not establish macOS
 runtime behavior. Physical input and native qualification remain open.
 
+The AX count's short native-call slice no longer limits its authority checks.
+Retained AX objects also distinguish root, owner and source-window bindings;
+uncertain setter failures retain their original evidence if verification fails.
+PID-targeted reference keyboard and text posts recheck the bound focused target
+after event creation, and their owned key-up refuses a reused PID generation.
+This is a partial input checkpoint: global keyboard, scoped window pointer and
+drag, receiver qualification and cleanup acknowledgement remain open. The
+metadata and portable error-flow checks do not establish native behavior.
+
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:
 local Git signature verification was unavailable. It does not establish
