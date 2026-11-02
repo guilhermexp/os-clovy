@@ -14,7 +14,14 @@ mod native {
     };
 
     fn component(value: &OsStr) -> io::Result<CString> {
-        CString::new(value.as_bytes())
+        let bytes = value.as_bytes();
+        if bytes.is_empty() || bytes == b"." || bytes == b".." || bytes.contains(&b'/') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid component",
+            ));
+        }
+        CString::new(bytes)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid component"))
     }
     fn open_at(parent: RawFd, name: &CStr, flags: i32) -> io::Result<File> {
@@ -352,6 +359,18 @@ mod native {
     mod tests {
         use super::*;
         #[test]
+        fn rejects_non_component_profile_names() {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(temp.path().join("a/b")).unwrap();
+            let root = RecoveryRoot::open(temp.path()).unwrap();
+            for name in ["", ".", "..", "a/b"] {
+                assert!(root.profile(OsStr::new(name)).is_err(), "{name:?}");
+                assert!(root.create_profile(OsStr::new(name)).is_err(), "{name:?}");
+            }
+            assert!(root.create_profile(OsStr::new("a/new")).is_err());
+            assert!(!temp.path().join("a/new").exists());
+        }
+        #[test]
         fn profile_swap_does_not_delete_replacement_or_follow_symlink() {
             let root = tempfile::tempdir().unwrap();
             let outside = tempfile::tempdir().unwrap();
@@ -531,7 +550,11 @@ mod native_windows {
         allow_reparse: bool,
     ) -> io::Result<File> {
         let mut wide: Vec<u16> = name.encode_wide().collect();
-        if wide.is_empty() || wide.contains(&0) {
+        if wide.is_empty()
+            || wide == [b'.' as u16]
+            || wide == [b'.' as u16, b'.' as u16]
+            || wide.iter().any(|c| matches!(*c, 0 | 47 | 92 | 58))
+        {
             return Err(io::Error::other("invalid component"));
         }
         let length = u16::try_from(wide.len() * 2).map_err(io::Error::other)?;
