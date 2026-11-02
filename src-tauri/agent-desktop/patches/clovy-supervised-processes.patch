@@ -71,18 +71,42 @@ index 31bf0ee..62a8ff1 100644
          to: Point { x: 1.0, y: 1.0 },
          duration_ms: None,
 diff --git a/crates/core/src/actions/headed_focus.rs b/crates/core/src/actions/headed_focus.rs
-index 3279848..05e9770 100644
+index 3279848..66bc7b6 100644
 --- a/crates/core/src/actions/headed_focus.rs
 +++ b/crates/core/src/actions/headed_focus.rs
-@@ -17,6 +17,7 @@ pub(crate) fn focus_entry_window(
+@@ -8,6 +8,11 @@ pub(crate) fn focus_entry_window(
+     context: &crate::CommandContext,
+     lease: &crate::InteractionLease,
+ ) -> Result<WindowInfo, AppError> {
++    let expected = expected_entry_window(entry)?;
++    focus_exact_window(&expected, adapter, context, lease)
++}
++
++pub(crate) fn expected_entry_window(entry: &crate::RefEntry) -> Result<WindowInfo, AppError> {
+     let process_instance = required_text(
+         entry.process.process_instance.as_deref(),
+         "Headed input requires target process-instance identity",
+@@ -16,7 +21,8 @@ pub(crate) fn focus_entry_window(
+         entry.source.source_window_id.as_deref(),
          "Headed input requires an exact source window id",
      )?;
-     let expected = WindowInfo {
+-    let expected = WindowInfo {
++    Ok(WindowInfo {
 +        native_owner: entry.source.native_owner.clone(),
          id: window_id.to_string(),
          title: entry.source.source_window_title.clone().unwrap_or_default(),
          app: entry.source.source_app.clone().unwrap_or_default(),
-@@ -56,10 +57,32 @@ pub(crate) fn focus_exact_window(
+@@ -24,8 +30,7 @@ pub(crate) fn focus_entry_window(
+         process_instance: Some(process_instance.to_string()),
+         bounds: None,
+         state: crate::WindowState::default(),
+-    };
+-    focus_exact_window(&expected, adapter, context, lease)
++    })
+ }
+
+ pub(crate) fn focus_process_window(
+@@ -56,10 +61,32 @@ pub(crate) fn focus_exact_window(
          .into());
      }
      adapter.focus_window(&live, lease)?;
@@ -221,7 +245,7 @@ index 8c84c24..e1bc28f 100644
              source_window_id: None,
              source_window_title: None,
 diff --git a/crates/core/src/adapter/input.rs b/crates/core/src/adapter/input.rs
-index 25f80d1..b1fa8fd 100644
+index 25f80d1..0c4256a 100644
 --- a/crates/core/src/adapter/input.rs
 +++ b/crates/core/src/adapter/input.rs
 @@ -1,6 +1,6 @@
@@ -248,7 +272,7 @@ index 25f80d1..b1fa8fd 100644
      fn key_event(
          &self,
          _combo: &KeyCombo,
-@@ -49,6 +58,15 @@ pub trait InputOps: Send + Sync {
+@@ -49,6 +58,26 @@ pub trait InputOps: Send + Sync {
          Err(AdapterError::not_supported("drag"))
      }
 
@@ -259,6 +283,17 @@ index 25f80d1..b1fa8fd 100644
 +        _lease: &InteractionLease,
 +    ) -> Result<OperationReport, AdapterError> {
 +        Err(AdapterError::not_supported("drag_for_window"))
++    }
++
++    fn drag_for_refs(
++        &self,
++        _window: &WindowInfo,
++        _source: Option<&crate::RefEntry>,
++        _destination: Option<&crate::RefEntry>,
++        _params: DragParams,
++        _lease: &InteractionLease,
++    ) -> Result<OperationReport, AdapterError> {
++        Err(AdapterError::not_supported("drag_for_refs"))
 +    }
 +
      fn clear_clipboard(&self, _lease: &InteractionLease) -> Result<OperationReport, AdapterError> {
@@ -1600,17 +1635,299 @@ index 0000000..63f24dd
 +    }
 +}
 diff --git a/crates/core/src/commands/drag.rs b/crates/core/src/commands/drag.rs
-index dcb7fe0..e0c64dc 100644
+index dcb7fe0..126b6cf 100644
 --- a/crates/core/src/commands/drag.rs
 +++ b/crates/core/src/commands/drag.rs
-@@ -131,6 +131,7 @@ pub fn execute(
-             })),
-         )?;
-         let params = DragParams {
-+            modifiers: Vec::new(),
-             from: from.point.clone(),
-             to: to.point.clone(),
-             duration_ms: args.duration_ms,
+@@ -1,5 +1,5 @@
+ use crate::{
+-    AppError, DragParams,
++    AdapterError, AppError, DragParams,
+     adapter::PlatformAdapter,
+     commands::{
+         helpers::{apply_post_action_wait, validate_post_action_wait},
+@@ -66,79 +66,94 @@ pub fn execute(
+         headed_requirement: crate::HeadedRequirement::None,
+     };
+     let auto_wait = args.timeout_ms.is_some_and(|timeout_ms| timeout_ms > 0);
++    let effects = crate::commands::pointer_action::PointEffects::default();
+     let cursor = crate::cursor_overlay::hold_cursor(context, deadline);
+-    let (from, to, lease, params) = before_first_event(|| {
+-        if auto_wait {
+-            wait_for_point_with_deadline(from_args, deadline, adapter, context)?;
+-            wait_for_point_with_deadline(to_args, deadline, adapter, context)?;
+-        }
+-        let (from, to, lease) = retry_leased_point_phase(args.timeout_ms, deadline, || {
+-            let lease = adapter.acquire_interaction_lease(deadline)?;
+-            let focused = focus_point_under_lease(from_args, &lease, adapter, context)?;
+-            let from = resolve_point_under_lease(
+-                PointResolveAttempt {
+-                    args: from_args,
+-                    stability: None,
+-                    allow_scroll: !auto_wait,
+-                },
++    let (from, to, lease, params) = before_first_event(
++        || {
++            if auto_wait {
++                wait_for_point_with_deadline(from_args, deadline, adapter, context, &effects)?;
++                wait_for_point_with_deadline(to_args, deadline, adapter, context, &effects)?;
++            }
++            let (from, to, lease) = retry_leased_point_phase(
++                args.timeout_ms,
+                 deadline,
+-                &lease,
+-                adapter,
+-                context,
+-            )?;
+-            let to = resolve_point_under_lease(
+-                PointResolveAttempt {
+-                    args: to_args,
+-                    stability: None,
+-                    allow_scroll: !auto_wait,
++                || {
++                    let lease = adapter.acquire_interaction_lease(deadline)?;
++                    let focused =
++                        focus_point_under_lease(from_args, &lease, adapter, context, &effects)?;
++                    let from = resolve_point_under_lease(
++                        PointResolveAttempt {
++                            args: from_args,
++                            stability: None,
++                            allow_scroll: !auto_wait,
++                            effects: &effects,
++                        },
++                        deadline,
++                        &lease,
++                        adapter,
++                        context,
++                    )?;
++                    let to = resolve_point_under_lease(
++                        PointResolveAttempt {
++                            args: to_args,
++                            stability: None,
++                            allow_scroll: !auto_wait,
++                            effects: &effects,
++                        },
++                        deadline,
++                        &lease,
++                        adapter,
++                        context,
++                    )?;
++                    let mut from = resolve_point_under_lease(
++                        PointResolveAttempt {
++                            args: from_args,
++                            stability: Some(from.bounds_hash),
++                            allow_scroll: false,
++                            effects: &effects,
++                        },
++                        deadline,
++                        &lease,
++                        adapter,
++                        context,
++                    )?;
++                    let to = resolve_point_under_lease(
++                        PointResolveAttempt {
++                            args: to_args,
++                            stability: Some(to.bounds_hash),
++                            allow_scroll: false,
++                            effects: &effects,
++                        },
++                        deadline,
++                        &lease,
++                        adapter,
++                        context,
++                    )?;
++                    from.focused = focused;
++                    Ok((from, to, lease))
+                 },
+-                deadline,
+-                &lease,
+-                adapter,
+-                context,
++                &effects,
+             )?;
+-            let mut from = resolve_point_under_lease(
+-                PointResolveAttempt {
+-                    args: from_args,
+-                    stability: Some(from.bounds_hash),
+-                    allow_scroll: false,
+-                },
++            ensure_point_deadline(
+                 deadline,
+-                &lease,
+-                adapter,
+-                context,
++                Some(json!({
++                    "status": "actionable",
++                    "from": { "x": from.point.x, "y": from.point.y },
++                    "to": { "x": to.point.x, "y": to.point.y }
++                })),
+             )?;
+-            let to = resolve_point_under_lease(
+-                PointResolveAttempt {
+-                    args: to_args,
+-                    stability: Some(to.bounds_hash),
+-                    allow_scroll: false,
+-                },
+-                deadline,
+-                &lease,
+-                adapter,
+-                context,
+-            )?;
+-            from.focused = focused;
+-            Ok((from, to, lease))
+-        })?;
+-        ensure_point_deadline(
+-            deadline,
+-            Some(json!({
+-                "status": "actionable",
+-                "from": { "x": from.point.x, "y": from.point.y },
+-                "to": { "x": to.point.x, "y": to.point.y }
+-            })),
+-        )?;
+-        let params = DragParams {
+-            from: from.point.clone(),
+-            to: to.point.clone(),
+-            duration_ms: args.duration_ms,
+-            drop_delay_ms: args.drop_delay_ms,
+-        };
+-        params.validate(deadline)?;
+-        Ok((from, to, lease, params))
+-    })?;
++            let params = DragParams {
++                modifiers: Vec::new(),
++                from: from.point.clone(),
++                to: to.point.clone(),
++                duration_ms: args.duration_ms,
++                drop_delay_ms: args.drop_delay_ms,
++            };
++            params.validate(deadline)?;
++            Ok((from, to, lease, params))
++        },
++        &effects,
++    )?;
+     crate::cursor_overlay::submit_travel(adapter, context, from.point.clone(), &lease, false);
+     let drag_tracking = crate::cursor_overlay::submit_drag(
+         adapter,
+@@ -147,7 +162,56 @@ pub fn execute(
+         to.point.clone(),
+         &lease,
+     );
+-    let result = adapter.drag(params, &lease);
++    let result = if cfg!(target_os = "macos")
++        && (from.source_entry.is_some() || to.source_entry.is_some())
++    {
++        let source = from.source_entry.as_ref();
++        let destination = to.source_entry.as_ref();
++        let anchor = source.or(destination).expect("reference presence checked");
++        (|| {
++            let expected = crate::actions::headed_focus::expected_entry_window(anchor)
++                .map_err(crate::ref_action::into_adapter_error)?;
++            if let (Some(source), Some(destination)) = (source, destination) {
++                let other = crate::actions::headed_focus::expected_entry_window(destination)
++                    .map_err(crate::ref_action::into_adapter_error)?;
++                let first = crate::actions::headed_focus::expected_entry_window(source)
++                    .map_err(crate::ref_action::into_adapter_error)?;
++                if first.id != other.id
++                    || first.pid != other.pid
++                    || first.process_instance != other.process_instance
++                    || first.native_owner != other.native_owner
++                {
++                    return Err(AdapterError::stale_ref_because(
++                        "Drag reference windows differ",
++                    ));
++                }
++            }
++            adapter.drag_for_refs(&expected, source, destination, params, &lease)
++        })()
++    } else {
++        adapter.drag(params, &lease)
++    }
++    .map_err(|mut error| {
++        if from.focused {
++            let mut details = match error.details.take() {
++                Some(serde_json::Value::Object(object)) => object,
++                Some(value) => serde_json::Map::from_iter([("original_details".into(), value)]),
++                None => serde_json::Map::new(),
++            };
++            details
++                .entry("native_disposition")
++                .or_insert_with(|| json!(error.disposition));
++            details.insert(
++                "drag_preparatory_focus".into(),
++                json!({"attempted": true, "confirmed": true}),
++            );
++            if error.disposition.retry() != crate::RetryDisposition::Unsafe {
++                error.disposition = crate::DeliverySemantics::delivered_unverified();
++            }
++            error = error.with_details(serde_json::Value::Object(details));
++        }
++        error
++    });
+     let delivered = result
+         .as_ref()
+         .is_ok_and(|report| crate::cursor_overlay::confirms_delivery(report.disposition()));
+@@ -171,7 +235,7 @@ pub fn execute(
+         crate::cursor_overlay::cancel_drag(adapter, context);
+     }
+     let mut response = operation_response(
+-        &result?,
++        &result.map_err(|error| effects.annotate(error.into()))?,
+         json!({
+             "from": { "x": from.point.x, "y": from.point.y },
+             "to": { "x": to.point.x, "y": to.point.y }
+diff --git a/crates/core/src/commands/drag_occlusion_retry_tests.rs b/crates/core/src/commands/drag_occlusion_retry_tests.rs
+index 98149bc..6d92bd2 100644
+--- a/crates/core/src/commands/drag_occlusion_retry_tests.rs
++++ b/crates/core/src/commands/drag_occlusion_retry_tests.rs
+@@ -109,20 +109,25 @@ impl SystemOps for TransientOcclusionAdapter {
+ }
+
+ #[test]
+-fn drag_retries_transient_post_focus_occlusion_without_holding_lease() {
++fn drag_preserves_focus_and_does_not_replay_after_post_focus_occlusion() {
+     let _guard = HomeGuard::new();
+     let snapshot_id = cross_app_snapshot();
+     let adapter = TransientOcclusionAdapter::new();
+     let mut args = cross_app_args(snapshot_id);
+     args.timeout_ms = Some(5_000);
+
+-    let value = execute(args, &adapter, &CommandContext::default().with_headed(true)).unwrap();
+-
+-    assert_eq!(value["disposition"]["delivery"], "delivered_unverified");
+-    assert!(value.get("dragged").is_none());
+-    assert_eq!(adapter.lease_acquisitions.load(Ordering::SeqCst), 2);
++    let error = execute(args, &adapter, &CommandContext::default().with_headed(true)).unwrap_err();
++    let AppError::Adapter(error) = error else {
++        panic!("expected adapter error")
++    };
++    assert_eq!(error.disposition.retry(), crate::RetryDisposition::Unsafe);
++    assert_eq!(
++        error.details.unwrap()["preparatory_effects"]["focus"]["confirmed"],
++        true
++    );
++    assert_eq!(adapter.lease_acquisitions.load(Ordering::SeqCst), 1);
+     assert!(!adapter.lease_held.load(Ordering::SeqCst));
+-    assert!(adapter.captured.lock().unwrap().is_some());
++    assert!(adapter.captured.lock().unwrap().is_none());
+ }
+
+ #[test]
+diff --git a/crates/core/src/commands/drag_retry_tests.rs b/crates/core/src/commands/drag_retry_tests.rs
+index f5f7627..dd02ac2 100644
+--- a/crates/core/src/commands/drag_retry_tests.rs
++++ b/crates/core/src/commands/drag_retry_tests.rs
+@@ -322,7 +322,11 @@ fn drag_does_not_dispatch_when_endpoints_cannot_remain_visible_together() {
+
+     let error = execute(args, &adapter, &CommandContext::default().with_headed(true)).unwrap_err();
+
+-    assert_eq!(error.code(), "TIMEOUT");
++    assert_eq!(error.code(), "ACTION_FAILED");
++    let AppError::Adapter(error) = error else {
++        panic!("expected adapter error")
++    };
++    assert_eq!(error.disposition.retry(), crate::RetryDisposition::Unsafe);
+     assert_eq!(adapter.dispatched.load(Ordering::SeqCst), 0);
+ }
+
 diff --git a/crates/core/src/commands/drag_tests.rs b/crates/core/src/commands/drag_tests.rs
 index ce2b0d2..3c8a57f 100644
 --- a/crates/core/src/commands/drag_tests.rs
@@ -1727,6 +2044,179 @@ index 1b2829c..58b5afe 100644
          id: id.into(),
          title: "Fixture".into(),
          app: "Fixture".into(),
+diff --git a/crates/core/src/commands/hover.rs b/crates/core/src/commands/hover.rs
+index 95e10a4..ce69dfb 100644
+--- a/crates/core/src/commands/hover.rs
++++ b/crates/core/src/commands/hover.rs
+@@ -46,49 +46,61 @@ pub fn execute(
+         headed_requirement: crate::HeadedRequirement::FocusedWindowAndCursor,
+     };
+     let auto_wait = args.timeout_ms.is_some_and(|timeout_ms| timeout_ms > 0);
++    let effects = crate::commands::pointer_action::PointEffects::default();
+     let cursor = crate::cursor_overlay::hold_cursor(context, deadline);
+-    let (resolved, lease) = before_first_event(|| {
+-        if auto_wait {
+-            wait_for_point_with_deadline(point_args, deadline, adapter, context)?;
+-        }
+-        let (resolved, lease) = retry_leased_point_phase(args.timeout_ms, deadline, || {
+-            let lease = adapter.acquire_interaction_lease(deadline)?;
+-            let focused = focus_point_under_lease(point_args, &lease, adapter, context)?;
+-            let first = resolve_point_under_lease(
+-                PointResolveAttempt {
+-                    args: point_args,
+-                    stability: None,
+-                    allow_scroll: !auto_wait,
+-                },
++    let (resolved, lease) = before_first_event(
++        || {
++            if auto_wait {
++                wait_for_point_with_deadline(point_args, deadline, adapter, context, &effects)?;
++            }
++            let (resolved, lease) = retry_leased_point_phase(
++                args.timeout_ms,
+                 deadline,
+-                &lease,
+-                adapter,
+-                context,
+-            )?;
+-            let mut resolved = resolve_point_under_lease(
+-                PointResolveAttempt {
+-                    args: point_args,
+-                    stability: Some(first.bounds_hash),
+-                    allow_scroll: false,
++                || {
++                    let lease = adapter.acquire_interaction_lease(deadline)?;
++                    let focused =
++                        focus_point_under_lease(point_args, &lease, adapter, context, &effects)?;
++                    let first = resolve_point_under_lease(
++                        PointResolveAttempt {
++                            args: point_args,
++                            stability: None,
++                            allow_scroll: !auto_wait,
++                            effects: &effects,
++                        },
++                        deadline,
++                        &lease,
++                        adapter,
++                        context,
++                    )?;
++                    let mut resolved = resolve_point_under_lease(
++                        PointResolveAttempt {
++                            args: point_args,
++                            stability: Some(first.bounds_hash),
++                            allow_scroll: false,
++                            effects: &effects,
++                        },
++                        deadline,
++                        &lease,
++                        adapter,
++                        context,
++                    )?;
++                    resolved.focused = focused;
++                    Ok((resolved, lease))
+                 },
++                &effects,
++            )?;
++            confirm_receiver(&resolved, deadline, adapter)?;
++            ensure_point_deadline(
+                 deadline,
+-                &lease,
+-                adapter,
+-                context,
++                Some(json!({
++                    "status": "actionable",
++                    "point": { "x": resolved.point.x, "y": resolved.point.y }
++                })),
+             )?;
+-            resolved.focused = focused;
+             Ok((resolved, lease))
+-        })?;
+-        confirm_receiver(&resolved, deadline, adapter)?;
+-        ensure_point_deadline(
+-            deadline,
+-            Some(json!({
+-                "status": "actionable",
+-                "point": { "x": resolved.point.x, "y": resolved.point.y }
+-            })),
+-        )?;
+-        Ok((resolved, lease))
+-    })?;
++        },
++        &effects,
++    )?;
+     let result = crate::cursor_overlay::dispatch_mouse_event_with_cursor(
+         adapter,
+         context,
+@@ -102,7 +114,7 @@ pub fn execute(
+         &lease,
+     );
+     let mut response = operation_response(
+-        &result?,
++        &result.map_err(|error| effects.annotate(error.into()))?,
+         json!({ "x": resolved.point.x, "y": resolved.point.y }),
+     )?;
+     if resolved.focused {
+diff --git a/crates/core/src/commands/hover_preflight_tests.rs b/crates/core/src/commands/hover_preflight_tests.rs
+index 8dcbcf1..a7b729f 100644
+--- a/crates/core/src/commands/hover_preflight_tests.rs
++++ b/crates/core/src/commands/hover_preflight_tests.rs
+@@ -150,7 +150,7 @@ fn hover_on_occluded_ref_fails_preflight_before_dispatch() {
+ }
+
+ #[test]
+-fn headed_hover_retries_transient_post_focus_occlusion_without_holding_lease() {
++fn headed_hover_preserves_focus_and_does_not_replay_after_occlusion() {
+     let _guard = HomeGuard::new();
+     let snapshot_id = ref_snapshot(42);
+     let adapter = OccludedTargetAdapter {
+@@ -163,19 +163,24 @@ fn headed_hover_retries_transient_post_focus_occlusion_without_holding_lease() {
+     let mut args = ref_args(snapshot_id);
+     args.timeout_ms = Some(5_000);
+
+-    let value = execute(args, &adapter, &CommandContext::default().with_headed(true)).unwrap();
+-
+-    assert_eq!(value["disposition"]["delivery"], "delivered_unverified");
+-    assert!(value.get("hovered").is_none());
++    let error = execute(args, &adapter, &CommandContext::default().with_headed(true)).unwrap_err();
++    let AppError::Adapter(error) = error else {
++        panic!("expected adapter error")
++    };
++    assert_eq!(error.disposition.retry(), crate::RetryDisposition::Unsafe);
++    assert_eq!(
++        error.details.unwrap()["preparatory_effects"]["focus"]["confirmed"],
++        true
++    );
+     assert_eq!(
+         adapter.hit_tests.load(std::sync::atomic::Ordering::SeqCst),
+-        3
++        1
+     );
+     assert_eq!(
+         adapter
+             .lease_acquisitions
+             .load(std::sync::atomic::Ordering::SeqCst),
+-        2
++        1
+     );
+     assert!(!adapter.lease_held.load(std::sync::atomic::Ordering::SeqCst));
+ }
+diff --git a/crates/core/src/commands/hover_receiver_tests.rs b/crates/core/src/commands/hover_receiver_tests.rs
+index 54768a2..71cd7f9 100644
+--- a/crates/core/src/commands/hover_receiver_tests.rs
++++ b/crates/core/src/commands/hover_receiver_tests.rs
+@@ -23,7 +23,11 @@ fn unproven_pointer_receiver_refuses_once_before_any_move() {
+             panic!("expected an adapter error");
+         };
+         assert_eq!(error.code, crate::ErrorCode::ActionFailed);
+-        assert_eq!(error.disposition, crate::DeliverySemantics::not_delivered());
++        assert_eq!(error.disposition.retry(), crate::RetryDisposition::Unsafe);
++        assert_eq!(
++            error.details.unwrap()["preparatory_effects"]["focus"]["confirmed"],
++            true
++        );
+         assert_eq!(adapter.receiver_checks.load(Ordering::SeqCst), 1);
+         assert!(adapter.moved_to.lock().unwrap().is_none());
+     }
 diff --git a/crates/core/src/commands/hover_tests.rs b/crates/core/src/commands/hover_tests.rs
 index d7c552f..b3487d3 100644
 --- a/crates/core/src/commands/hover_tests.rs
@@ -1863,8 +2353,257 @@ index 282cc86..ea86583 100644
              source_app: Some("Fixture".into()),
              source_window_id: Some("w-42".into()),
              source_window_title: Some("Fixture".into()),
+diff --git a/crates/core/src/commands/pointer_action.rs b/crates/core/src/commands/pointer_action.rs
+index 6ec7a8f..1c8ed45 100644
+--- a/crates/core/src/commands/pointer_action.rs
++++ b/crates/core/src/commands/pointer_action.rs
+@@ -22,6 +22,67 @@ pub(crate) struct PointResolveAttempt<'a> {
+     pub args: crate::commands::point_resolve::PointResolveArgs<'a>,
+     pub stability: Option<Option<u64>>,
+     pub allow_scroll: bool,
++    pub effects: &'a PointEffects,
++}
++
++#[derive(Default)]
++pub(crate) struct PointEffects {
++    focus: std::cell::Cell<u8>,
++    scroll: std::cell::Cell<u8>,
++}
++
++impl PointEffects {
++    fn record_scroll(&self, result: Result<(), crate::AdapterError>) -> Result<(), AppError> {
++        let state = &self.scroll;
++        match result {
++            Ok(()) => {
++                state.set(2);
++                Ok(())
++            }
++            Err(error) => {
++                if error.disposition.retry() != crate::RetryDisposition::Safe {
++                    state.set(state.get().max(1));
++                }
++                Err(error.into())
++            }
++        }
++    }
++
++    fn has_effect(&self) -> bool {
++        self.focus.get() != 0 || self.scroll.get() != 0
++    }
++
++    pub(crate) fn annotate(&self, error: AppError) -> AppError {
++        if !self.has_effect() {
++            return error;
++        }
++        let mut error = crate::ref_action::into_adapter_error(error);
++        let mut details = match error.details.take() {
++            Some(Value::Object(object)) => object,
++            Some(value) => serde_json::Map::from_iter([("original_details".into(), value)]),
++            None => serde_json::Map::new(),
++        };
++        details
++            .entry("native_disposition")
++            .or_insert_with(|| json!(error.disposition));
++        let current = json!({
++            "focus": {"attempted":self.focus.get()!=0,"confirmed":self.focus.get()==2},
++            "scroll": {"attempted":self.scroll.get()!=0,"confirmed":self.scroll.get()==2},
++        });
++        let combined = match details.remove("preparatory_effects") {
++            Some(previous) => json!({"previous": previous, "current": current}),
++            None => current,
++        };
++        details.insert("preparatory_effects".into(), combined);
++        if error.disposition.retry() != crate::RetryDisposition::Unsafe {
++            error.disposition = if self.focus.get() == 2 || self.scroll.get() == 2 {
++                crate::DeliverySemantics::delivered_unverified()
++            } else {
++                crate::DeliverySemantics::uncertain()
++            };
++        }
++        error.with_details(Value::Object(details)).into()
++    }
+ }
+
+ fn resolve_point_from_entry(
+@@ -29,6 +90,7 @@ fn resolve_point_from_entry(
+     deadline: crate::Deadline,
+     adapter: &dyn PlatformAdapter,
+     context: &CommandContext,
++    effects: &PointEffects,
+ ) -> Result<crate::commands::point_resolve::ResolvedPoint, AppError> {
+     let EntryPointResolve {
+         ref_id,
+@@ -74,7 +136,7 @@ fn resolve_point_from_entry(
+             .with_details(details)
+             .into());
+         };
+-        adapter.scroll_into_view(&handle, lease)?;
++        effects.record_scroll(adapter.scroll_into_view(&handle, lease))?;
+         handle = resolve_handle_within_deadline(adapter, entry, deadline)?;
+         let observation = adapter.observe_pointer(&handle, deadline)?;
+         bounds = observation.bounds;
+@@ -142,17 +204,25 @@ fn pointer_is_visible(bounds: Option<crate::Rect>, states: &[String]) -> bool {
+         })
+ }
+
+-/// Runs what a pointer gesture does before its first pointer event. Nothing
+-/// has reached the target by then, so a refusal or a timeout leaves the gesture
+-/// undelivered whatever the steps before it delivered.
++/// Distinguish an unsent pointer gesture from any focus or scroll already
++/// performed during preparation; those effects must remain visible on errors.
+ pub(crate) fn before_first_event<T>(
+     phase: impl FnOnce() -> Result<T, AppError>,
++    effects: &PointEffects,
+ ) -> Result<T, AppError> {
+-    phase().map_err(|error| match error {
+-        AppError::Adapter(error) => {
+-            AppError::Adapter(error.with_disposition(crate::DeliverySemantics::not_delivered()))
+-        }
+-        other => other,
++    phase().map_err(|error| {
++        effects.annotate(match error {
++            AppError::Adapter(error) => {
++                if error.disposition.retry() == crate::RetryDisposition::Unsafe {
++                    AppError::Adapter(error)
++                } else {
++                    AppError::Adapter(
++                        error.with_disposition(crate::DeliverySemantics::not_delivered()),
++                    )
++                }
++            }
++            other => other,
++        })
+     })
+ }
+
+@@ -167,6 +237,7 @@ pub(crate) fn wait_for_point_with_deadline<'a>(
+     deadline: crate::Deadline,
+     adapter: &dyn PlatformAdapter,
+     context: &CommandContext,
++    effects: &PointEffects,
+ ) -> Result<crate::commands::point_resolve::ResolvedPoint, AppError> {
+     use crate::commands::point_resolve::resolve_point_from_ref_or_xy_with_context;
+
+@@ -193,6 +264,7 @@ pub(crate) fn wait_for_point_with_deadline<'a>(
+             deadline,
+             adapter,
+             context,
++            effects,
+         ) {
+             Ok(mut point) => {
+                 point.focused = false;
+@@ -211,7 +283,7 @@ pub(crate) fn wait_for_point_with_deadline<'a>(
+                 if point_requires_scroll(&err)
+                     && !(observed.is_some() && observed == last_scrolled_bounds_hash)
+                 {
+-                    scroll_point_target(args, &entry, deadline, adapter, context)?;
++                    scroll_point_target(args, &entry, deadline, adapter, context, effects)?;
+                     last_scrolled_bounds_hash = observed;
+                     std::thread::sleep(POLL_INTERVAL.min(deadline.remaining()));
+                     continue;
+@@ -235,6 +307,7 @@ pub(crate) fn focus_point_under_lease(
+     lease: &crate::InteractionLease,
+     adapter: &dyn PlatformAdapter,
+     context: &CommandContext,
++    effects: &PointEffects,
+ ) -> Result<bool, AppError> {
+     if !args.headed_requirement.requires_focus() {
+         return Ok(false);
+@@ -243,7 +316,23 @@ pub(crate) fn focus_point_under_lease(
+         return Ok(false);
+     };
+     let entry = load_ref_entry(ref_id, context)?;
+-    crate::commands::point_resolve::focus_for_physical_input(Some(&entry), adapter, context, lease)
++    let result = crate::commands::point_resolve::focus_for_physical_input(
++        Some(&entry),
++        adapter,
++        context,
++        lease,
++    );
++    match &result {
++        Ok(true) => effects.focus.set(2),
++        Err(AppError::Adapter(error))
++            if error.disposition.retry() != crate::RetryDisposition::Safe =>
++        {
++            effects.focus.set(effects.focus.get().max(1))
++        }
++        Err(_) => effects.focus.set(effects.focus.get().max(1)),
++        _ => {}
++    }
++    result
+ }
+
+ pub(crate) fn resolve_point_under_lease<'a>(
+@@ -259,6 +348,7 @@ pub(crate) fn resolve_point_under_lease<'a>(
+         args,
+         stability,
+         allow_scroll,
++        effects,
+     } = attempt;
+     let Some(ref_id) = args.ref_id else {
+         return resolve_point_from_ref_or_xy_with_context(args, adapter, context, deadline, lease);
+@@ -275,6 +365,7 @@ pub(crate) fn resolve_point_under_lease<'a>(
+         deadline,
+         adapter,
+         context,
++        effects,
+     )
+ }
+
+@@ -282,12 +373,15 @@ pub(crate) fn retry_leased_point_phase<T>(
+     timeout_ms: Option<u64>,
+     deadline: crate::Deadline,
+     mut attempt: impl FnMut() -> Result<T, AppError>,
++    effects: &PointEffects,
+ ) -> Result<T, AppError> {
+     let auto_wait = timeout_ms.is_some_and(|timeout_ms| timeout_ms > 0);
+     loop {
+         match attempt() {
+             Ok(value) => return Ok(value),
+-            Err(error) if auto_wait && is_retryable_point_error(&error) => {
++            Err(error)
++                if auto_wait && !effects.has_effect() && is_retryable_point_error(&error) =>
++            {
+                 let remaining = deadline.remaining();
+                 if remaining.is_zero() {
+                     return Err(point_actionability_timeout(Some(point_error_report(
+@@ -307,11 +401,12 @@ fn scroll_point_target(
+     deadline: crate::Deadline,
+     adapter: &dyn PlatformAdapter,
+     context: &CommandContext,
++    effects: &PointEffects,
+ ) -> Result<(), AppError> {
+     let lease = adapter.acquire_interaction_lease(deadline)?;
+-    focus_point_under_lease(args, &lease, adapter, context)?;
++    focus_point_under_lease(args, &lease, adapter, context, effects)?;
+     let handle = resolve_handle_within_deadline(adapter, entry, deadline)?;
+-    adapter.scroll_into_view(&handle, &lease)?;
++    effects.record_scroll(adapter.scroll_into_view(&handle, &lease))?;
+     Ok(())
+ }
+
+diff --git a/crates/core/src/commands/pointer_action_focus_tests.rs b/crates/core/src/commands/pointer_action_focus_tests.rs
+index c7d7f96..5af6dd6 100644
+--- a/crates/core/src/commands/pointer_action_focus_tests.rs
++++ b/crates/core/src/commands/pointer_action_focus_tests.rs
+@@ -115,6 +115,7 @@ fn a_minimized_source_window_is_restored_before_the_wait_scrolls_its_target() {
+         crate::Deadline::after(5_000).unwrap(),
+         &adapter,
+         &crate::CommandContext::default().with_headed(true),
++        &super::PointEffects::default(),
+     )
+     .unwrap();
+
+@@ -133,6 +134,7 @@ fn a_window_the_manager_keeps_hidden_ends_the_wait_with_the_focus_refusal() {
+         crate::Deadline::after(5_000).unwrap(),
+         &adapter,
+         &crate::CommandContext::default().with_headed(true),
++        &super::PointEffects::default(),
+     ) {
+         Ok(_) => panic!("a window that stays hidden has no point to aim at"),
+         Err(err) => err,
 diff --git a/crates/core/src/commands/pointer_action_tests.rs b/crates/core/src/commands/pointer_action_tests.rs
-index 89ffd11..0a52c33 100644
+index 89ffd11..9006f91 100644
 --- a/crates/core/src/commands/pointer_action_tests.rs
 +++ b/crates/core/src/commands/pointer_action_tests.rs
 @@ -69,6 +69,7 @@ fn point_ref_snapshot() -> String {
@@ -1875,8 +2614,32 @@ index 89ffd11..0a52c33 100644
              source_app: Some("Fixture".into()),
              source_window_id: Some("w-42".into()),
              source_window_title: Some("Window".into()),
+@@ -145,6 +146,7 @@ fn terminal_stale_ref_is_preserved_after_retry_budget_expires() {
+         deadline,
+         &adapter,
+         &crate::CommandContext::default(),
++        &super::PointEffects::default(),
+     ) {
+         Ok(_) => panic!("terminal stale ref must not resolve"),
+         Err(err) => err,
+@@ -212,6 +214,7 @@ fn explicitly_retryable_app_unresponsive_recovers_within_shared_deadline() {
+         deadline,
+         &adapter,
+         &crate::CommandContext::default(),
++        &super::PointEffects::default(),
+     )
+     .unwrap();
+
+@@ -285,6 +288,7 @@ fn an_unchanged_bounds_hash_after_scroll_stops_the_scroll_retries() {
+         deadline,
+         &adapter,
+         &crate::CommandContext::default(),
++        &super::PointEffects::default(),
+     ) {
+         Ok(_) => panic!("a permanently zero-size target cannot become actionable"),
+         Err(err) => err,
 diff --git a/crates/core/src/commands/pointer_single_shot_tests.rs b/crates/core/src/commands/pointer_single_shot_tests.rs
-index c384f12..938e341 100644
+index c384f12..5619767 100644
 --- a/crates/core/src/commands/pointer_single_shot_tests.rs
 +++ b/crates/core/src/commands/pointer_single_shot_tests.rs
 @@ -190,6 +190,7 @@ fn ref_entry(pid: u32) -> RefEntry {
@@ -1887,6 +2650,29 @@ index c384f12..938e341 100644
              source_app: Some(format!("App {pid}")),
              source_window_id: Some(format!("w-{pid}")),
              source_window_title: Some(format!("Window {pid}")),
+@@ -306,19 +307,19 @@ fn disposition(error: AppError) -> DeliverySemantics {
+ }
+
+ #[test]
+-fn a_scroll_that_fails_before_the_first_pointer_event_leaves_the_gesture_undelivered() {
++fn an_unverified_scroll_failure_before_pointer_delivery_is_unsafe() {
+     let headed = CommandContext::default().with_headed(true);
+     for timeout_ms in [None, Some(5_000)] {
+         let _guard = HomeGuard::new();
+         let mut hovered = SingleShotScrollAdapter::new();
+         hovered.scroll_fails = true;
+         let error = hover::execute(hover_args(timeout_ms), &hovered, &headed).unwrap_err();
+-        assert_eq!(disposition(error), DeliverySemantics::not_delivered());
++        assert_eq!(disposition(error).retry(), crate::RetryDisposition::Unsafe);
+         assert_eq!(hovered.mouse_moves.load(Ordering::SeqCst), 0);
+         let mut dragged = SingleShotScrollAdapter::new();
+         dragged.scroll_fails = true;
+         let error = drag::execute(drag_args(timeout_ms), &dragged, &headed).unwrap_err();
+-        assert_eq!(disposition(error), DeliverySemantics::not_delivered());
++        assert_eq!(disposition(error).retry(), crate::RetryDisposition::Unsafe);
+         assert_eq!(dragged.drags.load(Ordering::SeqCst), 0);
+     }
+ }
 diff --git a/crates/core/src/commands/press.rs b/crates/core/src/commands/press.rs
 index 81a6c80..30e05e4 100644
 --- a/crates/core/src/commands/press.rs
@@ -6474,13 +7260,107 @@ index 1f8a933..a283355 100644
              Ok(())
          })
 diff --git a/crates/macos/src/input/adapter.rs b/crates/macos/src/input/adapter.rs
-index 7bb8e04..39b3dbf 100644
+index 7bb8e04..186c117 100644
 --- a/crates/macos/src/input/adapter.rs
 +++ b/crates/macos/src/input/adapter.rs
-@@ -6,6 +6,31 @@ use agent_desktop_core::{
+@@ -6,6 +6,125 @@ use agent_desktop_core::{
  use crate::adapter::MacOSAdapter;
 
  impl InputOps for MacOSAdapter {
++    #[cfg(target_os = "macos")]
++    fn drag_for_refs(
++        &self,
++        window: &agent_desktop_core::WindowInfo,
++        source: Option<&agent_desktop_core::RefEntry>,
++        destination: Option<&agent_desktop_core::RefEntry>,
++        params: DragParams,
++        lease: &InteractionLease,
++    ) -> Result<OperationReport, AdapterError> {
++        if source.is_none() && destination.is_none() {
++            return Err(AdapterError::stale_ref_because(
++                "Drag references are unavailable",
++            ));
++        }
++        for entry in [source, destination].into_iter().flatten() {
++            if entry.source.source_window_id.as_deref() != Some(window.id.as_str())
++                || entry.process.pid != window.pid
++                || entry.process.process_instance != window.process_instance
++                || entry.source.native_owner != window.native_owner
++            {
++                return Err(AdapterError::stale_ref_because(
++                    "Original drag reference window changed",
++                ));
++            }
++        }
++        let bound = crate::system::window::window_resolve::window_element_for_info(
++            window,
++            lease.deadline(),
++        )?;
++        let source = source
++            .map(|entry| {
++                crate::tree::resolve::resolve_element_with_deadline(entry, lease.deadline())
++            })
++            .transpose()?;
++        let destination = destination
++            .map(|entry| {
++                crate::tree::resolve::resolve_element_with_deadline(entry, lease.deadline())
++            })
++            .transpose()?;
++        let source_element = source
++            .as_ref()
++            .map(crate::adapter::ax_element)
++            .transpose()?;
++        let destination_element = destination
++            .as_ref()
++            .map(crate::adapter::ax_element)
++            .transpose()?;
++        let target = match source_element {
++            Some(element) => crate::input::mouse::scoped::Target::Element {
++                window: &bound,
++                element,
++            },
++            None => crate::input::mouse::scoped::Target::Window(&bound),
++        };
++        let destination = match destination_element {
++            Some(element) => crate::input::mouse::scoped::Destination::Element(element),
++            None => crate::input::mouse::scoped::Destination::Window,
++        };
++        let report = OperationReport::drag_dispatched(&params);
++        crate::input::mouse::scoped::drag(
++            target,
++            destination,
++            &window.id,
++            params,
++            lease.deadline(),
++        )?;
++        Ok(report)
++    }
++    #[cfg(target_os = "macos")]
++    fn drag_for_window(
++        &self,
++        window: &agent_desktop_core::WindowInfo,
++        params: DragParams,
++        lease: &InteractionLease,
++    ) -> Result<OperationReport, AdapterError> {
++        if window.id.is_empty() {
++            return Err(AdapterError::stale_ref_because(
++                "Original drag window is unavailable",
++            ));
++        }
++        let bound = crate::system::window::window_resolve::window_element_for_info(
++            window,
++            lease.deadline(),
++        )?;
++        let report = OperationReport::drag_dispatched(&params);
++        crate::input::mouse::scoped::drag(
++            crate::input::mouse::scoped::Target::Window(&bound),
++            crate::input::mouse::scoped::Destination::Window,
++            &window.id,
++            params,
++            lease.deadline(),
++        )?;
++        Ok(report)
++    }
 +    #[cfg(target_os = "macos")]
 +    fn mouse_event_for_window(
 +        &self,
@@ -7185,10 +8065,10 @@ index 6242bba..5e8986e 100644
          return Err(AdapterError::new(
 diff --git a/crates/macos/src/input/mouse/scoped.rs b/crates/macos/src/input/mouse/scoped.rs
 new file mode 100644
-index 0000000..8884471
+index 0000000..bcbc641
 --- /dev/null
 +++ b/crates/macos/src/input/mouse/scoped.rs
-@@ -0,0 +1,719 @@
+@@ -0,0 +1,1128 @@
 +use crate::tree::AXElement;
 +use agent_desktop_core::{AdapterError, Deadline, MouseEvent, MouseEventKind, Point};
 +use core_graphics::event::{
@@ -7205,6 +8085,11 @@ index 0000000..8884471
 +    },
 +}
 +
++pub(crate) enum Destination<'a> {
++    Window,
++    Element(&'a AXElement),
++}
++
 +impl Target<'_> {
 +    fn window(&self) -> &AXElement {
 +        match self {
@@ -7219,10 +8104,27 @@ index 0000000..8884471
 +    screen_height: f64,
 +    class: *mut std::ffi::c_void,
 +    selector: *mut std::ffi::c_void,
++    app: AXElement,
++    system: AXElement,
++    pointer_source: core_graphics::event_source::CGEventSource,
++    main_attribute: core_foundation::string::CFString,
++    front_attribute: core_foundation::string::CFString,
++    focus_attribute: core_foundation::string::CFString,
++}
++
++enum PointerState<'a> {
++    FreeMove,
++    FreeAtPoint,
++    Held {
++        down: &'a Permit,
++        button: u32,
++        source: i32,
++        cursor: &'a Point,
++    },
 +}
 +
 +impl<'a> Receiver<'a> {
-+    fn new(target: Target<'a>, id: &str) -> Result<Self, AdapterError> {
++    fn new(target: Target<'a>, id: &str, deadline: Deadline) -> Result<Self, AdapterError> {
 +        let window_number = crate::system::window::window_resolve::parse_window_number(id)
 +            .ok_or_else(|| {
 +                AdapterError::stale_ref_because("Original pointer window is unavailable")
@@ -7248,12 +8150,26 @@ index 0000000..8884471
 +                "Pointer receiver is unavailable",
 +            ));
 +        }
++        let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++        let window = target.window();
++        let pid = crate::system::process::process_identity::to_pid_t(window.root_identity()?.pid)?;
++        let mut app = crate::tree::element_for_pid(pid);
++        app.bind_child(window, instant)?;
++        let system =
++            AXElement::from_raw(unsafe { accessibility_sys::AXUIElementCreateSystemWide() });
++        let pointer_source = crate::input::mouse::event_source()?;
 +        Ok(Self {
 +            target,
 +            window_number,
 +            screen_height,
 +            class,
 +            selector,
++            app,
++            system,
++            pointer_source,
++            main_attribute: core_foundation::string::CFString::new("AXMain"),
++            front_attribute: core_foundation::string::CFString::new("AXFrontmost"),
++            focus_attribute: core_foundation::string::CFString::new("AXFocusedUIElement"),
 +        })
 +    }
 +
@@ -7284,30 +8200,36 @@ index 0000000..8884471
 +        &self,
 +        point: &Point,
 +        deadline: Deadline,
-+        cursor_required: bool,
++        state: PointerState<'_>,
 +    ) -> Result<Permit, AdapterError> {
 +        let instant = crate::tree::locator_deadline::from_operation(deadline)?;
 +        let window = self.target.window();
 +        window.qualify(instant)?;
 +        crate::system::focus::verify_app_focused(window, deadline).map_err(background_refusal)?;
 +        crate::system::focus::verify_window_main(window, deadline).map_err(background_refusal)?;
-+        let root_pid =
-+            crate::system::process::process_identity::to_pid_t(window.root_identity()?.pid)?;
-+        let mut app = crate::tree::element_for_pid(root_pid);
-+        app.bind_child(window, instant)?;
-+        crate::tree::properties::ax_ipc::prepare(&app, instant)?;
++        let app = &self.app;
++        app.qualify(instant)?;
++        crate::tree::properties::ax_ipc::prepare(app, instant)?;
 +        crate::tree::properties::ax_ipc::prepare(window, instant)?;
-+        let main_attribute = core_foundation::string::CFString::new("AXMain");
-+        let front_attribute = core_foundation::string::CFString::new("AXFrontmost");
-+        let system =
-+            AXElement::from_raw(unsafe { accessibility_sys::AXUIElementCreateSystemWide() });
-+        crate::tree::properties::ax_ipc::prepare(&system, instant)?;
-+        let pointer_source = crate::input::mouse::event_source()?;
++        let main_attribute = &self.main_attribute;
++        let front_attribute = &self.front_attribute;
++        let focus_attribute = &self.focus_attribute;
++        let move_focus = if matches!(state, PointerState::FreeMove) {
++            let focused = crate::tree::surface_read::element(&app, "AXFocusedUIElement", instant)?
++                .ok_or_else(|| {
++                    AdapterError::stale_ref_because("Pointer move receiver is unavailable")
++                })?;
++            let authority = focused.effect_authority(instant)?;
++            Some((focused, authority))
++        } else {
++            None
++        };
++        let system = &self.system;
++        crate::tree::properties::ax_ipc::prepare(system, instant)?;
++        let pointer_source = &self.pointer_source;
 +        // A move can also send exit events to the old receiver. Authenticate
 +        // that process before allowing the pointer to leave it.
-+        let previous = if cursor_required {
-+            None
-+        } else {
++        let previous = if matches!(state, PointerState::FreeMove) {
 +            let location = CGEvent::new(pointer_source.clone())
 +                .map_err(|()| AdapterError::internal("Pointer position unavailable"))?
 +                .location();
@@ -7356,6 +8278,8 @@ index 0000000..8884471
 +                window_pid,
 +                window_authority,
 +            })
++        } else {
++            None
 +        };
 +        let (error, hit) = crate::tree::properties::ax_ipc::element_at_position(
 +            &system,
@@ -7391,12 +8315,30 @@ index 0000000..8884471
 +        }
 +        let original = match self.target {
 +            Target::Window(_) => Original::Window,
-+            Target::Element { element, .. } => {
-+                Original::Element(element.effect_authority(instant)?)
-+            }
++            Target::Element { element, .. } => Original::Element {
++                element: element.clone(),
++                authority: element.effect_authority(instant)?,
++            },
 +        };
-+        let window_authority = window.effect_authority(instant)?;
-+        let hit_authority = hit.effect_authority(instant)?;
++        let window_authority = match &state {
++            PointerState::Held { down, .. } => std::sync::Arc::clone(&down.window),
++            _ => std::sync::Arc::new(window.effect_authority(instant)?),
++        };
++        let hit_authority = match &state {
++            PointerState::Held { down, .. }
++                if crate::tree::same_element(&hit, &down.element)
++                    && hit.same_owner(&down.element)? =>
++            {
++                std::sync::Arc::clone(&down.hit)
++            }
++            _ => std::sync::Arc::new(hit.effect_authority(instant)?),
++        };
++        if let PointerState::Held { down, .. } = &state {
++            down.element.qualify(instant)?;
++            if let Original::Element { element, .. } = &down.original {
++                element.qualify(instant)?;
++            }
++        }
 +        agent_desktop_core::commands::clovy_cancel::ensure()?;
 +        if let Some(previous) = &previous {
 +            let location = previous.location;
@@ -7442,16 +8384,21 @@ index 0000000..8884471
 +        }
 +        window_authority.revalidate(window, instant)?;
 +        hit_authority.revalidate(&hit, instant)?;
-+        if let (Target::Element { element, .. }, Original::Element(authority)) =
-+            (self.target, &original)
-+        {
++        if let Original::Element { element, authority } = &original {
 +            authority.revalidate(element, instant)?;
 +        }
-+        if cursor_required {
++        let expected_cursor = match &state {
++            PointerState::FreeMove => None,
++            PointerState::FreeAtPoint => Some(point),
++            PointerState::Held { cursor, .. } => Some(*cursor),
++        };
++        if let Some(expected_cursor) = expected_cursor {
 +            let current = CGEvent::new(pointer_source.clone())
 +                .map_err(|()| AdapterError::internal("Pointer position unavailable"))?
 +                .location();
-+            if (current.x - point.x).abs() > 0.5 || (current.y - point.y).abs() > 0.5 {
++            if (current.x - expected_cursor.x).abs() > 0.5
++                || (current.y - expected_cursor.y).abs() > 0.5
++            {
 +                return Err(AdapterError::stale_ref_because("Pointer position changed"));
 +            }
 +        }
@@ -7478,9 +8425,7 @@ index 0000000..8884471
 +        }
 +        window_authority.revalidate(window, instant)?;
 +        hit_authority.revalidate(&hit, instant)?;
-+        if let (Target::Element { element, .. }, Original::Element(authority)) =
-+            (self.target, &original)
-+        {
++        if let Original::Element { element, authority } = &original {
 +            authority.revalidate(element, instant)?;
 +        }
 +        if let Some(previous) = &previous {
@@ -7519,7 +8464,10 @@ index 0000000..8884471
 +        let expected_location = previous
 +            .as_ref()
 +            .map(|previous| previous.location)
-+            .unwrap_or(CGPoint::new(point.x, point.y));
++            .unwrap_or_else(|| {
++                let cursor = expected_cursor.unwrap_or(point);
++                CGPoint::new(cursor.x, cursor.y)
++            });
 +        if !native_boolean(window, &main_attribute)
 +            || !native_boolean(&app, &front_attribute)
 +            || !native_boolean(window, &main_attribute)
@@ -7549,9 +8497,14 @@ index 0000000..8884471
 +        }
 +        window_authority.revalidate(window, instant)?;
 +        hit_authority.revalidate(&hit, instant)?;
-+        if let (Target::Element { element, .. }, Original::Element(authority)) =
-+            (self.target, &original)
-+        {
++        if let PointerState::Held { down, .. } = &state {
++            down.window.revalidate(window, instant)?;
++            down.hit.revalidate(&down.element, instant)?;
++            if let Original::Element { element, authority } = &down.original {
++                authority.revalidate(element, instant)?;
++            }
++        }
++        if let Original::Element { element, authority } = &original {
 +            authority.revalidate(element, instant)?;
 +        }
 +        if let Some(previous) = &previous {
@@ -7563,7 +8516,37 @@ index 0000000..8884471
 +                instant,
 +            )?;
 +        }
-+        let latest = CGEvent::new(pointer_source)
++        if let Some((focused, authority)) = &move_focus {
++            authority.revalidate(focused, instant)?;
++            let mut value = std::ptr::null();
++            use core_foundation::base::TCFType;
++            let error = unsafe {
++                accessibility_sys::AXUIElementCopyAttributeValue(
++                    app.raw(),
++                    focus_attribute.as_concrete_TypeRef(),
++                    &mut value,
++                )
++            };
++            if error != accessibility_sys::kAXErrorSuccess || value.is_null() {
++                if !value.is_null() {
++                    unsafe { core_foundation::base::CFRelease(value) };
++                }
++                return Err(AdapterError::stale_ref_because(
++                    "Pointer move focus changed",
++                ));
++            }
++            let current =
++                crate::tree::properties::ax_value::created_ax_element(value).ok_or_else(|| {
++                    AdapterError::stale_ref_because("Pointer move focus is unavailable")
++                })?;
++            if !crate::tree::same_element(focused, &current) {
++                return Err(AdapterError::stale_ref_because(
++                    "Pointer move focus changed",
++                ));
++            }
++            authority.revalidate(focused, instant)?;
++        }
++        let latest = CGEvent::new(pointer_source.clone())
 +            .map_err(|()| AdapterError::internal("Pointer position unavailable"))?
 +            .location();
 +        if (latest.x - expected_location.x).abs() > 0.5
@@ -7575,7 +8558,14 @@ index 0000000..8884471
 +                }) != Some(previous.window_number)
 +            })
 +            || !self.native_window_at(point)
-+            || any_button_down()
++            || match state {
++                PointerState::FreeMove | PointerState::FreeAtPoint => any_button_down(),
++                PointerState::Held { button, source, .. } => {
++                    !button_down(source, button)
++                        || button_down(1, button)
++                        || (0..32).any(|other| other != button && button_down(0, other))
++                }
++            }
 +        {
 +            return Err(AdapterError::stale_ref_because(
 +                "Pointer position or capture changed",
@@ -7588,6 +8578,7 @@ index 0000000..8884471
 +            element: hit,
 +            original,
 +            _previous: previous,
++            _move_focus: move_focus,
 +        })
 +    }
 +}
@@ -7640,16 +8631,20 @@ index 0000000..8884471
 +}
 +
 +struct Permit {
-+    window: crate::tree::ax_element::NativeEffectAuthority,
-+    hit: crate::tree::ax_element::NativeEffectAuthority,
++    window: std::sync::Arc<crate::tree::ax_element::NativeEffectAuthority>,
++    hit: std::sync::Arc<crate::tree::ax_element::NativeEffectAuthority>,
 +    element: AXElement,
 +    original: Original,
 +    _previous: Option<Previous>,
++    _move_focus: Option<(AXElement, crate::tree::ax_element::NativeEffectAuthority)>,
 +}
 +
 +enum Original {
 +    Window,
-+    Element(crate::tree::ax_element::NativeEffectAuthority),
++    Element {
++        element: AXElement,
++        authority: crate::tree::ax_element::NativeEffectAuthority,
++    },
 +}
 +
 +fn any_button_down() -> bool {
@@ -7667,7 +8662,7 @@ index 0000000..8884471
 +) -> Result<(), AdapterError> {
 +    use crate::input::mouse::{down_type, event_flags, to_cg_button, up_type};
 +    crate::input::mouse::validate_point(&event.point)?;
-+    let receiver = Receiver::new(target, id)?;
++    let receiver = Receiver::new(target, id, deadline)?;
 +    let scroll_chunks = match &event.kind {
 +        MouseEventKind::Down | MouseEventKind::Up => {
 +            return Err(AdapterError::not_supported("standalone mouse state"));
@@ -7699,7 +8694,7 @@ index 0000000..8884471
 +        button,
 +        flags,
 +    )?;
-+    let _authority = receiver.qualify(&event.point, deadline, false)?;
++    let _authority = receiver.qualify(&event.point, deadline, PointerState::FreeMove)?;
 +    move_event.post(CGEventTapLocation::HID);
 +    delivery.mark_delivered();
 +    let after_effect = |error| crate::actions::DeliveryTracker::uncertain(error);
@@ -7741,7 +8736,7 @@ index 0000000..8884471
 +                        .ok()
 +                        .filter(|id| !matches!(*id, -1..=1));
 +                let permit = receiver
-+                    .qualify(&event.point, deadline, true)
++                    .qualify(&event.point, deadline, PointerState::FreeAtPoint)
 +                    .map_err(after_effect)?;
 +                down.post(CGEventTapLocation::HID);
 +                let mut release = Release {
@@ -7787,13 +8782,311 @@ index 0000000..8884471
 +                scroll.set_location(point);
 +                scroll.set_flags(flags);
 +                let _authority = receiver
-+                    .qualify(&event.point, deadline, true)
++                    .qualify(&event.point, deadline, PointerState::FreeAtPoint)
 +                    .map_err(after_effect)?;
 +                scroll.post(CGEventTapLocation::HID);
 +                crate::input::mouse::ensure_budget(deadline, delivery).map_err(after_effect)?;
 +            }
 +            Ok(())
 +        }
++    }
++}
++
++pub(crate) fn drag(
++    target: Target<'_>,
++    destination: Destination<'_>,
++    id: &str,
++    params: agent_desktop_core::DragParams,
++    deadline: Deadline,
++) -> Result<(), AdapterError> {
++    use core_graphics::event::CGMouseButton;
++    let duration = params.duration_ms.unwrap_or(300);
++    let drop_delay = params.drop_delay_ms.unwrap_or(500);
++    let mut effective = params.clone();
++    effective.duration_ms = Some(duration);
++    effective.drop_delay_ms = Some(drop_delay);
++    effective.validate(deadline)?;
++    let required = duration
++        .checked_add(drop_delay)
++        .and_then(|v| v.checked_add(210))
++        .ok_or_else(|| {
++            AdapterError::new(
++                agent_desktop_core::ErrorCode::InvalidArgs,
++                "Drag timing is invalid",
++            )
++        })?;
++    if deadline.remaining() < std::time::Duration::from_millis(required) {
++        return Err(deadline
++            .timeout_error()
++            .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered()));
++    }
++    let source = core_graphics::event_source::CGEventSource::new(
++        core_graphics::event_source::CGEventSourceStateID::Private,
++    )
++    .map_err(|()| AdapterError::internal("Private pointer event source is unavailable"))?;
++    let flags = crate::input::mouse::event_flags(&params.modifiers);
++    let origin = CGPoint::new(params.from.x, params.from.y);
++    let down = crate::input::mouse::create_event_with_source(
++        &source,
++        CGEventType::LeftMouseDown,
++        origin,
++        CGMouseButton::Left,
++        flags,
++    )?;
++    let first_up = crate::input::mouse::create_event_with_source(
++        &source,
++        CGEventType::LeftMouseUp,
++        origin,
++        CGMouseButton::Left,
++        flags,
++    )?;
++    let state = i32::try_from(down.get_integer_value_field(EventField::EVENT_SOURCE_STATE_ID))
++        .ok()
++        .filter(|id| !matches!(*id, -1..=1))
++        .ok_or_else(|| AdapterError::not_supported("private drag event state"))?;
++    if button_down(state, 0) || button_down(1, 0) {
++        return Err(AdapterError::stale_ref_because(
++            "Drag button is already held",
++        ));
++    }
++    let receiver = Receiver::new(target, id, deadline)?;
++    let steps_receiver = Receiver::new(Target::Window(target.window()), id, deadline)?;
++    let destination_receiver = match destination {
++        Destination::Window => Receiver::new(Target::Window(target.window()), id, deadline)?,
++        Destination::Element(element) => Receiver::new(
++            Target::Element {
++                window: target.window(),
++                element,
++            },
++            id,
++            deadline,
++        )?,
++    };
++    send(
++        target,
++        id,
++        MouseEvent {
++            kind: MouseEventKind::Move,
++            point: params.from.clone(),
++            button: agent_desktop_core::MouseButton::Left,
++            modifiers: params.modifiers.clone(),
++        },
++        deadline,
++    )?;
++    let uncertain = crate::actions::DeliveryTracker::uncertain;
++    let delivered = crate::actions::DeliveryTracker::from_delivered_units(1);
++    crate::input::mouse::sleep_bounded(deadline, std::time::Duration::from_millis(10), delivered)
++        .map_err(uncertain)?;
++    let down_permit = receiver
++        .qualify(&params.from, deadline, PointerState::FreeAtPoint)
++        .map_err(uncertain)?;
++    let mut release = DragRelease {
++        receiver: &steps_receiver,
++        down: down_permit,
++        current: params.from.clone(),
++        current_permit: None,
++        up: Some(first_up),
++        state,
++        observed_down: false,
++        armed: false,
++    };
++    release.armed = true;
++    down.post(CGEventTapLocation::HID);
++    crate::input::mouse::sleep_bounded(deadline, std::time::Duration::from_millis(200), delivered)
++        .map_err(uncertain)?;
++    release.observed_down = button_down(state, 0) && !button_down(1, 0);
++    if !release.observed_down {
++        return Err(uncertain(AdapterError::stale_ref_because(
++            "Owned drag button state is unavailable",
++        )));
++    }
++    let motion = agent_desktop_core::CursorMotion::new(params.from.clone(), params.to.clone());
++    let steps = duration
++        .div_ceil(16)
++        .clamp(1, agent_desktop_core::MAX_DRAG_STEPS);
++    for index in 1..=steps {
++        let next = motion.sample(motion.duration_ms() * index / steps);
++        let cg = CGPoint::new(next.x, next.y);
++        let step = crate::input::mouse::create_event_with_source(
++            &source,
++            CGEventType::LeftMouseDragged,
++            cg,
++            CGMouseButton::Left,
++            flags,
++        )
++        .map_err(uncertain)?;
++        let up = crate::input::mouse::create_event_with_source(
++            &source,
++            CGEventType::LeftMouseUp,
++            cg,
++            CGMouseButton::Left,
++            flags,
++        )
++        .map_err(uncertain)?;
++        let receiver = if index == steps {
++            &destination_receiver
++        } else {
++            &steps_receiver
++        };
++        let permit = receiver
++            .qualify(
++                &next,
++                deadline,
++                PointerState::Held {
++                    down: &release.down,
++                    button: 0,
++                    source: state,
++                    cursor: &release.current,
++                },
++            )
++            .map_err(uncertain)?;
++        step.post(CGEventTapLocation::HID);
++        release.current = next;
++        release.current_permit = Some(permit);
++        release.up = Some(up);
++        let pause = std::time::Duration::from_secs_f64(duration as f64 / steps as f64 / 1000.0);
++        crate::input::mouse::sleep_bounded(deadline, pause, delivered).map_err(uncertain)?;
++    }
++    crate::input::mouse::sleep_bounded(
++        deadline,
++        std::time::Duration::from_millis(drop_delay),
++        delivered,
++    )
++    .map_err(uncertain)?;
++    let final_permit = destination_receiver
++        .qualify(
++            &release.current,
++            deadline,
++            PointerState::Held {
++                down: &release.down,
++                button: 0,
++                source: state,
++                cursor: &release.current,
++            },
++        )
++        .map_err(uncertain)?;
++    release.current_permit = Some(final_permit);
++    if !release.finish() {
++        return Err(uncertain(AdapterError::stale_ref_because(
++            "Drag release receiver changed",
++        )));
++    }
++    crate::input::mouse::ensure_budget(deadline, delivered).map_err(uncertain)
++}
++
++struct DragRelease<'a, 'b> {
++    receiver: &'a Receiver<'b>,
++    down: Permit,
++    current: Point,
++    current_permit: Option<Permit>,
++    up: Option<CGEvent>,
++    state: i32,
++    observed_down: bool,
++    armed: bool,
++}
++
++impl DragRelease<'_, '_> {
++    fn finish(&mut self) -> bool {
++        let Some(up) = self.up.take() else {
++            return true;
++        };
++        if !self.armed {
++            return true;
++        }
++        let instant = std::time::Instant::now() + std::time::Duration::from_secs(1);
++        let current = self.current_permit.as_ref().unwrap_or(&self.down);
++        if self
++            .down
++            .window
++            .revalidate(self.receiver.target.window(), instant)
++            .is_err()
++            || self
++                .down
++                .hit
++                .revalidate(&self.down.element, instant)
++                .is_err()
++            || current.hit.revalidate(&current.element, instant).is_err()
++            || button_down(1, 0)
++            || (1..32).any(|button| button_down(0, button))
++        {
++            return false;
++        }
++        if let Original::Element { element, authority } = &self.down.original {
++            if authority.revalidate(element, instant).is_err() {
++                return false;
++            }
++        }
++        if let Original::Element { element, authority } = &current.original {
++            if authority.revalidate(element, instant).is_err() {
++                return false;
++            }
++        }
++        let system =
++            AXElement::from_raw(unsafe { accessibility_sys::AXUIElementCreateSystemWide() });
++        if crate::tree::properties::ax_ipc::prepare(&system, instant).is_err() {
++            return false;
++        }
++        let mut hit = std::ptr::null_mut();
++        let error = unsafe {
++            accessibility_sys::AXUIElementCopyElementAtPosition(
++                system.raw(),
++                self.current.x as f32,
++                self.current.y as f32,
++                &mut hit,
++            )
++        };
++        if error != accessibility_sys::kAXErrorSuccess || hit.is_null() {
++            if !hit.is_null() {
++                unsafe { core_foundation::base::CFRelease(hit.cast()) };
++            }
++            return false;
++        }
++        let hit = AXElement::from_raw(hit);
++        let cursor = crate::input::mouse::event_source()
++            .ok()
++            .and_then(|source| CGEvent::new(source).ok())
++            .map(|event| event.location());
++        if let Original::Element { element, authority } = &self.down.original {
++            if authority.revalidate(element, instant).is_err() {
++                return false;
++            }
++        }
++        if let Original::Element { element, authority } = &current.original {
++            if authority.revalidate(element, instant).is_err() {
++                return false;
++            }
++        }
++        if !crate::tree::same_element(&hit, &current.element)
++            || cursor.is_none_or(|point| {
++                (point.x - self.current.x).abs() > 0.5 || (point.y - self.current.y).abs() > 0.5
++            })
++            || self
++                .down
++                .window
++                .revalidate(self.receiver.target.window(), instant)
++                .is_err()
++            || self
++                .down
++                .hit
++                .revalidate(&self.down.element, instant)
++                .is_err()
++            || !self.receiver.native_window_at(&self.current)
++            || button_down(1, 0)
++            || (1..32).any(|button| button_down(0, button))
++        {
++            return false;
++        }
++        let owned_down = self.observed_down || (button_down(self.state, 0) && !button_down(1, 0));
++        up.post(CGEventTapLocation::HID);
++        if owned_down && !button_down(self.state, 0) && !button_down(1, 0) {
++            agent_desktop_core::commands::clovy_cancel::acknowledge_release(true);
++        }
++        true
++    }
++}
++impl Drop for DragRelease<'_, '_> {
++    fn drop(&mut self) {
++        self.finish();
 +    }
 +}
 +
@@ -7825,9 +9118,7 @@ index 0000000..8884471
 +        {
 +            return false;
 +        }
-+        if let (Target::Element { element, .. }, Original::Element(authority)) =
-+            (self.receiver.target, &self.permit.original)
-+        {
++        if let Original::Element { element, authority } = &self.permit.original {
 +            if authority.revalidate(element, instant).is_err() {
 +                return false;
 +            }
@@ -7857,9 +9148,7 @@ index 0000000..8884471
 +            .ok()
 +            .and_then(|source| CGEvent::new(source).ok())
 +            .map(|event| event.location());
-+        if let (Target::Element { element, .. }, Original::Element(authority)) =
-+            (self.receiver.target, &self.permit.original)
-+        {
++        if let Original::Element { element, authority } = &self.permit.original {
 +            if authority.revalidate(element, instant).is_err() {
 +                return false;
 +            }
@@ -8229,10 +9518,19 @@ index c9a0bbd..c25d2f4 100644
  ) -> Result<Vec<NotificationInfo>, AdapterError> {
      Err(AdapterError::not_supported("list_notifications"))
 diff --git a/crates/macos/src/notifications/nc_session.rs b/crates/macos/src/notifications/nc_session.rs
-index d4ab966..0037f58 100644
+index d4ab966..33581e5 100644
 --- a/crates/macos/src/notifications/nc_session.rs
 +++ b/crates/macos/src/notifications/nc_session.rs
-@@ -25,7 +25,7 @@ fn merge_session_result<T>(
+@@ -17,15 +17,12 @@ fn merge_session_result<T>(
+         (Ok(value), Ok(())) => Ok(value),
+         (Ok(_), Err(close_err)) => Err(close_err),
+         (Err(err), Ok(())) => Err(err),
+-        (Err(err), Err(close_err)) => {
+-            tracing::warn!(error = %close_err, "notification center cleanup also failed after the operation failed");
+-            Err(err)
+-        }
++        (Err(err), Err(close_err)) => Err(merge_errors(err, close_err, "cleanup")),
+     }
  }
 
  pub(crate) struct NcSession {
@@ -8241,7 +9539,7 @@ index d4ab966..0037f58 100644
      close_pending: bool,
      previous_app: Option<ProcessIdentity>,
      cleanup_on_drop: bool,
-@@ -34,8 +34,8 @@ pub(crate) struct NcSession {
+@@ -34,8 +31,8 @@ pub(crate) struct NcSession {
  struct NcSessionOps<Open, WaitUntilReady, Close, Reactivate>
  where
      Open: FnMut(Deadline) -> Result<(), AdapterError>,
@@ -8252,7 +9550,7 @@ index d4ab966..0037f58 100644
      Reactivate: FnMut(&ProcessIdentity, Deadline) -> Result<(), AdapterError>,
  {
      open: Open,
-@@ -50,10 +50,11 @@ impl NcSession {
+@@ -50,10 +47,11 @@ impl NcSession {
          deadline: Deadline,
      ) -> Result<Self, AdapterError> {
          if let Some(pid) = nc_pid(deadline)?
@@ -8266,7 +9564,7 @@ index d4ab966..0037f58 100644
                  close_pending: false,
                  previous_app: None,
                  cleanup_on_drop: true,
-@@ -83,20 +84,20 @@ impl NcSession {
+@@ -83,31 +81,34 @@ impl NcSession {
      ) -> Result<Self, AdapterError>
      where
          Open: FnMut(Deadline) -> Result<(), AdapterError>,
@@ -8292,7 +9590,10 @@ index d4ab966..0037f58 100644
                  Ok(session)
              }
              Err(error) => {
-@@ -106,8 +107,10 @@ impl NcSession {
+                 let cleanup = session.cleanup_with(ops.close, ops.reactivate);
++                session.cleanup_on_drop = false;
+                 merge_session_result(Err(error), cleanup)
+             }
          }
      }
 
@@ -8305,7 +9606,7 @@ index d4ab966..0037f58 100644
      }
 
      pub(crate) fn close(mut self) -> Result<(), AdapterError> {
-@@ -116,7 +119,7 @@ impl NcSession {
+@@ -116,14 +117,19 @@ impl NcSession {
 
      fn close_with(
          &mut self,
@@ -8314,7 +9615,23 @@ index d4ab966..0037f58 100644
          mut reactivate: impl FnMut(&ProcessIdentity, Deadline) -> Result<(), AdapterError>,
      ) -> Result<(), AdapterError> {
          let first = self.cleanup_with(&mut close, &mut reactivate);
-@@ -131,12 +134,15 @@ impl NcSession {
+-        let result = if first.is_err() && self.has_pending_cleanup() {
+-            self.cleanup_with(close, reactivate)
+-        } else {
+-            first
++        let result = match first {
++            Err(error) if self.has_pending_cleanup() => {
++                match self.cleanup_with(close, reactivate) {
++                    Ok(()) if definitively_unsent(&error) => Ok(()),
++                    Ok(()) => Err(error),
++                    Err(retry_error) => Err(merge_errors(error, retry_error, "retry")),
++                }
++            }
++            other => other,
+         };
+         self.cleanup_on_drop = false;
+         result
+@@ -131,18 +137,32 @@ impl NcSession {
 
      fn cleanup_with(
          &mut self,
@@ -8325,15 +9642,34 @@ index d4ab966..0037f58 100644
          let close_result = if self.close_pending {
 -            close(Deadline::detached_after(CLEANUP_TIMEOUT_MS)?)
 -                .inspect(|()| self.close_pending = false)
-+            close(
-+                self.process.as_ref(),
-+                Deadline::detached_after(CLEANUP_TIMEOUT_MS)?,
-+            )
-+            .inspect(|()| self.close_pending = false)
++            let result = Deadline::detached_after(CLEANUP_TIMEOUT_MS)
++                .and_then(|deadline| close(self.process.as_ref(), deadline));
++            if result
++                .as_ref()
++                .map_or_else(|error| !definitively_unsent(error), |_| true)
++            {
++                self.close_pending = false;
++            }
++            result
          } else {
              Ok(())
          };
-@@ -203,7 +209,7 @@ fn reactivate_app(app: &ProcessIdentity, deadline: Deadline) -> Result<(), Adapt
+         let restore_result = if let Some(app) = self.previous_app.as_ref() {
+-            reactivate(app, Deadline::detached_after(CLEANUP_TIMEOUT_MS)?)
+-                .inspect(|()| self.previous_app = None)
++            let result = Deadline::detached_after(CLEANUP_TIMEOUT_MS)
++                .and_then(|deadline| reactivate(app, deadline));
++            if result
++                .as_ref()
++                .map_or_else(|error| !definitively_unsent(error), |_| true)
++            {
++                self.previous_app = None;
++            }
++            result
+         } else {
+             Ok(())
+         };
+@@ -203,7 +223,7 @@ fn reactivate_app(app: &ProcessIdentity, deadline: Deadline) -> Result<(), Adapt
      if !crate::system::process::process_identity::matches_instance(pid, &app.instance)? {
          return Ok(());
      }
@@ -8342,7 +9678,70 @@ index d4ab966..0037f58 100644
  }
 
  #[cfg(not(target_os = "macos"))]
-@@ -253,13 +259,35 @@ fn nc_pid_from_output(
+@@ -218,11 +238,59 @@ fn merge_cleanup_results(
+     match (close, restore) {
+         (Ok(()), Ok(())) => Ok(()),
+         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+-        (Err(error), Err(restore_error)) => {
+-            tracing::warn!(error = %restore_error, "focus restoration also failed during Notification Center cleanup");
+-            Err(error)
++        (Err(error), Err(restore_error)) => Err(merge_errors(error, restore_error, "restore")),
++    }
++}
++
++fn definitively_unsent(error: &AdapterError) -> bool {
++    error.disposition == agent_desktop_core::DeliverySemantics::not_delivered()
++        && error.is_explicitly_retryable()
++}
++
++fn merge_errors(mut primary: AdapterError, secondary: AdapterError, stage: &str) -> AdapterError {
++    use agent_desktop_core::{DeliverySemantics, RetryDisposition};
++    let both_retryable = definitively_unsent(&primary) && definitively_unsent(&secondary);
++    let primary_details = primary.details.take();
++    let mut details = match primary_details {
++        Some(serde_json::Value::Object(object)) => object,
++        Some(value) => serde_json::Map::from_iter([("original_details".into(), value)]),
++        None => serde_json::Map::new(),
++    };
++    let key = format!("{stage}_error");
++    let secondary_evidence = serde_json::json!({
++        "code": secondary.code.as_str(),
++        "message": secondary.message,
++        "details": secondary.details,
++        "suggestion": secondary.suggestion,
++        "platform_detail": secondary.platform_detail,
++        "disposition": secondary.disposition,
++    });
++    let evidence = match details.remove(&key) {
++        Some(previous) => {
++            serde_json::json!({"previous": previous, "additional": secondary_evidence})
+         }
++        None => secondary_evidence,
++    };
++    details.insert(key, evidence);
++    if let Some(previous) =
++        details.insert("retryable".into(), serde_json::Value::Bool(both_retryable))
++    {
++        details.entry("original_retryable").or_insert(previous);
+     }
++    let disposition = if primary.disposition.retry() == RetryDisposition::Unsafe
++        || secondary.disposition.retry() == RetryDisposition::Unsafe
++    {
++        DeliverySemantics::uncertain()
++    } else if primary.disposition == DeliverySemantics::not_delivered()
++        && secondary.disposition == DeliverySemantics::not_delivered()
++    {
++        DeliverySemantics::not_delivered()
++    } else {
++        DeliverySemantics::unknown()
++    };
++    primary
++        .with_details(serde_json::Value::Object(details))
++        .with_disposition(disposition)
+ }
+
+ #[cfg(target_os = "macos")]
+@@ -253,13 +321,35 @@ fn nc_pid_from_output(
  }
 
  #[cfg(target_os = "macos")]
@@ -8383,7 +9782,7 @@ index d4ab966..0037f58 100644
  }
 
  #[cfg(not(target_os = "macos"))]
-@@ -268,8 +296,8 @@ fn nc_pid(_deadline: Deadline) -> Result<Option<i32>, AdapterError> {
+@@ -268,8 +358,8 @@ fn nc_pid(_deadline: Deadline) -> Result<Option<i32>, AdapterError> {
  }
 
  #[cfg(not(target_os = "macos"))]
@@ -8394,7 +9793,7 @@ index d4ab966..0037f58 100644
  }
 
  #[cfg(target_os = "macos")]
-@@ -301,20 +329,18 @@ fn open_nc(_deadline: Deadline) -> Result<(), AdapterError> {
+@@ -301,20 +391,18 @@ fn open_nc(_deadline: Deadline) -> Result<(), AdapterError> {
  }
 
  #[cfg(target_os = "macos")]
@@ -8421,7 +9820,7 @@ index d4ab966..0037f58 100644
      std::thread::sleep(std::time::Duration::from_millis(300));
      Ok(())
  }
-@@ -324,18 +350,20 @@ fn close_nc(deadline: Deadline) -> Result<(), AdapterError> {
+@@ -324,18 +412,20 @@ fn close_nc(deadline: Deadline) -> Result<(), AdapterError> {
  mod tests;
 
  #[cfg(not(target_os = "macos"))]
@@ -8446,7 +9845,7 @@ index d4ab966..0037f58 100644
              }
          }
          if deadline.is_expired() {
-@@ -348,7 +376,7 @@ fn wait_for_nc_ready(deadline: Deadline) -> Result<i32, AdapterError> {
+@@ -348,7 +438,7 @@ fn wait_for_nc_ready(deadline: Deadline) -> Result<i32, AdapterError> {
  }
 
  #[cfg(not(target_os = "macos"))]
@@ -8456,7 +9855,7 @@ index d4ab966..0037f58 100644
  }
 
 diff --git a/crates/macos/src/notifications/nc_session_tests.rs b/crates/macos/src/notifications/nc_session_tests.rs
-index 06dcad8..b9479bb 100644
+index 06dcad8..314f9c4 100644
 --- a/crates/macos/src/notifications/nc_session_tests.rs
 +++ b/crates/macos/src/notifications/nc_session_tests.rs
 @@ -28,7 +28,7 @@ fn closed_notification_center_is_policy_denied_headlessly() {
@@ -8468,7 +9867,7 @@ index 06dcad8..b9479bb 100644
          close_pending: true,
          previous_app: Some(ProcessIdentity::new(9_u32, "instance")),
          cleanup_on_drop: false,
-@@ -38,7 +38,7 @@ fn cleanup_retries_only_the_failed_step_with_a_fresh_budget() {
+@@ -38,10 +38,12 @@ fn cleanup_retries_only_the_failed_step_with_a_fresh_budget() {
 
      let error = session
          .cleanup_with(
@@ -8476,8 +9875,14 @@ index 06dcad8..b9479bb 100644
 +            |_, deadline| {
                  assert!(!deadline.is_expired());
                  close_attempts += 1;
-                 Err(AdapterError::timeout("close failed"))
-@@ -59,7 +59,7 @@ fn cleanup_retries_only_the_failed_step_with_a_fresh_budget() {
+-                Err(AdapterError::timeout("close failed"))
++                Err(AdapterError::timeout("close failed")
++                    .with_details(serde_json::json!({"retryable": true}))
++                    .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered()))
+             },
+             |_, deadline| {
+                 assert!(!deadline.is_expired());
+@@ -59,7 +61,7 @@ fn cleanup_retries_only_the_failed_step_with_a_fresh_budget() {
 
      session
          .cleanup_with(
@@ -8486,7 +9891,7 @@ index 06dcad8..b9479bb 100644
                  assert!(!deadline.is_expired());
                  close_attempts += 1;
                  Ok(())
-@@ -93,7 +93,7 @@ fn cleanup_failure_replaces_an_apparent_operation_success() {
+@@ -93,7 +95,7 @@ fn cleanup_failure_replaces_an_apparent_operation_success() {
  #[test]
  fn explicit_close_returns_success_when_bounded_retry_recovers() {
      let mut session = NcSession {
@@ -8495,7 +9900,7 @@ index 06dcad8..b9479bb 100644
          close_pending: true,
          previous_app: None,
          cleanup_on_drop: true,
-@@ -101,7 +101,7 @@ fn explicit_close_returns_success_when_bounded_retry_recovers() {
+@@ -101,10 +103,12 @@ fn explicit_close_returns_success_when_bounded_retry_recovers() {
      let attempts = std::cell::Cell::new(0);
 
      let result = session.close_with(
@@ -8503,8 +9908,14 @@ index 06dcad8..b9479bb 100644
 +        |_, _| {
              attempts.set(attempts.get() + 1);
              if attempts.get() == 1 {
-                 Err(AdapterError::timeout("transient close failure"))
-@@ -120,7 +120,7 @@ fn explicit_close_returns_success_when_bounded_retry_recovers() {
+-                Err(AdapterError::timeout("transient close failure"))
++                Err(AdapterError::timeout("transient close failure")
++                    .with_details(serde_json::json!({"retryable": true}))
++                    .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered()))
+             } else {
+                 Ok(())
+             }
+@@ -120,7 +124,7 @@ fn explicit_close_returns_success_when_bounded_retry_recovers() {
  #[test]
  fn explicit_close_returns_final_error_without_arming_drop_retry() {
      let mut session = NcSession {
@@ -8513,16 +9924,121 @@ index 06dcad8..b9479bb 100644
          close_pending: true,
          previous_app: None,
          cleanup_on_drop: true,
-@@ -129,7 +129,7 @@ fn explicit_close_returns_final_error_without_arming_drop_retry() {
+@@ -129,22 +133,107 @@ fn explicit_close_returns_final_error_without_arming_drop_retry() {
 
      let error = session
          .close_with(
 -            |_| {
 +            |_, _| {
                  attempts.set(attempts.get() + 1);
-                 Err(AdapterError::timeout(format!(
-                     "close attempt {} failed",
-@@ -157,7 +157,8 @@ fn partial_open_failure_closes_center_and_restores_previous_app() {
+-                Err(AdapterError::timeout(format!(
+-                    "close attempt {} failed",
+-                    attempts.get()
+-                )))
++                Err(
++                    AdapterError::timeout(format!("close attempt {} failed", attempts.get()))
++                        .with_details(serde_json::json!({"retryable": true}))
++                        .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered()),
++                )
+             },
+             |_, _| Ok(()),
+         )
+         .unwrap_err();
+
+     assert_eq!(attempts.get(), 2);
+-    assert!(error.message.contains("attempt 2"));
++    assert!(error.message.contains("attempt 1"));
++    assert!(
++        error.details.as_ref().unwrap()["retry_error"]["message"]
++            .as_str()
++            .unwrap()
++            .contains("attempt 2")
++    );
+     assert!(!session.cleanup_on_drop);
+ }
+
++#[test]
++fn uncertain_escape_is_not_replayed_and_restore_failure_is_preserved() {
++    let mut session = NcSession {
++        process: Some(ProcessIdentity::new(7_u32, "instance-7")),
++        close_pending: true,
++        previous_app: Some(ProcessIdentity::new(9_u32, "previous")),
++        cleanup_on_drop: true,
++    };
++    let attempts = std::cell::Cell::new(0);
++    let error = session
++        .close_with(
++            |_, _| {
++                attempts.set(attempts.get() + 1);
++                Err(
++                    AdapterError::new(ErrorCode::ActionFailed, "escape uncertain")
++                        .with_disposition(agent_desktop_core::DeliverySemantics::uncertain()),
++                )
++            },
++            |_, _| {
++                Err(AdapterError::timeout("restore failed")
++                    .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered()))
++            },
++        )
++        .unwrap_err();
++    assert_eq!(attempts.get(), 1);
++    assert_eq!(
++        error.disposition.retry(),
++        agent_desktop_core::RetryDisposition::Unsafe
++    );
++    assert_eq!(
++        error.details.as_ref().unwrap()["restore_error"]["code"],
++        "TIMEOUT"
++    );
++    drop(session);
++    assert_eq!(attempts.get(), 1);
++}
++
++#[test]
++fn failed_operation_keeps_unsafe_cleanup_evidence() {
++    let operation = AdapterError::new(ErrorCode::ElementNotFound, "operation failed")
++        .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered());
++    let cleanup = AdapterError::new(ErrorCode::ActionFailed, "escape uncertain")
++        .with_disposition(agent_desktop_core::DeliverySemantics::uncertain());
++    let error = merge_session_result::<()>(Err(operation), Err(cleanup)).unwrap_err();
++    assert_eq!(error.code, ErrorCode::ElementNotFound);
++    assert_eq!(
++        error.disposition.retry(),
++        agent_desktop_core::RetryDisposition::Unsafe
++    );
++    assert_eq!(
++        error.details.unwrap()["cleanup_error"]["code"],
++        "ACTION_FAILED"
++    );
++}
++
++#[test]
++fn terminal_unsent_escape_is_not_retried() {
++    let mut session = NcSession {
++        process: Some(ProcessIdentity::new(7_u32, "instance-7")),
++        close_pending: true,
++        previous_app: None,
++        cleanup_on_drop: true,
++    };
++    let attempts = std::cell::Cell::new(0);
++    let error = session
++        .close_with(
++            |_, _| {
++                attempts.set(attempts.get() + 1);
++                Err(AdapterError::new(ErrorCode::PolicyDenied, "terminal")
++                    .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered()))
++            },
++            |_, _| Ok(()),
++        )
++        .unwrap_err();
++    assert_eq!(attempts.get(), 1);
++    assert_eq!(error.code, ErrorCode::PolicyDenied);
++}
++
+ #[test]
+ fn partial_open_failure_closes_center_and_restores_previous_app() {
+     let previous = ProcessIdentity::new(9_u32, "instance");
+@@ -157,7 +246,8 @@ fn partial_open_failure_closes_center_and_restores_previous_app() {
          NcSessionOps {
              open: |_| Ok(()),
              wait_until_ready: |_| Err(AdapterError::timeout("readiness failed")),
@@ -8532,7 +10048,7 @@ index 06dcad8..b9479bb 100644
                  assert!(!deadline.is_expired());
                  close_attempts += 1;
                  Ok(())
-@@ -183,7 +184,7 @@ fn partial_open_failure_closes_center_and_restores_previous_app() {
+@@ -183,7 +273,7 @@ fn partial_open_failure_closes_center_and_restores_previous_app() {
  #[test]
  fn close_delay_does_not_consume_focus_restoration_budget() {
      let mut session = NcSession {
@@ -8541,7 +10057,7 @@ index 06dcad8..b9479bb 100644
          close_pending: true,
          previous_app: Some(ProcessIdentity::new(9_u32, "instance")),
          cleanup_on_drop: false,
-@@ -193,7 +194,7 @@ fn close_delay_does_not_consume_focus_restoration_budget() {
+@@ -193,7 +283,7 @@ fn close_delay_does_not_consume_focus_restoration_budget() {
 
      session
          .cleanup_with(

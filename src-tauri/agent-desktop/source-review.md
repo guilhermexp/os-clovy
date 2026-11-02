@@ -228,8 +228,7 @@ Retained AX objects also distinguish root, owner and source-window bindings;
 uncertain setter failures retain their original evidence if verification fails.
 PID-targeted reference keyboard and text posts recheck the bound focused target
 after event creation, and their owned key-up refuses a reused PID generation.
-This is a partial input checkpoint: scoped window drag and its receiver
-qualification remain open. The
+This is a partial input checkpoint: native input qualification remains open. The
 metadata and portable error-flow checks do not establish native behavior.
 
 The AX effect boundary now retains filesystem-qualified process evidence,
@@ -259,7 +258,20 @@ mutation installs its mutation timeout after the readers have configured their
 timeouts and repeats native checks before the effect. Native image rechecks use
 the shared kernel path reader with a stack buffer. Darwin metadata and portable
 wheel-chunk tests establish neither native event routing nor ABI or input
-delivery. Drag and native validation remain open.
+delivery. Native validation remains open.
+
+Window and reference drag use the scoped pointer boundary for prepositioning,
+mouse-down, each drag step and release. The original down receiver remains
+bound while each destination is rechecked; private source state separates the
+owned button from physical user buttons. Mouse movement additionally checks
+the focused accessibility receiver before dispatch. A cancellation release
+requires retained process and window identities and a matching cursor and
+receiver; errors after possible input remain unsafe. Notification cleanup
+does not replay an uncertain Escape and preserves both operation and cleanup
+errors, including the stronger disposition. Pointer preparation also preserves
+focus and scroll effects on later failure. These are source and portable
+control-flow checks, not evidence of AppKit routing, event capture, ABI,
+receiving-app behavior or native release and ACK.
 
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:
