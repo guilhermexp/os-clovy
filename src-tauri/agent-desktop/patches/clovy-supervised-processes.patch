@@ -4484,19 +4484,144 @@ index 82d6d61..c253888 100644
    "Win32_System_Com",
    "Win32_System_Com_StructuredStorage",
    "Win32_System_WinRT_Direct3D11",
+diff --git a/crates/windows/src/actions/chain.rs b/crates/windows/src/actions/chain.rs
+index 6ef6241..6d7e8d1 100644
+--- a/crates/windows/src/actions/chain.rs
++++ b/crates/windows/src/actions/chain.rs
+@@ -244,10 +244,13 @@ pub(crate) fn invoke_available(element: &UIAElement) -> bool {
+ /// directly (rather than an unverified bool to observe further) wrap this
+ /// with [`DeliveryOutcome::from_delivery`].
+ #[cfg(target_os = "windows")]
+-pub(crate) fn invoke_pattern_delivered(element: &UIAElement) -> Result<bool, AdapterError> {
++pub(crate) fn invoke_pattern_delivered(
++    element: &UIAElement,
++    deadline: Deadline,
++) -> Result<bool, AdapterError> {
+     match element.0.get_pattern::<UIInvokePattern>() {
+         Ok(pattern) => {
+-            crate::input::native_owner::before_semantic_effect()?;
++            let _authority = crate::input::native_owner::before_semantic_effect(element, deadline)?;
+             match pattern.invoke() {
+                 Ok(()) => classify_success(),
+                 Err(error) => classify_write("Invoke", INVOKE_LABEL, &error),
+diff --git a/crates/windows/src/actions/disclosure.rs b/crates/windows/src/actions/disclosure.rs
+index f015f91..4860aa7 100644
+--- a/crates/windows/src/actions/disclosure.rs
++++ b/crates/windows/src/actions/disclosure.rs
+@@ -141,10 +141,14 @@ mod imp {
+             },
+             || {
+                 delivered_with_observe(element, want_expanded, deadline, |element| {
+-                    pattern_expand_collapse(element, want_expanded)
++                    pattern_expand_collapse(element, want_expanded, deadline)
++                })
++            },
++            || {
++                delivered_with_observe(element, want_expanded, deadline, |element| {
++                    invoke_pattern_delivered(element, deadline)
+                 })
+             },
+-            || delivered_with_observe(element, want_expanded, deadline, invoke_pattern_delivered),
+         )
+     }
+
+@@ -218,6 +222,7 @@ mod imp {
+     fn pattern_expand_collapse(
+         element: &UIAElement,
+         want_expanded: bool,
++        deadline: Deadline,
+     ) -> Result<bool, AdapterError> {
+         let label = if want_expanded {
+             EXPAND_LABEL
+@@ -226,7 +231,8 @@ mod imp {
+         };
+         match element.0.get_pattern::<UIExpandCollapsePattern>() {
+             Ok(pattern) => {
+-                crate::input::native_owner::before_semantic_effect()?;
++                let _authority =
++                    crate::input::native_owner::before_semantic_effect(element, deadline)?;
+                 let result = if want_expanded {
+                     pattern.expand()
+                 } else {
 diff --git a/crates/windows/src/actions/dispatch.rs b/crates/windows/src/actions/dispatch.rs
-index 73b73f3..871b914 100644
+index 73b73f3..75bc4f3 100644
 --- a/crates/windows/src/actions/dispatch.rs
 +++ b/crates/windows/src/actions/dispatch.rs
-@@ -65,7 +65,7 @@ mod imp {
+@@ -45,7 +45,6 @@ mod imp {
+     use crate::actions::toggle_state::{check_steps, toggle_steps, uncheck_steps};
+     use crate::actions::value_write::{clear_steps, set_value_steps};
+     use crate::tree::element::{UIAElement, uia_element};
+-    use crate::tree::live_read::corroborate_verified_process;
+     use crate::tree::properties::property_ids::TreeProperty;
+     use crate::tree::properties::read_one;
+     use agent_desktop_core::LocatorField;
+@@ -65,8 +64,10 @@ mod imp {
          }
          let element = uia_element(handle)?;
          deadline.ensure_remaining()?;
 -        corroborate_verified_process(element)?;
-+        corroborate_verified_process(element, deadline)?;
++        let _authority = crate::tree::element::qualify_verified(element, deadline)?;
          crate::input::native_owner::ensure_interactive_desktop()?;
++        let _dispatch_authority = crate::tree::element::qualify_verified(element, deadline)?;
++        deadline.ensure_remaining()?;
          match &request.action {
              Action::Click => execute_click(element, request.policy, deadline),
+             Action::SetFocus => focus_element(element, &request, deadline),
+@@ -205,11 +206,11 @@ mod imp {
+             },
+             || {
+                 Ok(DeliveryOutcome::from_delivery(
+-                    invoke_pattern_delivered(element)?,
++                    invoke_pattern_delivered(element, deadline)?,
+                     false,
+                 ))
+             },
+-            || legacy_default_action(element),
++            || legacy_default_action(element, deadline),
+         )?;
+         Ok(ActionResult::from_execution(&Action::Click, steps))
+     }
+@@ -250,10 +251,14 @@ mod imp {
+         )
+     }
+
+-    fn legacy_default_action(element: &UIAElement) -> Result<DeliveryOutcome, AdapterError> {
++    fn legacy_default_action(
++        element: &UIAElement,
++        deadline: Deadline,
++    ) -> Result<DeliveryOutcome, AdapterError> {
+         let delivered = match element.0.get_pattern::<UILegacyIAccessiblePattern>() {
+             Ok(pattern) => {
+-                crate::input::native_owner::before_semantic_effect()?;
++                let _authority =
++                    crate::input::native_owner::before_semantic_effect(element, deadline)?;
+                 match pattern.do_default_action() {
+                     Ok(()) => classify_success()?,
+                     Err(error) => classify_write("DoDefaultAction", LEGACY_LABEL, &error)?,
+diff --git a/crates/windows/src/actions/focus.rs b/crates/windows/src/actions/focus.rs
+index c116c7e..84c0fbd 100644
+--- a/crates/windows/src/actions/focus.rs
++++ b/crates/windows/src/actions/focus.rs
+@@ -35,7 +35,7 @@ mod imp {
+             return Err(headless_denied(request.policy));
+         }
+         deadline.ensure_remaining()?;
+-        let delivered = invoke_focus(element)?;
++        let delivered = invoke_focus(element, deadline)?;
+         focus_from_delivery(
+             request.policy,
+             Ok(delivered),
+@@ -43,8 +43,8 @@ mod imp {
+         )
+     }
+
+-    fn invoke_focus(element: &UIAElement) -> Result<bool, AdapterError> {
+-        crate::input::native_owner::before_semantic_effect()?;
++    fn invoke_focus(element: &UIAElement, deadline: Deadline) -> Result<bool, AdapterError> {
++        let _authority = crate::input::native_owner::before_semantic_effect(element, deadline)?;
+         match element.0.set_focus() {
+             Ok(()) => classify_success(),
+             Err(error) => classify_mutation(SET_FOCUS_OP, SET_FOCUS_API, &failure_of(&error)),
 diff --git a/crates/windows/src/actions/physical_target.rs b/crates/windows/src/actions/physical_target.rs
 index 37447ec..3611544 100644
 --- a/crates/windows/src/actions/physical_target.rs
@@ -4519,10 +4644,32 @@ index 37447ec..3611544 100644
      ensure_elevation_allows(element)?;
      crate::actions::focus::keyboard_focus_ready(element)
  }
+diff --git a/crates/windows/src/actions/scroll.rs b/crates/windows/src/actions/scroll.rs
+index 5b27aeb..b31bc07 100644
+--- a/crates/windows/src/actions/scroll.rs
++++ b/crates/windows/src/actions/scroll.rs
+@@ -102,7 +102,7 @@ mod imp {
+             let Some(pattern) = pattern.as_ref() else {
+                 return Ok(());
+             };
+-            crate::input::native_owner::before_semantic_effect()?;
++            let _authority = crate::input::native_owner::before_semantic_effect(element, deadline)?;
+             let delivered = match pattern.scroll(horizontal, vertical) {
+                 Ok(()) => classify_success()?,
+                 Err(error) => classify_write("Scroll", SCROLL_LABEL, &error)?,
 diff --git a/crates/windows/src/actions/scroll_into_view.rs b/crates/windows/src/actions/scroll_into_view.rs
-index f27e44c..065e538 100644
+index f27e44c..f761e44 100644
 --- a/crates/windows/src/actions/scroll_into_view.rs
 +++ b/crates/windows/src/actions/scroll_into_view.rs
+@@ -31,7 +31,7 @@ mod imp {
+     use crate::tree::live_read::corroborate_verified_process;
+     use crate::tree::properties::property_ids::TreeProperty;
+     use crate::tree::properties::{read_one, rect_has_area};
+-    use crate::tree::walk::walker_source::{nearest_scroll_viewport, viewport_bounds};
++    use crate::tree::walk::walker_source::{nearest_scroll_viewport, qualified_viewport_bounds};
+     use agent_desktop_core::adapter::native_handle::NativeHandle;
+     use std::time::{Duration, Instant};
+     use uiautomation::core::UITreeWalker;
 @@ -69,7 +69,7 @@ mod imp {
          let element = uia_element(handle)?;
          let deadline = lease.deadline();
@@ -4532,11 +4679,81 @@ index f27e44c..065e538 100644
          scroll_into_view_element(element, deadline)
      }
 
+@@ -83,8 +83,8 @@ mod imp {
+         let client = automation_client()?;
+         let walker = client.get_raw_view_walker().ok();
+         let before = known_bounds(element);
+-        let viewport = resolve_scroll_viewport(element, walker.as_ref(), deadline);
+-        let invoke_failure = match invoke_scroll_into_view(element)? {
++        let viewport = resolve_scroll_viewport(element, walker.as_ref(), deadline)?;
++        let invoke_failure = match invoke_scroll_into_view(element, deadline)? {
+             InvokeOutcome::EmptyPattern => {
+                 return ladder_from_terminal(unsupported_error(), element, deadline);
+             }
+@@ -96,7 +96,7 @@ mod imp {
+                 element,
+                 viewport
+                     .as_ref()
+-                    .map(viewport_bounds)
++                    .map(|viewport| qualified_viewport_bounds(viewport, deadline))
+                     .transpose()?
+                     .flatten(),
+                 deadline,
+@@ -132,12 +132,17 @@ mod imp {
+         element: &UIAElement,
+         walker: Option<&UITreeWalker>,
+         deadline: Deadline,
+-    ) -> Option<UIAElement> {
+-        walker.and_then(|walker| {
+-            nearest_scroll_viewport(element, walker, deadline)
+-                .ok()
+-                .flatten()
+-        })
++    ) -> Result<Option<UIAElement>, AdapterError> {
++        let Some(walker) = walker else {
++            return Ok(None);
++        };
++        match nearest_scroll_viewport(element, walker, deadline) {
++            Ok(viewport) => Ok(viewport),
++            Err(crate::tree::walk::walker_source::ViewportError::Incomplete) => {
++                Err(deadline.timeout_error())
++            }
++            Err(crate::tree::walk::walker_source::ViewportError::Rejected(error)) => Err(error),
++        }
+     }
+
+     pub(crate) fn scroll_into_view_judged_for(
+@@ -276,10 +281,14 @@ mod imp {
+         read_one(element, TreeProperty::ScrollItemAvailable).flag() == Some(true)
+     }
+
+-    fn invoke_scroll_into_view(element: &UIAElement) -> Result<InvokeOutcome, AdapterError> {
++    fn invoke_scroll_into_view(
++        element: &UIAElement,
++        deadline: Deadline,
++    ) -> Result<InvokeOutcome, AdapterError> {
+         match element.0.get_pattern::<UIScrollItemPattern>() {
+             Ok(pattern) => {
+-                crate::input::native_owner::before_semantic_effect()?;
++                let _authority =
++                    crate::input::native_owner::before_semantic_effect(element, deadline)?;
+                 Ok(match pattern.scroll_into_view() {
+                     Ok(()) => InvokeOutcome::Succeeded,
+                     Err(error) => match failure_of(&error) {
 diff --git a/crates/windows/src/actions/scroll_ladder.rs b/crates/windows/src/actions/scroll_ladder.rs
-index 0e46949..a1ab089 100644
+index 0e46949..9e1eb51 100644
 --- a/crates/windows/src/actions/scroll_ladder.rs
 +++ b/crates/windows/src/actions/scroll_ladder.rs
-@@ -200,7 +200,7 @@ mod imp {
+@@ -188,7 +188,7 @@ mod imp {
+     use crate::tree::properties::property_ids::TreeProperty;
+     use crate::tree::properties::property_outcome::{PropertyOutcome, PropertyValue};
+     use crate::tree::properties::read_one;
+-    use crate::tree::walk::walker_source::{nearest_scroll_viewport, viewport_bounds};
++    use crate::tree::walk::walker_source::{nearest_scroll_viewport, qualified_viewport_bounds};
+     use agent_desktop_core::{ErrorCode, LocatorField, Rect};
+     use uiautomation::patterns::UIScrollPattern;
+
+@@ -200,14 +200,17 @@ mod imp {
          deadline: Deadline,
      ) -> Result<Option<DeliveryOutcome>, AdapterError> {
          deadline.ensure_remaining()?;
@@ -4545,7 +4762,34 @@ index 0e46949..a1ab089 100644
          let client = automation_client()?;
          let Some(walker) = client.get_raw_view_walker().ok() else {
              return Ok(None);
-@@ -249,7 +249,7 @@ mod imp {
+         };
+         match nearest_scroll_viewport(element, &walker, deadline) {
+             Ok(None) => Ok(None),
+-            Err(crate::tree::walk::walker_source::BudgetExpired) => Err(deadline.timeout_error()),
++            Err(crate::tree::walk::walker_source::ViewportError::Incomplete) => {
++                Err(deadline.timeout_error())
++            }
++            Err(crate::tree::walk::walker_source::ViewportError::Rejected(error)) => Err(error),
+             Ok(Some(ancestor)) => {
+                 scroll_ancestor_until_visible(element, &ancestor, deadline).map(Some)
+             }
+@@ -219,8 +222,13 @@ mod imp {
+         ancestor: &UIAElement,
+         deadline: Deadline,
+     ) -> Result<DeliveryOutcome, AdapterError> {
+-        let mut next_direction =
+-            || direction_when_not_visible(element, viewport_bounds(ancestor)?, deadline);
++        let mut next_direction = || {
++            direction_when_not_visible(
++                element,
++                qualified_viewport_bounds(ancestor, deadline)?,
++                deadline,
++            )
++        };
+         let mut scroll_once =
+             |direction: &Direction| scroll_cached_ancestor(element, ancestor, direction, deadline);
+         ladder_judged_for(deadline, &mut next_direction, &mut scroll_once)
+@@ -249,7 +257,7 @@ mod imp {
          context: &str,
      ) -> Result<VisibilitySample, AdapterError> {
          deadline.ensure_remaining()?;
@@ -4554,7 +4798,7 @@ index 0e46949..a1ab089 100644
          let bounds = match read_one(element, TreeProperty::BoundingRectangle).bounds() {
              LocatorField::Known(bounds) => Some(bounds),
              LocatorField::Absent => None,
-@@ -285,7 +285,7 @@ mod imp {
+@@ -285,7 +293,7 @@ mod imp {
          deadline: Deadline,
      ) -> Result<(), AdapterError> {
          deadline.ensure_remaining()?;
@@ -4563,7 +4807,16 @@ index 0e46949..a1ab089 100644
          let pattern = match ancestor.0.get_pattern::<UIScrollPattern>() {
              Ok(pattern) => pattern,
              Err(error) => {
-@@ -325,7 +325,7 @@ mod imp {
+@@ -299,7 +307,7 @@ mod imp {
+         let bounds = crate::actions::scroll::known_bounds(element).ok_or_else(|| {
+             AdapterError::new(ErrorCode::ActionFailed, "Missing scroll target bounds")
+         })?;
+-        let viewport = viewport_bounds(ancestor)?.ok_or_else(|| {
++        let viewport = qualified_viewport_bounds(ancestor, deadline)?.ok_or_else(|| {
+             AdapterError::new(ErrorCode::ActionFailed, "Missing scroll viewport bounds")
+         })?;
+         let horizontal = matches!(direction, Direction::Left | Direction::Right);
+@@ -325,13 +333,13 @@ mod imp {
              offset,
          )?;
          deadline.ensure_remaining()?;
@@ -4572,11 +4825,18 @@ index 0e46949..a1ab089 100644
          let (x, y) = if horizontal {
              (percent, -1.0)
          } else {
+             (-1.0, percent)
+         };
+-        crate::input::native_owner::before_semantic_effect()?;
++        let _authority = crate::input::native_owner::before_semantic_effect(ancestor, deadline)?;
+         match pattern.set_scroll_percent(x, y) {
+             Ok(()) => {
+                 classify_success()?;
 diff --git a/crates/windows/src/actions/select.rs b/crates/windows/src/actions/select.rs
-index bc54346..ea54d7f 100644
+index bc54346..3996f4d 100644
 --- a/crates/windows/src/actions/select.rs
 +++ b/crates/windows/src/actions/select.rs
-@@ -82,7 +82,8 @@ mod imp {
+@@ -82,18 +82,19 @@ mod imp {
          value: &str,
          deadline: Deadline,
      ) -> Result<Vec<ActionStep>, AdapterError> {
@@ -4586,8 +4846,59 @@ index bc54346..ea54d7f 100644
          let needs_expand = is_collapsed_container(element);
          let expanded = Cell::new(false);
          let mut expand = || {
+             deadline.ensure_remaining()?;
+-            expand_container(element)?;
++            expand_container(element, deadline)?;
+             expanded.set(true);
+             Ok(())
+         };
+         let mut collapse = || {
+             if expanded.get() {
+-                let _ = collapse_container(element);
++                let _ = collapse_container(element, deadline);
+             }
+         };
+         let found_holder = RefCell::new(self_match.then(|| element.clone()));
+@@ -185,7 +186,8 @@ mod imp {
+     ) -> Result<DeliveryOutcome, AdapterError> {
+         let delivered = match target.0.get_pattern::<UISelectionItemPattern>() {
+             Ok(pattern) => {
+-                crate::input::native_owner::before_semantic_effect()?;
++                let _authority =
++                    crate::input::native_owner::before_semantic_effect(target, deadline)?;
+                 match pattern.select() {
+                     Ok(()) => classify_success()?,
+                     Err(error) => classify_write("Select", SELECT_LABEL, &error)?,
+@@ -239,10 +241,11 @@ mod imp {
+         Ok(resolve_select_verification(container_value, selected))
+     }
+
+-    fn expand_container(element: &UIAElement) -> Result<(), AdapterError> {
++    fn expand_container(element: &UIAElement, deadline: Deadline) -> Result<(), AdapterError> {
+         match element.0.get_pattern::<UIExpandCollapsePattern>() {
+             Ok(pattern) => {
+-                crate::input::native_owner::before_semantic_effect()?;
++                let _authority =
++                    crate::input::native_owner::before_semantic_effect(element, deadline)?;
+                 match pattern.expand() {
+                     Ok(()) => Ok(()),
+                     Err(error) => {
+@@ -258,10 +261,11 @@ mod imp {
+         }
+     }
+
+-    fn collapse_container(element: &UIAElement) -> Result<(), AdapterError> {
++    fn collapse_container(element: &UIAElement, deadline: Deadline) -> Result<(), AdapterError> {
+         match element.0.get_pattern::<UIExpandCollapsePattern>() {
+             Ok(pattern) => {
+-                crate::input::native_owner::before_semantic_effect()?;
++                let _authority =
++                    crate::input::native_owner::before_semantic_effect(element, deadline)?;
+                 let _ = pattern.collapse();
+                 Ok(())
+             }
 diff --git a/crates/windows/src/actions/select_search.rs b/crates/windows/src/actions/select_search.rs
-index f1cda56..14b1511 100644
+index f1cda56..c07df8c 100644
 --- a/crates/windows/src/actions/select_search.rs
 +++ b/crates/windows/src/actions/select_search.rs
 @@ -81,7 +81,8 @@ mod imp {
@@ -4637,7 +4948,17 @@ index f1cda56..14b1511 100644
          Ok(found)
      }
 
-@@ -157,28 +179,47 @@ mod imp {
+@@ -134,7 +156,8 @@ mod imp {
+             || {
+                 deadline.ensure_remaining()?;
+                 let before = pattern.get_vertical_scroll_percent().ok();
+-                crate::input::native_owner::before_semantic_effect()?;
++                let _authority =
++                    crate::input::native_owner::before_semantic_effect(element, deadline)?;
+                 match pattern.scroll(ScrollAmount::NoAmount, ScrollAmount::SmallIncrement) {
+                     Ok(()) => {
+                         let _ = classify_success()?;
+@@ -157,28 +180,47 @@ mod imp {
          read_one(element, TreeProperty::SelectionItemAvailable).flag() == Some(true)
      }
 
@@ -4693,7 +5014,7 @@ index f1cda56..14b1511 100644
      }
 
      fn push_children(
-@@ -256,8 +297,12 @@ mod imp {
+@@ -256,8 +298,12 @@ mod imp {
          false
      }
 
@@ -4708,6 +5029,163 @@ index f1cda56..14b1511 100644
      }
  }
 
+diff --git a/crates/windows/src/actions/toggle_state.rs b/crates/windows/src/actions/toggle_state.rs
+index 1d80054..c86b889 100644
+--- a/crates/windows/src/actions/toggle_state.rs
++++ b/crates/windows/src/actions/toggle_state.rs
+@@ -96,8 +96,16 @@ mod imp {
+                 toggle_ok,
+                 invoke_ok,
+             },
+-            || delivered_with_observe(before, deadline, element, pattern_toggle),
+-            || delivered_with_observe(before, deadline, element, invoke_pattern_delivered),
++            || {
++                delivered_with_observe(before, deadline, element, |element| {
++                    pattern_toggle(element, deadline)
++                })
++            },
++            || {
++                delivered_with_observe(before, deadline, element, |element| {
++                    invoke_pattern_delivered(element, deadline)
++                })
++            },
+         )
+     }
+
+@@ -130,8 +138,8 @@ mod imp {
+                 invoke_ok: invoke_available(element),
+             },
+             || read_toggle_kind(element),
+-            || pattern_toggle(element),
+-            || invoke_pattern_delivered(element),
++            || pattern_toggle(element, deadline),
++            || invoke_pattern_delivered(element, deadline),
+         )
+     }
+
+@@ -256,10 +264,11 @@ mod imp {
+         read_toggle_state(element)
+     }
+
+-    fn pattern_toggle(element: &UIAElement) -> Result<bool, AdapterError> {
++    fn pattern_toggle(element: &UIAElement, deadline: Deadline) -> Result<bool, AdapterError> {
+         match element.0.get_pattern::<UITogglePattern>() {
+             Ok(pattern) => {
+-                crate::input::native_owner::before_semantic_effect()?;
++                let _authority =
++                    crate::input::native_owner::before_semantic_effect(element, deadline)?;
+                 match pattern.toggle() {
+                     Ok(()) => classify_success(),
+                     Err(error) => classify_write("Toggle", TOGGLE_LABEL, &error),
+diff --git a/crates/windows/src/actions/value_write.rs b/crates/windows/src/actions/value_write.rs
+index 3dd15a6..da6422e 100644
+--- a/crates/windows/src/actions/value_write.rs
++++ b/crates/windows/src/actions/value_write.rs
+@@ -62,9 +62,9 @@ mod imp {
+                 value_writable: value_writable(element),
+                 range_available: range_available(element),
+             },
+-            || invoke_value_set(element, value),
++            || invoke_value_set(element, value, deadline),
+             || match parsed {
+-                Some(target) => invoke_range_set(element, target),
++                Some(target) => invoke_range_set(element, target, deadline),
+                 None => Ok(DeliveryOutcome::NotDelivered),
+             },
+         )
+@@ -76,8 +76,10 @@ mod imp {
+         deadline: Deadline,
+     ) -> Result<Vec<ActionStep>, AdapterError> {
+         let value_ok = value_writable(element);
+-        clear_judged_for(deadline, policy, value_ok, || invoke_value_set(element, ""))
+-            .map_err(|error| attach_value_chars(error, ""))
++        clear_judged_for(deadline, policy, value_ok, || {
++            invoke_value_set(element, "", deadline)
++        })
++        .map_err(|error| attach_value_chars(error, ""))
+     }
+
+     /// Injected SetValue chain — unit-test seam and live path.
+@@ -150,10 +152,12 @@ mod imp {
+     fn invoke_value_set(
+         element: &UIAElement,
+         value: &str,
++        deadline: Deadline,
+     ) -> Result<DeliveryOutcome, AdapterError> {
+         let delivered = match element.0.get_pattern::<UIValuePattern>() {
+             Ok(pattern) => {
+-                crate::input::native_owner::before_semantic_effect()?;
++                let _authority =
++                    crate::input::native_owner::before_semantic_effect(element, deadline)?;
+                 match pattern.set_value(value) {
+                     Ok(()) => classify_success()?,
+                     Err(error) => classify_write("SetValue", VALUE_LABEL, &error)?,
+@@ -171,6 +175,7 @@ mod imp {
+     fn invoke_range_set(
+         element: &UIAElement,
+         target: f64,
++        deadline: Deadline,
+     ) -> Result<DeliveryOutcome, AdapterError> {
+         let pattern = match element.0.get_pattern::<UIRangeValuePattern>() {
+             Ok(pattern) => pattern,
+@@ -191,7 +196,7 @@ mod imp {
+                 ));
+             }
+         }
+-        crate::input::native_owner::before_semantic_effect()?;
++        let _authority = crate::input::native_owner::before_semantic_effect(element, deadline)?;
+         let delivered = match pattern.set_value(target) {
+             Ok(()) => classify_success()?,
+             Err(error) => classify_write("SetValue", RANGE_LABEL, &error)?,
+diff --git a/crates/windows/src/input/native_owner.rs b/crates/windows/src/input/native_owner.rs
+index 36e690e..150e159 100644
+--- a/crates/windows/src/input/native_owner.rs
++++ b/crates/windows/src/input/native_owner.rs
+@@ -80,13 +80,43 @@ pub(crate) fn ensure_interactive_desktop() -> Result<(), AdapterError> {
+     })?;
+     observation.map(|_| ())
+ }
+-pub(crate) fn before_semantic_effect() -> Result<(), AdapterError> {
++pub(crate) fn before_window_effect() -> Result<(), AdapterError> {
+     ensure_interactive_desktop()?;
+     if agent_desktop_core::commands::clovy_cancel::supervised() {
+         UIA_ATTEMPTED.store(true, Ordering::Release);
+     }
+     Ok(())
+ }
++
++#[cfg(target_os = "windows")]
++pub(crate) fn before_semantic_effect(
++    element: &crate::tree::element::UIAElement,
++    deadline: agent_desktop_core::Deadline,
++) -> Result<crate::tree::element::ElementAuthority, AdapterError> {
++    ensure_interactive_desktop()?;
++    let prior = UIA_ATTEMPTED.load(Ordering::Acquire);
++    let guard_result = (|| {
++        let authority = crate::tree::element::qualify_verified(element, deadline)?;
++        deadline.ensure_remaining()?;
++        agent_desktop_core::commands::clovy_cancel::ensure()?;
++        deadline.ensure_remaining()?;
++        Ok(authority)
++    })();
++    let authority = guard_result.map_err(|error: AdapterError| {
++        if prior
++            && matches!(
++                error.disposition,
++                DeliverySemantics::NotDelivered | DeliverySemantics::Unknown
++            )
++        {
++            error.with_disposition(DeliverySemantics::uncertain())
++        } else {
++            error
++        }
++    })?;
++    UIA_ATTEMPTED.store(true, Ordering::Release);
++    Ok(authority)
++}
+ pub(crate) fn finish_action_result(
+     result: Result<agent_desktop_core::ActionResult, AdapterError>,
+ ) -> Result<agent_desktop_core::ActionResult, AdapterError> {
 diff --git a/crates/windows/src/lib.rs b/crates/windows/src/lib.rs
 index 44d3f2c..63dd5c2 100644
 --- a/crates/windows/src/lib.rs
@@ -5630,6 +6108,37 @@ index d176588..3d558cd 100644
  use agent_desktop_core::AdapterError;
  use agent_desktop_core::ErrorCode;
 
+diff --git a/crates/windows/src/system/window/window_activate.rs b/crates/windows/src/system/window/window_activate.rs
+index 9d92805..373104b 100644
+--- a/crates/windows/src/system/window/window_activate.rs
++++ b/crates/windows/src/system/window/window_activate.rs
+@@ -225,7 +225,7 @@ fn restore_if_iconic(
+         if !owned_for_write(evidence)? {
+             return Err(recycled_before_foreground());
+         }
+-        crate::input::native_owner::before_semantic_effect()?;
++        crate::input::native_owner::before_window_effect()?;
+         if ShowWindowAsync(handle, SW_RESTORE) == 0 {
+             return Err(before_activation(hresult::win32_last_error(
+                 "ShowWindowAsync failed while restoring target",
+@@ -259,7 +259,7 @@ fn bring_to_foreground(
+             return Err(recycled_before_foreground());
+         }
+         if IsWindowVisible(handle) == 0 {
+-            crate::input::native_owner::before_semantic_effect()?;
++            crate::input::native_owner::before_window_effect()?;
+             if ShowWindowAsync(handle, SW_SHOW) == 0 {
+                 return Err(before_activation(hresult::win32_last_error(
+                     "ShowWindowAsync failed while showing target",
+@@ -269,7 +269,7 @@ fn bring_to_foreground(
+         if !owned_for_write(evidence)? {
+             return Err(recycled_before_foreground());
+         }
+-        crate::input::native_owner::before_semantic_effect()?;
++        crate::input::native_owner::before_window_effect()?;
+         let _ = SetForegroundWindow(handle);
+     }
+     Ok(())
 diff --git a/crates/windows/src/system/window/window_identity.rs b/crates/windows/src/system/window/window_identity.rs
 index 15125cc..a49c42f 100644
 --- a/crates/windows/src/system/window/window_identity.rs
@@ -6035,7 +6544,7 @@ index 8455283..2deecca 100644
      let error = hit_test_impl(
          &handle,
 diff --git a/crates/windows/src/tree/hit_test/mod.rs b/crates/windows/src/tree/hit_test/mod.rs
-index 7895215..82acb6a 100644
+index 7895215..fee5a88 100644
 --- a/crates/windows/src/tree/hit_test/mod.rs
 +++ b/crates/windows/src/tree/hit_test/mod.rs
 @@ -77,12 +77,12 @@ mod imp {
@@ -6119,7 +6628,7 @@ index 7895215..82acb6a 100644
      }
 
      /// The viewport climb is corroboration's input and nobody else's: it asks
-@@ -141,14 +163,14 @@ mod imp {
+@@ -141,14 +163,17 @@ mod imp {
      fn corroborate_with_viewport(
          context: &corroborate::InterceptionContext<'_>,
          bounds: &Rect,
@@ -6132,7 +6641,10 @@ index 7895215..82acb6a 100644
          ) {
              Ok(viewport) => viewport,
 -            Err(walker_source::BudgetExpired) => return classify::result_for_incomplete_walk(),
-+            Err(walker_source::BudgetExpired) => return Ok(classify::result_for_incomplete_walk()),
++            Err(walker_source::ViewportError::Incomplete) => {
++                return Ok(classify::result_for_incomplete_walk());
++            }
++            Err(walker_source::ViewportError::Rejected(error)) => return Err(error),
          };
          let demote =
              classify::should_demote_outside_viewport(&context.point, bounds, viewport.as_ref());
@@ -8155,7 +8667,7 @@ index 10b8e07..d6b307c 100644
 +    Ok(())
  }
 diff --git a/crates/windows/src/tree/walk/walker_source.rs b/crates/windows/src/tree/walk/walker_source.rs
-index 9feff85..c59fb57 100644
+index 9feff85..30ae1f0 100644
 --- a/crates/windows/src/tree/walk/walker_source.rs
 +++ b/crates/windows/src/tree/walk/walker_source.rs
 @@ -9,7 +9,7 @@ mod imp {
@@ -8167,7 +8679,92 @@ index 9feff85..c59fb57 100644
      use crate::tree::walk::cache::{build_walk_cache_request, policy_for_root};
      use crate::tree::walk::walker::{DEFAULT_MAX_RAW_DEPTH, NodeKey, TreeSource, walk_vocabulary};
      use agent_desktop_core::{AdapterError, Deadline, LocatorField, Rect};
-@@ -157,6 +157,9 @@ mod imp {
+@@ -26,6 +26,12 @@ mod imp {
+     #[derive(Debug)]
+     pub struct BudgetExpired;
+
++    #[derive(Debug)]
++    pub enum ViewportError {
++        Incomplete,
++        Rejected(AdapterError),
++    }
++
+     /// Whether two proxies address the same element.
+     ///
+     /// UI Automation hands back a new `IUIAutomationElement` per query, so
+@@ -74,17 +80,36 @@ mod imp {
+         target: &UIAElement,
+         walker: &UITreeWalker,
+         deadline: Deadline,
+-    ) -> Result<Option<UIAElement>, BudgetExpired> {
++    ) -> Result<Option<UIAElement>, ViewportError> {
++        let root = target.1.as_ref().ok_or_else(|| {
++            ViewportError::Rejected(AdapterError::new(
++                agent_desktop_core::ErrorCode::StaleRef,
++                "Element identity is unavailable",
++            ))
++        })?;
+         let mut current = target.clone();
+         for _ in 0..DEFAULT_MAX_RAW_DEPTH as usize {
+             if deadline.is_expired() {
+-                return Err(BudgetExpired);
++                return Err(ViewportError::Incomplete);
+             }
++            let _current_authority = crate::tree::element::qualify_verified(&current, deadline)
++                .map_err(ViewportError::Rejected)?;
++            deadline
++                .ensure_remaining()
++                .map_err(ViewportError::Rejected)?;
+             let parent = match parent_step(walker, &current) {
+                 Ok(Some(parent)) => parent,
+                 Ok(None) => return Ok(None),
+-                Err(()) => return Err(BudgetExpired),
++                Err(()) => return Err(ViewportError::Incomplete),
+             };
++            let parent =
++                crate::tree::element::bind_root(parent, root.root_pid, &root.root_token, deadline)
++                    .map_err(ViewportError::Rejected)?;
++            let _authority = crate::tree::element::qualify_verified(&parent, deadline)
++                .map_err(ViewportError::Rejected)?;
++            deadline
++                .ensure_remaining()
++                .map_err(ViewportError::Rejected)?;
+             if read_one(&parent, TreeProperty::ScrollAvailable).flag() == Some(true) {
+                 return Ok(Some(parent));
+             }
+@@ -136,19 +161,28 @@ mod imp {
+         }
+     }
+
++    pub fn qualified_viewport_bounds(
++        viewport: &UIAElement,
++        deadline: Deadline,
++    ) -> Result<Option<Rect>, AdapterError> {
++        let _authority = crate::tree::element::qualify_verified(viewport, deadline)?;
++        deadline.ensure_remaining()?;
++        viewport_bounds(viewport)
++    }
++
+     /// The nearest scroll viewport's rectangle, for a caller that climbs once
+     /// and reads once.
+     pub fn nearest_scroll_viewport_bounds(
+         target: &UIAElement,
+         walker: &UITreeWalker,
+         deadline: Deadline,
+-    ) -> Result<Option<Rect>, BudgetExpired> {
++    ) -> Result<Option<Rect>, ViewportError> {
+         nearest_scroll_viewport(target, walker, deadline)?
+             .as_ref()
+-            .map(viewport_bounds)
++            .map(|viewport| qualified_viewport_bounds(viewport, deadline))
+             .transpose()
+             .map(Option::flatten)
+-            .map_err(|_| BudgetExpired)
++            .map_err(ViewportError::Rejected)
+     }
+
+     /// The production enumeration surface: the raw view walker, plus the cache
+@@ -157,6 +191,9 @@ mod imp {
          client: UIAutomation,
          walker: UITreeWalker,
          cache: Option<UICacheRequest>,
@@ -8177,7 +8774,7 @@ index 9feff85..c59fb57 100644
          /// Whether the root is Chromium/Electron provenance (the provenance
          /// gate): the transparent-wrapper depth skip must only fire under
          /// detected Chromium/WebView2 provenance, because the identical
-@@ -166,40 +169,45 @@ mod imp {
+@@ -166,40 +203,45 @@ mod imp {
      }
 
      impl UiaTreeSource {
@@ -8241,7 +8838,7 @@ index 9feff85..c59fb57 100644
          }
 
          /// Whether the root this source walks carries Chromium provenance; the
-@@ -213,22 +221,38 @@ mod imp {
+@@ -213,22 +255,38 @@ mod imp {
      impl TreeSource for UiaTreeSource {
          type Node = UIAElement;
 
@@ -8292,7 +8889,7 @@ index 9feff85..c59fb57 100644
          }
 
          fn identity(&self, node: &UIAElement) -> NodeKey {
-@@ -242,23 +266,139 @@ mod imp {
+@@ -242,23 +300,139 @@ mod imp {
          fn evidence(
              &self,
              node: &UIAElement,
@@ -8443,7 +9040,7 @@ index 9feff85..c59fb57 100644
          }
 
          fn is_web_wrapper(
-@@ -286,7 +426,10 @@ mod imp {
+@@ -286,7 +460,10 @@ mod imp {
      pub struct UiaTreeSource;
 
      impl UiaTreeSource {
@@ -8455,7 +9052,7 @@ index 9feff85..c59fb57 100644
              Ok(Self)
          }
 
-@@ -298,6 +441,10 @@ mod imp {
+@@ -298,6 +475,10 @@ mod imp {
      impl TreeSource for UiaTreeSource {
          type Node = UIAElement;
 
@@ -8466,7 +9063,7 @@ index 9feff85..c59fb57 100644
          fn first_child(&self, _node: &UIAElement) -> Result<UIAElement, UiaFailure> {
              Err(UiaFailure::Sentinel(ERR_NONE))
          }
-@@ -317,16 +464,19 @@ mod imp {
+@@ -317,16 +498,19 @@ mod imp {
          fn evidence(
              &self,
              _node: &UIAElement,
@@ -8492,7 +9089,19 @@ index 9feff85..c59fb57 100644
          }
 
          fn is_web_wrapper(
-@@ -357,7 +507,7 @@ pub fn walk_uia_subtree(
+@@ -343,8 +527,9 @@ pub use imp::UiaTreeSource;
+
+ #[cfg(target_os = "windows")]
+ pub(crate) use imp::{
+-    BudgetExpired, identity, nearest_scroll_viewport, nearest_scroll_viewport_bounds, parent_step,
+-    same_element, viewport_bounds,
++    BudgetExpired, ViewportError, identity, nearest_scroll_viewport,
++    nearest_scroll_viewport_bounds, parent_step, qualified_viewport_bounds, same_element,
++    viewport_bounds,
+ };
+
+ /// Walks a live UI Automation subtree from an arbitrary root element.
+@@ -357,7 +542,7 @@ pub fn walk_uia_subtree(
      root_source: &ObservationRoot<'_>,
      budget: WalkBudget,
  ) -> Result<WalkOutcome, AdapterError> {
@@ -8502,10 +9111,27 @@ index 9feff85..c59fb57 100644
      walk_from_root(&source, &prepared, root_source, budget)
  }
 diff --git a/crates/windows/src/tree/walk/walker_source_tests.rs b/crates/windows/src/tree/walk/walker_source_tests.rs
-index 9d645ac..797da4a 100644
+index 9d645ac..ef81098 100644
 --- a/crates/windows/src/tree/walk/walker_source_tests.rs
 +++ b/crates/windows/src/tree/walk/walker_source_tests.rs
-@@ -181,7 +181,13 @@ mod windows_only {
+@@ -127,6 +127,16 @@ mod windows_only {
+             .map(crate::tree::element::UIAElement::from)
+             .expect("the fixture exposes at least one child");
+
++        let root_authority = crate::tree::element::qualify_current(&root, deadline())
++            .expect("the fixture root is qualified");
++        let child = crate::tree::element::bind_root(
++            child,
++            root_authority.pid().get(),
++            root_authority.token(),
++            deadline(),
++        )
++        .expect("the child is qualified");
++
+         let outcome = nearest_scroll_viewport(&child, &walker, deadline())
+             .expect("a live climb to the true root must not fault");
+         assert!(
+@@ -181,7 +191,13 @@ mod windows_only {
          let root =
              root_from_hwnd(fixture.handle(), deadline()).expect("the fixture window resolves");
 

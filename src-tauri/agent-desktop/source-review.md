@@ -144,6 +144,15 @@ libproc, signed native execution or a new engine artifact. The preserved
 source6 binary authenticates only e868; this patch requires a fresh prepared
 artifact and matching final qualification before delivery.
 
+The Windows element action dispatcher retains process authority across
+preparatory reads. Its UIA action mutations requalify the resolved element and
+root immediately before the call, after desktop readiness, and retain the
+authority through the call. Ancestor scroll targets are bound to their own
+process identity before their properties are read. A prior attempted effect
+is not made safe to retry by a later guard refusal. The independent shell and
+notification UIA invoke paths have not yet been migrated to this boundary;
+physical input and native acceptance also remain pending.
+
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:
 local Git signature verification was unavailable. It does not establish
