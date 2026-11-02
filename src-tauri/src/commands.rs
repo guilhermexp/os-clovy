@@ -19,8 +19,9 @@ use crate::{
     domain::{
         processing::{
             add_latency_checkpoint, manual_notes_for_generation,
-            process_saved_source_audio_with_progress, NoteProcessingProgressReporter,
-            ProcessingTiming, NOTE_PROCESSING_PROGRESS_EVENT, TRANSCRIPTION_RATE_LIMITED_CODE,
+            process_saved_source_audio_with_cancellation, process_saved_source_audio_with_progress,
+            NoteProcessingProgressReporter, ProcessingTiming, NOTE_PROCESSING_PROGRESS_EVENT,
+            TRANSCRIPTION_RATE_LIMITED_CODE,
         },
         processing_queue::{self, RetryOrigin},
         types::{
@@ -3438,49 +3439,49 @@ async fn process_recovered_source_audio(
             return Err(error.into());
         }
     };
-    let result = {
-        let effect = process_saved_source_audio_with_progress(
-            repos,
-            note_id,
-            session_id,
-            source_mode,
-            sources,
-            note.title.clone(),
-            note.generated_content.clone(),
-            manual_notes_for_generation(&note),
-            ProcessingTiming::untracked(),
-            progress.clone(),
-        );
-        let processing = async {
-            if let (Some(binding), Some((request_id, profile))) =
-                (dequeue_binding.as_ref(), authorization)
-            {
-                app.state::<crate::agent_recorder::AgentRecorderBroker>()
-                    .validate_request(request_id)?;
-                run_authorized_queued_audio(
-                    &repos.pool,
-                    binding,
-                    profile,
+    let cancellation = async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if let Some((request_id, profile)) = authorization {
+                if let Err(error) = revalidate_saved_recorder_request(
+                    app,
+                    repos,
+                    Some(request_id),
+                    Some(profile),
                     note_id,
                     session_id,
-                    effect,
+                    crate::agent_recorder::AgentRecorderAction::Recover,
+                    Some(crate::agent_recorder::RecordingRecoveryAction::Validate),
                 )
                 .await
-            } else {
-                effect.await
-            }
-        };
-        tokio::pin!(processing);
-        loop {
-            tokio::select! {
-                result=&mut processing=>break result,
-                _=tokio::time::sleep(Duration::from_millis(100)),if authorization.is_some()=>{
-                    if let Some((request_id,profile))=authorization {
-                        if let Err(error)=revalidate_saved_recorder_request(app,repos,Some(request_id),Some(profile),note_id,session_id,crate::agent_recorder::AgentRecorderAction::Recover,Some(crate::agent_recorder::RecordingRecoveryAction::Validate)).await { break Err(error); }
-                    }
+                {
+                    return error;
                 }
             }
         }
+    };
+    let effect = process_saved_source_audio_with_cancellation(
+        repos,
+        note_id,
+        session_id,
+        source_mode,
+        sources,
+        note.title.clone(),
+        note.generated_content.clone(),
+        manual_notes_for_generation(&note),
+        ProcessingTiming::untracked(),
+        progress,
+        cancellation,
+    );
+    let result = if let (Some(binding), Some((request_id, profile))) =
+        (dequeue_binding.as_ref(), authorization)
+    {
+        app.state::<crate::agent_recorder::AgentRecorderBroker>()
+            .validate_request(request_id)?;
+        run_authorized_queued_audio(&repos.pool, binding, profile, note_id, session_id, effect)
+            .await
+    } else {
+        effect.await
     };
     ticket.finish();
     if let Err(error) = &result {
