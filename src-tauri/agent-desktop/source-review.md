@@ -203,8 +203,15 @@ Tree observation and reference resolution qualify the original root generation
 before selecting a surface and after resolution retry waits. AX candidates carry
 the original root, source window and their own process generation through
 matching and retained handles. Raw elements cannot become handles without a
-binding. This source review does not establish native behavior; remaining live,
-selection, caret, capture and input reads require their own checks.
+binding. AX window arrays qualify their owner around each count and page,
+including retries, and propagate authority failures through traversal. Live
+observation, labels, values, selection and caret reads recheck bound identities
+around their provider calls. Focused-caret callers carry the original process
+generation; a system-wide lookup establishes a fresh native identity before
+reading the focused element. The exact CoreGraphics decoder borrows its single
+expected generation without creating a map. The portable error-flow test and
+macOS metadata-only compilation do not establish native behavior. macOS pixel
+capture, focus, semantic and physical input boundaries remain separate work.
 
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:
