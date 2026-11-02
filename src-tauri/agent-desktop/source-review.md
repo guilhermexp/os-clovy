@@ -273,6 +273,14 @@ focus and scroll effects on later failure. These are source and portable
 control-flow checks, not evidence of AppKit routing, event capture, ABI,
 receiving-app behavior or native release and ACK.
 
+Coordinate-based window input retains the captured window bounds through
+pointer movement, clicks, wheel chunks, drag steps and release. After Stop,
+the native exact-window metadata is checked against the original owner and
+geometry before dispatch. Missing or changed geometry refuses the action;
+reference-bound paths retain their existing element and window policy. The
+portable command-consumer tests and Darwin metadata check do not execute the
+native geometry read or establish macOS routing.
+
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:
 local Git signature verification was unavailable. It does not establish

@@ -1222,10 +1222,10 @@ index 0000000..d799bf0
 +mod review_tests;
 diff --git a/crates/core/src/commands/clovy_targeted_review_tests.rs b/crates/core/src/commands/clovy_targeted_review_tests.rs
 new file mode 100644
-index 0000000..63f24dd
+index 0000000..6e311bd
 --- /dev/null
 +++ b/crates/core/src/commands/clovy_targeted_review_tests.rs
-@@ -0,0 +1,408 @@
+@@ -0,0 +1,419 @@
 +use super::*;
 +use std::sync::{
 +    Arc, Mutex,
@@ -1239,6 +1239,7 @@ index 0000000..63f24dd
 +    SecureBeforeFocus,
 +    SecureAfterFocus,
 +    ResolveAfterFocus,
++    GeometryAfterFocus,
 +    CancelAfterFocus,
 +    InputRefused,
 +}
@@ -1369,6 +1370,9 @@ index 0000000..63f24dd
 +        self.in_lease();
 +        self.focuses.fetch_add(1, Ordering::SeqCst);
 +        self.window.lock().unwrap().state.is_focused = true;
++        if matches!(self.change, Change::GeometryAfterFocus) {
++            self.window.lock().unwrap().bounds.as_mut().unwrap().x = 5.0;
++        }
 +        if matches!(self.change, Change::CancelAfterFocus) {
 +            std::fs::write(
 +                std::env::var_os("CLOVY_AGENT_DESKTOP_CANCEL_FILE").unwrap(),
@@ -1537,6 +1541,13 @@ index 0000000..63f24dd
 +        for change in [Change::SecureAfterFocus, Change::ResolveAfterFocus] {
 +            assert_after_focus(change, dragging);
 +        }
++    }
++}
++
++#[test]
++fn moved_window_keeps_old_point_inside_but_refuses_click_and_drag() {
++    for dragging in [false, true] {
++        assert_after_focus(Change::GeometryAfterFocus, dragging);
 +    }
 +}
 +#[test]
@@ -2740,10 +2751,41 @@ index 53d6a9a..b9d26b6 100644
          title: format!("Instance {pid}"),
          app: "Electron".into(),
 diff --git a/crates/core/src/commands/ref_policy_tests.rs b/crates/core/src/commands/ref_policy_tests.rs
-index fa9463e..ac52147 100644
+index fa9463e..4e87760 100644
 --- a/crates/core/src/commands/ref_policy_tests.rs
 +++ b/crates/core/src/commands/ref_policy_tests.rs
-@@ -165,6 +165,7 @@ fn snapshot_id() -> String {
+@@ -16,30 +16,6 @@ use crate::{
+ };
+ use std::sync::Mutex;
+
+-/// Every command module stem whose execute function calls `context.request_base(`.
+-/// Adding a new ref-action command requires adding its stem here; the
+-/// `every_ref_action_command_is_registered_in_the_policy_list` guard enforces this.
+-const POLICY_TESTED_COMMANDS: &[&str] = &[
+-    "check",
+-    "clear",
+-    "click",
+-    "collapse",
+-    "double_click",
+-    "expand",
+-    "focus",
+-    "press",
+-    "right_click",
+-    "scroll",
+-    "scroll_to",
+-    "select",
+-    "set_value",
+-    "toggle",
+-    "triple_click",
+-    "type_text",
+-    "type_text_interval",
+-    "uncheck",
+-];
+-
+ struct RecordingAdapter {
+     requests: Mutex<Vec<ActionRequest>>,
+ }
+@@ -165,6 +141,7 @@ fn snapshot_id() -> String {
              ],
          },
          source: crate::RefSource {
@@ -2751,6 +2793,48 @@ index fa9463e..ac52147 100644
              source_app: Some("Fixture".into()),
              source_window_id: Some("w-1".into()),
              source_window_title: Some("Fixture".into()),
+@@ -359,41 +336,3 @@ fn headed_context_reaches_every_ref_action_without_policy_downgrade() {
+         );
+     }
+ }
+-
+-#[test]
+-fn every_ref_action_command_is_registered_in_the_policy_list() {
+-    let commands_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands");
+-    let covered: std::collections::BTreeSet<&str> =
+-        POLICY_TESTED_COMMANDS.iter().copied().collect();
+-
+-    let mut uncovered: Vec<String> = std::fs::read_dir(&commands_dir)
+-        .expect("commands directory must be readable")
+-        .filter_map(|entry| entry.ok())
+-        .filter_map(|entry| {
+-            let path = entry.path();
+-            if path.extension().is_some_and(|e| e == "rs") {
+-                path.file_stem()
+-                    .and_then(|s| s.to_str())
+-                    .map(ToOwned::to_owned)
+-            } else {
+-                None
+-            }
+-        })
+-        .filter(|stem| !stem.ends_with("_tests"))
+-        .filter(|stem| {
+-            if covered.contains(stem.as_str()) {
+-                return false;
+-            }
+-            let path = commands_dir.join(format!("{stem}.rs"));
+-            let source = std::fs::read_to_string(&path).unwrap_or_default();
+-            source.contains("context.request_base(")
+-        })
+-        .collect();
+-
+-    uncovered.sort();
+-    assert!(
+-        uncovered.is_empty(),
+-        "new ref-action command(s) call context.request_base( but are not in POLICY_TESTED_COMMANDS: {uncovered:?}\n\
+-         Add each stem to POLICY_TESTED_COMMANDS and write a matching policy assertion."
+-    );
+-}
 diff --git a/crates/core/src/commands/right_click_tests.rs b/crates/core/src/commands/right_click_tests.rs
 index 4c09602..3a75171 100644
 --- a/crates/core/src/commands/right_click_tests.rs
@@ -7260,10 +7344,10 @@ index 1f8a933..a283355 100644
              Ok(())
          })
 diff --git a/crates/macos/src/input/adapter.rs b/crates/macos/src/input/adapter.rs
-index 7bb8e04..186c117 100644
+index 7bb8e04..d710d17 100644
 --- a/crates/macos/src/input/adapter.rs
 +++ b/crates/macos/src/input/adapter.rs
-@@ -6,6 +6,125 @@ use agent_desktop_core::{
+@@ -6,6 +6,143 @@ use agent_desktop_core::{
  use crate::adapter::MacOSAdapter;
 
  impl InputOps for MacOSAdapter {
@@ -7319,7 +7403,7 @@ index 7bb8e04..186c117 100644
 +                window: &bound,
 +                element,
 +            },
-+            None => crate::input::mouse::scoped::Target::Window(&bound),
++            None => crate::input::mouse::scoped::Target::ReferenceWindow(&bound),
 +        };
 +        let destination = match destination_element {
 +            Some(element) => crate::input::mouse::scoped::Destination::Element(element),
@@ -7347,13 +7431,22 @@ index 7bb8e04..186c117 100644
 +                "Original drag window is unavailable",
 +            ));
 +        }
++        let bounds = window.bounds.ok_or_else(|| {
++            AdapterError::stale_ref_because("Original drag window geometry is unavailable")
++        })?;
++        bounds.validate().map_err(|_| {
++            AdapterError::stale_ref_because("Original drag window geometry is invalid")
++        })?;
 +        let bound = crate::system::window::window_resolve::window_element_for_info(
 +            window,
 +            lease.deadline(),
 +        )?;
 +        let report = OperationReport::drag_dispatched(&params);
 +        crate::input::mouse::scoped::drag(
-+            crate::input::mouse::scoped::Target::Window(&bound),
++            crate::input::mouse::scoped::Target::Window {
++                window: &bound,
++                bounds,
++            },
 +            crate::input::mouse::scoped::Destination::Window,
 +            &window.id,
 +            params,
@@ -7373,13 +7466,22 @@ index 7bb8e04..186c117 100644
 +                "Original pointer window is unavailable",
 +            ));
 +        }
++        let bounds = window.bounds.ok_or_else(|| {
++            AdapterError::stale_ref_because("Original pointer window geometry is unavailable")
++        })?;
++        bounds.validate().map_err(|_| {
++            AdapterError::stale_ref_because("Original pointer window geometry is invalid")
++        })?;
 +        let bound = crate::system::window::window_resolve::window_element_for_info(
 +            window,
 +            lease.deadline(),
 +        )?;
 +        let report = OperationReport::pointer_dispatched(&event, false);
 +        crate::input::mouse::scoped::send(
-+            crate::input::mouse::scoped::Target::Window(&bound),
++            crate::input::mouse::scoped::Target::Window {
++                window: &bound,
++                bounds,
++            },
 +            &window.id,
 +            event,
 +            lease.deadline(),
@@ -8065,10 +8167,10 @@ index 6242bba..5e8986e 100644
          return Err(AdapterError::new(
 diff --git a/crates/macos/src/input/mouse/scoped.rs b/crates/macos/src/input/mouse/scoped.rs
 new file mode 100644
-index 0000000..bcbc641
+index 0000000..fcb9928
 --- /dev/null
 +++ b/crates/macos/src/input/mouse/scoped.rs
-@@ -0,0 +1,1128 @@
+@@ -0,0 +1,1218 @@
 +use crate::tree::AXElement;
 +use agent_desktop_core::{AdapterError, Deadline, MouseEvent, MouseEventKind, Point};
 +use core_graphics::event::{
@@ -8078,7 +8180,11 @@ index 0000000..bcbc641
 +
 +#[derive(Clone, Copy)]
 +pub(crate) enum Target<'a> {
-+    Window(&'a AXElement),
++    Window {
++        window: &'a AXElement,
++        bounds: agent_desktop_core::Rect,
++    },
++    ReferenceWindow(&'a AXElement),
 +    Element {
 +        window: &'a AXElement,
 +        element: &'a AXElement,
@@ -8093,7 +8199,21 @@ index 0000000..bcbc641
 +impl Target<'_> {
 +    fn window(&self) -> &AXElement {
 +        match self {
-+            Self::Window(window) | Self::Element { window, .. } => window,
++            Self::Window { window, .. }
++            | Self::ReferenceWindow(window)
++            | Self::Element { window, .. } => window,
++        }
++    }
++
++    fn window_scope(&self) -> Self {
++        match self {
++            Self::Window { window, bounds } => Self::Window {
++                window,
++                bounds: *bounds,
++            },
++            Self::ReferenceWindow(window) | Self::Element { window, .. } => {
++                Self::ReferenceWindow(window)
++            }
 +        }
 +    }
 +}
@@ -8112,6 +8232,7 @@ index 0000000..bcbc641
 +    focus_attribute: core_foundation::string::CFString,
 +}
 +
++#[derive(Clone, Copy)]
 +enum PointerState<'a> {
 +    FreeMove,
 +    FreeAtPoint,
@@ -8194,6 +8315,20 @@ index 0000000..bcbc641
 +
 +    fn native_window_at(&self, point: &Point) -> bool {
 +        self.native_window_number(point) == Some(self.window_number)
++    }
++
++    fn revalidate_geometry(&self, deadline: std::time::Instant) -> Result<(), AdapterError> {
++        if let Target::Window { window, bounds } = self.target {
++            let pid =
++                crate::system::process::process_identity::to_pid_t(window.root_identity()?.pid)?;
++            crate::system::window::cg_window_exact::revalidate_native_geometry(
++                self.window_number,
++                pid,
++                bounds,
++                deadline,
++            )?;
++        }
++        Ok(())
 +    }
 +
 +    fn qualify(
@@ -8314,7 +8449,7 @@ index 0000000..bcbc641
 +            }
 +        }
 +        let original = match self.target {
-+            Target::Window(_) => Original::Window,
++            Target::Window { .. } | Target::ReferenceWindow(_) => Original::Window,
 +            Target::Element { element, .. } => Original::Element {
 +                element: element.clone(),
 +                authority: element.effect_authority(instant)?,
@@ -8495,6 +8630,7 @@ index 0000000..bcbc641
 +        if !crate::tree::same_element(&hit, &final_hit) {
 +            return Err(AdapterError::stale_ref_because("Pointer receiver changed"));
 +        }
++        self.revalidate_geometry(instant)?;
 +        window_authority.revalidate(window, instant)?;
 +        hit_authority.revalidate(&hit, instant)?;
 +        if let PointerState::Held { down, .. } = &state {
@@ -8557,6 +8693,28 @@ index 0000000..bcbc641
 +                    y: previous.location.y,
 +                }) != Some(previous.window_number)
 +            })
++            || !self.native_window_at(point)
++            || match state {
++                PointerState::FreeMove | PointerState::FreeAtPoint => any_button_down(),
++                PointerState::Held { button, source, .. } => {
++                    !button_down(source, button)
++                        || button_down(1, button)
++                        || (0..32).any(|other| other != button && button_down(0, other))
++                }
++            }
++        {
++            return Err(AdapterError::stale_ref_because(
++                "Pointer position or capture changed",
++            ));
++        }
++        // Geometry is read again at the final native boundary, after the
++        // provider reads above which may have blocked.
++        self.revalidate_geometry(instant)?;
++        let latest = CGEvent::new(self.pointer_source.clone())
++            .map_err(|()| AdapterError::internal("Pointer position unavailable"))?
++            .location();
++        if (latest.x - expected_location.x).abs() > 0.5
++            || (latest.y - expected_location.y).abs() > 0.5
 +            || !self.native_window_at(point)
 +            || match state {
 +                PointerState::FreeMove | PointerState::FreeAtPoint => any_button_down(),
@@ -8850,9 +9008,9 @@ index 0000000..bcbc641
 +        ));
 +    }
 +    let receiver = Receiver::new(target, id, deadline)?;
-+    let steps_receiver = Receiver::new(Target::Window(target.window()), id, deadline)?;
++    let steps_receiver = Receiver::new(target.window_scope(), id, deadline)?;
 +    let destination_receiver = match destination {
-+        Destination::Window => Receiver::new(Target::Window(target.window()), id, deadline)?,
++        Destination::Window => Receiver::new(target.window_scope(), id, deadline)?,
 +        Destination::Element(element) => Receiver::new(
 +            Target::Element {
 +                window: target.window(),
@@ -9042,6 +9200,9 @@ index 0000000..bcbc641
 +            return false;
 +        }
 +        let hit = AXElement::from_raw(hit);
++        if self.receiver.revalidate_geometry(instant).is_err() {
++            return false;
++        }
 +        let cursor = crate::input::mouse::event_source()
 +            .ok()
 +            .and_then(|source| CGEvent::new(source).ok())
@@ -9071,6 +9232,20 @@ index 0000000..bcbc641
 +                .revalidate(&self.down.element, instant)
 +                .is_err()
 +            || !self.receiver.native_window_at(&self.current)
++            || button_down(1, 0)
++            || (1..32).any(|button| button_down(0, button))
++        {
++            return false;
++        }
++        if self.receiver.revalidate_geometry(instant).is_err() {
++            return false;
++        }
++        let latest = CGEvent::new(self.receiver.pointer_source.clone())
++            .ok()
++            .map(|event| event.location());
++        if latest.is_none_or(|p| {
++            (p.x - self.current.x).abs() > 0.5 || (p.y - self.current.y).abs() > 0.5
++        }) || !self.receiver.native_window_at(&self.current)
 +            || button_down(1, 0)
 +            || (1..32).any(|button| button_down(0, button))
 +        {
@@ -9144,6 +9319,9 @@ index 0000000..bcbc641
 +            return false;
 +        }
 +        let hit = AXElement::from_raw(hit);
++        if self.receiver.revalidate_geometry(instant).is_err() {
++            return false;
++        }
 +        let position = crate::input::mouse::event_source()
 +            .ok()
 +            .and_then(|source| CGEvent::new(source).ok())
@@ -9167,6 +9345,20 @@ index 0000000..bcbc641
 +                .hit
 +                .revalidate(&self.permit.element, instant)
 +                .is_err()
++            || !self.receiver.native_window_at(self.point)
++            || button_down(1, self.button)
++            || (0..32).any(|other| other != self.button && button_down(0, other))
++        {
++            return false;
++        }
++        if self.receiver.revalidate_geometry(instant).is_err() {
++            return false;
++        }
++        let latest = CGEvent::new(self.receiver.pointer_source.clone())
++            .ok()
++            .map(|event| event.location());
++        if latest
++            .is_none_or(|p| (p.x - self.point.x).abs() > 0.5 || (p.y - self.point.y).abs() > 0.5)
 +            || !self.receiver.native_window_at(self.point)
 +            || button_down(1, self.button)
 +            || (0..32).any(|other| other != self.button && button_down(0, other))
@@ -11839,7 +12031,7 @@ index 08bb5bf..0d603e1 100644
              return Ok(());
          }
 diff --git a/crates/macos/src/system/window/cg_window.rs b/crates/macos/src/system/window/cg_window.rs
-index d321848..a71071e 100644
+index d321848..4a84328 100644
 --- a/crates/macos/src/system/window/cg_window.rs
 +++ b/crates/macos/src/system/window/cg_window.rs
 @@ -27,11 +27,16 @@ impl WindowRecord {
@@ -12009,8 +12201,17 @@ index d321848..a71071e 100644
      int_field(dict, key).ok_or_else(|| missing_field_error(key))
  }
 
+@@ -354,7 +437,7 @@ fn bool_field(dict: &WindowDictionary, key: &str) -> Result<bool, AdapterError>
+         .ok_or_else(|| invalid_field_error(key))
+ }
+
+-fn rect_field(dict: &WindowDictionary, key: &str) -> Option<Rect> {
++pub(crate) fn rect_field(dict: &WindowDictionary, key: &str) -> Option<Rect> {
+     use crate::tree::properties::cf_type::borrowed_cf_dictionary;
+     use core_foundation::base::TCFType;
+
 diff --git a/crates/macos/src/system/window/cg_window_exact.rs b/crates/macos/src/system/window/cg_window_exact.rs
-index dce76cf..1fb9a1b 100644
+index dce76cf..47167c9 100644
 --- a/crates/macos/src/system/window/cg_window_exact.rs
 +++ b/crates/macos/src/system/window/cg_window_exact.rs
 @@ -6,13 +6,26 @@ use super::cg_window::{WindowDictionary, WindowRecord, WindowRecordScope};
@@ -12041,7 +12242,7 @@ index dce76cf..1fb9a1b 100644
          )?;
          super::cg_window::capture_process_instances(&mut records, deadline)?;
          Ok(records)
-@@ -61,6 +74,44 @@ fn exact_window_dictionaries(window_number: i64) -> Result<Vec<WindowDictionary>
+@@ -61,6 +74,75 @@ fn exact_window_dictionaries(window_number: i64) -> Result<Vec<WindowDictionary>
      Ok(descriptions.iter().map(|record| record.clone()).collect())
  }
 
@@ -12049,6 +12250,13 @@ index dce76cf..1fb9a1b 100644
 +    window_number: i64,
 +    deadline: Instant,
 +) -> Result<i32, AdapterError> {
++    native_window_evidence(window_number, deadline).map(|(pid, _)| pid)
++}
++
++fn native_window_evidence(
++    window_number: i64,
++    deadline: Instant,
++) -> Result<(i32, WindowDictionary), AdapterError> {
 +    super::cg_window::ensure_before_deadline(deadline)?;
 +    let dictionaries = exact_window_dictionaries(window_number)?;
 +    let [dictionary] = dictionaries.as_slice() else {
@@ -12066,7 +12274,31 @@ index dce76cf..1fb9a1b 100644
 +        .filter(|pid| *pid > 0)
 +        .ok_or_else(|| AdapterError::stale_ref_because("Pointer window owner is unavailable"))?;
 +    super::cg_window::ensure_before_deadline(deadline)?;
-+    Ok(pid)
++    Ok((pid, dictionary.clone()))
++}
++
++pub(crate) fn revalidate_native_geometry(
++    window_number: i64,
++    expected_pid: i32,
++    expected: agent_desktop_core::Rect,
++    deadline: Instant,
++) -> Result<(), AdapterError> {
++    let expected = expected
++        .validate()
++        .map_err(|_| AdapterError::stale_ref_because("Original window geometry is invalid"))?;
++    if expected.width <= 0.0 || expected.height <= 0.0 {
++        return Err(AdapterError::stale_ref_because(
++            "Original window geometry is unavailable",
++        ));
++    }
++    let (pid, dictionary) = native_window_evidence(window_number, deadline)?;
++    let bounds = super::cg_window::rect_field(&dictionary, "kCGWindowBounds");
++    if pid != expected_pid || bounds != Some(expected) {
++        return Err(AdapterError::stale_ref_because(
++            "Original window geometry changed",
++        ));
++    }
++    super::cg_window::ensure_before_deadline(deadline)
 +}
 +
 +/// Recheck only native window identity after the last filesystem-backed Stop check.
