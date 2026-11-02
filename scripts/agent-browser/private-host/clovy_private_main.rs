@@ -20,6 +20,8 @@ mod tls;
 mod upgrade;
 mod validation;
 
+mod clovy_browser_grant;
+mod clovy_browser_process_identity;
 mod clovy_private_launch;
 use native::{
     browser::{BrowserManager, WaitUntil},
@@ -39,6 +41,7 @@ const LIMIT: usize = 16 * 1024 * 1024;
 struct Hello {
     token: String,
     protocol: u32,
+    grant: clovy_browser_grant::Grant,
 }
 #[derive(Deserialize)]
 struct Request {
@@ -354,6 +357,7 @@ impl ObservationBarrier {
 }
 
 struct Host {
+    grant: clovy_browser_grant::Grant,
     browser: Option<BrowserManager>,
     chrome: Option<clovy_private_launch::Chrome>,
     launch: Option<(String, String, u16, bool, bool)>,
@@ -363,8 +367,9 @@ struct Host {
     refs: HashMap<String, PrivateReference>,
 }
 impl Host {
-    fn new() -> Self {
+    fn new(grant: clovy_browser_grant::Grant) -> Self {
         Self {
+            grant,
             browser: None,
             chrome: None,
             launch: None,
@@ -426,6 +431,12 @@ impl Host {
     }
     async fn launch(&mut self) -> Result<Value, String> {
         let (c, p, port, persistent, headed) = self.launch.clone().ok_or("not_started")?;
+        if self.grant.persistent != persistent
+            || self.grant.profile.as_os_str() != std::ffi::OsStr::new(&p)
+            || self.grant.validate().is_err()
+        {
+            return Err("grant_mismatch".into());
+        }
         let (chrome, r, w) = clovy_private_launch::launch(&c, &p, port, persistent, headed)?;
         self.chrome = Some(chrome);
         self.browser = Some(BrowserManager::from_private_pipe(CdpClient::from_pipe(r, w)?).await?);
@@ -630,6 +641,12 @@ impl Host {
                 persistent,
                 headed,
             } => {
+                if self.grant.persistent != persistent
+                    || self.grant.profile.as_os_str() != std::ffi::OsStr::new(&profile_path)
+                    || self.grant.validate().is_err()
+                {
+                    return Err("grant_mismatch".into());
+                }
                 if self.launch.is_some() {
                     return Err("already_started".into());
                 }
@@ -1537,6 +1554,8 @@ async fn main() {
     }
 }
 async fn run() -> Result<(), String> {
+    clovy_browser_process_identity::process_birth(std::process::id())
+        .map_err(|_| "process_identity_unavailable")?;
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     std::thread::spawn(move || {
         let input = std::io::stdin();
@@ -1564,8 +1583,9 @@ async fn run() -> Result<(), String> {
     {
         return Err("invalid_handshake".into());
     }
+    hello.grant.validate().map_err(|_| "invalid_grant")?;
     output(&json!({"protocol":1,"token":hello.token}))?;
-    let mut host = Host::new();
+    let mut host = Host::new(hello.grant);
     #[cfg(unix)]
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|_| "signal_unavailable")?;

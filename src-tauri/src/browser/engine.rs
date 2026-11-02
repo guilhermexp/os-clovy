@@ -1,8 +1,15 @@
 //! Private agent-browser client. The stdio pipes are inherited capabilities;
 //! no command socket, CDP port, global CLI or user browser is involved.
+#[path = "../../../scripts/agent-browser/private-host/clovy_browser_grant.rs"]
+mod clovy_browser_grant;
+#[path = "../../../scripts/agent-browser/private-host/clovy_browser_process_identity.rs"]
+mod clovy_browser_process_identity;
 use super::{
     policy::{validate_final_public_url, PolicyConfig, Resolver, SystemResolver},
     proxy::PinningProxy,
+};
+use clovy_browser_grant::{
+    open_existing_plain, plain_metadata, profile_object_identity, same_open_file, Grant,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -457,7 +464,7 @@ impl AgentBrowserTransport {
             command.creation_flags(0x00000004 | 0x08000000);
         }
         // This mutex covers only spawn/publication, never CDP or wire I/O.
-        let (stdin, stdout) = {
+        let (stdin, stdout, grant) = {
             let mut process_guard = slot.process.lock().unwrap();
             if slot.cancelled.load(Ordering::SeqCst) {
                 return Err(closed());
@@ -465,6 +472,7 @@ impl AgentBrowserTransport {
             if !slot.persistent {
                 mark_starting(&slot.profile).map_err(|_| failed())?;
             }
+            let grant = Grant::new(&slot.profile, slot.persistent).map_err(|_| failed())?;
             #[cfg(windows)]
             let job = crate::process_group::windows_job::Job::new().map_err(|_| failed())?;
             let mut child = command.spawn().map_err(|_| failed())?;
@@ -490,7 +498,7 @@ impl AgentBrowserTransport {
                 #[cfg(windows)]
                 job,
             });
-            (stdin, stdout)
+            (stdin, stdout, grant)
         };
         let (sender, mut receiver) = mpsc::unbounded_channel::<Request>();
         *slot.sender.lock().unwrap() = Some(sender);
@@ -505,8 +513,11 @@ impl AgentBrowserTransport {
         std::thread::spawn(move || {
             let mut stdin = stdin;
             let mut stdout = BufReader::new(stdout);
-            let ready = write_line(&mut stdin, &json!({"protocol":1,"token":token}))
-                .and_then(|_| read_line(&mut stdout));
+            let ready = write_line(
+                &mut stdin,
+                &json!({"protocol":1,"token":token,"grant":grant}),
+            )
+            .and_then(|_| read_line(&mut stdout));
             let ready = ready.and_then(|value| {
                 if value["protocol"] == 1 && value["token"].as_str() == Some(&token) {
                     Ok(())
@@ -795,7 +806,7 @@ fn verify_bundle(config: &EngineConfig) -> Result<()> {
     // A debug binary must also reject resources built from an older private
     // guard/wire revision of the same upstream commit, even outside the normal
     // dev preparation hook. Release signing then protects the matching tree.
-    let inputs: [(&str, &[u8]); 8] = [
+    let inputs: &[(&str, &[u8])] = &[
         (
             "0001-no-reference-recovery.patch",
             include_bytes!("../../../scripts/agent-browser/0001-no-reference-recovery.patch"),
@@ -817,6 +828,16 @@ fn verify_bundle(config: &EngineConfig) -> Result<()> {
             include_bytes!("../../../scripts/agent-browser/private-host/clovy_private_launch.rs"),
         ),
         (
+            "private-host/clovy_browser_process_identity.rs",
+            include_bytes!(
+                "../../../scripts/agent-browser/private-host/clovy_browser_process_identity.rs"
+            ),
+        ),
+        (
+            "private-host/clovy_browser_grant.rs",
+            include_bytes!("../../../scripts/agent-browser/private-host/clovy_browser_grant.rs"),
+        ),
+        (
             "private-host/clovy_private_guard.js",
             include_bytes!("../../../scripts/agent-browser/private-host/clovy_private_guard.js"),
         ),
@@ -829,7 +850,7 @@ fn verify_bundle(config: &EngineConfig) -> Result<()> {
             include_bytes!("../../../scripts/agent-browser/windows-signing.mjs"),
         ),
     ];
-    for (name, bytes) in inputs {
+    for &(name, bytes) in inputs {
         if metadata["source"]["inputSha256"][name].as_str()
             != Some(format!("{:x}", Sha256::digest(bytes)).as_str())
         {
@@ -856,125 +877,12 @@ fn verify_bundle(config: &EngineConfig) -> Result<()> {
 const RESERVED_RECEIPT: &str = ".clovy-reserved.json";
 const STARTING_MARKER: &str = ".clovy-starting";
 
-fn plain_metadata(path: &std::path::Path) -> std::io::Result<fs::Metadata> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        return Err(std::io::Error::other("link is not an owned profile"));
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if metadata.file_attributes() & 0x400 != 0 {
-            return Err(std::io::Error::other(
-                "reparse point is not an owned profile",
-            ));
-        }
-    }
-    Ok(metadata)
-}
-
-fn open_existing_plain(path: &std::path::Path, write: bool) -> std::io::Result<File> {
-    if !plain_metadata(path)?.is_file() {
-        return Err(std::io::Error::other("expected a regular file"));
-    }
-    let mut options = OpenOptions::new();
-    options.read(true).write(write);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
-    }
-    let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(std::io::Error::other("expected a regular file"));
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if file.metadata()?.file_attributes() & 0x400 != 0 {
-            return Err(std::io::Error::other("reparse point is not an owned file"));
-        }
-    }
-    Ok(file)
-}
-
 fn sync_profile_directory(profile: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
     File::open(profile)?.sync_all()?;
     #[cfg(windows)]
     let _ = profile;
     Ok(())
-}
-
-fn profile_object_identity(path: &std::path::Path) -> std::io::Result<[u64; 2]> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = plain_metadata(path)?;
-        Ok([metadata.dev(), metadata.ino()])
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
-        use windows::Win32::{
-            Foundation::HANDLE,
-            Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION},
-        };
-        let metadata = plain_metadata(path)?;
-        if !metadata.is_dir() {
-            return Err(std::io::Error::other("expected a directory"));
-        }
-        let file = OpenOptions::new()
-            .access_mode(0)
-            .custom_flags(0x0200_0000 | 0x0020_0000)
-            .open(path)?;
-        let mut info = BY_HANDLE_FILE_INFORMATION::default();
-        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }
-            .map_err(std::io::Error::other)?;
-        if info.dwFileAttributes & 0x400 != 0 {
-            return Err(std::io::Error::other("reparse point"));
-        }
-        Ok([
-            info.dwVolumeSerialNumber as u64,
-            ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
-        ])
-    }
-}
-
-fn open_file_identity(file: &File) -> std::io::Result<[u64; 2]> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = file.metadata()?;
-        Ok([metadata.dev(), metadata.ino()])
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        use windows::Win32::{
-            Foundation::HANDLE,
-            Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION},
-        };
-        let mut info = BY_HANDLE_FILE_INFORMATION::default();
-        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }
-            .map_err(std::io::Error::other)?;
-        if info.dwFileAttributes & 0x400 != 0 {
-            return Err(std::io::Error::other("reparse point"));
-        }
-        Ok([
-            info.dwVolumeSerialNumber as u64,
-            ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
-        ])
-    }
-}
-
-fn same_open_file(file: &File, path: &std::path::Path) -> bool {
-    matches!((open_file_identity(file), open_existing_plain(path, false).and_then(|current| open_file_identity(&current))), (Ok(held), Ok(current)) if held == current)
 }
 
 fn create_receipt_file(path: &std::path::Path) -> std::io::Result<File> {
@@ -1048,7 +956,7 @@ fn publish_reserved(profile: &std::path::Path) -> std::io::Result<()> {
         .ok_or_else(|| std::io::Error::other("missing profile root"))?;
     serde_json::to_writer(
         &mut file,
-        &json!({"version":1,"nonce":name,"ownerProcessId":std::process::id(),"phase":"Reserved", "rootIdentity":profile_object_identity(root)?, "profileIdentity":profile_object_identity(profile)?}),
+        &json!({"version":1,"nonce":name,"ownerProcessId":std::process::id(),"ownerBirth":clovy_browser_process_identity::process_birth(std::process::id())?,"phase":"Reserved", "rootIdentity":profile_object_identity(root)?, "profileIdentity":profile_object_identity(profile)?}),
     )?;
     file.sync_all()?;
     drop(file);
@@ -1077,6 +985,8 @@ fn mark_starting(profile: &std::path::Path) -> std::io::Result<()> {
         || receipt["nonce"] != name
         || receipt["phase"] != "Reserved"
         || receipt["ownerProcessId"] != std::process::id()
+        || receipt["ownerBirth"]
+            != clovy_browser_process_identity::process_birth(std::process::id())?
         || receipt["rootIdentity"] != json!(profile_object_identity(root)?)
         || receipt["profileIdentity"] != json!(profile_object_identity(profile)?)
         || !same_open_file(&receipt_file, &receipt_path)
@@ -1359,6 +1269,252 @@ extern "C" {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires a separately built real private host"]
+    fn real_private_host_admits_only_bound_grants() {
+        use std::os::fd::AsRawFd;
+        fn host() -> (Child, BufReader<std::process::ChildStdout>) {
+            let binary = std::env::var_os("CLOVY_BROWSER_HOST_TEST_BINARY")
+                .expect("real host binary required");
+            let mut child = Command::new(binary)
+                .env_clear()
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let output = BufReader::new(child.stdout.take().unwrap());
+            (child, output)
+        }
+        fn send(child: &mut Child, value: Value) {
+            let input = child.stdin.as_mut().unwrap();
+            serde_json::to_writer(&mut *input, &value).unwrap();
+            input.write_all(b"\n").unwrap();
+            input.flush().unwrap();
+        }
+        fn line(output: &mut BufReader<std::process::ChildStdout>) -> Option<Value> {
+            let mut pollfd = libc::pollfd {
+                fd: output.get_ref().as_raw_fd(),
+                events: libc::POLLIN | libc::POLLHUP,
+                revents: 0,
+            };
+            assert_eq!(
+                unsafe { libc::poll(&mut pollfd, 1, 5000) },
+                1,
+                "host did not respond or exit"
+            );
+            let mut text = String::new();
+            if output.read_line(&mut text).unwrap() == 0 {
+                None
+            } else {
+                Some(serde_json::from_str(&text).unwrap())
+            }
+        }
+        fn rejected(value: Value) {
+            let (mut child, mut output) = host();
+            send(&mut child, value);
+            assert!(
+                line(&mut output).is_none(),
+                "invalid grant was acknowledged"
+            );
+            assert!(!child.wait().unwrap().success());
+        }
+        let root = tempfile::tempdir().unwrap();
+        let config = EngineConfig::production(
+            root.path().join("resources"),
+            root.path().join("data"),
+            false,
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _enter = runtime.enter();
+        let transport = AgentBrowserTransport::new(config);
+        transport.reserve("owned-fixture").unwrap();
+        let slot = transport.slot("owned-fixture").unwrap();
+        mark_starting(&slot.profile).unwrap();
+        let grant = serde_json::to_value(Grant::new(&slot.profile, false).unwrap()).unwrap();
+        let token = "a".repeat(64);
+        rejected(json!({"protocol":1,"token":token}));
+        for field in [
+            "nonce",
+            "parentBirth",
+            "profile",
+            "rootIdentity",
+            "profileIdentity",
+        ] {
+            let mut invalid = grant.clone();
+            invalid[field] = match field {
+                "nonce" => json!(uuid::Uuid::new_v4().to_string()),
+                "parentBirth" => json!(grant[field].as_u64().unwrap() ^ 1),
+                "rootIdentity" | "profileIdentity" => json!([0, 0]),
+                _ => json!(root.path().join("missing")),
+            };
+            rejected(json!({"protocol":1,"token":token,"grant":invalid}));
+        }
+        transport.reserve("missing-fixture").unwrap();
+        let missing = transport.slot("missing-fixture").unwrap();
+        mark_starting(&missing.profile).unwrap();
+        let missing_grant =
+            serde_json::to_value(Grant::new(&missing.profile, false).unwrap()).unwrap();
+        fs::remove_dir_all(&missing.profile).unwrap();
+        rejected(json!({"protocol":1,"token":token,"grant":missing_grant}));
+        transport.terminate("missing-fixture");
+        transport.reserve("link-fixture").unwrap();
+        let linked = transport.slot("link-fixture").unwrap();
+        mark_starting(&linked.profile).unwrap();
+        let linked_grant =
+            serde_json::to_value(Grant::new(&linked.profile, false).unwrap()).unwrap();
+        let moved = linked.profile.with_extension("moved");
+        fs::rename(&linked.profile, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &linked.profile).unwrap();
+        rejected(json!({"protocol":1,"token":token,"grant":linked_grant}));
+        fs::remove_file(&linked.profile).unwrap();
+        fs::rename(&moved, &linked.profile).unwrap();
+        transport.terminate("link-fixture");
+        let (mut child, mut output) = host();
+        send(
+            &mut child,
+            json!({"protocol":1,"token":token,"grant":grant}),
+        );
+        assert_eq!(
+            line(&mut output).unwrap(),
+            json!({"protocol":1,"token":token})
+        );
+        let competing = open_existing_plain(&slot.profile.join(".clovy-lease"), true).unwrap();
+        assert!(
+            lock_profile(&competing).is_err(),
+            "root must retain the lease"
+        );
+        for (id, profile, persistent) in [
+            (1, root.path().join("other"), false),
+            (2, slot.profile.clone(), true),
+            (
+                5,
+                PathBuf::from(format!("{}/.", slot.profile.display())),
+                false,
+            ),
+        ] {
+            send(
+                &mut child,
+                json!({"id":id,"action":"start","chromePath":root.path().join("absent-chrome"),"profilePath":profile,"proxyPort":1,"persistent":persistent,"headed":false}),
+            );
+            let result = line(&mut output).unwrap();
+            assert_eq!(result["id"], id);
+            assert_eq!(result["delivery"], "not_attempted");
+            assert!(result.get("error").is_some());
+        }
+        send(
+            &mut child,
+            json!({"id":3,"action":"start","chromePath":root.path().join("absent-chrome"),"profilePath":slot.profile,"proxyPort":1,"persistent":false,"headed":false}),
+        );
+        let matching = line(&mut output).unwrap();
+        assert_eq!(matching["id"], 3);
+        assert_eq!(matching["delivery"], "unknown");
+        send(&mut child, json!({"id":4,"action":"shutdown"}));
+        assert_eq!(line(&mut output).unwrap()["id"], 4);
+        assert!(child.wait().unwrap().success());
+        transport.shutdown();
+        let persistent_config = EngineConfig::production(
+            root.path().join("resources"),
+            root.path().join("persistent-data"),
+            true,
+        );
+        let persistent_transport = AgentBrowserTransport::new(persistent_config.clone());
+        persistent_transport.reserve("persistent").unwrap();
+        fs::write(
+            persistent_config.persistent_profile.join("sentinel"),
+            b"synthetic",
+        )
+        .unwrap();
+        let persistent_grant = Grant::new(&persistent_config.persistent_profile, true).unwrap();
+        let mut former_parent = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let former_pid = former_parent.id();
+        let former_birth = clovy_browser_process_identity::process_birth(former_pid).unwrap();
+        former_parent.kill().unwrap();
+        former_parent.wait().unwrap();
+        let mut expired = serde_json::to_value(&persistent_grant).unwrap();
+        expired["parentPid"] = json!(former_pid);
+        expired["parentBirth"] = json!(former_birth);
+        rejected(json!({"protocol":1,"token":token,"grant":expired}));
+        let (mut child, mut output) = host();
+        send(
+            &mut child,
+            json!({"protocol":1,"token":token,"grant":persistent_grant}),
+        );
+        assert_eq!(
+            line(&mut output).unwrap(),
+            json!({"protocol":1,"token":token})
+        );
+        send(
+            &mut child,
+            json!({"id":1,"action":"start","chromePath":root.path().join("absent-chrome"),"profilePath":persistent_config.persistent_profile,"proxyPort":1,"persistent":false,"headed":false}),
+        );
+        assert_eq!(line(&mut output).unwrap()["delivery"], "not_attempted");
+        send(
+            &mut child,
+            json!({"id":2,"action":"start","chromePath":root.path().join("absent-chrome"),"profilePath":persistent_config.persistent_profile,"proxyPort":1,"persistent":true,"headed":false}),
+        );
+        assert_eq!(line(&mut output).unwrap()["delivery"], "unknown");
+        send(&mut child, json!({"id":3,"action":"shutdown"}));
+        assert_eq!(line(&mut output).unwrap()["id"], 3);
+        assert!(child.wait().unwrap().success());
+        persistent_transport.shutdown();
+        assert_eq!(
+            fs::read(persistent_config.persistent_profile.join("sentinel")).unwrap(),
+            b"synthetic"
+        );
+        let original = root.path().join("login-target");
+        let replacement = root.path().join("different-login");
+        fs::create_dir(&original).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        let link = root.path().join("login-link");
+        std::os::unix::fs::symlink(&original, &link).unwrap();
+        let mut linked_config = persistent_config.clone();
+        linked_config.persistent_profile = link.clone();
+        let linked_transport = AgentBrowserTransport::new(linked_config);
+        linked_transport.reserve("linked").unwrap();
+        let linked_grant = Grant::new(&link, true).unwrap();
+        let (mut child, mut output) = host();
+        send(
+            &mut child,
+            json!({"protocol":1,"token":token,"grant":linked_grant}),
+        );
+        assert_eq!(
+            line(&mut output).unwrap(),
+            json!({"protocol":1,"token":token})
+        );
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&replacement, &link).unwrap();
+        send(
+            &mut child,
+            json!({"id":1,"action":"start","chromePath":root.path().join("absent-chrome"),"profilePath":link,"proxyPort":1,"persistent":true,"headed":false}),
+        );
+        assert_eq!(line(&mut output).unwrap()["delivery"], "not_attempted");
+        send(&mut child, json!({"id":2,"action":"shutdown"}));
+        assert_eq!(line(&mut output).unwrap()["id"], 2);
+        assert!(child.wait().unwrap().success());
+        linked_transport.shutdown();
+    }
+    #[tokio::test]
+    async fn starting_refuses_a_different_parent_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let config = EngineConfig::production(
+            root.path().join("resources"),
+            root.path().join("data"),
+            false,
+        );
+        let transport = AgentBrowserTransport::new(config);
+        transport.reserve("generation-test").unwrap();
+        let profile = transport.slot("generation-test").unwrap().profile.clone();
+        let receipt_path = profile.join(RESERVED_RECEIPT);
+        let mut receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        let birth = receipt["ownerBirth"].as_u64().unwrap();
+        receipt["ownerBirth"] = json!(birth ^ 1);
+        fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(mark_starting(&profile).is_err());
+        assert!(marker_absent(&profile));
+        transport.shutdown();
+    }
     #[cfg(unix)]
     #[tokio::test]
     async fn reserved_recovery_preserves_live_busy_starting_legacy_and_links() {

@@ -4,6 +4,7 @@ Usage: python3 private-host-smoke.py HOST_BINARY PINNED_CHROME EVIDENCE_DIR
 The private proxy answers fixture.invalid locally and rejects every other host.
 """
 import base64, http.server, json, os, pathlib, re, secrets, select, shutil, signal, subprocess, sys, tempfile, threading, time, urllib.parse, struct, zlib
+from fixture_grant import persistent_fixture_grant
 binary,chrome,evidence=map(pathlib.Path,sys.argv[1:4])
 regressions_only = sys.argv[4:] == ["--privacy-regressions-only"]
 assert not sys.argv[4:] or regressions_only
@@ -82,6 +83,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
     def log_message(self,*args):pass
 proxy=http.server.ThreadingHTTPServer(('127.0.0.1',0),Proxy);threading.Thread(target=proxy.serve_forever,daemon=True).start()
 profile=pathlib.Path(tempfile.mkdtemp(prefix='clovy-private-fixture-'))
+grant, profile_lease = persistent_fixture_grant(profile/'browser')
 proc=None;xvfb=None;receipts=[];stderr_file=None
 try:
     env={'HOME':str(profile),'PATH':'/usr/bin:/bin'}
@@ -107,7 +109,7 @@ try:
             stderr_file.flush();stderr_file.seek(0);raise RuntimeError('Host exited: '+stderr_file.read())
         return json.loads(line)
     token=secrets.token_hex(32)
-    assert wire({'protocol':1,'token':token})=={'protocol':1,'token':token}
+    assert wire({'protocol':1,'token':token,'grant':grant})=={'protocol':1,'token':token}
     def call(action,ok=True,**args):
         receipt=wire({'id':len(receipts)+1,'action':action,**args});receipts.append(receipt)
         (evidence/'receipts.json').write_text(json.dumps(receipts,indent=2))
@@ -344,4 +346,4 @@ finally:
         proc.wait()
         stderr_file.flush();stderr_file.close()
     if xvfb:xvfb.terminate();xvfb.wait()
-    proxy.shutdown();(evidence/'proxy-requests.json').write_text(json.dumps(requests,indent=2));shutil.rmtree(profile)
+    proxy.shutdown();(evidence/'proxy-requests.json').write_text(json.dumps(requests,indent=2));profile_lease.close();shutil.rmtree(profile)

@@ -26,6 +26,7 @@ import time
 import urllib.parse
 import uuid
 import zlib
+from fixture_grant import persistent_fixture_grant
 
 binary, chrome, evidence = map(Path, sys.argv[1:4])
 evidence.mkdir(parents=True, exist_ok=True)
@@ -91,6 +92,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
 proxy = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Proxy)
 threading.Thread(target=proxy.serve_forever, daemon=True).start()
 profile = Path(tempfile.mkdtemp(prefix='clovy-host-visibility-'))
+grant, profile_lease = persistent_fixture_grant(profile / 'browser')
 runtime = profile / 'runtime'; runtime.mkdir(mode=0o700)
 display = ':' + str(6000 + os.getpid() % 10000)
 env = {'HOME': str(profile), 'PATH': '/usr/bin:/bin', 'DISPLAY': display,
@@ -142,7 +144,7 @@ try:
         if not line: raise RuntimeError('Host exited')
         return json.loads(line)
     nonce = secrets.token_hex(32)
-    assert wire({'protocol': 1, 'token': nonce}) == {'protocol': 1, 'token': nonce}
+    assert wire({'protocol': 1, 'token': nonce, 'grant': grant}) == {'protocol': 1, 'token': nonce}
     def call(action, ok=True, **arguments):
         receipt = wire({'id': len(receipts) + 1, 'action': action, **arguments}); receipts.append(receipt)
         (evidence / 'receipts.json').write_text(json.dumps(receipts, indent=2))
@@ -244,4 +246,4 @@ finally:
         proc.wait()
     if stderr: stderr.close()
     if xvfb: xvfb.terminate(); xvfb.wait(timeout=5)
-    proxy.shutdown(); shutil.rmtree(profile)
+    proxy.shutdown(); profile_lease.close(); shutil.rmtree(profile)

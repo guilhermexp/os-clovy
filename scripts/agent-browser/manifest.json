@@ -12,6 +12,8 @@
       "private-host/clovy_private_main.rs",
       "private-host/clovy_private_client.rs",
       "private-host/clovy_private_launch.rs",
+      "private-host/clovy_browser_process_identity.rs",
+      "private-host/clovy_browser_grant.rs",
       "private-host/clovy_private_guard.js"
     ],
     "patchRevision": 1

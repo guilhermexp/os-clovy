@@ -1,13 +1,19 @@
 The `clovy-agent-browser` binary takes no arguments. Build the pinned upstream
 crate with `--locked --features clovy-private --bin clovy-agent-browser`, after
-applying both reviewed patches and copying the three Rust payload files and
+applying both reviewed patches and copying the Rust payload files and
 `clovy_private_guard.js` to `cli/src/`. Ship only this private binary.
 
 The parent creates the engine's process group or Windows Job before the engine
 can create Chrome. The engine and all Chrome children inherit that group/Job.
 The parent clears the environment and supplies the first stdin line
-`{"protocol":1,"token":"<32 random bytes encoded as 64 lowercase hex characters>"}`.
-The host echoes this handshake over the inherited private stdout pipe. It opens
+`{"protocol":1,"token":"<32 random bytes encoded as 64 lowercase hex characters>","grant":{...}}`.
+The grant binds the profile, modality, nonce, root/profile file identities and
+the parent PID and native birth. Before acknowledging, the host validates the
+grant and the live parent; an anonymous grant also requires the matching
+durable `Starting` receipt. `start` must use the exact granted path and mode,
+and the host revalidates before a launch or relaunch. The parent continues to
+hold the profile lease: this admission step does not transfer the lease or
+publish `Owned`. The host echoes the token over the inherited private stdout pipe. It opens
 no socket, discovery service, debugger port, provider plugin or streaming server.
 The authentication capability is possession of the inherited private pipes;
 the token correlates the child, and is never an argument or environment value.
