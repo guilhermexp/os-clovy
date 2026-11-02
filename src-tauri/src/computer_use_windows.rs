@@ -16,7 +16,7 @@ use tokio::process::{ChildStdin, ChildStdout, Command};
 mod process;
 use process::WindowsChild;
 use windows::{
-    core::{Interface, BOOL, PCWSTR, PWSTR},
+    core::{w, Interface, BOOL, PCWSTR, PWSTR},
     Win32::{
         Foundation::{
             CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, FILETIME, HANDLE, HWND, LPARAM,
@@ -728,20 +728,21 @@ fn verify_hosted_target(window: HWND, owner: u32, target: u32) -> Result<()> {
     if len <= 0 {
         bail!("The authorized window class is unavailable");
     }
-    if String::from_utf16_lossy(&class[..len as usize]) != "ApplicationFrameWindow" {
+    if &class[..len as usize] != unsafe { w!("ApplicationFrameWindow").as_wide() } {
         if owner == target {
             return Ok(());
         }
         bail!("The authorized hosted frame changed");
     }
-    let name: Vec<u16> = "Windows.UI.Core.CoreWindow"
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
     let mut after = None;
     loop {
         let child = match unsafe {
-            FindWindowExW(Some(window), after, PCWSTR(name.as_ptr()), PCWSTR::null())
+            FindWindowExW(
+                Some(window),
+                after,
+                w!("Windows.UI.Core.CoreWindow"),
+                PCWSTR::null(),
+            )
         } {
             Ok(child) => child,
             Err(_) if owner == target => return Ok(()),
