@@ -4658,7 +4658,7 @@ index d962b69..9c3f568 100644
          .stdout(Stdio::null())
          .stderr(Stdio::null())
 diff --git a/crates/macos/src/system/launch.rs b/crates/macos/src/system/launch.rs
-index e762159..c072268 100644
+index e762159..93bd471 100644
 --- a/crates/macos/src/system/launch.rs
 +++ b/crates/macos/src/system/launch.rs
 @@ -33,16 +33,47 @@ pub(crate) fn launch_app_impl(
@@ -4778,6 +4778,14 @@ index e762159..c072268 100644
  ) -> Result<(), AdapterError> {
      match target {
          LaunchTarget::Existing {
+@@ -289,6 +343,7 @@ fn exact_window(
+ ) -> Result<Option<WindowInfo>, AdapterError> {
+     let window = match crate::system::window::window_inventory::exact_window_for_pid_until(
+         pid,
++        process_instance,
+         deadline_instant(deadline)?,
+     ) {
+         Ok(window) => window,
 diff --git a/crates/macos/src/system/launch_bridge.m b/crates/macos/src/system/launch_bridge.m
 index 90595b4..f7a2a79 100644
 --- a/crates/macos/src/system/launch_bridge.m
@@ -5510,7 +5518,7 @@ index 5202c48..400b0c5 100644
 +    }
 +}
 diff --git a/crates/macos/src/system/window/cg_window.rs b/crates/macos/src/system/window/cg_window.rs
-index d321848..15feca2 100644
+index d321848..47679f1 100644
 --- a/crates/macos/src/system/window/cg_window.rs
 +++ b/crates/macos/src/system/window/cg_window.rs
 @@ -27,11 +27,16 @@ impl WindowRecord {
@@ -5531,24 +5539,72 @@ index d321848..15feca2 100644
              process_instance: self.process_instance,
              bounds: Some(self.bounds),
              state: agent_desktop_core::WindowState {
-@@ -73,7 +78,7 @@ fn capture_once(
+@@ -64,21 +69,37 @@ impl WindowRecordScope<'_> {
+ pub(crate) fn window_records_until(
+     deadline: Instant,
      scope: WindowRecordScope<'_>,
++    expected: &rustc_hash::FxHashMap<i32, String>,
+ ) -> Result<Vec<WindowRecord>, AdapterError> {
+-    stabilize_records_until(deadline, || capture_once(deadline, scope))
++    stabilize_records_until(deadline, || capture_once(deadline, scope, expected))
+ }
+
+ fn capture_once(
+     deadline: Instant,
+     scope: WindowRecordScope<'_>,
++    expected: &rustc_hash::FxHashMap<i32, String>,
  ) -> Result<Vec<WindowRecord>, AdapterError> {
      ensure_before_deadline(deadline)?;
 -    let mut records = records_from_dictionaries(window_dictionaries()?, scope)?;
-+    let mut records = records_from_dictionaries(window_dictionaries()?, scope, deadline)?;
++    verify_expected(expected, deadline)?;
++    let dictionaries = window_dictionaries()?;
++    verify_expected(expected, deadline)?;
++    let mut records = records_from_dictionaries(dictionaries, scope, expected, deadline)?;
      capture_process_instances(&mut records, deadline)?;
      ensure_before_deadline(deadline)?;
      Ok(records)
-@@ -123,6 +128,20 @@ fn stabilize_records_until(
+ }
+
++fn verify_expected(
++    expected: &rustc_hash::FxHashMap<i32, String>,
++    deadline: Instant,
++) -> Result<(), AdapterError> {
++    for (&pid, instance) in expected {
++        ensure_before_deadline(deadline)?;
++        crate::system::private_browser_guard::require_pid(pid, Some(instance))?;
++    }
++    ensure_before_deadline(deadline)
++}
++
+ fn stabilize_records_until(
+     deadline: Instant,
+     mut capture: impl FnMut() -> Result<Vec<WindowRecord>, AdapterError>,
+@@ -123,6 +144,37 @@ fn stabilize_records_until(
  pub(in crate::system) fn records_from_dictionaries(
      dictionaries: Vec<WindowDictionary>,
      scope: WindowRecordScope<'_>,
++    expected: &rustc_hash::FxHashMap<i32, String>,
 +    deadline: Instant,
 +) -> Result<Vec<WindowRecord>, AdapterError> {
 +    records_from_dictionaries_with(dictionaries, scope, |pid| {
 +        ensure_before_deadline(deadline)?;
-+        let result = crate::system::private_browser_guard::qualify_pid(pid, None)?;
++        let Some(instance) = expected.get(&pid).filter(|instance| !instance.is_empty()) else {
++            return if matches!(scope, WindowRecordScope::Pids(_)) {
++                Ok(None)
++            } else {
++                Err(AdapterError::stale_ref_because(
++                    "Window owner was not in the original capture",
++                ))
++            };
++        };
++        let result = crate::system::private_browser_guard::qualify_pid(pid, Some(instance))?;
++        if result.is_none() && !matches!(scope, WindowRecordScope::Pids(_)) {
++            return Err(AdapterError::new(
++                ErrorCode::PolicyDenied,
++                "This target cannot be controlled here",
++            )
++            .with_suggestion("Use Browser use or take over manually."));
++        }
 +        ensure_before_deadline(deadline)?;
 +        Ok(result)
 +    })
@@ -5561,7 +5617,7 @@ index d321848..15feca2 100644
  ) -> Result<Vec<WindowRecord>, AdapterError> {
      let mut records = Vec::new();
      for dictionary in dictionaries {
-@@ -139,6 +158,9 @@ pub(in crate::system) fn records_from_dictionaries(
+@@ -139,6 +191,9 @@ pub(in crate::system) fn records_from_dictionaries(
          if !scope.matches(pid, window_number) {
              continue;
          }
@@ -5571,7 +5627,7 @@ index d321848..15feca2 100644
          if dictionary
              .find(CFString::new("kCGWindowOwnerName"))
              .is_none()
-@@ -151,14 +173,21 @@ pub(in crate::system) fn records_from_dictionaries(
+@@ -151,14 +206,21 @@ pub(in crate::system) fn records_from_dictionaries(
          }
          let bounds = rect_field(&dictionary, "kCGWindowBounds")
              .ok_or_else(|| missing_field_error("kCGWindowBounds"))?;
@@ -5595,7 +5651,7 @@ index d321848..15feca2 100644
          });
      }
      Ok(records)
-@@ -212,6 +241,13 @@ fn capture_process_instances_with(
+@@ -212,6 +274,13 @@ fn capture_process_instances_with(
                  entry.insert(instance).clone()
              }
          };
@@ -5610,22 +5666,42 @@ index d321848..15feca2 100644
      }
      Ok(())
 diff --git a/crates/macos/src/system/window/cg_window_exact.rs b/crates/macos/src/system/window/cg_window_exact.rs
-index dce76cf..2fd3017 100644
+index dce76cf..e799a3d 100644
 --- a/crates/macos/src/system/window/cg_window_exact.rs
 +++ b/crates/macos/src/system/window/cg_window_exact.rs
-@@ -13,6 +13,7 @@ pub(crate) fn exact_window_record_until(
+@@ -6,13 +6,27 @@ use super::cg_window::{WindowDictionary, WindowRecord, WindowRecordScope};
+
+ pub(crate) fn exact_window_record_until(
+     window_number: i64,
++    expected_pid: i32,
++    expected_instance: &str,
+     deadline: Instant,
+ ) -> Result<Option<WindowRecord>, AdapterError> {
++    if expected_instance.is_empty() {
++        return Err(AdapterError::stale_ref_because(
++            "Window owner generation is unavailable",
++        ));
++    }
++    let expected = rustc_hash::FxHashMap::from_iter([(expected_pid, expected_instance.to_owned())]);
++    crate::system::private_browser_guard::require_pid(expected_pid, Some(expected_instance))?;
+     exact_window_record_until_with(window_number, deadline, || {
+         let dictionaries = exact_window_dictionaries(window_number)?;
++        super::cg_window::ensure_before_deadline(deadline)?;
++        crate::system::private_browser_guard::require_pid(expected_pid, Some(expected_instance))?;
++        super::cg_window::ensure_before_deadline(deadline)?;
          let mut records = super::cg_window::records_from_dictionaries(
              dictionaries,
              WindowRecordScope::Window(window_number),
++            &expected,
 +            deadline,
          )?;
          super::cg_window::capture_process_instances(&mut records, deadline)?;
          Ok(records)
 diff --git a/crates/macos/src/system/window/cg_window_tests.rs b/crates/macos/src/system/window/cg_window_tests.rs
-index f01c6e5..73c704c 100644
+index f01c6e5..ffab37b 100644
 --- a/crates/macos/src/system/window/cg_window_tests.rs
 +++ b/crates/macos/src/system/window/cg_window_tests.rs
-@@ -44,15 +44,20 @@ fn missing_optional_owner_name_does_not_block_scoped_windows() {
+@@ -44,32 +44,79 @@ fn missing_optional_owner_name_does_not_block_scoped_windows() {
          (CFString::new("kCGWindowBounds"), bounds.as_CFType()),
      ]);
 
@@ -5652,7 +5728,68 @@ index f01c6e5..73c704c 100644
      );
  }
 
-@@ -315,7 +320,10 @@ fn scoped_records(
+ #[test]
+ fn expired_cg_window_deadline_is_rejected_before_native_reads() {
+-    let error = window_records_until(Instant::now(), WindowRecordScope::Pid(1)).unwrap_err();
++    let error = window_records_until(
++        Instant::now(),
++        WindowRecordScope::Pid(1),
++        &Default::default(),
++    )
++    .unwrap_err();
+
+     assert_eq!(error.code.as_str(), "TIMEOUT");
+ }
+
+ #[test]
+ fn deadline_expired_before_any_capture_omits_the_unstable_inventory_kind() {
+-    let error = window_records_until(Instant::now(), WindowRecordScope::Pid(1)).unwrap_err();
++    let error = window_records_until(
++        Instant::now(),
++        WindowRecordScope::Pid(1),
++        &Default::default(),
++    )
++    .unwrap_err();
+
+     assert!(error.details.is_none());
+ }
+
++#[test]
++fn exact_dictionary_rejects_replacement_owner_before_decoding_content() {
++    let dictionary = CFDictionary::from_CFType_pairs(&[
++        (
++            CFString::new("kCGWindowLayer"),
++            CFNumber::from(0).as_CFType(),
++        ),
++        (
++            CFString::new("kCGWindowOwnerPID"),
++            CFNumber::from(42).as_CFType(),
++        ),
++        (
++            CFString::new("kCGWindowNumber"),
++            CFNumber::from(7).as_CFType(),
++        ),
++        // A malformed content field would fail differently if the decoder read it.
++        (
++            CFString::new("kCGWindowOwnerName"),
++            CFNumber::from(1).as_CFType(),
++        ),
++    ]);
++    let expected = rustc_hash::FxHashMap::from_iter([(77, "original-generation".into())]);
++    let error = records_from_dictionaries(
++        vec![dictionary],
++        WindowRecordScope::Window(7),
++        &expected,
++        Instant::now() + std::time::Duration::from_secs(1),
++    )
++    .unwrap_err();
++    assert_eq!(error.code, ErrorCode::StaleRef);
++}
++
+ #[test]
+ fn expired_deadline_before_any_attempt_is_a_plain_timeout() {
+     let error = expired_deadline_error(0, 0, None);
+@@ -315,7 +362,10 @@ fn scoped_records(
      dictionaries: Vec<WindowDictionary>,
      scope: WindowRecordScope<'_>,
  ) -> Vec<WindowRecord> {
@@ -5889,10 +6026,35 @@ index 64970a4..5bebf9f 100644
              title: "Main".into(),
              app: "Fixture".into(),
 diff --git a/crates/macos/src/system/window/window_inventory.rs b/crates/macos/src/system/window/window_inventory.rs
-index 68f680e..a69f77e 100644
+index 68f680e..b9b7c03 100644
 --- a/crates/macos/src/system/window/window_inventory.rs
 +++ b/crates/macos/src/system/window/window_inventory.rs
-@@ -54,7 +54,9 @@ pub(crate) fn list_windows_until(
+@@ -46,15 +46,32 @@ pub(crate) fn list_windows_until(
+                 Ok(owners)
+             },
+             |owners| owners.matching_pids(app_filter),
+-            |pids| {
++            |owners, pids| {
+                 require_running_app(pids, app_filter)?;
+-                cg_window::window_records_until(deadline, cg_window::WindowRecordScope::Pids(pids))
++                let expected =
++                    crate::system::window::window_inventory_global::qualified_owner_instances(
++                        owners, pids, deadline,
++                    )?;
++                if expected.is_empty() {
++                    return Err(AdapterError::new(
++                        agent_desktop_core::ErrorCode::PolicyDenied,
++                        "This target cannot be controlled here",
++                    )
++                    .with_suggestion("Use Browser use or take over manually."));
++                }
++                cg_window::window_records_until(
++                    deadline,
++                    cg_window::WindowRecordScope::Pids(pids),
++                    &expected,
++                )
+             },
+             |records, _| {
                  let mut windows = windows_from_records_with_focus(
                      records,
                      filter.focused_only,
@@ -5903,7 +6065,19 @@ index 68f680e..a69f77e 100644
                      crate::system::process::process_identity::matches_instance,
                  )?;
                  narrow_to_real_windows(&mut windows);
-@@ -84,7 +86,9 @@ pub(crate) fn focused_window_until(deadline: Instant) -> Result<Option<WindowInf
+@@ -79,14 +96,22 @@ pub(crate) fn focused_window_until(deadline: Instant) -> Result<Option<WindowInf
+     let Some(pid) = focused_application_pid(deadline)? else {
+         return Ok(None);
+     };
+-    let records =
+-        cg_window::window_records_until(deadline, cg_window::WindowRecordScope::Pid(pid))?;
++    let instance = crate::system::private_browser_guard::require_pid(pid, None)?;
++    let expected = rustc_hash::FxHashMap::from_iter([(pid, instance.clone())]);
++    let records = cg_window::window_records_until(
++        deadline,
++        cg_window::WindowRecordScope::Pid(pid),
++        &expected,
++    )?;
      let windows = windows_from_records_with_focus(
          records,
          true,
@@ -5913,8 +6087,11 @@ index 68f680e..a69f77e 100644
 +        },
          crate::system::process::process_identity::matches_instance,
      )?;
++    crate::system::private_browser_guard::require_pid(pid, Some(&instance))?;
      if focused_application_pid(deadline)? != Some(pid) {
-@@ -128,17 +132,26 @@ fn require_running_app(
+         return Err(AdapterError::app_unresponsive(
+             "Foreground application changed during focus verification",
+@@ -128,17 +153,26 @@ fn require_running_app(
  fn focus_state(
      ax_state: &mut impl FnMut(
          i32,
@@ -5943,7 +6120,26 @@ index 68f680e..a69f77e 100644
              Ok(crate::system::window::window_ax_state::WindowAxState {
                  focused: None,
                  minimized_by_id: rustc_hash::FxHashMap::default(),
-@@ -170,7 +183,9 @@ pub(crate) fn exact_window_for_pid_until(
+@@ -163,14 +197,26 @@ fn narrow_to_real_windows(windows: &mut Vec<WindowInfo>) {
+
+ pub(crate) fn exact_window_for_pid_until(
+     pid: i32,
++    instance: &str,
+     deadline: Instant,
+ ) -> Result<WindowInfo, AdapterError> {
+-    let records =
+-        cg_window::window_records_until(deadline, cg_window::WindowRecordScope::Pid(pid))?;
++    if instance.is_empty() {
++        return Err(AdapterError::stale_ref_because(
++            "Window owner generation is unavailable",
++        ));
++    }
++    let expected = rustc_hash::FxHashMap::from_iter([(pid, instance.to_owned())]);
++    let records = cg_window::window_records_until(
++        deadline,
++        cg_window::WindowRecordScope::Pid(pid),
++        &expected,
++    )?;
      let mut windows = windows_from_records_with_focus(
          records,
          false,
@@ -5954,7 +6150,7 @@ index 68f680e..a69f77e 100644
          |owner_pid, instance| {
              crate::system::process::process_identity::matches_instance(owner_pid, instance)
          },
-@@ -207,6 +222,7 @@ fn windows_from_records_with_focus(
+@@ -207,6 +253,7 @@ fn windows_from_records_with_focus(
      focused_only: bool,
      mut ax_state: impl FnMut(
          i32,
@@ -5962,7 +6158,7 @@ index 68f680e..a69f77e 100644
      ) -> Result<
          crate::system::window::window_ax_state::WindowAxState,
          AdapterError,
-@@ -251,6 +267,7 @@ fn windows_from_records_with_focus(
+@@ -251,6 +298,7 @@ fn windows_from_records_with_focus(
              std::collections::hash_map::Entry::Vacant(entry) => entry.insert(focus_state(
                  &mut ax_state,
                  record.pid,
@@ -5971,11 +6167,20 @@ index 68f680e..a69f77e 100644
                  visible_pids.contains(&record.pid),
              )?),
 diff --git a/crates/macos/src/system/window/window_inventory_global.rs b/crates/macos/src/system/window/window_inventory_global.rs
-index 8b48036..d50ec51 100644
+index 8b48036..cd0518f 100644
 --- a/crates/macos/src/system/window/window_inventory_global.rs
 +++ b/crates/macos/src/system/window/window_inventory_global.rs
-@@ -57,14 +57,20 @@ fn capture_global_once(
+@@ -51,28 +51,36 @@ fn capture_global_once(
+     let mut windows = capture_global_with(
+         focused_only,
+         || crate::system::app::workspace_apps::window_owner_snapshot_until(deadline),
+-        |eligible_pids| {
++        |owners, eligible_pids| {
++            let expected = qualified_owner_instances(owners, eligible_pids, deadline)?;
+             crate::system::window::cg_window::window_records_until(
+                 deadline,
                  crate::system::window::cg_window::WindowRecordScope::Pids(eligible_pids),
++                &expected,
              )
          },
 -        |pid| crate::system::window::window_ax_state::read_frontmost_until(pid, deadline),
@@ -5999,16 +6204,78 @@ index 8b48036..d50ec51 100644
      Ok(windows)
  }
 
-@@ -72,7 +78,7 @@ fn capture_global_with<S: OwnerSnapshotView>(
+ fn capture_global_with<S: OwnerSnapshotView>(
      focused_only: bool,
      capture_owners: impl FnMut() -> Result<S, AdapterError>,
-     capture_records: impl FnMut(&FxHashSet<i32>) -> Result<Vec<WindowRecord>, AdapterError>,
+-    capture_records: impl FnMut(&FxHashSet<i32>) -> Result<Vec<WindowRecord>, AdapterError>,
 -    mut read_frontmost: impl FnMut(i32) -> Result<WindowAxState, AdapterError>,
++    capture_records: impl FnMut(&S, &FxHashSet<i32>) -> Result<Vec<WindowRecord>, AdapterError>,
 +    mut read_frontmost: impl FnMut(i32, &str) -> Result<WindowAxState, AdapterError>,
  ) -> Result<Vec<WindowInfo>, AdapterError> {
      capture_stable_with(
          capture_owners,
-@@ -119,7 +125,7 @@ pub(in crate::system) fn assemble_global_windows<S: OwnerSnapshotView>(
+@@ -87,7 +95,7 @@ fn capture_global_with<S: OwnerSnapshotView>(
+ pub(in crate::system) fn capture_stable_with<S: OwnerSnapshotView>(
+     capture_owners: impl FnMut() -> Result<S, AdapterError>,
+     select_pids: impl FnMut(&S) -> FxHashSet<i32>,
+-    capture_records: impl FnMut(&FxHashSet<i32>) -> Result<Vec<WindowRecord>, AdapterError>,
++    capture_records: impl FnMut(&S, &FxHashSet<i32>) -> Result<Vec<WindowRecord>, AdapterError>,
+     assemble: impl FnMut(Vec<WindowRecord>, &S) -> Result<Vec<WindowInfo>, AdapterError>,
+ ) -> Result<Vec<WindowInfo>, AdapterError> {
+     capture_validated_with(
+@@ -102,24 +110,57 @@ pub(in crate::system) fn capture_stable_with<S: OwnerSnapshotView>(
+ pub(in crate::system) fn capture_validated_with<S: OwnerSnapshotView>(
+     mut capture_owners: impl FnMut() -> Result<S, AdapterError>,
+     mut select_pids: impl FnMut(&S) -> FxHashSet<i32>,
+-    mut capture_records: impl FnMut(&FxHashSet<i32>) -> Result<Vec<WindowRecord>, AdapterError>,
++    mut capture_records: impl FnMut(&S, &FxHashSet<i32>) -> Result<Vec<WindowRecord>, AdapterError>,
+     mut assemble: impl FnMut(Vec<WindowRecord>, &S) -> Result<Vec<WindowInfo>, AdapterError>,
+     mut validate: impl FnMut(&S, &S, &FxHashSet<i32>, &[WindowRecord]) -> Result<(), AdapterError>,
+ ) -> Result<Vec<WindowInfo>, AdapterError> {
+     let before = capture_owners()?;
+     let eligible_pids = select_pids(&before);
+-    let records = capture_records(&eligible_pids)?;
++    let records = capture_records(&before, &eligible_pids)?;
+     let assembled = assemble(records.clone(), &before);
+     let after = capture_owners()?;
+     validate(&before, &after, &eligible_pids, &records)?;
+     assembled
+ }
+
++pub(in crate::system) fn qualified_owner_instances<S: OwnerSnapshotView>(
++    owners: &S,
++    selected: &FxHashSet<i32>,
++    deadline: Instant,
++) -> Result<FxHashMap<i32, String>, AdapterError> {
++    let mut expected = FxHashMap::default();
++    for &pid in selected {
++        crate::system::window::cg_window::ensure_before_deadline(deadline)?;
++        let generation = owners
++            .generation(pid)
++            .ok_or_else(|| owner_churn_error(Some(pid), "owner_not_eligible"))?;
++        let Some(instance) = crate::system::private_browser_guard::qualify_pid(pid, None)? else {
++            continue;
++        };
++        crate::system::window::cg_window::ensure_before_deadline(deadline)?;
++        let matches = match generation {
++            OwnerGeneration::LaunchTime(time) => {
++                crate::system::process::process_identity::instance_matches_launch_time(
++                    pid, &instance, time,
++                )?
++            }
++            OwnerGeneration::LiveProcess => {
++                crate::system::process::process_identity::matches_instance(pid, &instance)?
++            }
++        };
++        if !matches {
++            return Err(owner_churn_error(Some(pid), "process_generation_changed"));
++        }
++        expected.insert(pid, instance);
++    }
++    Ok(expected)
++}
++
+ pub(in crate::system) fn assemble_global_windows<S: OwnerSnapshotView>(
      records: Vec<WindowRecord>,
      owners: &S,
      focused_only: bool,
@@ -6017,7 +6284,7 @@ index 8b48036..d50ec51 100644
  ) -> Result<Vec<WindowInfo>, AdapterError> {
      let records = records
          .into_iter()
-@@ -130,7 +136,14 @@ pub(in crate::system) fn assemble_global_windows<S: OwnerSnapshotView>(
+@@ -130,7 +171,14 @@ pub(in crate::system) fn assemble_global_windows<S: OwnerSnapshotView>(
      let frontmost_window_owner =
          frontmost_pid.filter(|pid| records.iter().any(|record| record.pid == *pid));
      let focus_state = match frontmost_window_owner {
@@ -6057,7 +6324,7 @@ index 9d7b7d5..10e5a37 100644
      })
      .unwrap();
 diff --git a/crates/macos/src/system/window/window_inventory_global_tests.rs b/crates/macos/src/system/window/window_inventory_global_tests.rs
-index 29a4fd5..27e0b09 100644
+index 29a4fd5..dd88ef8 100644
 --- a/crates/macos/src/system/window/window_inventory_global_tests.rs
 +++ b/crates/macos/src/system/window/window_inventory_global_tests.rs
 @@ -39,7 +39,7 @@ fn background_owner_is_never_ax_probed_and_has_unknown_minimized_state() {
@@ -6164,7 +6431,13 @@ index 29a4fd5..27e0b09 100644
          Ok(ax_state(Some((Some("Front".into()), Some(1)))))
      })
      .unwrap_err();
-@@ -303,7 +304,7 @@ fn global_capture_orders_appkit_cg_ax_appkit_and_filters_before_cg() {
+@@ -298,12 +299,12 @@ fn global_capture_orders_appkit_cg_ax_appkit_and_filters_before_cg() {
+             snapshot_count.set(ordinal + 1);
+             Ok(owners.clone())
+         },
+-        |eligible| {
++        |_, eligible| {
+             events.borrow_mut().push("cg");
              assert_eq!(eligible, &FxHashSet::from_iter([10, 20]));
              Ok(vec![record(10, 1, "Front")])
          },
@@ -6173,15 +6446,26 @@ index 29a4fd5..27e0b09 100644
              events.borrow_mut().push("ax");
              Ok(ax_state(Some((Some("Front".into()), Some(1)))))
          },
-@@ -329,7 +330,7 @@ fn post_ax_snapshot_is_captured_and_churn_wins_over_stale_ax_failure() {
+@@ -328,8 +329,8 @@ fn post_ax_snapshot_is_captured_and_churn_wins_over_stale_ax_failure() {
+             snapshot_count.set(snapshot_count.get() + 1);
              Ok(snapshots.borrow_mut().pop_front().unwrap())
          },
-         |_| Ok(vec![record(10, 1, "Front")]),
+-        |_| Ok(vec![record(10, 1, "Front")]),
 -        |_| Err(AdapterError::permission_denied()),
++        |_, _| Ok(vec![record(10, 1, "Front")]),
 +        |_, _| Err(AdapterError::permission_denied()),
      )
      .unwrap_err();
 
+@@ -347,7 +348,7 @@ fn scoped_pid_selection_is_still_bound_to_the_owner_generation() {
+     let error = capture_stable_with(
+         || Ok(snapshots.borrow_mut().pop_front().unwrap()),
+         |_| FxHashSet::from_iter([10]),
+-        |selected| {
++        |_, selected| {
+             assert_eq!(selected, &FxHashSet::from_iter([10]));
+             Ok(vec![record(10, 1, "Target")])
+         },
 diff --git a/crates/macos/src/system/window/window_inventory_tests.rs b/crates/macos/src/system/window/window_inventory_tests.rs
 index cf81f76..975193b 100644
 --- a/crates/macos/src/system/window/window_inventory_tests.rs
@@ -6267,7 +6551,7 @@ index cf81f76..975193b 100644
          title: "w".into(),
          app: "Fixture".into(),
 diff --git a/crates/macos/src/system/window/window_resolve.rs b/crates/macos/src/system/window/window_resolve.rs
-index 5523577..74c7399 100644
+index 5523577..c5cb286 100644
 --- a/crates/macos/src/system/window/window_resolve.rs
 +++ b/crates/macos/src/system/window/window_resolve.rs
 @@ -27,9 +27,15 @@ pub(crate) fn window_element_for_info_with_deadline(
@@ -6302,7 +6586,7 @@ index 5523577..74c7399 100644
      verify_window_record(win, &record)?;
      let mut resolved = window_info_from_record(win, &record)?;
      resolved.state.minimized = ax_state.minimized_by_id.get(&window_number).copied();
-@@ -61,6 +72,13 @@ fn locate_verified_record_until(
+@@ -61,10 +72,21 @@ fn locate_verified_record_until(
      win: &WindowInfo,
      deadline: std::time::Instant,
  ) -> Result<(i64, WindowRecord), AdapterError> {
@@ -6314,9 +6598,20 @@ index 5523577..74c7399 100644
 +        .ok_or_else(|| window_identity_mismatch(&win.id))?;
 +    guard(pid, instance, deadline)?;
      let window_number = parse_window_number(&win.id).ok_or_else(|| invalid_window_id(&win.id))?;
-     let record =
-         crate::system::window::cg_window_exact::exact_window_record_until(window_number, deadline)?
-@@ -74,6 +92,11 @@ pub(crate) fn verify_window_identity_until(
+-    let record =
+-        crate::system::window::cg_window_exact::exact_window_record_until(window_number, deadline)?
+-            .ok_or_else(|| window_not_found(&win.id))?;
++    let record = crate::system::window::cg_window_exact::exact_window_record_until(
++        window_number,
++        pid,
++        instance,
++        deadline,
++    )?
++    .ok_or_else(|| window_not_found(&win.id))?;
+     verify_window_record(win, &record)?;
+     Ok((window_number, record))
+ }
+@@ -74,10 +96,19 @@ pub(crate) fn verify_window_identity_until(
      evidence: WindowIdentityEvidence<'_>,
      deadline: std::time::Instant,
  ) -> Result<(), AdapterError> {
@@ -6326,9 +6621,20 @@ index 5523577..74c7399 100644
 +        .ok_or_else(|| window_identity_mismatch(id))?;
 +    guard(evidence.pid, instance, deadline)?;
      let window_number = parse_window_number(id).ok_or_else(|| invalid_window_id(id))?;
-     let record =
-         crate::system::window::cg_window_exact::exact_window_record_until(window_number, deadline)?
-@@ -134,8 +157,18 @@ fn resolve_window_element_strict(
+-    let record =
+-        crate::system::window::cg_window_exact::exact_window_record_until(window_number, deadline)?
+-            .ok_or_else(|| window_not_found(id))?;
++    let record = crate::system::window::cg_window_exact::exact_window_record_until(
++        window_number,
++        evidence.pid,
++        instance,
++        deadline,
++    )?
++    .ok_or_else(|| window_not_found(id))?;
+     if !window_record_matches_source(&record, &evidence) {
+         return Err(window_identity_mismatch(id));
+     }
+@@ -134,8 +165,18 @@ fn resolve_window_element_strict(
      let (window_number, record) = locate_verified_record_until(win, deadline)?;
      crate::tree::locator_deadline::remaining(deadline)?;
      let pid = crate::system::process::process_identity::to_pid_t(win.pid)?;
@@ -6349,7 +6655,7 @@ index 5523577..74c7399 100644
  }
 
  pub(crate) fn parse_window_number(id: &str) -> Option<i64> {
-@@ -159,6 +192,13 @@ fn verify_window_record(win: &WindowInfo, record: &WindowRecord) -> Result<(), A
+@@ -159,6 +200,13 @@ fn verify_window_record(win: &WindowInfo, record: &WindowRecord) -> Result<(), A
      {
          return Err(window_identity_mismatch(&win.id));
      }
@@ -6363,7 +6669,7 @@ index 5523577..74c7399 100644
      if !win.app.is_empty() && record.app_name != win.app {
          return Err(window_identity_mismatch(&win.id));
      }
-@@ -176,6 +216,12 @@ fn window_info_from_record(
+@@ -176,6 +224,12 @@ fn window_info_from_record(
      record: &WindowRecord,
  ) -> Result<WindowInfo, AdapterError> {
      Ok(WindowInfo {
@@ -6376,7 +6682,7 @@ index 5523577..74c7399 100644
          id: win.id.clone(),
          title: record
              .title
-@@ -196,13 +242,15 @@ fn window_info_from_record(
+@@ -196,13 +250,15 @@ fn window_info_from_record(
 
  fn ax_window_element_for_number(
      pid: i32,
@@ -6393,7 +6699,7 @@ index 5523577..74c7399 100644
          prepare_for_read(window, deadline)?;
          if crate::tree::resolve::resolve_ax_read::read_string(window, "AXRole", deadline)?
              .as_deref()
-@@ -211,7 +259,10 @@ fn ax_window_element_for_number(
+@@ -211,7 +267,10 @@ fn ax_window_element_for_number(
              continue;
          }
          match ax_window_id_with_deadline(window, deadline) {
@@ -6405,7 +6711,7 @@ index 5523577..74c7399 100644
              Ok(_) => {}
              Err(error) if crate::system::window::window_bridge::is_unavailable(&error) => {
                  unavailable_bridge = Some(error);
-@@ -228,6 +279,7 @@ fn ax_window_element_for_number(
+@@ -228,6 +287,7 @@ fn ax_window_element_for_number(
      };
      let mut single_match = None;
      for window in windows {
@@ -6413,7 +6719,7 @@ index 5523577..74c7399 100644
          prepare_for_read(&window, deadline)?;
          if crate::tree::resolve::resolve_ax_read::read_string(&window, "AXRole", deadline)?
              .as_deref()
-@@ -235,6 +287,7 @@ fn ax_window_element_for_number(
+@@ -235,6 +295,7 @@ fn ax_window_element_for_number(
          {
              continue;
          }
@@ -6421,7 +6727,7 @@ index 5523577..74c7399 100644
          if crate::tree::resolve::resolve_ax_read::read_string(&window, "AXTitle", deadline)?
              .as_deref()
              != Some(title)
-@@ -252,8 +305,12 @@ fn ax_window_element_for_number(
+@@ -252,8 +313,12 @@ fn ax_window_element_for_number(
          }
          single_match = Some(window);
      }
@@ -6435,7 +6741,7 @@ index 5523577..74c7399 100644
          None => match unavailable_bridge {
              Some(error) => Err(error),
              None => Ok(None),
-@@ -263,14 +320,16 @@ fn ax_window_element_for_number(
+@@ -263,14 +328,16 @@ fn ax_window_element_for_number(
 
  fn window_element_by_title(
      pid: i32,
@@ -6453,7 +6759,7 @@ index 5523577..74c7399 100644
          if crate::tree::resolve::resolve_ax_read::read_string(&window, "AXRole", deadline)?
              .as_deref()
              != Some("AXWindow")
-@@ -279,14 +338,18 @@ fn window_element_by_title(
+@@ -279,14 +346,18 @@ fn window_element_by_title(
          }
          window_count += 1;
          only_window = Some(window.clone());
@@ -6473,7 +6779,7 @@ index 5523577..74c7399 100644
      }
      if exact.len() > 1 {
          return Err(AdapterError::ambiguous_target(format!(
-@@ -299,12 +362,40 @@ fn window_element_by_title(
+@@ -299,12 +370,40 @@ fn window_element_by_title(
          })));
      }
      if requested_title.is_empty() && window_count == 1 {
@@ -7460,6 +7766,30 @@ index bb5da0e..275d360 100644
      if read.invalid_element {
          return Ok(IdentityMatch::Unknown);
      }
+diff --git a/crates/macos/src/tree/resolve/resolve_source_app.rs b/crates/macos/src/tree/resolve/resolve_source_app.rs
+index 5035a54..f3bd01c 100644
+--- a/crates/macos/src/tree/resolve/resolve_source_app.rs
++++ b/crates/macos/src/tree/resolve/resolve_source_app.rs
+@@ -25,9 +25,19 @@ pub(in crate::tree) fn verify_source_application(
+     )?;
+     if source_app_matches(expected, actual.as_deref(), || {
+         let pid = crate::system::process::process_identity::to_pid_t(entry.process.pid)?;
++        let instance = entry
++            .process
++            .process_instance
++            .as_deref()
++            .filter(|value| !value.is_empty())
++            .ok_or_else(|| {
++                AdapterError::stale_ref_because("Saved process generation is unavailable")
++            })?;
++        let expected = rustc_hash::FxHashMap::from_iter([(pid, instance.to_owned())]);
+         let records = crate::system::window::cg_window::window_records_until(
+             context.deadline,
+             crate::system::window::cg_window::WindowRecordScope::Pid(pid),
++            &expected,
+         )?;
+         Ok(source_names_for_pid(
+             pid,
 diff --git a/crates/macos/src/tree/resolve/resolve_tests.rs b/crates/macos/src/tree/resolve/resolve_tests.rs
 index 34c968e..2cc3aab 100644
 --- a/crates/macos/src/tree/resolve/resolve_tests.rs

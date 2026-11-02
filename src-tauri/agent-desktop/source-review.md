@@ -193,7 +193,9 @@ process generation and executable before and after window waits. This source
 review does not establish Cocoa or native macOS behavior.
 
 macOS window inventory qualifies the owner generation and kernel image before
-decoding window names or titles. AX window and focus reads carry that captured
+the CoreGraphics collection and rechecks that same generation before decoding
+window names or titles. Exact window decoding receives the original PID and
+generation, and refuses a different owner before decoding content. AX window and focus reads carry that captured
 generation and verify the AX element owner before reading its content. Strict
 resolution and the title fallback repeat qualification against the original
 generation; other macOS read, capture and input surfaces remain separate work.
