@@ -4902,6 +4902,37 @@ index 386ae66..c91e6b4 100644
      }
 
      pub fn perform_observed_action(
+diff --git a/crates/macos/src/actions/chain/activate_descendant.rs b/crates/macos/src/actions/chain/activate_descendant.rs
+index 6b00286..2afc97c 100644
+--- a/crates/macos/src/actions/chain/activate_descendant.rs
++++ b/crates/macos/src/actions/chain/activate_descendant.rs
+@@ -41,15 +41,22 @@ mod imp {
+         deadline: Deadline,
+     ) -> Result<DeliveryOutcome, AdapterError> {
+         let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++        element.qualify(instant)?;
+         let children = crate::tree::properties::attributes::copy_ax_array_prefix_result(
+             element,
+             "AXChildren",
+             MAX_CANDIDATES,
+             instant,
+-        )
+-        .ok()
+-        .flatten()
+-        .unwrap_or_default();
++        );
++        element.qualify(instant)?;
++        let mut children = children
++            .map_err(|error| {
++                crate::tree::query::read_error::semantic_read(error, "activation.children")
++            })?
++            .unwrap_or_default();
++        for child in &mut children {
++            child.bind_child(element, instant)?;
++        }
+
+         super::activate_candidates(&children, |child, action| {
+             crate::actions::ax_helpers::perform_observed_action(child, action, deadline)
 diff --git a/crates/macos/src/actions/chain/chain_disclosure_steps.rs b/crates/macos/src/actions/chain/chain_disclosure_steps.rs
 index a5589ff..4c80398 100644
 --- a/crates/macos/src/actions/chain/chain_disclosure_steps.rs
@@ -7337,10 +7368,10 @@ index 030b252..fc29f77 100644
          .stderr(Stdio::null())
 diff --git a/crates/macos/src/system/private_browser_guard.rs b/crates/macos/src/system/private_browser_guard.rs
 new file mode 100644
-index 0000000..5bf1e1d
+index 0000000..13451cb
 --- /dev/null
 +++ b/crates/macos/src/system/private_browser_guard.rs
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,156 @@
 +//! Host-provided browser identity, evaluated afresh at each native boundary.
 +use agent_desktop_core::{AdapterError, ErrorCode};
 +use std::{
@@ -7411,6 +7442,43 @@ index 0000000..5bf1e1d
 +    qualify_pid(pid, expected)?.ok_or_else(denied)
 +}
 +
++/// Filesystem qualification is completed before this evidence is retained.
++/// Revalidation uses only kernel process metadata, never filesystem paths.
++pub(crate) struct NativeAuthority {
++    identity: super::process::process_identity::ProcessIdentity,
++    image: String,
++}
++
++impl NativeAuthority {
++    pub(crate) fn capture(pid: i32, instance: &str) -> Result<Self, AdapterError> {
++        let process = agent_desktop_core::ProcessIdentity::new(
++            super::process::process_identity::from_pid_t(pid)?,
++            instance,
++        );
++        let identity = super::process::process_identity::require_core(&process)?;
++        let image = super::launch_completion::kernel_executable(pid).map_err(|_| denied())?;
++        require_pid(pid, Some(instance))?;
++        if !identity.still_matches().map_err(|_| denied())?
++            || super::launch_completion::kernel_executable(pid).map_err(|_| denied())? != image
++        {
++            return Err(AdapterError::stale_ref_because("Process identity changed"));
++        }
++        Ok(Self { identity, image })
++    }
++
++    pub(crate) fn revalidate(&self) -> Result<(), AdapterError> {
++        if !self.identity.still_matches().map_err(|_| denied())?
++            || super::launch_completion::kernel_executable(self.identity.pid())
++                .map_err(|_| denied())?
++                != self.image
++            || !self.identity.still_matches().map_err(|_| denied())?
++        {
++            return Err(AdapterError::stale_ref_because("Process identity changed"));
++        }
++        Ok(())
++    }
++}
++
 +// Only the native launch bridge calls this; paths and birth tokens are never
 +// supplied by tool arguments. Null and invalid inputs refuse the operation.
 +#[unsafe(no_mangle)]
@@ -7461,24 +7529,25 @@ index 0000000..5bf1e1d
 +    .unwrap_or(false) as u8
 +}
 diff --git a/crates/macos/src/system/process/mod.rs b/crates/macos/src/system/process/mod.rs
-index 98cc130..e800a2b 100644
+index 98cc130..737b69f 100644
 --- a/crates/macos/src/system/process/mod.rs
 +++ b/crates/macos/src/system/process/mod.rs
-@@ -5,6 +5,8 @@ use std::sync::mpsc;
+@@ -5,6 +5,9 @@ use std::sync::mpsc;
  use std::thread::JoinHandle;
  use std::time::{Duration, Instant};
 
 +mod spawn_checked;
++pub(crate) use spawn_checked::classify_capture_failure;
 +
  const MAX_CAPTURED_STREAM_BYTES: usize = 8 * 1024 * 1024;
  const OUTPUT_CONTEXT_BYTES: usize = 4 * 1024;
  const MAX_CLEANUP_RESERVE: Duration = Duration::from_millis(250);
-@@ -36,6 +38,15 @@ pub(crate) fn run_with_deadline(
+@@ -36,6 +39,16 @@ pub(crate) fn run_with_deadline(
      command: &mut Command,
      label: &str,
      deadline: Instant,
 +) -> Result<Output, AdapterError> {
-+    run_with_deadline_checked(command, label, deadline, || Ok(()))
++    run_with_deadline_checked(command, label, deadline, || Ok(()), || {})
 +}
 +
 +pub(crate) fn run_with_deadline_checked(
@@ -7486,21 +7555,23 @@ index 98cc130..e800a2b 100644
 +    label: &str,
 +    deadline: Instant,
 +    before_spawn: impl FnOnce() -> Result<(), AdapterError>,
++    on_attempt: impl FnOnce(),
  ) -> Result<Output, AdapterError> {
      let remaining = deadline.saturating_duration_since(Instant::now());
      if remaining.is_zero() {
-@@ -49,9 +60,7 @@ pub(crate) fn run_with_deadline(
+@@ -49,9 +62,8 @@ pub(crate) fn run_with_deadline(
      })?;
      configure_process_group(command);
      command.stdout(Stdio::piped()).stderr(Stdio::piped());
 -    let mut child = command
 -        .spawn()
 -        .map_err(|error| AdapterError::internal(format!("{label}: {error}")))?;
-+    let mut child = spawn_checked::spawn_checked(command, label, work_deadline, before_spawn)?;
++    let mut child =
++        spawn_checked::spawn_checked(command, label, work_deadline, before_spawn, on_attempt)?;
      let process_group = i32::try_from(child.id()).map_err(|_| {
          let _ = child.kill();
          let _ = child.wait();
-@@ -114,7 +123,12 @@ pub(crate) fn run_with_deadline(
+@@ -114,7 +126,12 @@ pub(crate) fn run_with_deadline(
 
  fn configure_process_group(command: &mut Command) {
      use std::os::unix::process::CommandExt;
@@ -7514,7 +7585,7 @@ index 98cc130..e800a2b 100644
  }
 
  fn wait_for_status(child: &mut Child, deadline: Instant) -> Result<ExitStatus, AdapterError> {
-@@ -196,7 +210,17 @@ fn signal_group(process_group: i32, signal: i32) -> std::io::Result<bool> {
+@@ -196,7 +213,17 @@ fn signal_group(process_group: i32, signal: i32) -> std::io::Result<bool> {
      unsafe extern "C" {
          fn kill(pid: i32, signal: i32) -> i32;
      }
@@ -7596,21 +7667,30 @@ index 8d068ba..c1adb70 100644
      let cf_attr = CFString::new(kAXRoleAttribute);
 diff --git a/crates/macos/src/system/process/spawn_checked.rs b/crates/macos/src/system/process/spawn_checked.rs
 new file mode 100644
-index 0000000..46e3933
+index 0000000..4c66dbe
 --- /dev/null
 +++ b/crates/macos/src/system/process/spawn_checked.rs
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,32 @@
 +use agent_desktop_core::AdapterError;
 +use std::{
 +    process::{Child, Command},
 +    time::Instant,
 +};
 +
++pub(crate) fn classify_capture_failure(error: AdapterError, attempted: bool) -> AdapterError {
++    if attempted {
++        error.with_disposition(agent_desktop_core::DeliverySemantics::uncertain())
++    } else {
++        error.with_disposition(agent_desktop_core::DeliverySemantics::not_delivered())
++    }
++}
++
 +pub(crate) fn spawn_checked(
 +    command: &mut Command,
 +    label: &str,
 +    deadline: Instant,
 +    before_spawn: impl FnOnce() -> Result<(), AdapterError>,
++    on_attempt: impl FnOnce(),
 +) -> Result<Child, AdapterError> {
 +    before_spawn()?;
 +    if Instant::now() >= deadline {
@@ -7618,6 +7698,7 @@ index 0000000..46e3933
 +            "{label} has no subprocess cleanup budget"
 +        )));
 +    }
++    on_attempt();
 +    command
 +        .spawn()
 +        .map_err(|error| AdapterError::internal(format!("{label}: {error}")))
@@ -7699,15 +7780,15 @@ index f1296b1..fa5931c 100644
              activation_delivered(
                  &application,
 diff --git a/crates/macos/src/system/screenshot.rs b/crates/macos/src/system/screenshot.rs
-index 2217f04..d6f1957 100644
+index 2217f04..304b79c 100644
 --- a/crates/macos/src/system/screenshot.rs
 +++ b/crates/macos/src/system/screenshot.rs
-@@ -23,16 +23,35 @@ mod imp {
+@@ -23,16 +23,27 @@ mod imp {
          scale_factor: f64,
          deadline: Deadline,
          arguments: impl FnOnce(&Path) -> Result<Vec<OsString>, AdapterError>,
 +        before_spawn: impl FnOnce() -> Result<(), AdapterError>,
-+        after_spawn_error: impl Fn(AdapterError) -> AdapterError,
++        classify_error: impl Fn(AdapterError, bool) -> AdapterError,
      ) -> Result<ImageBuffer, AdapterError> {
          deadline.ensure_remaining()?;
          let temp = TempPng::new()?;
@@ -7719,29 +7800,21 @@ index 2217f04..d6f1957 100644
 +            &mut command,
 +            "screencapture",
 +            deadline_instant(deadline)?,
-+            || {
-+                before_spawn()?;
-+                attempted.set(true);
-+                Ok(())
-+            },
++            before_spawn,
++            || attempted.set(true),
 +        )
-+        .map_err(|error| {
-+            if attempted.get() {
-+                after_spawn_error(error)
-+            } else {
-+                error
-+            }
-+        })?;
++        .map_err(|error| classify_error(error, attempted.get()))?;
          if !output.status.success() {
 -            return Err(map_screencapture_error(&output));
-+            return Err(after_spawn_error(map_screencapture_error(&output)));
++            return Err(classify_error(map_screencapture_error(&output), true));
          }
 -        let mut buffer = read_png(temp.path(), deadline)?;
-+        let mut buffer = read_png(temp.path(), deadline).map_err(after_spawn_error)?;
++        let mut buffer =
++            read_png(temp.path(), deadline).map_err(|error| classify_error(error, true))?;
          buffer.scale_factor = scale_factor;
          Ok(buffer)
      }
-@@ -80,9 +99,13 @@ mod imp {
+@@ -80,9 +91,13 @@ mod imp {
          let (raw_index, current) = crate::system::display::capture_selection(expected, deadline)?;
          deadline.ensure_remaining()?;
          verify_display_identity(index, expected, &current)?;
@@ -7753,12 +7826,12 @@ index 2217f04..d6f1957 100644
 +            deadline,
 +            |path| display_args(raw_index, path),
 +            || Ok(()),
-+            |error| error,
++            |error, _| error,
 +        )?;
          deadline.ensure_remaining()?;
          let after = crate::system::display::display_at_capture_index(raw_index, deadline)?;
          deadline.ensure_remaining()?;
-@@ -123,20 +146,43 @@ mod imp {
+@@ -123,20 +138,62 @@ mod imp {
          let window_id = parse_window_id(&verified.id)?;
          let scale = crate::system::display::scale_for_bounds(verified.bounds, deadline)?;
          deadline.ensure_remaining()?;
@@ -7781,18 +7854,37 @@ index 2217f04..d6f1957 100644
 +            },
 +            || {
 +                (|| {
-+                    agent_desktop_core::commands::clovy_cancel::ensure()?;
 +                    crate::system::window::window_resolve::resolve_capture_window(
 +                        window,
 +                        deadline_instant(deadline)?,
 +                    )?;
++                    let pid = crate::system::process::process_identity::to_pid_t(window.pid)?;
++                    let instance = window
++                        .process_instance
++                        .as_deref()
++                        .filter(|v| !v.is_empty())
++                        .ok_or_else(|| {
++                            AdapterError::stale_ref_because("Window generation is unavailable")
++                        })?;
++                    let authority = crate::system::private_browser_guard::NativeAuthority::capture(
++                        pid, instance,
++                    )?;
++                    agent_desktop_core::commands::clovy_cancel::ensure()?;
++                    let instant = deadline_instant(deadline)?;
++                    authority.revalidate()?;
++                    crate::system::window::cg_window_exact::revalidate_native_owner(
++                        i64::from(window_id),
++                        pid,
++                        instant,
++                    )?;
++                    authority.revalidate()?;
 +                    deadline.ensure_remaining()
 +                })()
 +                .map_err(|error: AdapterError| {
 +                    error.with_disposition(agent_desktop_core::DeliverySemantics::not_delivered())
 +                })
 +            },
-+            after_capture,
++            crate::system::process::classify_capture_failure,
 +        )?;
          crate::system::window::window_resolve::resolve_capture_window(
              &verified,
@@ -7811,7 +7903,7 @@ index 2217f04..d6f1957 100644
      struct TempPng {
          dir: PathBuf,
          path: PathBuf,
-@@ -180,6 +226,7 @@ mod imp {
+@@ -180,6 +237,7 @@ mod imp {
          }
      }
 
@@ -7854,7 +7946,7 @@ index 08bb5bf..0d603e1 100644
              return Ok(());
          }
 diff --git a/crates/macos/src/system/window/cg_window.rs b/crates/macos/src/system/window/cg_window.rs
-index d321848..2dedb5e 100644
+index d321848..a71071e 100644
 --- a/crates/macos/src/system/window/cg_window.rs
 +++ b/crates/macos/src/system/window/cg_window.rs
 @@ -27,11 +27,16 @@ impl WindowRecord {
@@ -8015,8 +8107,17 @@ index d321848..2dedb5e 100644
          record.process_instance = Some(instance);
      }
      Ok(())
+@@ -313,7 +396,7 @@ fn invalid_field_error(field: &str) -> AdapterError {
+     ))
+ }
+
+-fn required_int_field(dict: &WindowDictionary, key: &str) -> Result<i64, AdapterError> {
++pub(super) fn required_int_field(dict: &WindowDictionary, key: &str) -> Result<i64, AdapterError> {
+     int_field(dict, key).ok_or_else(|| missing_field_error(key))
+ }
+
 diff --git a/crates/macos/src/system/window/cg_window_exact.rs b/crates/macos/src/system/window/cg_window_exact.rs
-index dce76cf..69b2270 100644
+index dce76cf..87a52bd 100644
 --- a/crates/macos/src/system/window/cg_window_exact.rs
 +++ b/crates/macos/src/system/window/cg_window_exact.rs
 @@ -6,13 +6,26 @@ use super::cg_window::{WindowDictionary, WindowRecord, WindowRecordScope};
@@ -8047,6 +8148,36 @@ index dce76cf..69b2270 100644
          )?;
          super::cg_window::capture_process_instances(&mut records, deadline)?;
          Ok(records)
+@@ -61,6 +74,29 @@ fn exact_window_dictionaries(window_number: i64) -> Result<Vec<WindowDictionary>
+     Ok(descriptions.iter().map(|record| record.clone()).collect())
+ }
+
++/// Recheck only native window identity after the last filesystem-backed Stop check.
++pub(crate) fn revalidate_native_owner(
++    window_number: i64,
++    expected_pid: i32,
++    deadline: Instant,
++) -> Result<(), AdapterError> {
++    super::cg_window::ensure_before_deadline(deadline)?;
++    let dictionaries = exact_window_dictionaries(window_number)?;
++    let [dictionary] = dictionaries.as_slice() else {
++        return Err(AdapterError::stale_ref_because(
++            "Exact window is unavailable or ambiguous",
++        ));
++    };
++    let owner = super::cg_window::required_int_field(dictionary, "kCGWindowOwnerPID")?;
++    let number = super::cg_window::required_int_field(dictionary, "kCGWindowNumber")?;
++    if owner != i64::from(expected_pid) || number != window_number {
++        return Err(AdapterError::stale_ref_because(
++            "Exact window owner changed",
++        ));
++    }
++    super::cg_window::ensure_before_deadline(deadline)
++}
++
+ fn exact_window_source_error(message: &str, window_number: i64) -> AdapterError {
+     super::cg_window::inventory_error(message).with_details(serde_json::json!({
+         "kind": "exact_window_inventory_source",
 diff --git a/crates/macos/src/system/window/cg_window_tests.rs b/crates/macos/src/system/window/cg_window_tests.rs
 index f01c6e5..ffab37b 100644
 --- a/crates/macos/src/system/window/cg_window_tests.rs
@@ -9346,10 +9477,10 @@ index 7dee59c..f18085f 100644
 
      fn get_live_element(
 diff --git a/crates/macos/src/tree/ax_element.rs b/crates/macos/src/tree/ax_element.rs
-index a0fcaf4..04d54d6 100644
+index a0fcaf4..cc33b0c 100644
 --- a/crates/macos/src/tree/ax_element.rs
 +++ b/crates/macos/src/tree/ax_element.rs
-@@ -1,68 +1,325 @@
+@@ -1,68 +1,412 @@
 +use agent_desktop_core::{AdapterError, NativeHandle, ProcessIdentity, RefEntry, WindowInfo};
 +use std::{sync::Arc, time::Instant};
 +
@@ -9374,6 +9505,51 @@ index a0fcaf4..04d54d6 100644
 +    binding: Option<Arc<Binding>>,
 +}
 +
++#[cfg(target_os = "macos")]
++pub(crate) struct NativeEffectAuthority {
++    root: crate::system::private_browser_guard::NativeAuthority,
++    owner: Option<crate::system::private_browser_guard::NativeAuthority>,
++    root_pid: i32,
++    owner_pid: i32,
++    source_window: Option<i64>,
++}
++
++#[cfg(target_os = "macos")]
++impl NativeEffectAuthority {
++    pub(crate) fn revalidate(
++        &self,
++        element: &AXElement,
++        deadline: Instant,
++    ) -> Result<(), AdapterError> {
++        crate::tree::locator_deadline::remaining(deadline)?;
++        self.root.revalidate()?;
++        if let Some(owner) = &self.owner {
++            owner.revalidate()?;
++        }
++        if let Some(window) = self.source_window {
++            crate::system::window::cg_window_exact::revalidate_native_owner(
++                window,
++                self.root_pid,
++                deadline,
++            )?;
++        }
++        let mut actual = 0;
++        let error = unsafe { accessibility_sys::AXUIElementGetPid(element.raw(), &mut actual) };
++        if error != accessibility_sys::kAXErrorSuccess || actual != self.owner_pid {
++            return Err(AdapterError::stale_ref_because(
++                "Accessibility owner changed",
++            ));
++        }
++        self.root.revalidate()?;
++        if let Some(owner) = &self.owner {
++            owner.revalidate()?;
++        }
++        crate::tree::locator_deadline::remaining(deadline)?;
++        Ok(())
++    }
++}
+
+-    pub struct AXElement(pub(crate) AXUIElementRef);
 +impl AXElement {
 +    // A raw element is metadata-only until bound to an original identity.
 +    pub(crate) fn from_raw(raw: RawElement) -> Self {
@@ -9383,15 +9559,11 @@ index a0fcaf4..04d54d6 100644
 +    pub(crate) fn raw(&self) -> RawElement {
 +        self.raw
 +    }
-
--    pub struct AXElement(pub(crate) AXUIElementRef);
++
 +    pub(crate) fn same_binding(&self, other: &Self) -> bool {
 +        self.binding == other.binding
 +    }
-
--    impl AXElement {
--        pub(crate) fn into_native_handle(self) -> NativeHandle {
--            NativeHandle::new(self)
++
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn owner_identity(&self) -> Result<&ProcessIdentity, AdapterError> {
 +        self.binding
@@ -9400,6 +9572,49 @@ index a0fcaf4..04d54d6 100644
 +            .ok_or_else(|| {
 +                AdapterError::stale_ref_because("Accessibility owner identity is unavailable")
 +            })
++    }
++
++    #[cfg(target_os = "macos")]
++    pub(crate) fn effect_authority(
++        &self,
++        deadline: Instant,
++    ) -> Result<NativeEffectAuthority, AdapterError> {
++        self.qualify(deadline)?;
++        let binding = self.binding.as_ref().ok_or_else(|| {
++            AdapterError::stale_ref_because("Accessibility element has no original identity")
++        })?;
++        let root_pid = crate::system::process::process_identity::to_pid_t(binding.root.pid)?;
++        let owner_pid = crate::system::process::process_identity::to_pid_t(binding.owner.pid)?;
++        let root = crate::system::private_browser_guard::NativeAuthority::capture(
++            root_pid,
++            &binding.root.instance,
++        )?;
++        let owner = if owner_pid == root_pid {
++            None
++        } else {
++            Some(
++                crate::system::private_browser_guard::NativeAuthority::capture(
++                    owner_pid,
++                    &binding.owner.instance,
++                )?,
++            )
++        };
++        let source_window = binding
++            .source_window
++            .as_deref()
++            .map(|id| {
++                crate::system::window::window_resolve::parse_window_number(id).ok_or_else(|| {
++                    AdapterError::stale_ref_because("Original window identity is invalid")
++                })
++            })
++            .transpose()?;
++        Ok(NativeEffectAuthority {
++            root,
++            owner,
++            root_pid,
++            owner_pid,
++            source_window,
++        })
 +    }
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn bind_process(
@@ -9410,7 +9625,10 @@ index a0fcaf4..04d54d6 100644
 +    ) -> Result<(), AdapterError> {
 +        self.bind_process_scoped(pid, instance, None, deadline)
 +    }
-+
+
+-    impl AXElement {
+-        pub(crate) fn into_native_handle(self) -> NativeHandle {
+-            NativeHandle::new(self)
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn bind_process_scoped(
 +        &mut self,
@@ -9554,10 +9772,7 @@ index a0fcaf4..04d54d6 100644
 +            && left.source_window == right.source_window
 +            && left.owner == right.owner)
 +    }
-
--    impl AXElement {
--        pub(crate) fn into_native_handle(self) -> NativeHandle {
--            NativeHandle::new(self)
++
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn owner_is_root(&self) -> Result<bool, AdapterError> {
 +        let binding = self
@@ -9591,16 +9806,17 @@ index a0fcaf4..04d54d6 100644
 +                ));
 +            }
 +            return self.qualify(deadline);
-         }
++        }
 +        self.bind_root(
 +            Arc::new(ProcessIdentity::new(window.pid, instance)),
 +            (!window.id.is_empty()).then(|| Arc::from(window.id.as_str())),
 +            deadline,
 +        )
-     }
++    }
 
--    impl Drop for AXElement {
--        fn drop(&mut self) {}
+-    impl AXElement {
+-        pub(crate) fn into_native_handle(self) -> NativeHandle {
+-            NativeHandle::new(self)
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn bind_child(
 +        &mut self,
@@ -9621,7 +9837,7 @@ index a0fcaf4..04d54d6 100644
 +                self.binding = Some(Arc::clone(binding));
 +                return self.qualify(deadline);
 +            }
-+        }
+         }
 +        self.bind_root(
 +            Arc::clone(&binding.root),
 +            binding.source_window.clone(),
@@ -9629,9 +9845,8 @@ index a0fcaf4..04d54d6 100644
 +        )
      }
 
--    impl Clone for AXElement {
--        fn clone(&self) -> Self {
--            AXElement(self.0)
+-    impl Drop for AXElement {
+-        fn drop(&mut self) {}
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn qualify(&self, deadline: Instant) -> Result<(), AdapterError> {
 +        let binding = self.binding.as_ref().ok_or_else(|| {
@@ -9655,7 +9870,7 @@ index a0fcaf4..04d54d6 100644
 +                owner_pid,
 +                Some(&binding.owner.instance),
 +            )?;
-         }
++        }
 +        crate::tree::locator_deadline::remaining(deadline)?;
 +        if crate::tree::properties::ax_ipc::pid(self, deadline).ok() != Some(owner_pid) {
 +            return Err(AdapterError::stale_ref_because(
@@ -9665,9 +9880,11 @@ index a0fcaf4..04d54d6 100644
 +        crate::tree::locator_deadline::remaining(deadline)?;
 +        Ok(())
      }
- }
++}
 
--pub(crate) use imp::AXElement;
+-    impl Clone for AXElement {
+-        fn clone(&self) -> Self {
+-            AXElement(self.0)
 +impl Clone for AXElement {
 +    fn clone(&self) -> Self {
 +        #[cfg(target_os = "macos")]
@@ -9679,10 +9896,11 @@ index a0fcaf4..04d54d6 100644
 +        Self {
 +            raw: self.raw,
 +            binding: self.binding.clone(),
-+        }
-+    }
-+}
-+
+         }
+     }
+ }
+
+-pub(crate) use imp::AXElement;
 +impl Drop for AXElement {
 +    fn drop(&mut self) {
 +        #[cfg(target_os = "macos")]
@@ -10299,10 +10517,21 @@ index e01a4b2..10f0e24 100644
  };
 
 diff --git a/crates/macos/src/tree/properties/ax_ipc.rs b/crates/macos/src/tree/properties/ax_ipc.rs
-index 951b697..ab76bce 100644
+index 951b697..4af1d8e 100644
 --- a/crates/macos/src/tree/properties/ax_ipc.rs
 +++ b/crates/macos/src/tree/properties/ax_ipc.rs
-@@ -78,7 +78,7 @@ fn install_messaging_timeout(
+@@ -69,7 +69,9 @@ fn prepare_mutation(
+     element: &crate::tree::AXElement,
+     deadline: impl AxDeadline,
+ ) -> Result<Duration, AdapterError> {
+-    install_messaging_timeout(element, deadline, mutation_slice)
++    install_messaging_timeout(element, deadline, |remaining| {
++        mutation_slice(remaining.saturating_sub(Duration::from_millis(10)))
++    })
+ }
+
+ #[cfg(target_os = "macos")]
+@@ -78,7 +80,7 @@ fn install_messaging_timeout(
      deadline: impl AxDeadline,
      slice: fn(Duration) -> Duration,
  ) -> Result<Duration, AdapterError> {
@@ -10311,7 +10540,7 @@ index 951b697..ab76bce 100644
          return Err(AdapterError::new(
              ErrorCode::ElementNotFound,
              "Cannot address a null accessibility element",
-@@ -94,7 +94,7 @@ fn install_messaging_timeout(
+@@ -94,7 +96,7 @@ fn install_messaging_timeout(
              "Accessibility deadline exhausted before IPC",
          ));
      }
@@ -10320,7 +10549,7 @@ index 951b697..ab76bce 100644
      if error == kAXErrorSuccess {
          Ok(remaining)
      } else {
-@@ -110,7 +110,7 @@ pub(crate) fn copy_attribute_value(
+@@ -110,7 +112,7 @@ pub(crate) fn copy_attribute_value(
  ) -> (i32, CFTypeRef) {
      let mut value: CFTypeRef = std::ptr::null();
      let error = match prepare(element, deadline) {
@@ -10329,7 +10558,7 @@ index 951b697..ab76bce 100644
          Err(error) => adapter_error_to_ax(&error),
      };
      (error, value)
-@@ -126,7 +126,12 @@ pub(crate) fn copy_parameterized_attribute_value(
+@@ -126,7 +128,12 @@ pub(crate) fn copy_parameterized_attribute_value(
      let mut value: CFTypeRef = std::ptr::null();
      let error = match prepare(element, deadline) {
          Ok(_) => unsafe {
@@ -10343,7 +10572,7 @@ index 951b697..ab76bce 100644
          },
          Err(error) => adapter_error_to_ax(&error),
      };
-@@ -144,7 +149,7 @@ pub(crate) fn copy_attribute_values(
+@@ -144,7 +151,7 @@ pub(crate) fn copy_attribute_values(
      let mut values = std::ptr::null();
      let error = match prepare(element, deadline) {
          Ok(_) => unsafe {
@@ -10352,7 +10581,7 @@ index 951b697..ab76bce 100644
          },
          Err(error) => adapter_error_to_ax(&error),
      };
-@@ -161,7 +166,7 @@ pub(crate) fn copy_multiple_attribute_values(
+@@ -161,7 +168,7 @@ pub(crate) fn copy_multiple_attribute_values(
      let error = match prepare(element, deadline) {
          Ok(_) => unsafe {
              AXUIElementCopyMultipleAttributeValues(
@@ -10361,7 +10590,7 @@ index 951b697..ab76bce 100644
                  attributes,
                  0,
                  &mut values as *mut _ as *mut _,
-@@ -180,7 +185,7 @@ pub(crate) fn attribute_value_count(
+@@ -180,7 +187,7 @@ pub(crate) fn attribute_value_count(
  ) -> Result<usize, i32> {
      let mut count: CFIndex = 0;
      let error = match prepare(element, deadline) {
@@ -10370,7 +10599,7 @@ index 951b697..ab76bce 100644
          Err(error) => adapter_error_to_ax(&error),
      };
      if error != kAXErrorSuccess {
-@@ -196,7 +201,7 @@ pub(crate) fn copy_action_names(
+@@ -196,7 +203,7 @@ pub(crate) fn copy_action_names(
  ) -> (i32, CFArrayRef) {
      let mut actions = std::ptr::null();
      let error = match prepare(element, deadline) {
@@ -10379,7 +10608,7 @@ index 951b697..ab76bce 100644
          Err(error) => adapter_error_to_ax(&error),
      };
      (error, actions)
-@@ -210,7 +215,7 @@ pub(crate) fn is_attribute_settable(
+@@ -210,7 +217,7 @@ pub(crate) fn is_attribute_settable(
  ) -> (i32, bool) {
      let mut settable = 0_u8;
      let error = match prepare(element, deadline) {
@@ -10388,41 +10617,55 @@ index 951b697..ab76bce 100644
          Err(error) => adapter_error_to_ax(&error),
      };
      (error, settable != 0)
-@@ -222,8 +227,15 @@ pub(crate) fn perform_action(
+@@ -222,8 +229,21 @@ pub(crate) fn perform_action(
      action: CFStringRef,
      deadline: impl AxDeadline,
  ) -> Result<i32, AdapterError> {
-+    element
-+        .qualify(deadline.absolute().map_err(pre_mutation_error)?)
-+        .map_err(pre_mutation_error)?;
-     prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
+-    prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
 -    Ok(unsafe { AXUIElementPerformAction(element.0, action) })
-+    agent_desktop_core::commands::clovy_cancel::ensure()?;
 +    let instant = deadline.absolute().map_err(pre_mutation_error)?;
-+    element.qualify(instant).map_err(pre_mutation_error)?;
-+    crate::tree::locator_deadline::remaining(instant).map_err(pre_mutation_error)?;
++    let authority = element
++        .effect_authority(instant)
++        .map_err(pre_mutation_error)?;
++    let timeout = prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
++    authority
++        .revalidate(element, instant)
++        .map_err(pre_mutation_error)?;
++    if instant.saturating_duration_since(Instant::now()) < timeout {
++        return Err(pre_mutation_error(AdapterError::timeout(
++            "Accessibility mutation budget expired before dispatch",
++        )));
++    }
 +    Ok(unsafe { AXUIElementPerformAction(element.raw(), action) })
  }
 
  #[cfg(target_os = "macos")]
-@@ -233,8 +245,15 @@ pub(crate) fn set_attribute_value(
+@@ -233,8 +253,21 @@ pub(crate) fn set_attribute_value(
      value: CFTypeRef,
      deadline: impl AxDeadline,
  ) -> Result<i32, AdapterError> {
-+    element
-+        .qualify(deadline.absolute().map_err(pre_mutation_error)?)
-+        .map_err(pre_mutation_error)?;
-     prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
+-    prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
 -    Ok(unsafe { AXUIElementSetAttributeValue(element.0, attribute, value) })
-+    agent_desktop_core::commands::clovy_cancel::ensure()?;
 +    let instant = deadline.absolute().map_err(pre_mutation_error)?;
-+    element.qualify(instant).map_err(pre_mutation_error)?;
-+    crate::tree::locator_deadline::remaining(instant).map_err(pre_mutation_error)?;
++    let authority = element
++        .effect_authority(instant)
++        .map_err(pre_mutation_error)?;
++    let timeout = prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
++    authority
++        .revalidate(element, instant)
++        .map_err(pre_mutation_error)?;
++    if instant.saturating_duration_since(Instant::now()) < timeout {
++        return Err(pre_mutation_error(AdapterError::timeout(
++            "Accessibility mutation budget expired before dispatch",
++        )));
++    }
 +    Ok(unsafe { AXUIElementSetAttributeValue(element.raw(), attribute, value) })
  }
 
  #[cfg(target_os = "macos")]
-@@ -246,7 +265,7 @@ pub(crate) fn element_at_position(
+@@ -246,7 +279,7 @@ pub(crate) fn element_at_position(
      let mut element = std::ptr::null_mut();
      let error = match prepare(system, deadline) {
          Ok(_) => unsafe {
@@ -10431,7 +10674,7 @@ index 951b697..ab76bce 100644
          },
          Err(error) => adapter_error_to_ax(&error),
      };
-@@ -257,7 +276,7 @@ pub(crate) fn element_at_position(
+@@ -257,7 +290,7 @@ pub(crate) fn element_at_position(
  pub(crate) fn pid(element: &crate::tree::AXElement, deadline: impl AxDeadline) -> Result<i32, i32> {
      let mut pid = 0_i32;
      let error = match prepare(element, deadline) {

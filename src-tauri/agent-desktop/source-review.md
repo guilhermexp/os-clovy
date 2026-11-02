@@ -232,6 +232,16 @@ This is a partial input checkpoint: global keyboard, scoped window pointer and
 drag, receiver qualification and cleanup acknowledgement remain open. The
 metadata and portable error-flow checks do not establish native behavior.
 
+The AX effect boundary now retains filesystem-qualified process evidence,
+checks Stop, then revalidates process image, birth, window and AX owner using
+native metadata before dispatch. The mutation timeout remains installed during
+that final check. Descendant activation binds children before reading or acting.
+Exact screenshot spawn records an attempt only at the actual spawn boundary,
+after the work-deadline check. Standalone notification traversal still has a
+separate raw-child consumer and is outside this checkpoint; it needs its own
+original session identity migration. Native AX and screenshot behavior remain
+unverified.
+
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:
 local Git signature verification was unavailable. It does not establish
