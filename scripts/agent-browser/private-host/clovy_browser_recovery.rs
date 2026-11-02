@@ -15,10 +15,6 @@ use std::{
 };
 
 type Id = [u64; 2];
-#[cfg(windows)]
-pub(crate) fn sync_directory_path(path: &Path) -> io::Result<()> {
-    native::sync(&native::root(path, false)?)
-}
 const RECEIPT: &str = ".clovy-reserved.json";
 const LEASE: &str = ".clovy-lease";
 const MARKER: &str = ".clovy-starting";
@@ -911,6 +907,19 @@ mod tests {
             std::io::stdin().read_line(&mut line).unwrap();
             let grant: super::super::clovy_browser_grant::Grant =
                 serde_json::from_str(&line).unwrap();
+            if std::env::var_os("CLOVY_GC_SWAP_PROFILE").is_some() {
+                let profile = grant.profile.clone();
+                HOOK.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move |at| {
+                        if at == "grant-before-owned" {
+                            std::fs::rename(&profile, profile.with_file_name("captured-original"))
+                                .unwrap();
+                            std::fs::create_dir(&profile).unwrap();
+                            std::fs::write(profile.join("sentinel"), b"replacement").unwrap();
+                        }
+                    }))
+                });
+            }
             assert!(
                 grant.acquire_owned(None).is_err(),
                 "cancelled/dead-owner host was admitted"
@@ -983,6 +992,59 @@ mod tests {
             assert!(root.recover().unwrap().is_empty());
             assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
         }
+    }
+    #[test]
+    fn host_owned_publication_uses_captured_profile_after_name_swap() {
+        let test = format!(
+            "{}::process_fixture",
+            module_path!().split_once("::").unwrap().1
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let mut owner = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test, "--nocapture"])
+            .env("CLOVY_GC_CHILD", temp.path())
+            .env("CLOVY_GC_ROLE", "owner")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut owner_output = BufReader::new(owner.stdout.take().unwrap());
+        let grant = barrier(&mut owner_output, "GRANT=");
+        let nonce = serde_json::from_str::<Value>(&grant).unwrap()["nonce"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut host = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test, "--nocapture"])
+            .env("CLOVY_GC_CHILD", temp.path())
+            .env("CLOVY_GC_ROLE", "host")
+            .env("CLOVY_GC_SWAP_PROFILE", "1")
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(host.stdin.take().unwrap(), "{grant}").unwrap();
+        let output = host.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let replacement = temp.path().join(nonce);
+        assert_eq!(
+            std::fs::read(replacement.join("sentinel")).unwrap(),
+            b"replacement"
+        );
+        assert!(!replacement.join(RECEIPT).exists());
+        assert!(!replacement.join(LEASE).exists());
+        let original: Value = serde_json::from_slice(
+            &std::fs::read(temp.path().join("captured-original").join(RECEIPT)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(original["phase"], "Owned");
+        owner.stdin.take().unwrap().write_all(b"x").unwrap();
+        assert!(owner.wait().unwrap().success());
     }
     #[test]
     fn crash_each_durable_boundary_resumes_in_another_process() {

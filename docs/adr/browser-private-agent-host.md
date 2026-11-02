@@ -146,6 +146,9 @@ the existing physical lease and rereads the receipt under that lock. It never
 creates a missing lease. A dead original parent with `Starting` and no `Owned`
 is cancelled durably before collection. A bootstrap that has not acquired the
 lease has no authority; its post-lock validation refuses the cancelled phase.
+The host reads anonymous controls and publishes `Owned` relative to its captured
+profile capability and retains that capability beside the original lease.
+Replacing the profile's name during publication cannot redirect its write.
 `Cancelled` is recoverable after another crash. Stop instead derives authority
 from its cancelled Slot and the exit of the original supervised tree; the local
 parent need not die.

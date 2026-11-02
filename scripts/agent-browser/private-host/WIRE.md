@@ -33,6 +33,10 @@ identified controls and empty directories, preserving unexpected payload,
 unknown entries and all persistent profiles. A lease is never recreated.
 See the 2026-11-02 addendum in `docs/adr/browser-private-agent-host.md`.
 
+The anonymous host retains the same profile capability as its lease, including
+receipt publication and subsequent ownership validation. These operations do
+not resolve a replacement profile by its former pathname.
+
 Every subsequent JSON line is bounded to 16 MiB and contains `id:u64` and an
 `action`. Unknown action fields are rejected. Responses are
 `{id,delivery,data? ,error?:{code,message}}`; error codes come from a finite local

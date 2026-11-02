@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 
@@ -165,63 +165,6 @@ pub(crate) fn lock_profile(file: &File) -> io::Result<()> {
     }
 }
 
-pub(crate) fn sync_profile_directory(profile: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    File::open(profile)?.sync_all()?;
-    #[cfg(windows)]
-    super::clovy_browser_recovery::sync_directory_path(profile)?;
-    Ok(())
-}
-
-pub(crate) fn create_receipt_file(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(0x8000_0000);
-    }
-    options.open(path)
-}
-
-pub(crate) fn publish_receipt_file(
-    source: &Path,
-    destination: &Path,
-    replace: bool,
-) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        let _ = replace;
-        fs::rename(source, destination)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn MoveFileExW(source: *const u16, destination: *const u16, flags: u32) -> i32;
-        }
-        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-        let destination: Vec<u16> = destination
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
-        if unsafe {
-            MoveFileExW(
-                source.as_ptr(),
-                destination.as_ptr(),
-                0x8 | if replace { 1 } else { 0 },
-            )
-        } == 0
-        {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
-}
-
 fn grant_directory_identity(path: &Path, persistent: bool) -> io::Result<[u64; 2]> {
     if persistent {
         profile_object_identity(&fs::canonicalize(path)?)
@@ -265,6 +208,7 @@ pub(crate) struct OwnedLease {
     #[cfg(windows)]
     job: OwnedJob,
     lease: File,
+    profile: super::clovy_browser_recovery::RecoveryProfile,
 }
 
 // Keep the lease after closing the direct browser process until its remaining
@@ -561,6 +505,17 @@ fn open_own_job(name: &str) -> io::Result<OwnedJob> {
 }
 
 impl Grant {
+    fn anonymous_profile(&self) -> io::Result<super::clovy_browser_recovery::RecoveryProfile> {
+        let profile = super::clovy_browser_recovery::RecoveryRoot::open(&self.root)?
+            .profile(std::ffi::OsStr::new(&self.nonce))?;
+        if self.persistent
+            || profile.root_identity() != self.root_identity
+            || profile.identity() != self.profile_identity
+        {
+            return Err(io::Error::other("invalid browser profile capability"));
+        }
+        Ok(profile)
+    }
     #[cfg(windows)]
     pub(crate) fn browser_job_name(&self) -> String {
         format!("Local\\ClovyBrowser-{}", self.nonce)
@@ -625,11 +580,11 @@ impl Grant {
             if self.profile.file_name().and_then(|v| v.to_str()) != Some(self.nonce.as_str()) {
                 return Err(io::Error::other("invalid browser grant"));
             }
-            let path = self.profile.join(".clovy-reserved.json");
-            let mut receipt = open_existing_plain(&path, false)?;
+            let profile = self.anonymous_profile()?;
+            let mut receipt = profile.open_file(".clovy-reserved.json", false)?;
             let mut bytes = Vec::new();
             (&mut receipt).take(4097).read_to_end(&mut bytes)?;
-            if bytes.len() > 4096 || !same_open_file(&receipt, &path) {
+            if bytes.len() > 4096 || !profile.same_file(".clovy-reserved.json", &receipt) {
                 return Err(io::Error::other("invalid browser grant"));
             }
             let value: Value = serde_json::from_slice(&bytes)?;
@@ -649,12 +604,10 @@ impl Grant {
             {
                 return Err(io::Error::other("invalid browser grant"));
             }
-            let mut marker = open_existing_plain(&self.profile.join(".clovy-starting"), false)?;
+            let mut marker = profile.open_file(".clovy-starting", false)?;
             let mut content = Vec::new();
             (&mut marker).take(32).read_to_end(&mut content)?;
-            if content != b"Starting\n"
-                || !same_open_file(&marker, &self.profile.join(".clovy-starting"))
-            {
+            if content != b"Starting\n" || !profile.same_file(".clovy-starting", &marker) {
                 return Err(io::Error::other("invalid browser grant"));
             }
         } else if expected.is_some() {
@@ -676,12 +629,12 @@ impl Grant {
         self.validate()?;
         #[cfg(test)]
         super::clovy_browser_recovery::checkpoint("grant-before-lock");
-        let lease_path = self.profile.join(".clovy-lease");
-        let lease = open_existing_plain(&lease_path, true)?;
+        let profile = self.anonymous_profile()?;
+        let lease = profile.open_file(".clovy-lease", true)?;
         lock_profile(&lease)?;
         #[cfg(test)]
         super::clovy_browser_recovery::checkpoint("grant-after-lock");
-        if !same_open_file(&lease, &lease_path) {
+        if !profile.same_file(".clovy-lease", &lease) {
             return Err(io::Error::other("lease changed"));
         }
         self.validate()?;
@@ -717,11 +670,10 @@ impl Grant {
             job: job_name.map(str::to_owned),
             boot: boot_identity()?,
         };
-        let receipt_path = self.profile.join(".clovy-reserved.json");
-        let mut source = open_existing_plain(&receipt_path, false)?;
+        let mut source = profile.open_file(".clovy-reserved.json", false)?;
         let mut bytes = Vec::new();
         (&mut source).take(4097).read_to_end(&mut bytes)?;
-        if bytes.len() > 4096 || !same_open_file(&source, &receipt_path) {
+        if bytes.len() > 4096 || !profile.same_file(".clovy-reserved.json", &source) {
             return Err(io::Error::other("receipt changed"));
         }
         let mut receipt: Value = serde_json::from_slice(&bytes)?;
@@ -729,26 +681,20 @@ impl Grant {
             return Err(io::Error::other("invalid receipt phase"));
         }
         self.validate()?;
-        if !same_open_file(&source, &receipt_path) {
+        if !profile.same_file(".clovy-reserved.json", &source) {
             return Err(io::Error::other("receipt changed"));
         }
         receipt["phase"] = json!("Owned");
         receipt["owned"] = json!(&owned);
-        let temporary = self
-            .profile
-            .join(format!(".clovy-owned-{}.tmp", uuid::Uuid::new_v4()));
-        let mut file = create_receipt_file(&temporary)?;
-        serde_json::to_writer(&mut file, &receipt)?;
-        file.flush()?;
-        file.sync_all()?;
-        drop(file);
+        #[cfg(test)]
+        super::clovy_browser_recovery::checkpoint("grant-before-owned");
         drop(source);
-        publish_receipt_file(&temporary, &receipt_path, true)?;
-        sync_profile_directory(&self.profile)?;
+        profile.replace_receipt(&serde_json::to_vec(&receipt)?)?;
         self.validate_phase(Some(&owned))?;
         Ok(OwnedLease {
             identity: owned,
             lease,
+            profile,
             #[cfg(windows)]
             job,
         })
@@ -794,7 +740,7 @@ impl OwnedLease {
     pub(crate) fn validate(&self, grant: &Grant) -> io::Result<()> {
         if self.identity.host_pid != std::process::id()
             || process_birth(self.identity.host_pid)? != self.identity.host_birth
-            || !same_open_file(&self.lease, &grant.profile.join(".clovy-lease"))
+            || !self.profile.same_file(".clovy-lease", &self.lease)
         {
             return Err(io::Error::other("ownership changed"));
         }
