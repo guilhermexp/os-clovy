@@ -30,6 +30,12 @@ element's current native PID and those stored generations before provider
 reads and requalify around later calls. Missing identity fails closed. Tree
 traversal, batched cache and related-element reads still require their own
 guards; this increment does not establish native UIA acceptance.
+Process-generation mismatches and disappeared processes retain the StaleRef
+contract; a private or indeterminate policy classification is PolicyDenied.
+Live UIA qualification observes the existing deadline before and after its
+native and filesystem checks. Root observe/resolve guards are partial: child
+and sibling cache-prefetch still require metadata-first qualification before
+this source can be considered protected for tree traversal.
 Windows UIA descendants, capture, input and other native guards, macOS guards,
 a newly prepared engine, and native acceptance remain pending. This partial
 change does not qualify an existing engine artifact.

@@ -4484,6 +4484,94 @@ index 82d6d61..c253888 100644
    "Win32_System_Com",
    "Win32_System_Com_StructuredStorage",
    "Win32_System_WinRT_Direct3D11",
+diff --git a/crates/windows/src/actions/dispatch.rs b/crates/windows/src/actions/dispatch.rs
+index 73b73f3..871b914 100644
+--- a/crates/windows/src/actions/dispatch.rs
++++ b/crates/windows/src/actions/dispatch.rs
+@@ -65,7 +65,7 @@ mod imp {
+         }
+         let element = uia_element(handle)?;
+         deadline.ensure_remaining()?;
+-        corroborate_verified_process(element)?;
++        corroborate_verified_process(element, deadline)?;
+         crate::input::native_owner::ensure_interactive_desktop()?;
+         match &request.action {
+             Action::Click => execute_click(element, request.policy, deadline),
+diff --git a/crates/windows/src/actions/physical_target.rs b/crates/windows/src/actions/physical_target.rs
+index 37447ec..3611544 100644
+--- a/crates/windows/src/actions/physical_target.rs
++++ b/crates/windows/src/actions/physical_target.rs
+@@ -59,7 +59,7 @@ pub(crate) fn ensure_click_delivery_ready(
+     deadline: Deadline,
+ ) -> Result<bool, AdapterError> {
+     deadline.ensure_remaining()?;
+-    corroborate_verified_process(element)?;
++    corroborate_verified_process(element, deadline)?;
+     ensure_elevation_allows(element)?;
+     target_window_is_foreground(element, deadline)
+ }
+@@ -69,7 +69,7 @@ pub(crate) fn ensure_keyboard_delivery_ready(
+     deadline: Deadline,
+ ) -> Result<bool, AdapterError> {
+     deadline.ensure_remaining()?;
+-    corroborate_verified_process(element)?;
++    corroborate_verified_process(element, deadline)?;
+     ensure_elevation_allows(element)?;
+     crate::actions::focus::keyboard_focus_ready(element)
+ }
+diff --git a/crates/windows/src/actions/scroll_into_view.rs b/crates/windows/src/actions/scroll_into_view.rs
+index f27e44c..065e538 100644
+--- a/crates/windows/src/actions/scroll_into_view.rs
++++ b/crates/windows/src/actions/scroll_into_view.rs
+@@ -69,7 +69,7 @@ mod imp {
+         let element = uia_element(handle)?;
+         let deadline = lease.deadline();
+         deadline.ensure_remaining()?;
+-        corroborate_verified_process(element)?;
++        corroborate_verified_process(element, deadline)?;
+         scroll_into_view_element(element, deadline)
+     }
+
+diff --git a/crates/windows/src/actions/scroll_ladder.rs b/crates/windows/src/actions/scroll_ladder.rs
+index 0e46949..a1ab089 100644
+--- a/crates/windows/src/actions/scroll_ladder.rs
++++ b/crates/windows/src/actions/scroll_ladder.rs
+@@ -200,7 +200,7 @@ mod imp {
+         deadline: Deadline,
+     ) -> Result<Option<DeliveryOutcome>, AdapterError> {
+         deadline.ensure_remaining()?;
+-        corroborate_verified_process(element)?;
++        corroborate_verified_process(element, deadline)?;
+         let client = automation_client()?;
+         let Some(walker) = client.get_raw_view_walker().ok() else {
+             return Ok(None);
+@@ -249,7 +249,7 @@ mod imp {
+         context: &str,
+     ) -> Result<VisibilitySample, AdapterError> {
+         deadline.ensure_remaining()?;
+-        corroborate_verified_process(element)?;
++        corroborate_verified_process(element, deadline)?;
+         let bounds = match read_one(element, TreeProperty::BoundingRectangle).bounds() {
+             LocatorField::Known(bounds) => Some(bounds),
+             LocatorField::Absent => None,
+@@ -285,7 +285,7 @@ mod imp {
+         deadline: Deadline,
+     ) -> Result<(), AdapterError> {
+         deadline.ensure_remaining()?;
+-        corroborate_verified_process(ancestor)?;
++        corroborate_verified_process(ancestor, deadline)?;
+         let pattern = match ancestor.0.get_pattern::<UIScrollPattern>() {
+             Ok(pattern) => pattern,
+             Err(error) => {
+@@ -325,7 +325,7 @@ mod imp {
+             offset,
+         )?;
+         deadline.ensure_remaining()?;
+-        corroborate_verified_process(ancestor)?;
++        corroborate_verified_process(ancestor, deadline)?;
+         let (x, y) = if horizontal {
+             (percent, -1.0)
+         } else {
 diff --git a/crates/windows/src/lib.rs b/crates/windows/src/lib.rs
 index 44d3f2c..63dd5c2 100644
 --- a/crates/windows/src/lib.rs
@@ -4503,19 +4591,26 @@ index 44d3f2c..63dd5c2 100644
 
 diff --git a/crates/windows/src/private_browser_guard.rs b/crates/windows/src/private_browser_guard.rs
 new file mode 100644
-index 0000000..4486444
+index 0000000..08d7b32
 --- /dev/null
 +++ b/crates/windows/src/private_browser_guard.rs
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,205 @@
 +//! Private host configuration and per-use process image qualification.
 +use agent_desktop_core::{AdapterError, ErrorCode, ProcessId};
 +
 +fn denied() -> AdapterError {
 +    AdapterError::new(
-+        ErrorCode::WindowNotFound,
++        ErrorCode::PolicyDenied,
 +        "This target cannot be controlled here",
 +    )
 +    .with_suggestion("Use Browser use or take over manually.")
++}
++
++fn stale() -> AdapterError {
++    AdapterError::new(
++        ErrorCode::StaleRef,
++        "The target process identity is unavailable or changed",
++    )
 +}
 +
 +#[cfg(target_os = "windows")]
@@ -4577,20 +4672,63 @@ index 0000000..4486444
 +    _owner: Option<QualifiedProcess>,
 +}
 +
++impl QualifiedWindowProcesses {
++    pub(crate) fn owner_token(&self) -> &str {
++        self._owner.as_ref().unwrap_or(&self._target).token()
++    }
++}
++
 +#[cfg(target_os = "windows")]
 +pub(crate) fn qualify(pid: ProcessId) -> Result<QualifiedProcess, AdapterError> {
++    qualify_inner(pid, None)
++}
++
++#[cfg(target_os = "windows")]
++fn qualify_inner(pid: ProcessId, expected: Option<&str>) -> Result<QualifiedProcess, AdapterError> {
 +    use std::{os::windows::ffi::OsStringExt, path::PathBuf};
-+    use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, FILETIME, GetLastError};
++    use windows_sys::Win32::Foundation::{
++        ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, FILETIME, GetLastError,
++    };
 +    use windows_sys::Win32::System::Threading::{
-+        GetProcessTimes, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-+        QueryFullProcessImageNameW,
++        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_NAME_WIN32,
++        PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 +    };
 +    let runtime = runtime()?;
 +    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, u32::from(pid)) };
 +    if raw.is_null() {
-+        return Err(denied());
++        return Err(if unsafe { GetLastError() } == ERROR_INVALID_PARAMETER {
++            stale()
++        } else {
++            denied()
++        });
 +    }
 +    let handle = ProcessHandle(raw);
++    let mut exit_code = 0u32;
++    if unsafe { GetExitCodeProcess(handle.0, &mut exit_code) } == 0 {
++        return Err(denied());
++    }
++    if exit_code != windows_sys::Win32::Foundation::STILL_ACTIVE as u32 {
++        return Err(stale());
++    }
++    let mut created = FILETIME::default();
++    let mut exit = FILETIME::default();
++    let mut kernel = FILETIME::default();
++    let mut user = FILETIME::default();
++    if unsafe { GetProcessTimes(handle.0, &mut created, &mut exit, &mut kernel, &mut user) } == 0 {
++        return Err(stale());
++    }
++    let ticks = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
++    if ticks == 0 {
++        return Err(stale());
++    }
++    let token = format!(
++        "windows-proc-v1:{}:{}",
++        ticks / 10_000_000,
++        ticks % 10_000_000
++    );
++    if expected.is_some_and(|expected| expected != token) {
++        return Err(stale());
++    }
 +    let mut small = [0u16; 512];
 +    let mut len = small.len() as u32;
 +    let ok = unsafe {
@@ -4612,24 +4750,12 @@ index 0000000..4486444
 +        }
 +        PathBuf::from(std::ffi::OsString::from_wide(&large[..len as usize]))
 +    };
-+    let mut created = FILETIME::default();
-+    let mut exit = FILETIME::default();
-+    let mut kernel = FILETIME::default();
-+    let mut user = FILETIME::default();
-+    if unsafe { GetProcessTimes(handle.0, &mut created, &mut exit, &mut kernel, &mut user) } == 0 {
-+        return Err(denied());
-+    }
-+    let ticks = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
-+    if ticks == 0 || !matches!(runtime.owns(&path), Ok(false)) {
++    if !matches!(runtime.owns(&path), Ok(false)) {
 +        return Err(denied());
 +    }
 +    Ok(QualifiedProcess {
 +        _handle: handle,
-+        token: format!(
-+            "windows-proc-v1:{}:{}",
-+            ticks / 10_000_000,
-+            ticks % 10_000_000
-+        ),
++        token,
 +    })
 +}
 +
@@ -4638,35 +4764,44 @@ index 0000000..4486444
 +    Err(denied())
 +}
 +
++#[cfg(target_os = "windows")]
 +pub(crate) fn qualify_expected(
 +    pid: ProcessId,
 +    expected: &str,
 +) -> Result<QualifiedProcess, AdapterError> {
-+    let authority = qualify(pid)?;
-+    if authority.token != expected {
-+        return Err(denied());
-+    }
-+    Ok(authority)
++    qualify_inner(pid, Some(expected))
++}
++
++#[cfg(not(target_os = "windows"))]
++pub(crate) fn qualify_expected(
++    _pid: ProcessId,
++    _expected: &str,
++) -> Result<QualifiedProcess, AdapterError> {
++    Err(denied())
 +}
 +
 +pub(crate) fn qualify_window_processes(
 +    owner: ProcessId,
 +    pid: ProcessId,
 +    expected: &str,
++    deadline: agent_desktop_core::Deadline,
 +) -> Result<QualifiedWindowProcesses, AdapterError> {
++    deadline.ensure_remaining()?;
 +    let target = qualify_expected(pid, expected)?;
++    deadline.ensure_remaining()?;
 +    let owner = if owner == pid {
 +        None
 +    } else {
 +        Some(qualify(owner)?)
 +    };
++    deadline.ensure_remaining()?;
 +    Ok(QualifiedWindowProcesses {
 +        _target: target,
 +        _owner: owner,
 +    })
 +}
 diff --git a/crates/windows/src/system/capture/capture_backend.rs b/crates/windows/src/system/capture/capture_backend.rs
-index f33a96f..a76ad80 100644
+index f33a96f..1803025 100644
 --- a/crates/windows/src/system/capture/capture_backend.rs
 +++ b/crates/windows/src/system/capture/capture_backend.rs
 @@ -1,15 +1,12 @@
@@ -4688,7 +4823,7 @@ index f33a96f..a76ad80 100644
 
  use super::capture_display::capture_display_at;
  use super::capture_modern;
-@@ -20,10 +17,78 @@ use crate::system::window::window_enum::WindowHandle;
+@@ -20,10 +17,80 @@ use crate::system::window::window_enum::WindowHandle;
  /// degradation must not starve the fallback of its deadline).
  const LEGACY_DEADLINE_FLOOR: Duration = Duration::from_millis(200);
 
@@ -4727,6 +4862,7 @@ index f33a96f..a76ad80 100644
 +            evidence.pid,
 +            evidence.process_instance,
 +        )?;
++        deadline.ensure_remaining()?;
 +        let owner = if self.owner == evidence.pid {
 +            if self.owner_token != evidence.process_instance {
 +                return Err(AdapterError::new(
@@ -4741,6 +4877,7 @@ index f33a96f..a76ad80 100644
 +                &self.owner_token,
 +            )?)
 +        };
++        deadline.ensure_remaining()?;
 +        if live_window_owner(handle) != Some(self.owner) || !evidence.owns_handle_now()? {
 +            return Err(AdapterError::new(
 +                ErrorCode::StaleRef,
@@ -4769,7 +4906,7 @@ index f33a96f..a76ad80 100644
          scale_factor: f64,
      },
      Display {
-@@ -65,9 +130,9 @@ pub(crate) fn capture_modern(
+@@ -65,9 +132,9 @@ pub(crate) fn capture_modern(
      }
      match subject {
          CaptureSubject::Window {
@@ -4781,7 +4918,7 @@ index f33a96f..a76ad80 100644
          CaptureSubject::Display { index } => capture_modern::capture_display(index, deadline),
      }
  }
-@@ -78,28 +143,32 @@ pub(crate) fn capture_legacy(
+@@ -78,28 +145,32 @@ pub(crate) fn capture_legacy(
  ) -> Result<ImageBuffer, AdapterError> {
      match subject {
          CaptureSubject::Window {
@@ -5287,7 +5424,7 @@ index 6b976ef..58e4327 100644
      .expect("bare PrintWindow retry must succeed on the pattern fixture");
      assert!(
 diff --git a/crates/windows/src/system/capture/screenshot.rs b/crates/windows/src/system/capture/screenshot.rs
-index 75b4c76..4309a44 100644
+index 75b4c76..b091e04 100644
 --- a/crates/windows/src/system/capture/screenshot.rs
 +++ b/crates/windows/src/system/capture/screenshot.rs
 @@ -5,7 +5,7 @@ use agent_desktop_core::{
@@ -5299,7 +5436,7 @@ index 75b4c76..4309a44 100644
  use crate::system::display::{
      capture_selection, display_at, scale_for_bounds, verify_display_identity,
  };
-@@ -94,9 +94,43 @@ pub(crate) fn capture_window(
+@@ -94,9 +94,39 @@ pub(crate) fn capture_window(
      }
      let scale = scale_for_bounds(verified.bounds, deadline)?;
      deadline.ensure_remaining()?;
@@ -5315,14 +5452,10 @@ index 75b4c76..4309a44 100644
 +        owner,
 +        evidence.pid,
 +        evidence.process_instance,
++        deadline,
 +    )?;
-+    let owner_token = if owner == evidence.pid {
-+        evidence.process_instance.to_owned()
-+    } else {
-+        crate::private_browser_guard::qualify(owner)?
-+            .token()
-+            .to_owned()
-+    };
++    deadline.ensure_remaining()?;
++    let owner_token = _authority.owner_token().to_owned();
 +    if crate::system::window::window_identity::live_window_owner(handle) != Some(owner)
 +        || !evidence.owns_handle_now()?
 +    {
@@ -5344,8 +5477,42 @@ index 75b4c76..4309a44 100644
              scale_factor: scale,
          },
          deadline,
+diff --git a/crates/windows/src/system/window/window_identity.rs b/crates/windows/src/system/window/window_identity.rs
+index 15125cc..a49c42f 100644
+--- a/crates/windows/src/system/window/window_identity.rs
++++ b/crates/windows/src/system/window/window_identity.rs
+@@ -2,6 +2,29 @@ use agent_desktop_core::{AdapterError, ErrorCode, ProcessId, WindowInfo};
+
+ use crate::system::process_identity;
+
++pub(crate) fn qualify_window(
++    window: &WindowInfo,
++    deadline: agent_desktop_core::Deadline,
++) -> Result<crate::private_browser_guard::QualifiedWindowProcesses, AdapterError> {
++    deadline.ensure_remaining()?;
++    let handle = super::window_ops::parse_handle(&window.id);
++    let evidence = WindowIdentityEvidence::from_info(handle, window)
++        .ok_or_else(|| window_identity_mismatch(handle))?;
++    let owner = live_window_owner(handle).ok_or_else(|| window_identity_mismatch(handle))?;
++    let authority = crate::private_browser_guard::qualify_window_processes(
++        owner,
++        evidence.pid,
++        evidence.process_instance,
++        deadline,
++    )?;
++    deadline.ensure_remaining()?;
++    if live_window_owner(handle) != Some(owner) || !evidence.owns_handle_now()? {
++        return Err(window_identity_mismatch(handle));
++    }
++    deadline.ensure_remaining()?;
++    Ok(authority)
++}
++
+ /// The immutable identity evidence a resolved window must match.
+ ///
+ /// Fresh-list verification is strict (title included), while stored-evidence
 diff --git a/crates/windows/src/system/window/window_ops.rs b/crates/windows/src/system/window/window_ops.rs
-index ca7efde..c04c64c 100644
+index ca7efde..7bf92f9 100644
 --- a/crates/windows/src/system/window/window_ops.rs
 +++ b/crates/windows/src/system/window/window_ops.rs
 @@ -138,6 +138,7 @@ fn list_windows_live_once(
@@ -5356,7 +5523,7 @@ index ca7efde..c04c64c 100644
      #[cfg(test)]
      enumeration_calls::record();
 
-@@ -161,11 +162,25 @@ fn list_windows_live_once(
+@@ -161,11 +162,36 @@ fn list_windows_live_once(
          let Some((pid, token, app)) = identity_facts(window.handle) else {
              return true;
          };
@@ -5366,11 +5533,22 @@ index ca7efde..c04c64c 100644
 +        let Some(token_ref) = token.as_deref() else {
 +            return true;
 +        };
-+        let Ok(_authority) =
-+            crate::private_browser_guard::qualify_window_processes(owner, pid, token_ref)
-+        else {
-+            return true;
++        let _authority = match crate::private_browser_guard::qualify_window_processes(
++            owner, pid, token_ref, deadline,
++        ) {
++            Ok(authority) => authority,
++            Err(_) => {
++                if let Err(error) = deadline.ensure_remaining() {
++                    *failure.borrow_mut() = Some(error);
++                    return false;
++                }
++                return true;
++            }
 +        };
++        if let Err(error) = deadline.ensure_remaining() {
++            *failure.borrow_mut() = Some(error);
++            return false;
++        }
          if let Some(filter_name) = app_filter {
              if !app_name_matches(&app, filter_name) {
                  return true;
@@ -5383,10 +5561,10 @@ index ca7efde..c04c64c 100644
          let focused = !focused_seen && is_foreground_window(window.handle);
          if filter.focused_only && !focused {
 diff --git a/crates/windows/src/system/window/window_resolve.rs b/crates/windows/src/system/window/window_resolve.rs
-index 6a629ce..9376d88 100644
+index 6a629ce..e18f647 100644
 --- a/crates/windows/src/system/window/window_resolve.rs
 +++ b/crates/windows/src/system/window/window_resolve.rs
-@@ -30,13 +30,30 @@ pub(crate) fn resolve_window_strict(
+@@ -30,13 +30,32 @@ pub(crate) fn resolve_window_strict(
              "headed focus requires a process-instance token on the stored window",
          ));
      };
@@ -5397,7 +5575,9 @@ index 6a629ce..9376d88 100644
 +        owner,
 +        evidence.pid,
 +        evidence.process_instance,
++        deadline,
 +    )?;
++    deadline.ensure_remaining()?;
 +    if super::window_identity::live_window_owner(handle) != Some(owner) {
 +        return Err(AdapterError::new(
 +            ErrorCode::WindowNotFound,
@@ -5418,7 +5598,7 @@ index 6a629ce..9376d88 100644
  ) -> Result<WindowInfo, AdapterError> {
      let mut found = None;
      enumerate_top_level(|window| {
-@@ -58,6 +75,28 @@ fn live_window_info(
+@@ -58,6 +77,30 @@ fn live_window_info(
              "window is no longer an agent-visible top-level window",
          ));
      }
@@ -5431,7 +5611,9 @@ index 6a629ce..9376d88 100644
 +        expected.process_instance.as_deref().ok_or_else(|| {
 +            AdapterError::new(ErrorCode::StaleRef, "Window generation is unavailable")
 +        })?,
++        deadline,
 +    )?;
++    deadline.ensure_remaining()?;
 +    let evidence = WindowIdentityEvidence::from_info(handle, expected).ok_or_else(|| {
 +        AdapterError::new(ErrorCode::StaleRef, "Window generation is unavailable")
 +    })?;
@@ -5448,7 +5630,7 @@ index 6a629ce..9376d88 100644
      Ok(WindowInfo {
          id: expected.id.clone(),
 diff --git a/crates/windows/src/tree/element.rs b/crates/windows/src/tree/element.rs
-index 473e0cc..17f027d 100644
+index 473e0cc..a7b89d3 100644
 --- a/crates/windows/src/tree/element.rs
 +++ b/crates/windows/src/tree/element.rs
 @@ -9,6 +9,8 @@ use agent_desktop_core::{AdapterError, ErrorCode, NativeHandle};
@@ -5485,12 +5667,48 @@ index 473e0cc..17f027d 100644
      }
 
      /// The verified process identity, if this element resolved through the
-@@ -85,6 +101,43 @@ impl UIAElement {
+@@ -83,6 +99,88 @@ impl UIAElement {
+             .as_ref()
+             .map(|payload| (payload.pid, payload.token.as_str()))
      }
- }
-
++
++    pub(crate) fn matches_root(&self, pid: u32, token: &str) -> bool {
++        self.1
++            .as_ref()
++            .is_some_and(|payload| payload.root_pid == pid && payload.root_token == token)
++    }
++}
++
 +#[cfg(target_os = "windows")]
-+pub(crate) fn qualify_verified(element: &UIAElement) -> Result<ElementAuthority, AdapterError> {
++pub(crate) fn qualify_current(
++    element: &UIAElement,
++    deadline: agent_desktop_core::Deadline,
++) -> Result<crate::private_browser_guard::QualifiedProcess, AdapterError> {
++    let stale = || {
++        AdapterError::new(
++            ErrorCode::StaleRef,
++            "Element identity is unavailable or changed",
++        )
++    };
++    deadline.ensure_remaining()?;
++    let pid = element.0.get_process_id().map_err(|_| stale())?;
++    if pid == 0 {
++        return Err(stale());
++    }
++    let authority = crate::private_browser_guard::qualify(agent_desktop_core::ProcessId::new(pid))?;
++    deadline.ensure_remaining()?;
++    if element.0.get_process_id().map_err(|_| stale())? != pid {
++        return Err(stale());
++    }
++    deadline.ensure_remaining()?;
++    Ok(authority)
++}
++
++#[cfg(target_os = "windows")]
++pub(crate) fn qualify_verified(
++    element: &UIAElement,
++    deadline: agent_desktop_core::Deadline,
++) -> Result<ElementAuthority, AdapterError> {
 +    use agent_desktop_core::ProcessId;
 +    let stale = || {
 +        AdapterError::new(
@@ -5498,6 +5716,7 @@ index 473e0cc..17f027d 100644
 +            "Element identity is unavailable or changed",
 +        )
 +    };
++    deadline.ensure_remaining()?;
 +    let payload = element.1.as_ref().ok_or_else(stale)?;
 +    let current = element.0.get_process_id().map_err(|_| stale())?;
 +    if current == 0 || current != payload.pid {
@@ -5507,13 +5726,23 @@ index 473e0cc..17f027d 100644
 +        ProcessId::new(payload.root_pid),
 +        &payload.root_token,
 +    )?;
-+    let target = crate::private_browser_guard::qualify_expected(
-+        ProcessId::new(payload.pid),
-+        &payload.token,
-+    )?;
++    deadline.ensure_remaining()?;
++    let target = if payload.pid == payload.root_pid {
++        if payload.token != payload.root_token {
++            return Err(stale());
++        }
++        None
++    } else {
++        Some(crate::private_browser_guard::qualify_expected(
++            ProcessId::new(payload.pid),
++            &payload.token,
++        )?)
++    };
++    deadline.ensure_remaining()?;
 +    if element.0.get_process_id().map_err(|_| stale())? != current {
 +        return Err(stale());
 +    }
++    deadline.ensure_remaining()?;
 +    Ok(ElementAuthority {
 +        _root: root,
 +        _target: target,
@@ -5523,12 +5752,10 @@ index 473e0cc..17f027d 100644
 +#[cfg(target_os = "windows")]
 +pub(crate) struct ElementAuthority {
 +    _root: crate::private_browser_guard::QualifiedProcess,
-+    _target: crate::private_browser_guard::QualifiedProcess,
-+}
-+
++    _target: Option<crate::private_browser_guard::QualifiedProcess>,
+ }
+
  /// Borrows the UI Automation element carried by a core `NativeHandle`.
- ///
- /// A handle built by another platform, or an empty one, is rejected rather
 diff --git a/crates/windows/src/tree/hit_test/hit_test_tests.rs b/crates/windows/src/tree/hit_test/hit_test_tests.rs
 index 8455283..2deecca 100644
 --- a/crates/windows/src/tree/hit_test/hit_test_tests.rs
@@ -5547,8 +5774,27 @@ index 8455283..2deecca 100644
          .into_native_handle();
      let error = hit_test_impl(
          &handle,
+diff --git a/crates/windows/src/tree/hit_test/mod.rs b/crates/windows/src/tree/hit_test/mod.rs
+index 7895215..fdea41f 100644
+--- a/crates/windows/src/tree/hit_test/mod.rs
++++ b/crates/windows/src/tree/hit_test/mod.rs
+@@ -77,12 +77,12 @@ mod imp {
+         deadline: Deadline,
+         client: &UIAutomation,
+     ) -> Result<HitTestResult, AdapterError> {
+-        corroborate_verified_process(target)?;
++        corroborate_verified_process(target, deadline)?;
+         let bounds = match read_target_bounds(target)? {
+             Some(bounds) => bounds,
+             None => return Ok(HitTestResult::Unknown),
+         };
+-        corroborate_verified_process(target)?;
++        corroborate_verified_process(target, deadline)?;
+         let Ok(walker) = client.get_raw_view_walker() else {
+             return Ok(HitTestResult::Unknown);
+         };
 diff --git a/crates/windows/src/tree/live_read.rs b/crates/windows/src/tree/live_read.rs
-index 18a45b9..defd7d0 100644
+index 18a45b9..fcedf97 100644
 --- a/crates/windows/src/tree/live_read.rs
 +++ b/crates/windows/src/tree/live_read.rs
 @@ -51,7 +51,7 @@ mod imp {
@@ -5560,38 +5806,180 @@ index 18a45b9..defd7d0 100644
 
      /// The shared single-element live read.
      ///
-@@ -77,9 +77,16 @@ mod imp {
+@@ -77,14 +77,21 @@ mod imp {
          deadline: Deadline,
      ) -> Result<LiveRead, AdapterError> {
          let element = uia_element(handle)?;
 +        deadline.ensure_remaining()?;
-+        let _authority = crate::tree::element::qualify_verified(element)?;
++        let _authority = crate::tree::element::qualify_verified(element, deadline)?;
 +        let minimized =
 +            crate::tree::minimized::owning_window_minimized(element, deadline).unwrap_or(false);
 +        deadline.ensure_remaining()?;
-+        let _after_minimized = crate::tree::element::qualify_verified(element)?;
++        let _after_minimized = crate::tree::element::qualify_verified(element, deadline)?;
          let outside_visible_area =
 -            crate::tree::minimized::owning_window_minimized(element, deadline).unwrap_or(false)
 -                || crate::tree::minimized::outside_scroll_viewports(element, deadline)?;
 +            minimized || crate::tree::minimized::outside_scroll_viewports(element, deadline)?;
 +        deadline.ensure_remaining()?;
-+        let _before_read = crate::tree::element::qualify_verified(element)?;
++        let _before_read = crate::tree::element::qualify_verified(element, deadline)?;
          read_live_element_core(
              element,
              deadline,
-@@ -159,11 +166,7 @@ mod imp {
+             outside_visible_area,
+-            corroborate_verified_process,
++            |element| corroborate_verified_process(element, deadline),
+             |element| read_live_bounded(element, deadline),
+             |element| read_label(element, false),
+         )
+@@ -158,12 +165,11 @@ mod imp {
+     /// OS rather than trusting the answer the pre-read call already gave,
      /// which is what lets the post-read call catch a process that died
      /// during the read.
-     pub(crate) fn corroborate_verified_process(element: &UIAElement) -> Result<(), AdapterError> {
+-    pub(crate) fn corroborate_verified_process(element: &UIAElement) -> Result<(), AdapterError> {
 -        if let Some((pid, token)) = element.verified_process() {
 -            if !crate::system::process_identity::matches_instance(ProcessId::new(pid), token)? {
 -                return Err(stale_reader_error());
 -            }
 -        }
-+        let _authority = crate::tree::element::qualify_verified(element)?;
++    pub(crate) fn corroborate_verified_process(
++        element: &UIAElement,
++        deadline: Deadline,
++    ) -> Result<(), AdapterError> {
++        let _authority = crate::tree::element::qualify_verified(element, deadline)?;
          Ok(())
      }
  }
+diff --git a/crates/windows/src/tree/live_read_seam_tests.rs b/crates/windows/src/tree/live_read_seam_tests.rs
+index 9f99715..dfa161f 100644
+--- a/crates/windows/src/tree/live_read_seam_tests.rs
++++ b/crates/windows/src/tree/live_read_seam_tests.rs
+@@ -110,11 +110,12 @@ fn a_vanished_resolved_target_settles_stale_not_retryable_unresponsive() {
+         (ElementProperties::from_reads(Vec::new()), vec![error])
+     };
+
++    let budget = deadline();
+     let error = match read_live_element_core(
+         element,
+-        deadline(),
++        budget,
+         false,
+-        corroborate_verified_process,
++        |element| corroborate_verified_process(element, budget),
+         vanished_read,
+         live_label,
+     ) {
+@@ -160,11 +161,12 @@ fn a_vanished_target_wrapped_through_the_real_property_read_error_still_settles_
+         (ElementProperties::from_reads(Vec::new()), vec![wrapped])
+     };
+
++    let budget = deadline();
+     let error = match read_live_element_core(
+         element,
+-        deadline(),
++        budget,
+         false,
+-        corroborate_verified_process,
++        |element| corroborate_verified_process(element, budget),
+         vanished_read,
+         live_label,
+     ) {
+@@ -198,11 +200,12 @@ fn a_bundle_whose_essential_slots_are_unknown_fails_retryable_never_partial() {
+         .expect("a UIAElement payload");
+     let unread = |_: &UIAElement| (ElementProperties::from_reads(Vec::new()), Vec::new());
+
++    let budget = deadline();
+     let error = match read_live_element_core(
+         element,
+-        deadline(),
++        budget,
+         false,
+-        corroborate_verified_process,
++        |element| corroborate_verified_process(element, budget),
+         unread,
+         live_label,
+     ) {
+@@ -235,7 +238,7 @@ fn a_bundle_whose_essential_slots_are_unknown_fails_retryable_never_partial() {
+ /// because an expired deadline is refused before the read is ever attempted
+ /// and the label read would never be reached.
+ #[test]
+-fn a_spent_deadline_skips_the_label_read_without_changing_the_outcome() {
++fn a_spent_deadline_skips_the_label_read_and_refuses_the_result() {
+     ensure_test_apartment();
+     let fixture = HostedFixture::spawn().expect("a fixture host starts");
+     let handle = verified_handle(&fixture).expect("a verified handle");
+@@ -249,11 +252,12 @@ fn a_spent_deadline_skips_the_label_read_without_changing_the_outcome() {
+         live_label(element)
+     };
+
+-    let unhurried = read_live_element_core(
++    let budget = deadline();
++    let _unhurried = read_live_element_core(
+         element,
+-        deadline(),
++        budget,
+         false,
+-        corroborate_verified_process,
++        |element| corroborate_verified_process(element, budget),
+         read_live,
+         |element| counted(&unhurried_labels, element),
+     )
+@@ -268,11 +272,12 @@ fn a_spent_deadline_skips_the_label_read_without_changing_the_outcome() {
+         element,
+         spent_budget,
+         false,
+-        corroborate_verified_process,
++        |element| corroborate_verified_process(element, spent_budget),
+         read_past_the_budget,
+         |element| counted(&spent_labels, element),
+     )
+-    .expect("a read whose budget ran out mid-read still answers");
++    .err()
++    .expect("a read whose budget ran out must not answer");
+
+     assert_eq!(
+         unhurried_labels.get(),
+@@ -284,10 +289,7 @@ fn a_spent_deadline_skips_the_label_read_without_changing_the_outcome() {
+         0,
+         "a read whose deadline is gone must not issue the label's further cross-process calls"
+     );
+-    assert_eq!(
+-        spent.evidence.role, unhurried.evidence.role,
+-        "skipping the label must not change what the read concludes"
+-    );
++    assert_eq!(spent.code, ErrorCode::Timeout);
+ }
+
+ /// A minimized owner reports its subtree offscreen even though the provider
+@@ -304,11 +306,12 @@ fn a_minimized_owner_reports_its_subtree_offscreen_in_the_live_read() {
+         .downcast_ref::<UIAElement>()
+         .expect("a UIAElement payload");
+
++    let budget = deadline();
+     let read = read_live_element_core(
+         element,
+-        deadline(),
++        budget,
+         true,
+-        corroborate_verified_process,
++        |element| corroborate_verified_process(element, budget),
+         read_live,
+         live_label,
+     )
+@@ -337,11 +340,12 @@ fn a_restored_owner_keeps_the_provider_offscreen_answer() {
+         .expect("a UIAElement payload");
+     let (raw, _) = read_live(element);
+
++    let budget = deadline();
+     let read = read_live_element_core(
+         element,
+-        deadline(),
++        budget,
+         false,
+-        corroborate_verified_process,
++        |element| corroborate_verified_process(element, budget),
+         read_live,
+         live_label,
+     )
 diff --git a/crates/windows/src/tree/live_read_tests.rs b/crates/windows/src/tree/live_read_tests.rs
 index 8492555..f674609 100644
 --- a/crates/windows/src/tree/live_read_tests.rs
@@ -5638,8 +6026,134 @@ index 8492555..f674609 100644
          .into_native_handle();
      let downcast = handle
          .downcast_ref::<UIAElement>()
+diff --git a/crates/windows/src/tree/observe.rs b/crates/windows/src/tree/observe.rs
+index e4a6985..4fb0c35 100644
+--- a/crates/windows/src/tree/observe.rs
++++ b/crates/windows/src/tree/observe.rs
+@@ -49,8 +49,15 @@ pub(crate) fn observe_tree(
+     adapter: &crate::adapter::WindowsAdapter,
+ ) -> Result<ObservedTree, AdapterError> {
+     let request = (*request).validate()?;
+-    re_verify_root(root)?;
++    if let ObservationRoot::Window(window) = root {
++        hwnd_of(&window.id)?;
++    }
++    #[cfg(target_os = "windows")]
++    let _root_authority = qualify_root(root, request.deadline)?;
++    re_verify_root(root, request.deadline)?;
+     let element = surface_root(root, request.surface, request.deadline)?;
++    #[cfg(target_os = "windows")]
++    let _element_authority = crate::tree::element::qualify_current(&element, request.deadline)?;
+     let chromium_root = chromium::is_chromium_root(&element);
+     let budget = WalkBudget::new(request.max_logical_depth, request.deadline)
+         .with_max_raw_depth(request.max_raw_depth.min(DEFAULT_MAX_RAW_DEPTH));
+@@ -65,7 +72,7 @@ pub(crate) fn observe_tree(
+             outcome,
+             walk_duration: walk_started.elapsed(),
+         },
+-        re_verify_root,
++        |root| re_verify_root(root, request.deadline),
+     )
+ }
+
+@@ -164,7 +171,13 @@ fn still_thin_after_settle() -> AdapterError {
+ }
+
+ /// Rechecks stored ownership and generation evidence after the UIA read.
+-fn re_verify_root(root: ObservationRoot<'_>) -> Result<(), AdapterError> {
++fn re_verify_root(
++    root: ObservationRoot<'_>,
++    deadline: agent_desktop_core::Deadline,
++) -> Result<(), AdapterError> {
++    #[cfg(target_os = "windows")]
++    let _authority = qualify_root(root, deadline)?;
++    deadline.ensure_remaining()?;
+     match root {
+         ObservationRoot::Window(window) => {
+             let handle = hwnd_of(&window.id)?;
+@@ -174,10 +187,48 @@ fn re_verify_root(root: ObservationRoot<'_>) -> Result<(), AdapterError> {
+                     window,
+                 )
+                 .ok_or_else(window_identity_changed)?;
+-            evidence.verify_stored()
++            evidence.verify_stored()?;
++            deadline.ensure_remaining()
+         }
+         ObservationRoot::Element { entry, .. } => {
+-            verify_process_identity(entry.process.pid, entry.process.process_instance.as_deref())
++            verify_process_identity(entry.process.pid, entry.process.process_instance.as_deref())?;
++            deadline.ensure_remaining()
++        }
++    }
++}
++
++#[cfg(target_os = "windows")]
++enum RootAuthority {
++    Window {
++        _guard: crate::private_browser_guard::QualifiedWindowProcesses,
++    },
++    Element {
++        _guard: crate::tree::element::ElementAuthority,
++    },
++}
++
++#[cfg(target_os = "windows")]
++fn qualify_root(
++    root: ObservationRoot<'_>,
++    deadline: agent_desktop_core::Deadline,
++) -> Result<RootAuthority, AdapterError> {
++    match root {
++        ObservationRoot::Window(window) => Ok(RootAuthority::Window {
++            _guard: crate::system::window::window_identity::qualify_window(window, deadline)?,
++        }),
++        ObservationRoot::Element { handle, entry, .. } => {
++            let element = crate::tree::element::uia_element(handle)?;
++            let token = entry
++                .process
++                .process_instance
++                .as_deref()
++                .ok_or_else(window_identity_changed)?;
++            if !element.matches_root(entry.process.pid.get(), token) {
++                return Err(window_identity_changed());
++            }
++            Ok(RootAuthority::Element {
++                _guard: crate::tree::element::qualify_verified(element, deadline)?,
++            })
+         }
+     }
+ }
+diff --git a/crates/windows/src/tree/observe_tests.rs b/crates/windows/src/tree/observe_tests.rs
+index 67cfc47..19cf46f 100644
+--- a/crates/windows/src/tree/observe_tests.rs
++++ b/crates/windows/src/tree/observe_tests.rs
+@@ -70,8 +70,11 @@ fn a_destroyed_hwnd_fails_reverification_as_window_not_found() {
+         state: Default::default(),
+     };
+
+-    let error = re_verify_root(agent_desktop_core::ObservationRoot::Window(&window))
+-        .expect_err("a destroyed handle must fail the liveness gate");
++    let error = re_verify_root(
++        agent_desktop_core::ObservationRoot::Window(&window),
++        Deadline::after(5_000).unwrap(),
++    )
++    .expect_err("a destroyed handle must fail the liveness gate");
+     assert_eq!(error.code, ErrorCode::WindowNotFound);
+ }
+
+@@ -98,7 +101,10 @@ fn a_freshly_created_fixture_window_passes_reverification() {
+         state: Default::default(),
+     };
+
+-    let result = re_verify_root(ObservationRoot::Window(&window));
++    let result = re_verify_root(
++        ObservationRoot::Window(&window),
++        Deadline::after(5_000).unwrap(),
++    );
+     assert!(
+         result.is_ok(),
+         "a live fixture root must pass the liveness gate: {result:?}"
 diff --git a/crates/windows/src/tree/resolve/mod.rs b/crates/windows/src/tree/resolve/mod.rs
-index 123d6fd..5530ce6 100644
+index 123d6fd..8a7798f 100644
 --- a/crates/windows/src/tree/resolve/mod.rs
 +++ b/crates/windows/src/tree/resolve/mod.rs
 @@ -93,7 +93,7 @@ fn resolve_attempt(entry: &RefEntry, deadline: Deadline) -> Result<NativeHandle,
@@ -5647,7 +6161,7 @@ index 123d6fd..5530ce6 100644
          .or_else(|| repair_past_leading_chrome(&source, &prepared, entry, &budget))
      {
 -        return Ok(into_verified_handle(accepted, entry));
-+        return into_verified_handle(accepted, entry);
++        return into_verified_handle(accepted, entry, deadline);
      }
 
      let mut searched = Vec::new();
@@ -5656,11 +6170,11 @@ index 123d6fd..5530ce6 100644
                  return Err(stale_ref_error(entry));
              };
 -            Ok(into_verified_handle(candidate.element, entry))
-+            into_verified_handle(candidate.element, entry)
++            into_verified_handle(candidate.element, entry, deadline)
          }
          SearchVerdict::Ambiguous => Err(ambiguous_target_error(entry, searched.len())),
      }
-@@ -216,21 +216,43 @@ fn classify_search(
+@@ -216,21 +216,48 @@ fn classify_search(
      }
  }
 
@@ -5676,13 +6190,16 @@ index 123d6fd..5530ce6 100644
      entry: &RefEntry,
 -) -> NativeHandle {
 -    element
++    deadline: Deadline,
 +) -> Result<NativeHandle, AdapterError> {
++    deadline.ensure_remaining()?;
 +    let root_token = entry
 +        .process
 +        .process_instance
 +        .as_ref()
 +        .ok_or_else(|| stale_ref_error(entry))?;
 +    let _root = crate::private_browser_guard::qualify_expected(entry.process.pid, root_token)?;
++    deadline.ensure_remaining()?;
 +    let pid = element
 +        .0
 +        .get_process_id()
@@ -5691,6 +6208,7 @@ index 123d6fd..5530ce6 100644
 +        return Err(stale_ref_error(entry));
 +    }
 +    let authority = crate::private_browser_guard::qualify(agent_desktop_core::ProcessId::new(pid))?;
++    deadline.ensure_remaining()?;
 +    if element
 +        .0
 +        .get_process_id()
@@ -5699,6 +6217,7 @@ index 123d6fd..5530ce6 100644
 +    {
 +        return Err(stale_ref_error(entry));
 +    }
++    deadline.ensure_remaining()?;
 +    Ok(element
          .with_verified_process(
 +            pid,
@@ -5712,8 +6231,16 @@ index 123d6fd..5530ce6 100644
  }
 
  #[cfg(target_os = "windows")]
+@@ -332,6 +359,7 @@ pub(crate) fn resolve_window_root(
+         bounds: None,
+         state: Default::default(),
+     };
++    let _authority = crate::system::window::window_identity::qualify_window(&window, deadline)?;
+     crate::system::window::window_identity::WindowIdentityEvidence::from_info(
+         crate::system::window::window_ops::parse_handle(&window.id),
+         &window,
 diff --git a/crates/windows/src/tree/resolve/resolve_anchor.rs b/crates/windows/src/tree/resolve/resolve_anchor.rs
-index 3990eff..00657a9 100644
+index 3990eff..8aca766 100644
 --- a/crates/windows/src/tree/resolve/resolve_anchor.rs
 +++ b/crates/windows/src/tree/resolve/resolve_anchor.rs
 @@ -96,7 +96,7 @@ fn resolve_locator_anchor_once(
@@ -5721,12 +6248,25 @@ index 3990eff..00657a9 100644
      match anchor_geometry_verdict(entry, &evidence) {
          AnchorGeometryVerdict::Promote => {
 -            Ok(crate::tree::resolve::into_verified_handle(candidate, entry))
-+            crate::tree::resolve::into_verified_handle(candidate, entry)
++            crate::tree::resolve::into_verified_handle(candidate, entry, deadline)
          }
          AnchorGeometryVerdict::SettleStale => Err(stale_ref_error(entry)),
          AnchorGeometryVerdict::Retry => Err(identity_unknown_error(entry)),
+diff --git a/crates/windows/src/tree/surfaces.rs b/crates/windows/src/tree/surfaces.rs
+index c4b458d..5f3baa7 100644
+--- a/crates/windows/src/tree/surfaces.rs
++++ b/crates/windows/src/tree/surfaces.rs
+@@ -34,6 +34,8 @@ pub(crate) fn surface_root(
+         (ObservationRoot::Window(window), SnapshotSurface::Sheet) => {
+             let handle = focused_hwnd_of(&window.id)?;
+             let element = root_from_hwnd(handle, deadline)?;
++            #[cfg(target_os = "windows")]
++            let _authority = crate::tree::element::qualify_current(&element, deadline)?;
+             if window_is_modal_sheet(&element) {
+                 Ok(element)
+             } else {
 diff --git a/crates/windows/src/tree/text_insertion.rs b/crates/windows/src/tree/text_insertion.rs
-index 0cd7b9b..8142dc4 100644
+index 0cd7b9b..e74abc4 100644
 --- a/crates/windows/src/tree/text_insertion.rs
 +++ b/crates/windows/src/tree/text_insertion.rs
 @@ -38,7 +38,7 @@ fn count_line_breaks(text: &str) -> u32 {
@@ -5742,10 +6282,10 @@ index 0cd7b9b..8142dc4 100644
      ) -> Result<Option<Rect>, AdapterError> {
          deadline.ensure_remaining()?;
          let element = uia_element(handle)?;
-+        let _authority = crate::tree::element::qualify_verified(element)?;
++        let _authority = crate::tree::element::qualify_verified(element, deadline)?;
          let Ok(pattern) = element.0.get_pattern::<UITextPattern>() else {
 +            deadline.ensure_remaining()?;
-+            let _authority = crate::tree::element::qualify_verified(element)?;
++            let _authority = crate::tree::element::qualify_verified(element, deadline)?;
              return Ok(None);
          };
 -        Ok(caret(&pattern))
@@ -5753,7 +6293,7 @@ index 0cd7b9b..8142dc4 100644
      }
 
      /// The insertion caret of the element with keyboard focus, when it belongs
-@@ -68,114 +71,213 @@ mod imp {
+@@ -68,114 +71,214 @@ mod imp {
          let Ok(focused) = client.get_focused_element() else {
              return Ok(None);
          };
@@ -5771,14 +6311,29 @@ index 0cd7b9b..8142dc4 100644
 +        let token = authority.token().to_owned();
 +        let focused =
 +            UIAElement::from(focused).with_verified_process(pid, token.clone(), pid, token);
-+        let _authority = crate::tree::element::qualify_verified(&focused)?;
++        deadline.ensure_remaining()?;
++        let _authority = crate::tree::element::qualify_verified(&focused, deadline)?;
 +        let Ok(pattern) = focused.0.get_pattern::<UITextPattern>() else {
 +            deadline.ensure_remaining()?;
-+            let _authority = crate::tree::element::qualify_verified(&focused)?;
++            let _authority = crate::tree::element::qualify_verified(&focused, deadline)?;
              return Ok(None);
          };
 -        Ok(caret(&pattern))
 +        caret(&pattern, &focused, deadline)
++    }
++
++    macro_rules! checked_some {
++        ($element:expr, $deadline:expr, $value:expr) => {{
++            $deadline.ensure_remaining()?;
++            let _authority = crate::tree::element::qualify_verified($element, $deadline)?;
++            let value = $value;
++            $deadline.ensure_remaining()?;
++            let _authority_after = crate::tree::element::qualify_verified($element, $deadline)?;
++            match value {
++                Some(value) => value,
++                None => return Ok(None),
++            }
++        }};
      }
 
 -    fn caret(pattern: &UITextPattern) -> Option<Rect> {
@@ -5787,20 +6342,6 @@ index 0cd7b9b..8142dc4 100644
 -        let moved = previous
 -            .move_endpoint_by_unit(TextPatternRangeEndpoint::Start, TextUnit::Character, -1)
 -            .ok()?;
-+    macro_rules! checked_some {
-+        ($element:expr, $deadline:expr, $value:expr) => {{
-+            $deadline.ensure_remaining()?;
-+            let _authority = crate::tree::element::qualify_verified($element)?;
-+            let value = $value;
-+            $deadline.ensure_remaining()?;
-+            let _authority_after = crate::tree::element::qualify_verified($element)?;
-+            match value {
-+                Some(value) => value,
-+                None => return Ok(None),
-+            }
-+        }};
-+    }
-+
 +    fn caret(
 +        pattern: &UITextPattern,
 +        element: &UIAElement,
@@ -6040,7 +6581,7 @@ index 0cd7b9b..8142dc4 100644
  }
 
 diff --git a/crates/windows/src/tree/text_selection.rs b/crates/windows/src/tree/text_selection.rs
-index b1d96d0..37021df 100644
+index b1d96d0..07e0ffd 100644
 --- a/crates/windows/src/tree/text_selection.rs
 +++ b/crates/windows/src/tree/text_selection.rs
 @@ -35,10 +35,8 @@ mod imp {
@@ -6065,12 +6606,12 @@ index b1d96d0..37021df 100644
 -        };
 -        let Ok(selections) = pattern.get_selection() else {
 -            return Ok(None);
-+        let _authority = crate::tree::element::qualify_verified(element)?;
++        let _authority = crate::tree::element::qualify_verified(element, deadline)?;
 +        let pattern = match element.0.get_pattern::<UITextPattern>() {
 +            Ok(pattern) => pattern,
 +            Err(error) => {
 +                deadline.ensure_remaining()?;
-+                let _authority = crate::tree::element::qualify_verified(element)?;
++                let _authority = crate::tree::element::qualify_verified(element, deadline)?;
 +                use crate::tree::automation::{UiaFailure, failure_of};
 +                let failure = failure_of(&error);
 +                if failure.is_exhaustion()
@@ -6086,13 +6627,13 @@ index b1d96d0..37021df 100644
 +            }
          };
 +        deadline.ensure_remaining()?;
-+        let _authority = crate::tree::element::qualify_verified(element)?;
++        let _authority = crate::tree::element::qualify_verified(element, deadline)?;
 +        let selections = pattern
 +            .get_selection()
 +            .map_err(|error| crate::tree::automation::uia_error(&error, "read text selection"))?;
          let Some(selection) = selections.into_iter().next() else {
 +            deadline.ensure_remaining()?;
-+            let _authority = crate::tree::element::qualify_verified(element)?;
++            let _authority = crate::tree::element::qualify_verified(element, deadline)?;
              return Ok(None);
          };
 -        let Ok(prefix) = pattern.get_document_range() else {
@@ -6100,12 +6641,12 @@ index b1d96d0..37021df 100644
 -        };
 -        if prefix
 +        deadline.ensure_remaining()?;
-+        let _authority = crate::tree::element::qualify_verified(element)?;
++        let _authority = crate::tree::element::qualify_verified(element, deadline)?;
 +        let prefix = pattern
 +            .get_document_range()
 +            .map_err(|error| crate::tree::automation::uia_error(&error, "read document range"))?;
 +        deadline.ensure_remaining()?;
-+        let _authority = crate::tree::element::qualify_verified(element)?;
++        let _authority = crate::tree::element::qualify_verified(element, deadline)?;
 +        prefix
              .move_endpoint_by_range(
                  TextPatternRangeEndpoint::End,
@@ -6122,17 +6663,17 @@ index b1d96d0..37021df 100644
 -        };
 +            .map_err(|error| crate::tree::automation::uia_error(&error, "read selection range"))?;
 +        deadline.ensure_remaining()?;
-+        let _authority = crate::tree::element::qualify_verified(element)?;
++        let _authority = crate::tree::element::qualify_verified(element, deadline)?;
 +        let prefix_text = prefix
 +            .get_text(-1)
 +            .map_err(|error| crate::tree::automation::uia_error(&error, "read selection prefix"))?;
 +        deadline.ensure_remaining()?;
-+        let _authority = crate::tree::element::qualify_verified(element)?;
++        let _authority = crate::tree::element::qualify_verified(element, deadline)?;
 +        let selection_text = selection
 +            .get_text(-1)
 +            .map_err(|error| crate::tree::automation::uia_error(&error, "read selected text"))?;
 +        deadline.ensure_remaining()?;
-+        let _authority = crate::tree::element::qualify_verified(element)?;
++        let _authority = crate::tree::element::qualify_verified(element, deadline)?;
          Ok(Some(utf16_range(&prefix_text, &selection_text)))
      }
  }
