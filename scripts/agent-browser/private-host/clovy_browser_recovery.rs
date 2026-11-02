@@ -59,11 +59,29 @@ pub(crate) struct RecoveryRoot {
 }
 pub(crate) struct RecoveryProfile {
     root: File,
-    holder: Option<File>,
+    location: ProfileLocation,
     directory: File,
     root_id: Id,
     id: Id,
     nonce: String,
+}
+enum ProfileLocation {
+    Original,
+    #[cfg(unix)]
+    UnixHolder(File),
+    #[cfg(windows)]
+    WindowsPinnedOriginal,
+}
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum TerminalLocation {
+    UnixHolder { holder: Id, holder_receipt: Id },
+    WindowsPinnedOriginal,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -78,8 +96,7 @@ struct Terminal {
     phase: String,
     nonce: String,
     root: Id,
-    holder: Id,
-    holder_receipt: Id,
+    location: TerminalLocation,
     profile: Id,
     controls: Vec<Control>,
     receipt: Value,
@@ -126,12 +143,12 @@ impl RecoveryRoot {
             .ok_or_else(invalid)?
             .to_owned();
         let directory = native::directory(&self.directory, name, false)?;
-        self.captured(directory, None, nonce)
+        self.captured(directory, ProfileLocation::Original, nonce)
     }
     fn captured(
         &self,
         directory: File,
-        holder: Option<File>,
+        location: ProfileLocation,
         nonce: String,
     ) -> io::Result<RecoveryProfile> {
         Ok(RecoveryProfile {
@@ -139,7 +156,7 @@ impl RecoveryRoot {
             root_id: native::identity(&self.directory)?,
             id: native::identity(&directory)?,
             directory,
-            holder,
+            location,
             nonce,
         })
     }
@@ -151,8 +168,9 @@ impl RecoveryRoot {
             .to_owned();
         let directory = native::directory(&self.directory, name, true)?;
         native::sync(&self.directory)?;
-        self.captured(directory, None, nonce)
+        self.captured(directory, ProfileLocation::Original, nonce)
     }
+    #[cfg(unix)]
     fn quarantined(&self, nonce: &str) -> io::Result<RecoveryProfile> {
         let holder = native::directory(
             &self.directory,
@@ -160,7 +178,11 @@ impl RecoveryRoot {
             false,
         )?;
         let directory = native::directory(&holder, OsStr::new("profile"), false)?;
-        let profile = self.captured(directory, Some(holder), nonce.to_owned())?;
+        let profile = self.captured(
+            directory,
+            ProfileLocation::UnixHolder(holder),
+            nonce.to_owned(),
+        )?;
         profile.validate_links()?;
         Ok(profile)
     }
@@ -200,21 +222,20 @@ impl RecoveryRoot {
                 let candidate = if canonical(name) {
                     self.profile(OsStr::new(name))
                 } else {
-                    self.quarantined(nonce)
+                    #[cfg(unix)]
+                    {
+                        self.quarantined(nonce)
+                    }
+                    #[cfg(windows)]
+                    {
+                        Err(invalid())
+                    }
                 };
                 let Some(profile) = optional(candidate)? else {
                     return Ok(());
                 };
-                let mut cleanup = profile.authorize(None)?;
+                let cleanup = profile.authorize(None)?;
                 cleanup.require_abandoned()?;
-                if cleanup.receipt["phase"] == "Starting" {
-                    cleanup.receipt["phase"] = json!("Cancelled");
-                    cleanup
-                        .profile
-                        .replace_receipt(&serde_json::to_vec(&cleanup.receipt)?)?;
-                    cleanup.receipt_file = cleanup.profile.open_file(RECEIPT, false)?;
-                    checkpoint("cancelled");
-                }
                 cleanup.delete()
             })();
             if let Err(error) = result {
@@ -279,16 +300,20 @@ impl RecoveryProfile {
         if native::identity(&self.root)? != self.root_id {
             return Err(invalid());
         }
-        if let Some(holder) = &self.holder {
-            native::same(
-                &self.root,
-                OsStr::new(&format!("{HOLDER}{}", self.nonce)),
-                holder,
-            )?;
-            native::same(holder, OsStr::new("profile"), &self.directory)?;
-            validate_holder(holder, &self.nonce, self.root_id, self.id)?;
-        } else {
-            native::same(&self.root, OsStr::new(&self.nonce), &self.directory)?;
+        match &self.location {
+            #[cfg(unix)]
+            ProfileLocation::UnixHolder(holder) => {
+                native::same(
+                    &self.root,
+                    OsStr::new(&format!("{HOLDER}{}", self.nonce)),
+                    holder,
+                )?;
+                native::same(holder, OsStr::new("profile"), &self.directory)?;
+                validate_holder(holder, &self.nonce, self.root_id, self.id)?;
+            }
+            _ => {
+                native::same(&self.root, OsStr::new(&self.nonce), &self.directory)?;
+            }
         }
         Ok(())
     }
@@ -440,9 +465,53 @@ impl Cleanup {
         }
         Ok(())
     }
-    fn delete(mut self) -> io::Result<()> {
+    fn cancel_starting(self) -> io::Result<Self> {
         self.validate()?;
-        if self.profile.holder.is_none() {
+        if self.receipt["phase"] != "Starting" {
+            return Ok(self);
+        }
+        // There is deliberately no Cleanup value during publication: deletion
+        // requires a captured, revalidated reader, never an optional receipt.
+        let Self {
+            profile,
+            lease,
+            receipt_file,
+            marker,
+            mut receipt,
+        } = self;
+        receipt["phase"] = json!("Cancelled");
+        let bytes = serde_json::to_vec(&receipt)?;
+        drop(receipt_file);
+        checkpoint("receipt-reader-closed");
+        profile.replace_receipt(&bytes)?;
+        let mut receipt_file = profile.open_file(RECEIPT, false)?;
+        if read_json_bounded(&mut receipt_file, 4096)? != receipt {
+            return Err(invalid());
+        }
+        let cleanup = Self {
+            profile,
+            lease,
+            receipt_file,
+            marker,
+            receipt,
+        };
+        cleanup.validate()?;
+        checkpoint("cancelled");
+        Ok(cleanup)
+    }
+    fn quarantine(&mut self) -> io::Result<()> {
+        self.validate()?;
+        #[cfg(windows)]
+        if matches!(self.profile.location, ProfileLocation::Original) {
+            // NTFS cannot rename the source directory with open descendants.
+            // Pin the same physical profile in place, retaining the same lease.
+            self.profile.directory = native::pin_directory(&self.profile.directory)?;
+            self.profile.location = ProfileLocation::WindowsPinnedOriginal;
+            self.validate()?;
+            checkpoint("quarantined");
+        }
+        #[cfg(unix)]
+        if matches!(self.profile.location, ProfileLocation::Original) {
             let name = format!("{HOLDER}{}", self.profile.nonce);
             let holder = match native::directory(&self.profile.root, OsStr::new(&name), false) {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -462,6 +531,7 @@ impl Cleanup {
                     let mut file = native::file(&holder, OsStr::new(HOLDER_RECEIPT), true, true)?;
                     serde_json::to_writer(&mut file, &receipt)?;
                     native::sync(&file)?;
+                    drop(file);
                     native::sync(&holder)?;
                     native::rename(
                         &self.profile.root,
@@ -502,12 +572,22 @@ impl Cleanup {
                 OsStr::new("profile"),
                 false,
             )?;
-            self.profile.holder = Some(holder);
+            self.profile.location = ProfileLocation::UnixHolder(holder);
             self.validate()?;
             native::sync(&self.profile.root)?;
-            native::sync(self.profile.holder.as_ref().ok_or_else(invalid)?)?;
+            if let ProfileLocation::UnixHolder(holder) = &self.profile.location {
+                native::sync(holder)?;
+            }
             checkpoint("quarantined");
         }
+        Ok(())
+    }
+    fn delete(self) -> io::Result<()> {
+        let mut cleanup = self.cancel_starting()?;
+        cleanup.quarantine()?;
+        cleanup.delete_payload()
+    }
+    fn delete_payload(self) -> io::Result<()> {
         self.validate()?;
         empty_payload(&self.profile.directory, true)?;
         self.validate()?;
@@ -528,17 +608,25 @@ impl Cleanup {
             });
         }
         let terminal = Terminal {
-            version: 1,
+            version: 2,
             phase: "PayloadGone".to_owned(),
             nonce: self.profile.nonce.clone(),
             root: self.profile.root_id,
-            holder: native::identity(self.profile.holder.as_ref().ok_or_else(invalid)?)?,
-            holder_receipt: native::identity(&validate_holder(
-                self.profile.holder.as_ref().ok_or_else(invalid)?,
-                &self.profile.nonce,
-                self.profile.root_id,
-                self.profile.id,
-            )?)?,
+            location: match &self.profile.location {
+                #[cfg(unix)]
+                ProfileLocation::UnixHolder(holder) => TerminalLocation::UnixHolder {
+                    holder: native::identity(holder)?,
+                    holder_receipt: native::identity(&validate_holder(
+                        holder,
+                        &self.profile.nonce,
+                        self.profile.root_id,
+                        self.profile.id,
+                    )?)?,
+                },
+                #[cfg(windows)]
+                ProfileLocation::WindowsPinnedOriginal => TerminalLocation::WindowsPinnedOriginal,
+                ProfileLocation::Original => return Err(invalid()),
+            },
             profile: self.profile.id,
             controls,
             receipt: self.receipt.clone(),
@@ -587,12 +675,26 @@ fn empty_payload(directory: &File, top: bool) -> io::Result<()> {
 }
 impl Terminal {
     fn validate(&self, root: &File, nonce: &str) -> io::Result<()> {
-        if self.version != 1
+        if self.version != 2
             || self.phase != "PayloadGone"
             || self.nonce != nonce
             || self.root != native::identity(root)?
+            || self.profile == [0, 0]
+            || self.controls.iter().any(|control| control.id == [0, 0])
+            || !matches!(
+                self.receipt["phase"].as_str(),
+                Some("Reserved" | "Cancelled" | "Owned")
+            )
         {
             return Err(invalid());
+        }
+        match self.location {
+            TerminalLocation::UnixHolder {
+                holder,
+                holder_receipt,
+            } if cfg!(unix) && holder != [0, 0] && holder_receipt != [0, 0] => (),
+            TerminalLocation::WindowsPinnedOriginal if cfg!(windows) => (),
+            _ => return Err(invalid()),
         }
         validate_receipt(&self.receipt, nonce, self.root, self.profile)?;
         let expected = if self.receipt["phase"] == "Reserved" {
@@ -658,17 +760,43 @@ fn validate_holder(holder: &File, nonce: &str, root: Id, profile: Id) -> io::Res
     native::same(holder, OsStr::new(HOLDER_RECEIPT), &file)?;
     Ok(file)
 }
-fn finish(
-    root: &File,
-    record: File,
-    terminal: Terminal,
-    mut held: Option<Cleanup>,
-) -> io::Result<()> {
+fn finish(root: &File, record: File, terminal: Terminal, held: Option<Cleanup>) -> io::Result<()> {
     terminal.validate(root, &terminal.nonce)?;
     native::same(root, OsStr::new(&terminal_name(&terminal.nonce)), &record)?;
+    match terminal.location {
+        TerminalLocation::WindowsPinnedOriginal => {
+            finish_profile(root, OsStr::new(&terminal.nonce), &terminal, held)?;
+            if optional(native::directory(root, OsStr::new(&terminal.nonce), false))?.is_some() {
+                return Err(invalid());
+            }
+        }
+        TerminalLocation::UnixHolder {
+            holder,
+            holder_receipt,
+        } => {
+            finish_holder(root, &terminal, holder, holder_receipt, held)?;
+        }
+    }
+    native::sync(root)?;
+    native::remove(
+        root,
+        OsStr::new(&terminal_name(&terminal.nonce)),
+        &record,
+        false,
+    )?;
+    drop(record);
+    native::sync(root)
+}
+fn finish_holder(
+    root: &File,
+    terminal: &Terminal,
+    holder_id: Id,
+    holder_receipt: Id,
+    held: Option<Cleanup>,
+) -> io::Result<()> {
     let holder_name = format!("{HOLDER}{}", terminal.nonce);
     if let Some(holder) = optional(native::directory(root, OsStr::new(&holder_name), false))? {
-        if native::identity(&holder)? != terminal.holder {
+        if native::identity(&holder)? != holder_id {
             return Err(invalid());
         }
         let entries = native::list(&holder)?;
@@ -679,7 +807,7 @@ fn finish(
                 e.name != OsStr::new(HOLDER_RECEIPT)
                     || e.directory
                     || e.link
-                    || e.id != terminal.holder_receipt
+                    || e.id != holder_receipt
             }
         }) {
             return Err(invalid());
@@ -687,60 +815,18 @@ fn finish(
         if entries.iter().any(|e| e.name == OsStr::new("profile")) {
             let marker =
                 validate_holder(&holder, &terminal.nonce, terminal.root, terminal.profile)?;
-            if native::identity(&marker)? != terminal.holder_receipt {
+            if native::identity(&marker)? != holder_receipt {
                 return Err(invalid());
             }
         }
-        if let Some(directory) = optional(native::directory(&holder, OsStr::new("profile"), false))?
-        {
-            if native::identity(&directory)? != terminal.profile {
-                return Err(invalid());
-            }
-            verify_controls(&directory, &terminal, true)?;
-            // Lease may already be absent. Exclusivity then lives in record.
-            let lease = if held.is_none() {
-                let lease = optional(native::file(&directory, OsStr::new(LEASE), true, false))?;
-                if let Some(file) = &lease {
-                    lock_profile(file)?;
-                }
-                lease
-            } else {
-                None
-            };
-            verify_controls(&directory, &terminal, true)?;
-            for control in &terminal.controls {
-                if let Some(file) = optional(native::file(
-                    &directory,
-                    OsStr::new(&control.name),
-                    true,
-                    false,
-                ))? {
-                    if native::identity(&file)? != control.id {
-                        return Err(invalid());
-                    }
-                    native::remove(&directory, OsStr::new(&control.name), &file, false)?;
-                    drop(file);
-                    native::sync(&directory)?;
-                    checkpoint(&format!("removed-{}", control.name));
-                }
-            }
-            drop(lease);
-            // Close every original control/profile handle before Windows
-            // removes the empty directory. The root record stays locked.
-            drop(held.take());
-            native::sync(&directory)?;
-            native::remove(&holder, OsStr::new("profile"), &directory, true)?;
-            drop(directory);
-            native::sync(&holder)?;
-            checkpoint("profile-removed");
-        }
+        finish_profile(&holder, OsStr::new("profile"), terminal, held)?;
         if let Some(file) = optional(native::file(
             &holder,
             OsStr::new(HOLDER_RECEIPT),
             true,
             false,
         ))? {
-            if native::identity(&file)? != terminal.holder_receipt {
+            if native::identity(&file)? != holder_receipt {
                 return Err(invalid());
             }
             validate_holder(&holder, &terminal.nonce, terminal.root, terminal.profile)?;
@@ -753,7 +839,7 @@ fn finish(
             return Err(invalid());
         }
         native::same(root, OsStr::new(&holder_name), &holder)?;
-        native::remove(root, OsStr::new(&holder_name), &holder, true)?;
+        native::remove_directory(root, OsStr::new(&holder_name), &holder)?;
         drop(holder);
         native::sync(root)?;
         checkpoint("holder-removed");
@@ -761,14 +847,70 @@ fn finish(
     if optional(native::directory(root, OsStr::new(&holder_name), false))?.is_some() {
         return Err(invalid());
     }
-    native::remove(
-        root,
-        OsStr::new(&terminal_name(&terminal.nonce)),
-        &record,
-        false,
-    )?;
-    drop(record);
-    native::sync(root)
+    Ok(())
+}
+fn finish_profile(
+    parent: &File,
+    name: &OsStr,
+    terminal: &Terminal,
+    mut held: Option<Cleanup>,
+) -> io::Result<()> {
+    let Some(directory) = optional(native::directory(parent, name, false))? else {
+        // Also make the absence durable when resuming after directory removal.
+        return native::sync(parent);
+    };
+    if native::identity(&directory)? != terminal.profile {
+        return Err(invalid());
+    }
+    #[cfg(windows)]
+    let directory = native::pin_directory(&directory)?;
+    verify_controls(&directory, terminal, true)?;
+    // A missing lease is never recreated. The locked terminal owns exclusion.
+    let lease = if held.is_none() {
+        let lease = optional(native::file(&directory, OsStr::new(LEASE), true, false))?;
+        if let Some(file) = &lease {
+            lock_profile(file)?;
+        }
+        lease
+    } else {
+        None
+    };
+    verify_controls(&directory, terminal, true)?;
+    for control in &terminal.controls {
+        if let Some(file) = optional(native::file(
+            &directory,
+            OsStr::new(&control.name),
+            true,
+            false,
+        ))? {
+            if native::identity(&file)? != control.id {
+                return Err(invalid());
+            }
+            native::remove(&directory, OsStr::new(&control.name), &file, false)?;
+            drop(file);
+            native::sync(&directory)?;
+            checkpoint(&format!("removed-{}", control.name));
+        }
+    }
+    drop(lease);
+    drop(held.take());
+    native::sync(&directory)?;
+    checkpoint("profile-retiring");
+    // Only the durable, exclusively locked terminal permits releasing this
+    // pin. Keep a reference to the same object across release; no path reopen.
+    #[cfg(windows)]
+    let directory = native::unpin_directory(directory)?;
+    #[cfg(windows)]
+    checkpoint("pin-closed");
+    native::same(parent, name, &directory)?;
+    if !native::list(&directory)?.is_empty() {
+        return Err(invalid());
+    }
+    native::remove_directory(parent, name, &directory)?;
+    drop(directory);
+    native::sync(parent)?;
+    checkpoint("profile-removed");
+    Ok(())
 }
 
 // Deterministic crash/swap barriers exist only in test binaries. Production has
@@ -1111,6 +1253,8 @@ mod tests {
             for boundary in boundaries
                 .into_iter()
                 .chain((phase == "Starting").then_some("cancelled"))
+                .chain((phase == "Starting").then_some("receipt-reader-closed"))
+                .chain(Some("profile-retiring"))
                 .chain((phase != "Reserved").then_some("removed-.clovy-starting"))
             {
                 let temp = tempfile::tempdir().unwrap();
@@ -1215,6 +1359,39 @@ mod tests {
             first.stdin.take().unwrap().write_all(b"x").unwrap();
             assert!(first.wait().unwrap().success());
             assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
+        }
+    }
+    #[test]
+    fn terminal_legacy_or_wrong_platform_location_never_falls_back_to_payload_gc() {
+        for change in ["legacy", "location"] {
+            let temp = tempfile::tempdir().unwrap();
+            let (nonce, _) = fixture(temp.path(), "Starting", false);
+            assert_eq!(
+                child(temp.path(), Some("terminal-published"), None)
+                    .wait()
+                    .unwrap()
+                    .code(),
+                Some(77)
+            );
+            let record = temp.path().join(terminal_name(&nonce));
+            let mut value: Value =
+                serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+            if change == "legacy" {
+                value["version"] = json!(1);
+            } else {
+                value["location"] = json!({"kind":"windowsPinnedOriginal"});
+            }
+            std::fs::write(&record, serde_json::to_vec(&value).unwrap()).unwrap();
+            let profile = temp.path().join(format!("{HOLDER}{nonce}/profile"));
+            std::fs::write(profile.join("unexpected"), b"keep").unwrap();
+            assert!(!RecoveryRoot::open(temp.path())
+                .unwrap()
+                .recover()
+                .unwrap()
+                .is_empty());
+            assert_eq!(std::fs::read(profile.join("unexpected")).unwrap(), b"keep");
+            assert!(profile.join(LEASE).exists());
+            assert!(record.exists());
         }
     }
     #[test]
@@ -1464,7 +1641,475 @@ mod tests {
 
 #[cfg(all(test, windows))]
 mod tests {
-    pub(super) fn checkpoint(_: &str) {}
+    use super::super::clovy_browser_process_identity::process_birth;
+    use super::*;
+    use std::{
+        cell::RefCell,
+        io::{BufRead, BufReader},
+        process::{Child, Command, Stdio},
+    };
+    type Hook = Box<dyn FnMut(&str)>;
+    thread_local! { static HOOK: RefCell<Option<Hook>> = RefCell::new(None); }
+    pub(super) fn checkpoint(name: &str) {
+        HOOK.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook(name);
+            }
+        });
+        if std::env::var_os("CLOVY_WIN_GC_CHILD").is_none() {
+            return;
+        }
+        if std::env::var("CLOVY_WIN_GC_CRASH").ok().as_deref() == Some(name) {
+            std::process::exit(77);
+        }
+        if std::env::var("CLOVY_WIN_GC_PAUSE").ok().as_deref() == Some(name) {
+            println!("GC_BARRIER");
+            std::io::stdout().flush().unwrap();
+            std::io::stdin().read_exact(&mut [0]).unwrap();
+        }
+    }
+    fn command(path: &Path, role: &str) -> Command {
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            &format!(
+                "{}::process_fixture",
+                module_path!().split_once("::").unwrap().1
+            ),
+            "--nocapture",
+        ])
+        .env("CLOVY_WIN_GC_CHILD", path)
+        .env("CLOVY_WIN_GC_ROLE", role)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+        cmd
+    }
+    fn barrier(output: &mut impl BufRead, prefix: &str) -> String {
+        loop {
+            let mut line = String::new();
+            assert!(
+                output.read_line(&mut line).unwrap() > 0,
+                "child exited before {prefix}"
+            );
+            if let Some((_, value)) = line.split_once(prefix) {
+                return value.trim().to_owned();
+            }
+        }
+    }
+    fn dead(path: &Path) -> (u32, u64) {
+        let mut child = command(path, "wait").spawn().unwrap();
+        let birth = barrier(&mut BufReader::new(child.stdout.take().unwrap()), "BIRTH=")
+            .parse()
+            .unwrap();
+        let pid = child.id();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        (pid, birth)
+    }
+    fn fixture(path: &Path, phase: &str, alive: bool) -> (String, RecoveryProfile) {
+        let root = RecoveryRoot::open(path).unwrap();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let profile = root.create_profile(OsStr::new(&nonce)).unwrap();
+        drop(profile.create_file(LEASE).unwrap());
+        let (pid, birth) = if alive {
+            (
+                std::process::id(),
+                process_birth(std::process::id()).unwrap(),
+            )
+        } else {
+            dead(path)
+        };
+        let mut receipt = json!({"version":1,"nonce":nonce,"ownerProcessId":pid,"ownerBirth":birth,"phase":phase,"rootIdentity":profile.root_id,"profileIdentity":profile.id});
+        if phase == "Owned" {
+            let (host_pid, host_birth) = dead(path);
+            receipt["owned"] = json!(Owned {
+                version: 1,
+                nonce: nonce.clone(),
+                root_identity: profile.root_id,
+                profile_identity: profile.id,
+                parent_pid: pid,
+                parent_birth: birth,
+                host_pid,
+                host_birth,
+                group: None,
+                job: Some(format!("Local\\ClovyBrowser-{nonce}")),
+                boot: boot_identity().unwrap()
+            });
+        }
+        let mut file = profile.create_file(RECEIPT).unwrap();
+        serde_json::to_writer(&mut file, &receipt).unwrap();
+        native::sync(&file).unwrap();
+        drop(file);
+        if phase != "Reserved" {
+            let mut marker = profile.create_file(MARKER).unwrap();
+            marker.write_all(b"Starting\n").unwrap();
+            native::sync(&marker).unwrap();
+        }
+        profile.sync().unwrap();
+        (nonce, profile)
+    }
+    fn payload(path: &Path, nonce: &str) {
+        let profile = path.join(nonce);
+        std::fs::create_dir(profile.join("nested")).unwrap();
+        for name in CONTROLS {
+            std::fs::write(profile.join("nested").join(name), b"payload").unwrap();
+        }
+        std::fs::write(profile.join("payload"), b"synthetic").unwrap();
+    }
+    fn collector(path: &Path, crash: Option<&str>, pause: Option<&str>) -> Child {
+        let mut cmd = command(path, "collect");
+        if let Some(name) = crash {
+            cmd.env("CLOVY_WIN_GC_CRASH", name);
+        }
+        if let Some(name) = pause {
+            cmd.env("CLOVY_WIN_GC_PAUSE", name);
+        }
+        cmd.spawn().unwrap()
+    }
+    #[test]
+    fn process_fixture() {
+        let Some(path) = std::env::var_os("CLOVY_WIN_GC_CHILD") else {
+            return;
+        };
+        match std::env::var("CLOVY_WIN_GC_ROLE").unwrap().as_str() {
+            "wait" => {
+                println!("BIRTH={}", process_birth(std::process::id()).unwrap());
+                std::io::stdout().flush().unwrap();
+                std::io::stdin().read_exact(&mut [0]).unwrap();
+            }
+            "owned" => {
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).unwrap();
+                let grant: super::super::clovy_browser_grant::Grant =
+                    serde_json::from_str(&line).unwrap();
+                // A private job containing only this subprocess exercises the
+                // real host admission/publication, without assigning the suite.
+                use std::{ffi::c_void, os::windows::ffi::OsStrExt};
+                #[link(name = "kernel32")]
+                extern "system" {
+                    fn CreateJobObjectW(attrs: *const c_void, name: *const u16) -> *mut c_void;
+                    fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
+                    fn GetCurrentProcess() -> *mut c_void;
+                    fn CloseHandle(handle: *mut c_void) -> i32;
+                }
+                let name = grant.browser_job_name();
+                let wide: Vec<_> = OsStr::new(&name).encode_wide().chain(Some(0)).collect();
+                let job = unsafe { CreateJobObjectW(std::ptr::null(), wide.as_ptr()) };
+                assert!(!job.is_null());
+                assert_ne!(
+                    unsafe { AssignProcessToJobObject(job, GetCurrentProcess()) },
+                    0
+                );
+                let lease = grant.acquire_owned(Some(&name)).unwrap();
+                println!("OWNED");
+                std::io::stdout().flush().unwrap();
+                std::io::stdin().read_exact(&mut [0]).unwrap();
+                drop(lease);
+                assert_ne!(unsafe { CloseHandle(job) }, 0);
+            }
+            "collect" => {
+                let diagnostics = RecoveryRoot::open(Path::new(&path))
+                    .unwrap()
+                    .recover()
+                    .unwrap();
+                assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            }
+            other => panic!("unknown fixture role {other}"),
+        }
+    }
+    #[test]
+    fn publications_and_same_lease_cancelled_collection_retain_normal_directory_references() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = RecoveryRoot::open(temp.path()).unwrap();
+        let (nonce, profile) = fixture(temp.path(), "Reserved", true);
+        let mut receipt = read_json(&mut profile.open_file(RECEIPT, false).unwrap()).unwrap();
+        let mut marker = profile.create_file(MARKER).unwrap();
+        marker.write_all(b"Starting\n").unwrap();
+        native::sync(&marker).unwrap();
+        receipt["phase"] = json!("Starting");
+        profile
+            .replace_receipt(&serde_json::to_vec(&receipt).unwrap())
+            .unwrap();
+        drop(marker);
+        let lease = profile.open_file(LEASE, true).unwrap();
+        lock_profile(&lease).unwrap();
+        let id = native::identity(&lease).unwrap();
+        let cleanup = profile
+            .authorize(Some(lease))
+            .unwrap()
+            .cancel_starting()
+            .unwrap();
+        assert_eq!(cleanup.receipt["phase"], "Cancelled");
+        assert_eq!(native::identity(&cleanup.lease).unwrap(), id);
+        assert_eq!(
+            read_json(&mut cleanup.profile.open_file(RECEIPT, false).unwrap()).unwrap(),
+            cleanup.receipt
+        );
+        cleanup.delete().unwrap();
+        assert!(!temp.path().join(nonce).exists());
+        assert!(root.names().unwrap().is_empty());
+    }
+    #[test]
+    fn real_owned_publication_and_stop_consume_the_same_captured_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = RecoveryRoot::open(temp.path()).unwrap();
+        let (nonce, profile) = fixture(temp.path(), "Starting", true);
+        payload(temp.path(), &nonce);
+        let grant = super::super::clovy_browser_grant::Grant::new(&temp.path().join(&nonce), false)
+            .unwrap();
+        let mut host = command(temp.path(), "owned").spawn().unwrap();
+        writeln!(
+            host.stdin.as_mut().unwrap(),
+            "{}",
+            serde_json::to_string(&grant).unwrap()
+        )
+        .unwrap();
+        let mut output = BufReader::new(host.stdout.take().unwrap());
+        barrier(&mut output, "OWNED");
+        assert_eq!(
+            read_json(&mut profile.open_file(RECEIPT, false).unwrap()).unwrap()["phase"],
+            "Owned"
+        );
+        assert!(!root.recover().unwrap().is_empty());
+        host.stdin.take().unwrap().write_all(b"x").unwrap();
+        assert!(host.wait().unwrap().success());
+        profile.delete_stopped(None, &nonce).unwrap();
+        assert!(root.names().unwrap().is_empty());
+    }
+    #[test]
+    fn holder_publication_closes_descendant_reader_and_directory_delete_is_operational() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = RecoveryRoot::open(temp.path()).unwrap();
+        let holder = native::directory(&root.directory, OsStr::new("temporary"), true).unwrap();
+        let mut receipt = native::file(&holder, OsStr::new(HOLDER_RECEIPT), true, true).unwrap();
+        receipt.write_all(b"synthetic").unwrap();
+        native::sync(&receipt).unwrap();
+        drop(receipt);
+        native::sync(&holder).unwrap();
+        native::rename(
+            &root.directory,
+            OsStr::new("temporary"),
+            &holder,
+            &root.directory,
+            OsStr::new("published"),
+            false,
+        )
+        .unwrap();
+        let receipt = native::file(&holder, OsStr::new(HOLDER_RECEIPT), true, false).unwrap();
+        native::remove(&holder, OsStr::new(HOLDER_RECEIPT), &receipt, false).unwrap();
+        drop(receipt);
+        native::remove_directory(&root.directory, OsStr::new("published"), &holder).unwrap();
+        drop(holder);
+        assert!(root.names().unwrap().is_empty());
+    }
+    #[test]
+    fn pinned_profile_blocks_swap_and_payload_delete_share_three_does_not_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let (nonce, profile) = fixture(temp.path(), "Starting", true);
+        payload(temp.path(), &nonce);
+        let original = temp.path().join(&nonce);
+        let target = temp.path().join("swapped");
+        HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |at| {
+                if at == "quarantined" {
+                    assert!(std::fs::rename(&original, &target).is_err());
+                    assert!(original.join(LEASE).is_file());
+                }
+            }))
+        });
+        let result = profile.delete_stopped(None, &nonce);
+        HOOK.with(|hook| *hook.borrow_mut() = None);
+        result.unwrap();
+        assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
+    }
+    #[test]
+    fn crash_boundaries_resume_original_pinned_location_without_recreating_lease() {
+        for phase in ["Reserved", "Starting", "Owned", "Cancelled"] {
+            for boundary in [
+                "authorized",
+                "quarantined",
+                "payload-entry",
+                "payload-gone",
+                "terminal-published",
+                "removed-.clovy-reserved.json",
+                "removed-.clovy-lease",
+                "profile-retiring",
+                "pin-closed",
+                "profile-removed",
+            ]
+            .into_iter()
+            .chain((phase == "Starting").then_some("receipt-reader-closed"))
+            .chain((phase == "Starting").then_some("cancelled"))
+            .chain((phase != "Reserved").then_some("removed-.clovy-starting"))
+            {
+                let temp = tempfile::tempdir().unwrap();
+                let (nonce, profile) = fixture(temp.path(), phase, false);
+                drop(profile);
+                payload(temp.path(), &nonce);
+                let output = collector(temp.path(), Some(boundary), None)
+                    .wait_with_output()
+                    .unwrap();
+                assert_eq!(
+                    output.status.code(),
+                    Some(77),
+                    "{phase} {boundary}: {}",
+                    String::from_utf8_lossy(&output.stdout)
+                );
+                if boundary == "terminal-published" {
+                    let terminal: Terminal = serde_json::from_slice(
+                        &std::fs::read(temp.path().join(terminal_name(&nonce))).unwrap(),
+                    )
+                    .unwrap();
+                    assert!(matches!(
+                        terminal.location,
+                        TerminalLocation::WindowsPinnedOriginal
+                    ));
+                    assert!(temp.path().join(&nonce).is_dir());
+                }
+                let lease_missing = !temp.path().join(&nonce).join(LEASE).exists();
+                assert!(
+                    collector(temp.path(), None, None).wait().unwrap().success(),
+                    "{phase} {boundary}"
+                );
+                assert!(
+                    std::fs::read_dir(temp.path()).unwrap().next().is_none(),
+                    "{phase} {boundary}"
+                );
+                if lease_missing {
+                    assert!(!temp.path().join(nonce).join(LEASE).exists());
+                }
+            }
+        }
+    }
+    #[test]
+    fn concurrent_collectors_exclude_across_terminal_and_pin_release() {
+        for boundary in [
+            "authorized",
+            "terminal-published",
+            "removed-.clovy-lease",
+            "pin-closed",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let (nonce, profile) = fixture(temp.path(), "Starting", false);
+            drop(profile);
+            let mut first = collector(temp.path(), None, Some(boundary));
+            let mut output = BufReader::new(first.stdout.take().unwrap());
+            barrier(&mut output, "GC_BARRIER");
+            assert!(!RecoveryRoot::open(temp.path())
+                .unwrap()
+                .recover()
+                .unwrap()
+                .is_empty());
+            assert!(temp.path().join(&nonce).exists());
+            first.stdin.take().unwrap().write_all(b"x").unwrap();
+            assert!(first.wait().unwrap().success());
+            assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
+        }
+    }
+    #[test]
+    fn pin_release_under_terminal_preserves_a_replacement_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let (nonce, profile) = fixture(temp.path(), "Starting", true);
+        let original = temp.path().join(&nonce);
+        let saved = temp.path().join("saved");
+        let replacement = original.clone();
+        HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |at| {
+                if at == "pin-closed" {
+                    std::fs::rename(&original, &saved).unwrap();
+                    std::fs::create_dir(&original).unwrap();
+                    std::fs::write(original.join("sentinel"), b"keep").unwrap();
+                }
+            }))
+        });
+        let result = profile.delete_stopped(None, &nonce);
+        HOOK.with(|hook| *hook.borrow_mut() = None);
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(replacement.join("sentinel")).unwrap(),
+            b"keep"
+        );
+        assert!(temp.path().join(terminal_name(&nonce)).exists());
+        assert!(!RecoveryRoot::open(temp.path())
+            .unwrap()
+            .recover()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            std::fs::read(replacement.join("sentinel")).unwrap(),
+            b"keep"
+        );
+    }
+    #[test]
+    fn terminal_retains_unexpected_payload_replaced_controls_and_legacy_records() {
+        for change in [
+            "payload",
+            RECEIPT,
+            LEASE,
+            MARKER,
+            "legacy",
+            "ambiguous",
+            "profile",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let (nonce, profile) = fixture(temp.path(), "Starting", false);
+            drop(profile);
+            assert_eq!(
+                collector(temp.path(), Some("terminal-published"), None)
+                    .wait()
+                    .unwrap()
+                    .code(),
+                Some(77)
+            );
+            let directory = temp.path().join(&nonce);
+            let record = temp.path().join(terminal_name(&nonce));
+            match change {
+                "legacy" | "ambiguous" => {
+                    let mut value: Value =
+                        serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+                    if change == "legacy" {
+                        value["version"] = json!(1);
+                    } else {
+                        value.as_object_mut().unwrap().remove("location");
+                    }
+                    std::fs::write(&record, serde_json::to_vec(&value).unwrap()).unwrap();
+                }
+                "payload" => {
+                    std::fs::write(directory.join("unexpected"), b"keep").unwrap();
+                }
+                "profile" => {
+                    std::fs::rename(&directory, temp.path().join("saved")).unwrap();
+                    std::fs::create_dir(&directory).unwrap();
+                    std::fs::write(directory.join("sentinel"), b"keep").unwrap();
+                }
+                control => {
+                    let path = directory.join(control);
+                    let bytes = std::fs::read(&path).unwrap();
+                    std::fs::rename(&path, temp.path().join("saved")).unwrap();
+                    std::fs::write(path, bytes).unwrap();
+                }
+            }
+            assert!(
+                !RecoveryRoot::open(temp.path())
+                    .unwrap()
+                    .recover()
+                    .unwrap()
+                    .is_empty(),
+                "{change}"
+            );
+            assert!(record.exists());
+            assert!(directory.is_dir());
+            if change == "payload" {
+                assert_eq!(
+                    std::fs::read(directory.join("unexpected")).unwrap(),
+                    b"keep"
+                );
+            }
+            if change == "profile" {
+                assert_eq!(std::fs::read(directory.join("sentinel")).unwrap(), b"keep");
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1675,6 +2320,9 @@ mod native {
             return Err(io::Error::last_os_error());
         }
         Ok(())
+    }
+    pub(super) fn remove_directory(parent: &File, name: &OsStr, file: &File) -> io::Result<()> {
+        remove(parent, name, file, true)
     }
     pub(super) fn rename(
         parent: &File,
@@ -1939,8 +2587,11 @@ mod native {
         Ok(file)
     }
     fn reopen(file: &File, access: u32) -> io::Result<File> {
+        reopen_shared(file, access, 7)
+    }
+    fn reopen_shared(file: &File, access: u32, share: u32) -> io::Result<File> {
         let handle =
-            unsafe { ReOpenFile(file.as_raw_handle(), access, 7, 0x02000000 | 0x00200000) };
+            unsafe { ReOpenFile(file.as_raw_handle(), access, share, 0x02000000 | 0x00200000) };
         if handle as isize == -1 {
             return Err(io::Error::last_os_error());
         }
@@ -1951,7 +2602,20 @@ mod native {
         Ok(next)
     }
     pub(super) fn directory(parent: &File, name: &OsStr, create: bool) -> io::Result<File> {
-        open(parent, name, Some(true), create, 0x001100a7, false)
+        // A retained rename destination must not request DELETE (MS-FSA 185).
+        open(parent, name, Some(true), create, 0x001000a7, false)
+    }
+    pub(super) fn pin_directory(file: &File) -> io::Result<File> {
+        let pin = reopen_shared(file, 0x001000a7, 3)?;
+        if info(&pin)?.attributes & 0x10 == 0 {
+            return Err(invalid());
+        }
+        Ok(pin)
+    }
+    pub(super) fn unpin_directory(pin: File) -> io::Result<File> {
+        let reference = reopen(&pin, 0x001000a7)?;
+        drop(pin);
+        Ok(reference)
     }
     pub(super) fn file(parent: &File, name: &OsStr, write: bool, create: bool) -> io::Result<File> {
         open(
@@ -1992,7 +2656,7 @@ mod native {
                 return Err(invalid());
             };
             let access = if parts.peek().is_none() {
-                0x001100a7
+                0x001000a7
             } else {
                 0x001000a0
             };
@@ -2138,6 +2802,16 @@ mod native {
         }
         Ok(())
     }
+    pub(super) fn remove_directory(parent: &File, name: &OsStr, file: &File) -> io::Result<()> {
+        same(parent, name, file)?;
+        if !list(file)?.is_empty() {
+            return Err(invalid());
+        }
+        // Only directory references reach this operation. Payload handles
+        // already own DELETE with share=3 and must never be reopened for it.
+        let destructive = reopen(file, 0x001100a7)?;
+        remove(parent, name, &destructive, true)
+    }
     pub(super) fn rename(
         parent: &File,
         name: &OsStr,
@@ -2147,6 +2821,13 @@ mod native {
         replace: bool,
     ) -> io::Result<()> {
         same(parent, name, file)?;
+        let destructive;
+        let source = if info(file)?.attributes & 0x10 != 0 {
+            destructive = reopen(file, 0x001100a7)?;
+            &destructive
+        } else {
+            file
+        };
         let name = component(to)?;
         let size = std::mem::offset_of!(RenameInfo, name) + name.len() * 2;
         let mut storage = vec![0u64; size.div_ceil(8)];
@@ -2160,7 +2841,8 @@ mod native {
                 ptr::addr_of_mut!((*data).name).cast::<u16>(),
                 name.len(),
             );
-            if SetFileInformationByHandle(file.as_raw_handle(), 3, data.cast(), size as u32) == 0 {
+            if SetFileInformationByHandle(source.as_raw_handle(), 3, data.cast(), size as u32) == 0
+            {
                 return Err(io::Error::last_os_error());
             }
         }

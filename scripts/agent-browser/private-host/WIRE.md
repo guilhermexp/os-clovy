@@ -27,10 +27,26 @@ the existing exclusive lease, dead-parent `Starting` becomes durably
 `Owned` additionally requires original host/parent exit, matching native boot
 identity and an empty original group/Job. No recovery path kills or replays.
 Stop uses its cancelled Slot and completed tree termination instead of parent
-death. A private identified holder and locked root `PayloadGone` record keep
-cleanup resumable after controls disappear. Terminal recovery removes only
+death. Unix moves the profile into a private identified holder. Windows instead
+pins its original UUID directory without DELETE access or DELETE sharing;
+open controls and the same lease remain in place. NTFS forbids moving a source
+directory with open descendants, even when those opens share DELETE.
+A locked root `PayloadGone` record keeps cleanup resumable after controls
+disappear. Its internal version 2 uses a typed `location`: `unixHolder` with
+physical holder/receipt IDs, or `windowsPinnedOriginal` with the real profile
+at the original UUID. Version 1, missing/ambiguous locations and locations for
+another platform are retained, never inferred from names or mapped to a fake
+holder. Active grant/receipt/Owned and spawn/ACK formats are unchanged.
+Terminal recovery removes only
 identified controls and empty directories, preserving unexpected payload,
 unknown entries and all persistent profiles. A lease is never recreated.
+Cancelled publication closes its old receipt reader under the same lease,
+then captures and validates the new durable reader before deletion is possible.
+Windows releases every profile pin only after controls are retired and the
+terminal record owns exclusion, retains an identified reference across that
+release, and acquires DELETE operationally by reopening that same directory
+object. Payload entries keep their original DELETE/share-3 handle through
+removal; they are not reopened for DELETE.
 See the 2026-11-02 addendum in `docs/adr/browser-private-agent-host.md`.
 
 The anonymous host retains the same profile capability as its lease, including

@@ -50,7 +50,13 @@ processes; no startup orphan or premature profile-lease release is acceptable.
 Anonymous startup recovery and Stop/reaper now share the physical collector:
 existing exclusive lease, durable `Starting` cancellation, original-tree and
 boot checks for `Owned`, and a locked root terminal record before controls are
-retired. Recovery does not kill or replay. Unknown/legacy/corrupt objects and
+retired. Unix uses a physical holder; Windows pins the original UUID directory
+in place because open descendants prevent its rename. The version-2 terminal
+location explicitly distinguishes these placements. The same collector retires
+controls and empty directories under the locked terminal; only then may Windows
+release the pin and acquire DELETE by the same physical handle. Cancelled
+publication closes/replaces/revalidates its receipt under the original lease.
+Recovery does not kill or replay. Unknown/legacy/corrupt objects and
 unexpected terminal payload are preserved. The browser ADR's 2026-11-02
 addendum documents the holder/terminal format and platform limits.
 Closed tabs and stale references fail explicitly. Saved logins never revive

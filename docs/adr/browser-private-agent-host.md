@@ -193,3 +193,56 @@ objects. Flush uses
 [NtFlushBuffersFileEx with flags zero](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntflushbuffersfileex),
 propagating failures. Type checks are not native filesystem, crash-power-loss,
 sharing-mode or signed application acceptance.
+
+## 2026-11-02 addendum: Windows pins the original recovery location
+
+Windows uses logical quarantine at the original UUID, while Unix retains the
+physical holder described above. This supersedes the earlier cross-platform
+holder placement, not the common authorization/payload/terminal algorithm.
+[MS-FSA FileRenameInformation](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/87f86c9b-6c2a-4803-84b7-131a74a434fa)
+requires rejecting a source-directory rename with open descendants; the
+[open-descendant algorithm](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/133840e4-778e-44ca-9b41-da2323615075)
+does not exempt DELETE-sharing handles. POSIX replacement semantics relax the
+destination's existing opens, not those source descendants. Closing/recreating
+the lease to enable a rename would break physical exclusion and is rejected.
+
+After the unchanged R1/R2 or Stop authorization under the same exclusive lease,
+Windows reopens the captured directory object, compares its physical ID and
+pins it with reference rights, without DELETE access or DELETE sharing. Root
+and normal directory references also omit DELETE; Windows rename opens its
+destination internally with sharing that can conflict with an existing DELETE
+access handle ([MS-FSA Appendix A, note 185](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/4e3695bd-7574-4f24-a223-b4679c065b63#Appendix_A_185)). Destructive directory operations
+acquire DELETE temporarily with ReOpenFile, compare IDs and release it before
+another rename can use that directory as a destination. This does not apply
+to payload handles: their DELETE/share-3 open is the actual removal capability,
+and reopening it for DELETE would conflict with itself.
+
+Starting-to-Cancelled consumes the typed Cleanup, revalidates and closes the old
+receipt reader while retaining the original exclusive lease, publishes the new
+receipt durably, then captures and validates the replacement before recreating
+Cleanup. A crash before publication leaves Starting recoverable; after it,
+Cancelled resumes. Stop uses this same transition for Starting. Neither phase
+nor receipt absence grants a bootstrap permission to resume.
+
+The internal terminal format is version 2. Its tagged location is either
+`unixHolder`, binding real holder and holder-receipt IDs, or
+`windowsPinnedOriginal`, binding the actual profile at its original UUID through
+the root/profile IDs and nonce. There is no synthetic holder, zero-ID alias or
+error fallback. Old/ambiguous records and incompatible platform locations are
+preserved. Active grants, receipts, Owned and the spawn/ACK protocol are unchanged.
+
+Both placements use one control retirement routine. PayloadGone is durable and
+the exact root record exclusively locked before any control is removed. Windows
+keeps the directory pinned while retiring controls and the same lease, then
+reopens a reference to that same object and closes all pins only at empty
+directory retirement. The record remains locked throughout. The operational
+DELETE reopen and parent-relative ID check cannot redirect removal to a
+replacement. An unexpected entry, replacement or failed observation preserves
+the record and object; terminal recovery never recurses reappeared payload.
+Only synchronized absence permits removal of the root record.
+
+Native Windows regression consumers cover publication, pinned collection,
+same-handle payload removal, concurrency, swaps and crash boundaries. GNU
+compilation on Linux is not Windows execution or power-loss proof. Windows
+filesystem/sharing and application acceptance still require the native host;
+the existing Unix matrix and live Chrome proof remain separate evidence.
