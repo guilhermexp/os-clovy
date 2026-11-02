@@ -7,6 +7,7 @@
       "../resources/agent-browser": "native/agent-browser",
       "resources/agent-skills": "native/agent-skills",
       "native/bin/clovy-dictation-helper.exe": "native/bin/clovy-dictation-helper.exe",
+      "../.tauri-helper/mcp-windows": "native/bin",
       "../.tauri-helper/computer-use": "native/bin/computer-use"
     },
     "windows": {

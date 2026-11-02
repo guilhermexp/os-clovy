@@ -1,8 +1,7 @@
 //! The local channel between `clovy-mcp` (spawned by an MCP client) and the
-//! running app: a Unix socket in `<app data dir>/mcp/` (directory 0700,
-//! socket 0600) and an installation secret in the same directory (file
-//! 0600). The binary never opens Clovy's databases; it relays JSON-RPC lines
-//! here.
+//! running app: a Unix socket (0700 directory, 0600 socket/secret), or a local
+//! Windows named pipe with protected user/SYSTEM DACL and a private secret.
+//! The binary never opens Clovy's databases; it relays JSON-RPC lines here.
 //!
 //! Wire format: newline-delimited JSON. The client's first line is the
 //! handshake `{"clovyMcp": 1, "secret": "<hex>"}`, plus `"turn": "<token>"`
@@ -82,476 +81,57 @@ fn secrets_match(expected: &str, offered: &str) -> bool {
 
 /// Reads the installation secret (the relay side).
 pub fn read_secret(dir: &Path) -> std::io::Result<String> {
-    let secret = std::fs::read_to_string(secret_path(dir))?
-        .trim()
-        .to_string();
-    if valid_secret(&secret) {
-        Ok(secret)
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "the Clovy MCP secret file is malformed",
-        ))
+    #[cfg(windows)]
+    return windows::read_secret(dir);
+    #[cfg(not(windows))]
+    {
+        let secret = std::fs::read_to_string(secret_path(dir))?
+            .trim()
+            .to_string();
+        if valid_secret(&secret) {
+            Ok(secret)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the Clovy MCP secret file is malformed",
+            ))
+        }
     }
 }
 
+#[cfg(any(unix, windows))]
+#[path = "channel/common.rs"]
+mod common;
+#[cfg(any(unix, windows))]
+pub use common::{ClientError, Handler, Service, TurnHandler};
 #[cfg(unix)]
-pub use unix::{connect, connect_turn, ClientError, Handler, Listener, Service, TurnHandler};
-
+#[path = "channel/unix.rs"]
+mod unix;
 #[cfg(unix)]
-mod unix {
-    use std::future::Future;
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    use std::path::{Path, PathBuf};
-    use std::pin::Pin;
-    use std::sync::Arc;
-    use std::time::Duration;
+pub use unix::{connect, connect_turn, endpoint_available, Listener, SyncStream};
+#[cfg(windows)]
+#[path = "channel/windows.rs"]
+mod windows;
+#[cfg(windows)]
+pub use windows::{connect, connect_turn, endpoint_available, Listener, SyncStream};
+#[cfg(test)]
+#[path = "transport_tests.rs"]
+mod transport_tests;
 
-    use rand::RngCore;
-    use serde_json::{json, Value};
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
-    use tokio::net::{UnixListener, UnixStream};
-    use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
-
-    use super::*;
-    use crate::mcp_server::turns::{BoundTurn, TurnBinding, TurnRegistry, TURN_EXPIRED};
-
-    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-    /// How long a revoked connection waits for the answers of the calls it
-    /// was serving before it closes.
-    const REVOKE_GRACE: Duration = Duration::from_secs(2);
-    const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
-
-    /// Answers one MCP message (`None` for notifications), whatever the
-    /// connection's turn.
-    pub type Handler =
-        Arc<dyn Fn(Value) -> Pin<Box<dyn Future<Output = Option<Value>> + Send>> + Send + Sync>;
-
-    /// Answers one MCP message of a connection bound to a turn, or not
-    /// (`None`).
-    pub type TurnHandler = Arc<
-        dyn Fn(
-                Value,
-                Option<Arc<TurnBinding>>,
-            ) -> Pin<Box<dyn Future<Output = Option<Value>> + Send>>
-            + Send
-            + Sync,
-    >;
-
-    /// What a listener answers with: either handler kind.
-    pub struct Service(TurnHandler);
-
-    impl From<TurnHandler> for Service {
-        fn from(handler: TurnHandler) -> Self {
-            Self(handler)
-        }
-    }
-
-    impl From<Handler> for Service {
-        fn from(handler: Handler) -> Self {
-            Self(Arc::new(move |message, _turn| handler(message)))
-        }
-    }
-
-    fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-    }
-
-    /// The installation secret, created on first use (file mode 0600).
-    pub(crate) fn load_or_create_secret(dir: &Path) -> std::io::Result<String> {
-        ensure_private_dir(dir)?;
-        match read_secret(dir) {
-            Ok(secret) => return Ok(secret),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => std::fs::remove_file(secret_path(dir))?,
-        }
-        let mut bytes = [0u8; SECRET_BYTES];
-        rand::thread_rng().fill_bytes(&mut bytes);
-        let secret: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(secret_path(dir))?;
-        file.write_all(secret.as_bytes())?;
-        Ok(secret)
-    }
-
-    /// A running socket listener; dropping it without `stop` leaves the
-    /// accept task running.
-    pub struct Listener {
-        socket: PathBuf,
-        shutdown: watch::Sender<bool>,
-    }
-
-    impl Listener {
-        /// Binds the socket and serves connections until `stop`, with no
-        /// live turns (a handshake offering one gets `turn_expired`). Must
-        /// run inside the Tokio runtime.
-        pub async fn start(dir: &Path, handler: impl Into<Service>) -> std::io::Result<Self> {
-            Self::start_with_turns(dir, handler, TurnRegistry::default()).await
-        }
-
-        /// [`Listener::start`], binding connections to the live turns of
-        /// `turns`.
-        pub async fn start_with_turns(
-            dir: &Path,
-            handler: impl Into<Service>,
-            turns: TurnRegistry,
-        ) -> std::io::Result<Self> {
-            let Service(handler) = handler.into();
-            let secret: Arc<str> = load_or_create_secret(dir)?.into();
-            let socket = socket_path(dir);
-            if let Ok(metadata) = std::fs::symlink_metadata(&socket) {
-                use std::os::unix::fs::FileTypeExt;
-                if !metadata.file_type().is_socket() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::AlreadyExists,
-                        format!("{} exists and is not a socket", socket.display()),
-                    ));
-                }
-                // Left behind by a previous run that did not stop cleanly.
-                std::fs::remove_file(&socket)?;
-            }
-            let listener = UnixListener::bind(&socket).map_err(|error| {
-                std::io::Error::new(
-                    error.kind(),
-                    format!("could not listen on {}: {error}", socket.display()),
-                )
-            })?;
-            std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-            let (shutdown, mut stopped) = watch::channel(false);
-            let connections = shutdown.subscribe();
-            let handshakes = Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES));
-            let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        accepted = listener.accept() => {
-                            let stream = match accepted {
-                                Ok((stream, _)) => stream,
-                                Err(error) => {
-                                    // Out of descriptors (EMFILE) and the like
-                                    // persist: do not spin on them.
-                                    tracing::warn!(%error, "mcp server: accept failed");
-                                    tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
-                                    continue;
-                                }
-                            };
-                            // Too many peers that have not authenticated yet:
-                            // close this one now instead of holding it open.
-                            let Ok(handshake) = Arc::clone(&handshakes).try_acquire_owned() else {
-                                continue;
-                            };
-                            tokio::spawn(serve(
-                                stream,
-                                handshake,
-                                Arc::clone(&slots),
-                                Arc::clone(&secret),
-                                turns.clone(),
-                                Arc::clone(&handler),
-                                connections.clone(),
-                            ));
-                        }
-                        _ = stopped.changed() => break,
-                    }
-                }
-            });
-            Ok(Self { socket, shutdown })
-        }
-
-        pub fn socket(&self) -> &Path {
-            &self.socket
-        }
-
-        /// Removes the socket file, then stops accepting and closes every open
-        /// connection. Removing first means a relay whose connection drops can
-        /// already tell that the server is off.
-        pub fn stop(self) {
-            let _ = std::fs::remove_file(&self.socket);
-            let _ = self.shutdown.send(true);
-        }
-    }
-
-    /// One line, at most `MAX_LINE_BYTES`; `None` at end of stream.
-    async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(
-        reader: &mut R,
-    ) -> std::io::Result<Option<Vec<u8>>> {
-        let mut line = Vec::new();
-        let read = reader
-            .take(MAX_LINE_BYTES as u64 + 1)
-            .read_until(b'\n', &mut line)
-            .await?;
-        if read == 0 {
-            return Ok(None);
-        }
-        if line.len() > MAX_LINE_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "message too long",
-            ));
-        }
-        Ok(Some(line))
-    }
-
-    fn same_user(stream: &UnixStream) -> bool {
-        // SAFETY: geteuid has no preconditions and cannot fail.
-        let own = unsafe { libc::geteuid() };
-        stream.peer_cred().is_ok_and(|peer| peer.uid() == own)
-    }
-
-    async fn serve(
-        stream: UnixStream,
-        handshake: OwnedSemaphorePermit,
-        slots: Arc<Semaphore>,
-        secret: Arc<str>,
-        turns: TurnRegistry,
-        handler: TurnHandler,
-        mut shutdown: watch::Receiver<bool>,
-    ) {
-        let authorized = same_user(&stream);
-        let (read, mut write) = stream.into_split();
-        let mut reader = AsyncBufReader::new(read);
-        let hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_line(&mut reader)).await;
-        let offered = match hello {
-            Ok(Ok(Some(line))) => serde_json::from_slice::<Value>(&line).ok(),
-            _ => None,
-        };
-        let accepted = authorized
-            && offered.as_ref().is_some_and(|hello| {
-                hello.get("clovyMcp").and_then(Value::as_u64) == Some(HANDSHAKE_VERSION)
-                    && hello
-                        .get("secret")
-                        .and_then(Value::as_str)
-                        .is_some_and(|offered| secrets_match(&secret, offered))
-            });
-        // The turn is looked up only after the secret matched: a token alone
-        // learns nothing.
-        let turn = match accepted.then(|| offered.as_ref().and_then(|hello| hello.get("turn"))) {
-            None | Some(None) | Some(Some(Value::Null)) => Ok(None),
-            Some(Some(Value::String(token))) => turns.bind(token).map(Some).ok_or(()),
-            Some(Some(_)) => Err(()),
-        };
-        // Held until this connection ends.
-        let slot = (accepted && turn.is_ok())
-            .then(|| slots.try_acquire_owned().ok())
-            .flatten();
-        drop(handshake);
-        let reply = match (accepted, &turn, &slot) {
-            (false, _, _) => {
-                json!({ "clovyMcp": HANDSHAKE_VERSION, "ok": false, "error": "unauthorized" })
-            }
-            (true, Err(()), _) => {
-                json!({ "clovyMcp": HANDSHAKE_VERSION, "ok": false, "error": TURN_EXPIRED })
-            }
-            (true, Ok(_), Some(_)) => json!({ "clovyMcp": HANDSHAKE_VERSION, "ok": true }),
-            (true, Ok(_), None) => {
-                json!({ "clovyMcp": HANDSHAKE_VERSION, "ok": false, "error": "busy" })
-            }
-        };
-        let mut turn: Option<BoundTurn> = turn.ok().flatten();
-        let binding = turn.as_ref().map(|turn| Arc::clone(&turn.binding));
-        if write
-            .write_all(format!("{reply}\n").as_bytes())
+#[cfg(all(test, unix))]
+pub(crate) type TestStream = tokio::net::UnixStream;
+#[cfg(all(test, windows))]
+pub(crate) type TestStream = tokio::net::windows::named_pipe::NamedPipeClient;
+#[cfg(test)]
+pub(crate) async fn test_stream(dir: &Path) -> TestStream {
+    #[cfg(unix)]
+    {
+        tokio::net::UnixStream::connect(socket_path(dir))
             .await
-            .is_err()
-            || slot.is_none()
-        {
-            let _ = write.shutdown().await;
-            return;
-        }
-
-        let (responses, mut outbox) = mpsc::channel::<Value>(MAX_IN_FLIGHT_PER_CONNECTION);
-        let writer = tokio::spawn(async move {
-            while let Some(response) = outbox.recv().await {
-                if write
-                    .write_all(format!("{response}\n").as_bytes())
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            let _ = write.shutdown().await;
-        });
-        let in_flight = Arc::new(Semaphore::new(MAX_IN_FLIGHT_PER_CONNECTION));
-        let mut calls = tokio::task::JoinSet::new();
-        let (cancel_calls, call_cancelled) = watch::channel(false);
-        let mut cut = false;
-        loop {
-            while calls.try_join_next().is_some() {}
-            // Backpressure: the next line is read only once a request slot
-            // is free, so a fast client waits in its own socket buffer.
-            let permit = tokio::select! {
-                permit = Arc::clone(&in_flight).acquire_owned() => match permit {
-                    Ok(permit) => permit,
-                    Err(_) => break,
-                },
-                _ = shutdown.changed() => break,
-                _ = revoked(&mut turn) => {
-                    cut = true;
-                    break;
-                }
-            };
-            tokio::select! {
-                line = read_line(&mut reader) => {
-                    let Ok(Some(line)) = line else { break };
-                    if line.iter().all(u8::is_ascii_whitespace) {
-                        continue;
-                    }
-                    let responses = responses.clone();
-                    let handler = Arc::clone(&handler);
-                    let binding = binding.clone();
-                    let mut call_cancelled = call_cancelled.clone();
-                    calls.spawn(async move {
-                        let response = match serde_json::from_slice::<Value>(&line) {
-                            Ok(message) => {
-                                let id = crate::mcp_server::protocol::request_id(&message);
-                                let is_tool = crate::mcp_server::protocol::method(&message) == Some("tools/call");
-                                let operation = handler(message, binding);
-                                tokio::pin!(operation);
-                                tokio::select! {
-                                    biased;
-                                    response = &mut operation => response,
-                                    _ = call_cancelled.changed() => {
-                                        match tokio::time::timeout(REVOKE_GRACE / 2, &mut operation).await {
-                                            Ok(response) => response,
-                                            Err(_) => id.map(|id| if is_tool {
-                                                let mut error = crate::domain::types::AppError::new("run_cancelled", "The run was cancelled after the call was admitted. Inspect its target before retrying.");
-                                                error.details = Some(serde_json::json!({"delivery":"unknown","effect":"unknown","retrySafe":false,"callId":id.clone()}));
-                                                crate::mcp_server::protocol::result_response(id, crate::mcp_server::protocol::tool_error_for(&error))
-                                            } else {
-                                                crate::mcp_server::protocol::error_response(id, crate::mcp_server::protocol::SERVER_UNAVAILABLE, "The run was cancelled. (run_cancelled)")
-                                            }),
-                                        }
-                                    },
-                                }
-                            },
-                            Err(error) => Some(crate::mcp_server::protocol::error_response(
-                                Value::Null,
-                                crate::mcp_server::protocol::PARSE_ERROR,
-                                error.to_string(),
-                            )),
-                        };
-                        drop(line);
-                        if let Some(response) = response {
-                            let _ = responses.send(response).await;
-                        }
-                        drop(permit);
-                    });
-                }
-                _ = shutdown.changed() => break,
-                _ = revoked(&mut turn) => {
-                    cut = true;
-                    break;
-                }
-            }
-        }
-        if *shutdown.borrow() {
-            // App shutdown: pending answers are dropped.
-            calls.abort_all();
-            writer.abort();
-        } else if cut {
-            // Stop in-flight handlers as well as rejecting new requests.
-            // A remote dispatch already sent may still have an uncertain result.
-            let _ = cancel_calls.send(true);
-            drop(responses);
-            let mut writer = writer;
-            if tokio::time::timeout(REVOKE_GRACE, &mut writer)
-                .await
-                .is_err()
-            {
-                writer.abort();
-            }
-        } else {
-            // The client closed its side: let pending answers drain.
-            drop(responses);
-            let _ = writer.await;
-        }
-        drop(slot);
+            .unwrap()
     }
-
-    /// Resolves when the connection's turn is revoked; never for an unbound
-    /// connection.
-    async fn revoked(turn: &mut Option<BoundTurn>) {
-        match turn {
-            Some(turn) => turn.revoked().await,
-            None => std::future::pending().await,
-        }
-    }
-
-    /// Why the relay could not get an authenticated connection.
-    #[derive(Debug)]
-    pub enum ClientError {
-        /// No secret yet: the server was never turned on.
-        NeverEnabled,
-        /// No socket, or nobody listening: server off or app closed.
-        NotListening,
-        /// The app refused the secret.
-        Refused,
-        /// Every connection slot is taken.
-        Busy,
-        /// The turn token is unknown or revoked: the CLI turn has ended.
-        TurnExpired,
-        Other(std::io::Error),
-    }
-
-    /// Connects and authenticates (the relay side, blocking).
-    pub fn connect(dir: &Path) -> Result<std::os::unix::net::UnixStream, ClientError> {
-        connect_turn(dir, None)
-    }
-
-    /// [`connect`], bound to the CLI turn of `turn` when given.
-    pub fn connect_turn(
-        dir: &Path,
-        turn: Option<&str>,
-    ) -> Result<std::os::unix::net::UnixStream, ClientError> {
-        let secret = match read_secret(dir) {
-            Ok(secret) => secret,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ClientError::NeverEnabled)
-            }
-            Err(error) => return Err(ClientError::Other(error)),
-        };
-        let stream = std::os::unix::net::UnixStream::connect(socket_path(dir)).map_err(
-            |error| match error.kind() {
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
-                    ClientError::NotListening
-                }
-                _ => ClientError::Other(error),
-            },
-        )?;
-        stream
-            .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
-            .map_err(ClientError::Other)?;
-        // The app closes a peer it has no handshake slot for.
-        let closed = |error: std::io::Error| match error.kind() {
-            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset => {
-                ClientError::Busy
-            }
-            _ => ClientError::Other(error),
-        };
-        (&stream)
-            .write_all(format!("{}\n", turn_handshake(&secret, turn)).as_bytes())
-            .map_err(closed)?;
-        let mut reply = String::new();
-        BufReader::new(&stream)
-            .read_line(&mut reply)
-            .map_err(closed)?;
-        if reply.is_empty() {
-            return Err(ClientError::Busy);
-        }
-        let reply = serde_json::from_str::<Value>(&reply).unwrap_or(Value::Null);
-        if reply.get("ok").and_then(Value::as_bool) != Some(true) {
-            return Err(match reply.get("error").and_then(Value::as_str) {
-                Some("busy") => ClientError::Busy,
-                Some(TURN_EXPIRED) => ClientError::TurnExpired,
-                _ => ClientError::Refused,
-            });
-        }
-        stream.set_read_timeout(None).map_err(ClientError::Other)?;
-        Ok(stream)
+    #[cfg(windows)]
+    {
+        windows::test_stream(dir)
     }
 }

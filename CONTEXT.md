@@ -820,7 +820,8 @@ The stdio MCP server that lets MCP clients outside Clovy (Claude Code,
 Cursor, CLI chat engines) read the current **data partition**'s notes,
 dictations, and memories, and the installation's activity (activity has no
 partition, [ADR-0059](docs/adr/0059-activity-is-per-installation-not-per-data-partition.md)).
-The binary relays to the running app over an authenticated local socket and
+The binary relays to the running app over an authenticated local channel
+(Unix socket on macOS, private local named pipe on Windows) and
 answers only while Clovy is open with the server on, which it is by default
 until the user turns it off (see [docs/mcp-server.md](docs/mcp-server.md)). It
 is independent of **activity capture**: with capture off it still serves notes,

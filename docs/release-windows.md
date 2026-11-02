@@ -15,12 +15,25 @@ is no unsigned output alias.
 Computer use now requires signed native artifacts. Set
 `WINDOWS_CERTIFICATE_THUMBPRINT` to an available current-user signing
 certificate and provide `signtool.exe` on PATH (or `WINDOWS_SIGNTOOL_PATH`).
-The builder signs the bundled agent-desktop engine and authenticated helper
+The builder signs the bundled `clovy-mcp.exe` relay, agent-desktop engine and authenticated helper
 before Tauri signs Clovy and the installer. Payload verification requires a
-valid matching publisher on the host, Computer use helper and engine, plus
+valid matching publisher on the host, MCP relay, Computer use helper and engine, plus
 matching engine manifest, source, protocol, patch, target, binary and license
 hashes. Missing signing credentials fail the build; unsigned executables cannot
 satisfy the private helper's peer contract.
+
+`scripts/tauri-build.mjs` stages the MCP relay through
+`prepare-windows-mcp.mjs` after preparing the existing native engines. This
+invokes Cargo with the requested target/profile and honors `CARGO_TARGET_DIR`,
+selects the executable from Cargo's artifact events, signs it with the existing
+certificate, and writes `.tauri-helper/mcp-windows/clovy-mcp-manifest.json`.
+The Windows config maps that directory to `native/bin`. `build.rs` may create
+the directory for bootstrap, but never a placeholder executable.
+`verify-windows-artifacts.ps1` requires exactly one extracted relay and manifest
+at that location, identical staged/extracted hashes, current-source provenance,
+the release MSVC target/profile, and the same publisher as app/installer.
+Run the builder and final verifier on native Windows; a GNU metadata/typecheck
+run is not proof of signing or NSIS extraction.
 
 `pnpm tauri:dev` uses a native development runner around Cargo. On every rebuild,
 it takes the executable paths reported by Cargo, signs the newly built host and

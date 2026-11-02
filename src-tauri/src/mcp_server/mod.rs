@@ -15,14 +15,14 @@
 mod bound_partition_tests;
 pub mod channel;
 pub mod protocol;
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 #[path = "red_tests.rs"]
 mod red_tests;
 pub mod stdio;
 #[cfg(test)]
 pub(crate) mod tests;
 pub mod tools;
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 #[path = "turn_tests.rs"]
 mod turn_tests;
 pub mod turns;
@@ -39,7 +39,10 @@ use tools::{ActivityAccess, McpData, ToolCtx};
 
 /// The relay binary (`[[bin]]` in Cargo.toml, bundled under
 /// `Resources/native/bin/`).
+#[cfg(not(windows))]
 pub const BINARY_NAME: &str = "clovy-mcp";
+#[cfg(windows)]
+pub const BINARY_NAME: &str = "clovy-mcp.exe";
 /// The server's key in `mcpServers` configuration objects.
 pub const SERVER_KEY: &str = "clovy";
 
@@ -98,14 +101,21 @@ pub fn cursor_config(launch: &McpLaunch) -> Value {
 }
 
 fn shell_quote(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"/._-=:@%+,".contains(&byte))
+    #[cfg(windows)]
     {
-        return value.to_string();
+        return format!("'{}'", value.replace('\'', "''"));
     }
-    format!("'{}'", value.replace('\'', r"'\''"))
+    #[cfg(not(windows))]
+    {
+        if !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"/._-=:@%+,".contains(&byte))
+        {
+            return value.to_string();
+        }
+        format!("'{}'", value.replace('\'', r"'\''"))
+    }
 }
 
 /// `claude mcp add` for the user scope (every project).
@@ -186,7 +196,7 @@ pub struct McpServerState {
 
 #[derive(Default)]
 struct Slot {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     listener: Option<channel::Listener>,
     error: Option<String>,
 }
@@ -200,7 +210,7 @@ impl McpServerState {
     /// Starts the listener in the directory `dir` resolves, with `handler`,
     /// when `enabled` and none runs; stops it when not `enabled`. `dir` and
     /// `handler` run only when the listener starts.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) async fn apply_switch<H>(
         &self,
         enabled: bool,
@@ -210,7 +220,15 @@ impl McpServerState {
         H: Into<channel::Service>,
     {
         let mut slot = self.slot.lock().await;
-        if enabled && slot.listener.is_none() {
+        if enabled
+            && !slot
+                .listener
+                .as_ref()
+                .is_some_and(channel::Listener::is_running)
+        {
+            if let Some(listener) = slot.listener.take() {
+                listener.stop_and_wait().await;
+            }
             let started = match dir() {
                 Ok(dir) => channel::Listener::start_with_turns(&dir, handler(), self.turns.clone())
                     .await
@@ -230,7 +248,7 @@ impl McpServerState {
             }
         } else if !enabled {
             if let Some(listener) = slot.listener.take() {
-                listener.stop();
+                listener.stop_and_wait().await;
             }
             slot.error = None;
         }
@@ -239,18 +257,27 @@ impl McpServerState {
     /// Whether the listener runs, and the last start error, read together.
     pub(crate) async fn listener_status(&self) -> (bool, Option<String>) {
         let slot = self.slot.lock().await;
-        #[cfg(unix)]
-        let running = slot.listener.is_some();
-        #[cfg(not(unix))]
+        #[cfg(any(unix, windows))]
+        let running = slot
+            .listener
+            .as_ref()
+            .is_some_and(channel::Listener::is_running);
+        #[cfg(not(any(unix, windows)))]
         let running = false;
-        (running, slot.error.clone())
+        let error = slot.error.clone();
+        #[cfg(any(unix, windows))]
+        let error = error.or_else(|| {
+            (slot.listener.is_some() && !running)
+                .then(|| "The MCP listener stopped. Turn the server off and on to retry.".into())
+        });
+        (running, error)
     }
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerStatusDto {
-    /// macOS with activity settings available.
+    /// macOS or Windows with activity settings available.
     pub supported: bool,
     pub enabled: bool,
     pub running: bool,
@@ -269,7 +296,7 @@ pub struct SetMcpServerEnabledRequest {
 }
 
 fn supported(app: &AppHandle) -> bool {
-    cfg!(target_os = "macos") && crate::activity::activity_settings_supported(app)
+    cfg!(any(target_os = "macos", windows)) && crate::activity::activity_settings_supported(app)
 }
 
 async fn status(app: &AppHandle) -> Result<McpServerStatusDto, AppError> {
@@ -295,11 +322,11 @@ async fn status(app: &AppHandle) -> Result<McpServerStatusDto, AppError> {
 async fn reconcile(app: &AppHandle) {
     let enabled = crate::activity::mcp_server_enabled(app);
     let state = app.state::<McpServerState>();
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     state
         .apply_switch(enabled, || channel_dir(app), || app_handler(app.clone()))
         .await;
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = enabled;
         state.slot.lock().await.error = None;
@@ -326,7 +353,7 @@ pub async fn mcp_server_set_enabled(
     if !supported(&app) {
         return Err(AppError::new(
             "mcp_server_unsupported",
-            "The Clovy MCP server is available on macOS only.",
+            "The Clovy MCP server requires macOS or Windows with activity settings available.",
         ));
     }
     crate::activity::set_mcp_server_enabled(&app, request.enabled)?;
@@ -334,7 +361,7 @@ pub async fn mcp_server_set_enabled(
     status(&app).await
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn app_handler(app: AppHandle) -> channel::TurnHandler {
     std::sync::Arc::new(move |message: Value, binding| {
         let app = app.clone();
