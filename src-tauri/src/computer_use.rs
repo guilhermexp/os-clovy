@@ -159,11 +159,18 @@ struct TargetContext {
     window_id: u64,
     app_name: String,
     identity: AppIdentity,
+    native_owner: Option<NativeOwnerIdentity>,
     elements: HashMap<u32, ElementSummary>,
     capture_path: Option<String>,
     capture_sha256: Option<String>,
     capture_generation: u64,
     bounds: crate::computer_use_cursor::ScreenRect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct NativeOwnerIdentity {
+    pid: u32,
+    instance: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3282,6 +3289,7 @@ struct WindowTarget {
     window_id: u64,
     app_name: String,
     identity: AppIdentity,
+    native_owner: Option<NativeOwnerIdentity>,
     title: String,
     z_index: i64,
     x: f64,
@@ -3319,8 +3327,20 @@ async fn windows(
         .iter()
         .filter_map(|window| {
             let pid = window.get("pid")?.as_i64()?;
+            let native_owner = match window.get("native_owner") {
+                Some(value) if !value.is_null() => {
+                    let owner: NativeOwnerIdentity = serde_json::from_value(value.clone()).ok()?;
+                    if owner.pid == 0 || owner.instance.is_empty() {
+                        return None;
+                    }
+                    Some(owner)
+                }
+                _ if cfg!(target_os = "windows") => return None,
+                _ => None,
+            };
             Some(WindowTarget {
                 pid,
+                native_owner,
                 window_id: window.get("window_id")?.as_u64()?,
                 app_name: window.get("app_name")?.as_str()?.to_string(),
                 // WindowServer's owner name is presentation text and can be
@@ -3450,6 +3470,7 @@ async fn refresh_window_target(
             window.pid == target.pid
                 && window.window_id == target.window_id
                 && window.identity == target.identity
+                && window.native_owner == target.native_owner
                 && !blocked_target(state, &window.app_name, &window.identity)
         })
         .ok_or_else(stale_target_error)
@@ -3832,6 +3853,7 @@ async fn capture(
         window_id: target.window_id,
         app_name: target.app_name.clone(),
         identity: target.identity.clone(),
+        native_owner: target.native_owner.clone(),
         elements,
         capture_path: capture_path.clone(),
         capture_sha256,
@@ -4056,6 +4078,7 @@ fn store_target_selection(
                 window_id: target.window_id,
                 app_name: target.app_name.clone(),
                 identity: target.identity.clone(),
+                native_owner: target.native_owner.clone(),
                 elements: HashMap::new(),
                 capture_path: None,
                 capture_sha256: None,
@@ -4530,6 +4553,7 @@ async fn revalidate_target(
                 && window.window_id == approved.window_id
                 && window.app_name == approved.app_name
                 && window.identity == approved.identity
+                && window.native_owner == approved.native_owner
                 && !blocked_target(state, &window.app_name, &window.identity)
         });
     let live_window = live_window.ok_or_else(stale_target_error)?;
@@ -4595,6 +4619,7 @@ fn same_target_capture(current: &TargetContext, approved: &TargetContext) -> boo
         && current.window_id == approved.window_id
         && current.app_name == approved.app_name
         && current.identity == approved.identity
+        && current.native_owner == approved.native_owner
 }
 
 fn referenced_elements(action: &str, arguments: &Value) -> Vec<u32> {
@@ -5845,6 +5870,7 @@ mod tests {
             .unwrap()
             .insert(AppAuthorizationKey::RequestedName("Fixture".into()));
         *state.target.lock().unwrap() = Some(TargetContext {
+            native_owner: None,
             pid: 1,
             window_id: 2,
             app_name: "Fixture".into(),
@@ -5886,6 +5912,7 @@ mod tests {
         let epoch = state.current_epoch();
         let generation = state.attended_generation.load(Ordering::SeqCst);
         let target = WindowTarget {
+            native_owner: None,
             pid: 1,
             window_id: 2,
             app_name: "Fixture".into(),
@@ -6373,6 +6400,7 @@ mod tests {
 
     fn fixture_target() -> TargetContext {
         TargetContext {
+            native_owner: None,
             pid: 42,
             window_id: 84,
             app_name: "TextEdit".to_string(),
@@ -6400,6 +6428,7 @@ mod tests {
     fn fixture_windows() -> Vec<WindowTarget> {
         vec![
             WindowTarget {
+                native_owner: None,
                 pid: 10,
                 window_id: 100,
                 app_name: "TextEdit".to_string(),
@@ -6414,6 +6443,7 @@ mod tests {
                 on_current_space: Some(true),
             },
             WindowTarget {
+                native_owner: None,
                 pid: 10,
                 window_id: 101,
                 app_name: "TextEdit".to_string(),
@@ -6428,6 +6458,7 @@ mod tests {
                 on_current_space: Some(true),
             },
             WindowTarget {
+                native_owner: None,
                 pid: 20,
                 window_id: 200,
                 app_name: "Preview".to_string(),
@@ -6730,6 +6761,7 @@ mod tests {
     #[test]
     fn sensitive_fields_are_never_automated() {
         let target = TargetContext {
+            native_owner: None,
             pid: 1,
             window_id: 2,
             app_name: "Safari".to_string(),
@@ -7132,6 +7164,7 @@ mod tests {
     #[test]
     fn approved_capture_and_element_references_fail_closed_when_stale() {
         let approved = TargetContext {
+            native_owner: None,
             pid: 10,
             window_id: 20,
             app_name: "TextEdit".to_string(),
@@ -7318,6 +7351,7 @@ mod tests {
             "/Applications/Other TextEdit.app/Contents/MacOS/TextEdit",
         );
         windows.push(WindowTarget {
+            native_owner: None,
             pid: 30,
             window_id: 300,
             app_name: "TextEdit".to_string(),

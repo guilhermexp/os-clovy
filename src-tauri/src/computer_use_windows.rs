@@ -56,8 +56,9 @@ use windows::{
             },
         },
         UI::WindowsAndMessaging::{
-            EnumWindows, GetShellWindow, GetWindowThreadProcessId, IsIconic, IsWindow,
-            SetForegroundWindow, ShowWindowAsync, SW_RESTORE, SW_SHOWNOACTIVATE,
+            EnumWindows, FindWindowExW, GetClassNameW, GetShellWindow, GetWindowThreadProcessId,
+            IsIconic, IsWindow, SetForegroundWindow, ShowWindowAsync, SW_RESTORE,
+            SW_SHOWNOACTIVATE,
         },
     },
 };
@@ -721,6 +722,41 @@ fn verify_window_owner(window: HWND, expected_pid: u32) -> Result<()> {
     Ok(())
 }
 
+fn verify_hosted_target(window: HWND, owner: u32, target: u32) -> Result<()> {
+    if owner == target {
+        return Ok(());
+    }
+    let mut class = [0u16; 128];
+    let len = unsafe { GetClassNameW(window, &mut class) };
+    if len <= 0 || String::from_utf16_lossy(&class[..len as usize]) != "ApplicationFrameWindow" {
+        bail!("The authorized hosted frame changed");
+    }
+    let name: Vec<u16> = "Windows.UI.Core.CoreWindow"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let mut after = None;
+    loop {
+        let child = match unsafe {
+            FindWindowExW(Some(window), after, PCWSTR(name.as_ptr()), PCWSTR::null())
+        } {
+            Ok(child) => child,
+            Err(_) => bail!("The authorized hosted window is unavailable"),
+        };
+        let mut child_pid = 0;
+        if unsafe { GetWindowThreadProcessId(child, Some(&mut child_pid)) } == 0 {
+            bail!("Hosted window identity is unavailable");
+        }
+        if child_pid != owner {
+            if child_pid != target {
+                bail!("The authorized hosted window changed");
+            }
+            return Ok(());
+        }
+        after = Some(child);
+    }
+}
+
 pub fn permission_result() -> Value {
     let ready = readiness();
     let accessible = ready.is_ok();
@@ -775,6 +811,15 @@ pub fn focus_window_result(
             .as_u64()
             .context("Missing target window")?;
         let hwnd = HWND(usize::try_from(id)? as *mut c_void);
+        let owner_pid = u32::try_from(
+            args["expected_native_owner"]["pid"]
+                .as_u64()
+                .context("Missing original window owner")?,
+        )?;
+        let owner_expected = args["expected_native_owner"]["instance"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .context("Missing original owner generation")?;
         let mut actual = 0;
         unsafe {
             if !IsWindow(Some(hwnd)).as_bool() {
@@ -782,7 +827,7 @@ pub fn focus_window_result(
             }
             GetWindowThreadProcessId(hwnd, Some(&mut actual));
         }
-        if pid == 0 || pid != actual {
+        if pid == 0 || owner_pid == 0 || owner_pid != actual {
             bail!("Target window identity changed");
         }
         let expected = args["expected_process_instance"]
@@ -790,35 +835,69 @@ pub fn focus_window_result(
             .context("Missing expected process generation")?;
         let process =
             unsafe { Handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)?) };
+        let owner_process = if owner_pid == pid {
+            None
+        } else {
+            Some(unsafe {
+                Handle(OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION,
+                    false,
+                    owner_pid,
+                )?)
+            })
+        };
+        let owner_handle = owner_process
+            .as_ref()
+            .map(|handle| handle.0)
+            .unwrap_or(process.0);
         unsafe {
             GetWindowThreadProcessId(hwnd, Some(&mut actual));
         }
-        if actual != pid || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        if actual != owner_pid || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
             bail!("The authorized window identity changed");
         }
         verify_target_integrity(process.0)?;
+        if owner_pid != pid {
+            verify_target_integrity(owner_handle)?;
+        }
         require_desktop()?;
-        verify_window_owner(hwnd, pid)?;
+        let identity = qualify_focus_target(runtime, process.0, expected, None)?;
+        let owner_identity = if owner_pid == pid {
+            if owner_expected != expected {
+                bail!("The authorized owner generation changed");
+            }
+            identity.clone()
+        } else {
+            qualify_focus_target(runtime, owner_handle, owner_expected, None)?
+        };
         if crate::computer_use_cancel::current_run_cancelled() {
             bail!("Computer use was stopped before window restoration");
         }
-        let identity = qualify_focus_target(runtime, process.0, expected, None)?;
+        verify_hosted_target(hwnd, owner_pid, pid)?;
+        verify_window_owner(hwnd, owner_pid)?;
         let restored = unsafe { IsIconic(hwnd) }.as_bool()
             && unsafe { ShowWindowAsync(hwnd, SW_RESTORE) }.as_bool();
         dispatched |= restored;
         unsafe {
             GetWindowThreadProcessId(hwnd, Some(&mut actual));
         }
-        if actual != pid || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        if actual != owner_pid || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
             bail!("The authorized window changed during restoration");
         }
         verify_target_integrity(process.0)?;
+        if owner_pid != pid {
+            verify_target_integrity(owner_handle)?;
+        }
         require_desktop()?;
-        verify_window_owner(hwnd, pid)?;
+        qualify_focus_target(runtime, process.0, expected, Some(&identity))?;
+        if owner_pid != pid {
+            qualify_focus_target(runtime, owner_handle, owner_expected, Some(&owner_identity))?;
+        }
         if crate::computer_use_cancel::current_run_cancelled() {
             bail!("Computer use was stopped before focusing the window");
         }
-        qualify_focus_target(runtime, process.0, expected, Some(&identity))?;
+        verify_hosted_target(hwnd, owner_pid, pid)?;
+        verify_window_owner(hwnd, owner_pid)?;
         let focused = unsafe { SetForegroundWindow(hwnd) }.as_bool();
         dispatched |= focused;
         Ok((pid, id, focused, restored))

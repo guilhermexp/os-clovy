@@ -51,7 +51,7 @@ impl Window {
         json!({"pid":self.pid(),"window_id":self.public_id,"app_name":self.raw["app_name"],
             "title":self.raw["title"],"bounds":self.raw["bounds"],"z_index":z_index,
             "is_on_screen":self.raw["visible"].as_bool().unwrap_or(false),
-            "process_instance":self.raw["process_instance"],"accessible":self.raw["accessible"],
+            "process_instance":self.raw["process_instance"],"native_owner":self.raw["native_owner"],"accessible":self.raw["accessible"],
             "is_focused":self.raw["is_focused"]})
     }
 }
@@ -144,6 +144,13 @@ impl EngineAdapter {
             if raw["pid"].as_i64().is_none_or(|p| p <= 0)
                 || geometry(&raw["bounds"]).is_none()
                 || raw["process_instance"].as_str().is_none_or(str::is_empty)
+                || (cfg!(target_os = "windows")
+                    && (raw["native_owner"]["pid"]
+                        .as_u64()
+                        .is_none_or(|p| p == 0 || p > u32::MAX as u64)
+                        || raw["native_owner"]["instance"]
+                            .as_str()
+                            .is_none_or(str::is_empty)))
             {
                 continue;
             }
@@ -248,6 +255,7 @@ impl EngineAdapter {
                 {
                     let mut scoped = args.clone();
                     scoped["expected_process_instance"] = window.raw["process_instance"].clone();
+                    scoped["expected_native_owner"] = window.raw["native_owner"].clone();
                     let mut result = crate::computer_use_windows::focus_window_result(
                         &scoped,
                         self.host.browser_runtime(),

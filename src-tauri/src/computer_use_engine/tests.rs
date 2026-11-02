@@ -34,7 +34,7 @@ fn launch_failure_distinguishes_typed_denial_from_a_lookalike_error() {
 fn window() -> Window {
     Window {
         public_id: 7,
-        raw: json!({"id":"w-7","pid":42,"process_instance":"p42:100","app_name":"Synthetic","title":"Document","is_focused":false,"visible":true,"bounds":{"x":-200.0,"y":10.0,"width":400.0,"height":300.0}}),
+        raw: json!({"id":"w-7","pid":42,"process_instance":"p42:100","native_owner":{"pid":77,"instance":"p77:200"},"app_name":"Synthetic","title":"Document","is_focused":false,"visible":true,"bounds":{"x":-200.0,"y":10.0,"width":400.0,"height":300.0}}),
     }
 }
 fn capture() -> Capture {
@@ -60,6 +60,9 @@ fn exact_window_process_instance_and_geometry_are_required() {
     let w = window();
     let mut changed = w.clone();
     changed.raw["process_instance"] = json!("p42:101");
+    assert!(!w.same_identity(&changed));
+    changed = w.clone();
+    changed.raw["native_owner"]["instance"] = json!("p77:201");
     assert!(!w.same_identity(&changed));
     changed = w.clone();
     changed.raw["bounds"]["x"] = json!(-201.0);

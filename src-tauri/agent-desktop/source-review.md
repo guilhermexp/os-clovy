@@ -177,8 +177,11 @@ Window and reference records now carry an optional typed native owner identity
 through allocation, persistence and ref payloads. A Windows hosted window
 without the original owner identity is refused at the qualified window boundary;
 a same-process owner may use the existing target generation. Windows inventory
-does not yet populate the new field, and remaining native consumers still
-require migration before hosted windows can be qualified end to end.
+records the owner generation from the retained process authority before reading
+the title, and carries it through the broker, references, focus and capture.
+Scoped input checks Stop before its final native receiver and focus observations;
+those observations and the effect have no intervening filesystem check.
+This records the source-level boundary, not a native Windows acceptance.
 
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:
