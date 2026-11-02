@@ -8280,7 +8280,7 @@ new file mode 100644
 index 0000000..2c1c453
 --- /dev/null
 +++ b/crates/macos/src/input/mouse/scoped.rs
-@@ -0,0 +1,1217 @@
+@@ -0,0 +1,1228 @@
 +use crate::tree::AXElement;
 +use agent_desktop_core::{AdapterError, Deadline, MouseEvent, MouseEventKind, Point};
 +use core_graphics::event::{
@@ -8439,6 +8439,17 @@ index 0000000..2c1c453
 +            )?;
 +        }
 +        Ok(())
++    }
++
++    fn revalidate_cleanup_owner(&self, deadline: std::time::Instant) -> Result<(), AdapterError> {
++        let pid = crate::system::process::process_identity::to_pid_t(
++            self.target.window().root_identity()?.pid,
++        )?;
++        crate::system::window::cg_window_exact::revalidate_native_owner(
++            self.window_number,
++            pid,
++            deadline,
++        )
 +    }
 +
 +    fn qualify(
@@ -9309,7 +9320,7 @@ index 0000000..2c1c453
 +            return false;
 +        }
 +        let hit = AXElement::from_raw(hit);
-+        if self.receiver.revalidate_geometry(instant).is_err() {
++        if self.receiver.revalidate_cleanup_owner(instant).is_err() {
 +            return false;
 +        }
 +        let cursor = crate::input::mouse::event_source()
@@ -9346,7 +9357,7 @@ index 0000000..2c1c453
 +        {
 +            return false;
 +        }
-+        if self.receiver.revalidate_geometry(instant).is_err() {
++        if self.receiver.revalidate_cleanup_owner(instant).is_err() {
 +            return false;
 +        }
 +        let latest = CGEvent::new(self.receiver.pointer_source.clone())

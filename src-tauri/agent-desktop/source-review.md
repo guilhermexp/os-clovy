@@ -273,9 +273,10 @@ control-flow checks, not evidence of AppKit routing, event capture, ABI,
 receiving-app behavior or native release and ACK.
 
 Coordinate-based window input retains the captured window bounds through
-pointer movement, clicks, wheel chunks, drag steps and release. After Stop,
-the native exact-window metadata is checked against the original owner and
-geometry before dispatch. Missing or changed geometry refuses the action;
+pointer movement, clicks, wheel chunks and new drag steps. Drag cleanup
+checks the original native window and owner without requiring its old bounds;
+all existing identity, hit, cursor and physical-input guards remain in force.
+Other dispatches still refuse missing or changed geometry;
 reference-bound paths retain their existing element and window policy. The
 portable command-consumer tests and Darwin metadata check do not execute the
 native geometry read or establish macOS routing.
