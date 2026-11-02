@@ -96,12 +96,16 @@ describe("chat engine presentation", () => {
 
   it("changes the approval mode of the selected conversation", async () => {
     const user = userEvent.setup();
-    mocks.invoke.mockImplementation((command: string) => {
-      if (command === "set_agent_session_approval_mode") {
-        return Promise.resolve({ ...session, approvalMode: "bypass" });
-      }
-      return answer(command, [session]);
-    });
+    let storedSession = { ...session };
+    mocks.invoke.mockImplementation(
+      (command: string, args: { approvalMode: AgentSessionDto["approvalMode"] }) => {
+        if (command === "set_agent_session_approval_mode") {
+          storedSession = { ...storedSession, approvalMode: args.approvalMode };
+          return Promise.resolve(storedSession);
+        }
+        return answer(command, [storedSession]);
+      },
+    );
     render(<AgentWorkspace initialSession={session} />);
     const control = await screen.findByRole("combobox", { name: "Tool approval" });
     expect(control).toHaveValue("approvals");
