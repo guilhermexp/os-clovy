@@ -6143,9 +6143,18 @@ index d176588..3d558cd 100644
  use agent_desktop_core::ErrorCode;
 
 diff --git a/crates/windows/src/system/window/window_activate.rs b/crates/windows/src/system/window/window_activate.rs
-index 9d92805..fb8b042 100644
+index 9d92805..45d8db3 100644
 --- a/crates/windows/src/system/window/window_activate.rs
 +++ b/crates/windows/src/system/window/window_activate.rs
+@@ -38,7 +38,7 @@ const INTER_ATTEMPT_DELAY: Duration = Duration::from_millis(25);
+ /// immediately before issuing it, and success itself is ownership-qualified:
+ /// `is_owned_foreground` requires the foreground window to be this handle
+ /// **and** still owned by the expected process. A recycle that wins the
+-/// residual race therefore fails closed as not-delivered instead of
++/// residual race therefore fails closed with uncertain delivery instead of
+ /// reporting focus over a foreign window and licensing headed input into it.
+ ///
+ /// Restore-versus-raise ordering: restore-then-raise when iconic; raise
 @@ -64,14 +64,47 @@ pub(crate) fn focus_window(win: &WindowInfo, lease: &InteractionLease) -> Result
              "headed focus requires a process-instance token on the stored window",
          )));
@@ -6234,16 +6243,22 @@ index 9d92805..fb8b042 100644
          if is_owned_foreground(handle, evidence) {
              return Ok(());
          }
-@@ -165,7 +214,7 @@ fn raise_with_budget(
- /// guards already use: not-delivered while nothing has gone out,
- /// delivered-unverified once a physical write has.
+@@ -161,11 +210,10 @@ fn raise_with_budget(
+ /// second attempt onward, a prior `bring_to_foreground` call has already
+ /// issued `ShowWindow`/`SetForegroundWindow` against the live handle, so the
+ /// envelope cannot claim nothing was written even though the error itself is
+-/// a plain `Timeout`. That mirrors the split the keyboard and mouse release
+-/// guards already use: not-delivered while nothing has gone out,
+-/// delivered-unverified once a physical write has.
++/// a plain `Timeout`. A native write attempt is uncertain until independently
++/// observed; it cannot authorize a safe replay.
  fn after_foreground_write_attempted(error: AdapterError) -> AdapterError {
 -    error.with_disposition(DeliverySemantics::delivered_unverified())
 +    error.with_disposition(DeliverySemantics::uncertain())
  }
 
  pub(crate) fn budget_exhausted(strictly_higher: bool) -> AdapterError {
-@@ -216,6 +265,10 @@ pub(crate) fn is_owned_foreground(
+@@ -216,6 +264,10 @@ pub(crate) fn is_owned_foreground(
  fn restore_if_iconic(
      handle: super::window_enum::WindowHandle,
      evidence: &WindowIdentityEvidence<'_>,
@@ -6254,7 +6269,7 @@ index 9d92805..fb8b042 100644
  ) -> Result<(), AdapterError> {
      use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, SW_RESTORE, ShowWindowAsync};
      unsafe {
-@@ -225,7 +278,9 @@ fn restore_if_iconic(
+@@ -225,7 +277,9 @@ fn restore_if_iconic(
          if !owned_for_write(evidence)? {
              return Err(recycled_before_foreground());
          }
@@ -6265,7 +6280,7 @@ index 9d92805..fb8b042 100644
          if ShowWindowAsync(handle, SW_RESTORE) == 0 {
              return Err(before_activation(hresult::win32_last_error(
                  "ShowWindowAsync failed while restoring target",
-@@ -241,6 +296,10 @@ fn restore_if_iconic(
+@@ -241,6 +295,10 @@ fn restore_if_iconic(
  fn restore_if_iconic(
      _handle: super::window_enum::WindowHandle,
      _evidence: &WindowIdentityEvidence<'_>,
@@ -6276,7 +6291,7 @@ index 9d92805..fb8b042 100644
  ) -> Result<(), AdapterError> {
      Ok(())
  }
-@@ -249,6 +308,10 @@ fn restore_if_iconic(
+@@ -249,6 +307,10 @@ fn restore_if_iconic(
  fn bring_to_foreground(
      handle: super::window_enum::WindowHandle,
      evidence: &WindowIdentityEvidence<'_>,
@@ -6287,7 +6302,7 @@ index 9d92805..fb8b042 100644
  ) -> Result<(), AdapterError> {
      use windows_sys::Win32::UI::WindowsAndMessaging::{
          IsWindowVisible, SW_SHOW, SetForegroundWindow, ShowWindowAsync,
-@@ -259,7 +322,9 @@ fn bring_to_foreground(
+@@ -259,7 +321,9 @@ fn bring_to_foreground(
              return Err(recycled_before_foreground());
          }
          if IsWindowVisible(handle) == 0 {
@@ -6298,7 +6313,7 @@ index 9d92805..fb8b042 100644
              if ShowWindowAsync(handle, SW_SHOW) == 0 {
                  return Err(before_activation(hresult::win32_last_error(
                      "ShowWindowAsync failed while showing target",
-@@ -269,7 +334,9 @@ fn bring_to_foreground(
+@@ -269,7 +333,9 @@ fn bring_to_foreground(
          if !owned_for_write(evidence)? {
              return Err(recycled_before_foreground());
          }
@@ -6309,7 +6324,7 @@ index 9d92805..fb8b042 100644
          let _ = SetForegroundWindow(handle);
      }
      Ok(())
-@@ -279,6 +346,10 @@ fn bring_to_foreground(
+@@ -279,6 +345,10 @@ fn bring_to_foreground(
  fn bring_to_foreground(
      _handle: super::window_enum::WindowHandle,
      _evidence: &WindowIdentityEvidence<'_>,
@@ -6320,8 +6335,17 @@ index 9d92805..fb8b042 100644
  ) -> Result<(), AdapterError> {
      Err(AdapterError::not_supported("focus_window"))
  }
+@@ -303,7 +373,7 @@ fn owned_for_write(evidence: &WindowIdentityEvidence<'_>) -> Result<bool, Adapte
+ /// is the foreground call itself (the visibility write is skipped when the
+ /// window is already visible, which it is on every path that reaches here),
+ /// and success is ownership-qualified — so the outcome of losing the race is
+-/// a foreign window raised once and an honest not-delivered refusal, never
++/// a foreign window raised once and an uncertain refusal, never
+ /// input delivered to it. Closing it entirely needs a kernel primitive that
+ /// does not exist.
+ fn recycled_before_foreground() -> AdapterError {
 diff --git a/crates/windows/src/system/window/window_activate_tests.rs b/crates/windows/src/system/window/window_activate_tests.rs
-index 1756264..4c4afb0 100644
+index 1756264..d0489b7 100644
 --- a/crates/windows/src/system/window/window_activate_tests.rs
 +++ b/crates/windows/src/system/window/window_activate_tests.rs
 @@ -119,10 +119,20 @@ fn restore_branch_fails_closed_on_recycled_ownership() {
@@ -6368,7 +6392,24 @@ index 1756264..4c4afb0 100644
      assert_eq!(error.code, ErrorCode::WindowNotFound);
      assert_eq!(
          error.disposition.delivery(),
-@@ -193,7 +213,7 @@ fn strictly_higher_integrity_budget_exhaustion_is_perm_denied_never_action_faile
+@@ -160,7 +180,7 @@ fn budget_retry_fails_closed_on_recycled_ownership() {
+     assert_eq!(error.code, ErrorCode::WindowNotFound);
+     assert_eq!(
+         error.disposition.delivery(),
+-        DeliveryDisposition::NotDelivered
++        DeliveryDisposition::DeliveryUncertain
+     );
+     assert!(
+         attempt_probe::count() >= 1,
+@@ -186,14 +206,14 @@ fn strictly_higher_integrity_budget_exhaustion_is_perm_denied_never_action_faile
+     );
+     assert_eq!(
+         error.disposition.delivery(),
+-        DeliveryDisposition::NotDelivered
++        DeliveryDisposition::DeliveryUncertain
+     );
+     let _ = target;
+ }
 
  #[cfg(target_os = "windows")]
  #[test]
