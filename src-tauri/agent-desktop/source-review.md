@@ -154,8 +154,11 @@ retains the original target and owner generations and requalifies them before
 restore and foreground writes; a later failure preserves an uncertain effect.
 The private adapter accepts a closed set of tool names and constructs engine
 arguments itself: the standalone shell and notification CLI commands are not
-exposed through that route. Physical keyboard and mouse sends and native
-acceptance remain pending.
+exposed through that route. An incomplete ancestor read reports stale unless
+the actual deadline has expired. Keyboard focus preparation retains the
+element authority through the focus read. Exact-window key dispatch now retains
+and requalifies its window and owner before starting the key sequence, but
+individual keyboard and mouse sends and native acceptance remain pending.
 
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:

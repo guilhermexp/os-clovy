@@ -4623,7 +4623,7 @@ index c116c7e..84c0fbd 100644
              Ok(()) => classify_success(),
              Err(error) => classify_mutation(SET_FOCUS_OP, SET_FOCUS_API, &failure_of(&error)),
 diff --git a/crates/windows/src/actions/physical_target.rs b/crates/windows/src/actions/physical_target.rs
-index 37447ec..3611544 100644
+index 37447ec..8c7b8ef 100644
 --- a/crates/windows/src/actions/physical_target.rs
 +++ b/crates/windows/src/actions/physical_target.rs
 @@ -59,7 +59,7 @@ pub(crate) fn ensure_click_delivery_ready(
@@ -4635,15 +4635,19 @@ index 37447ec..3611544 100644
      ensure_elevation_allows(element)?;
      target_window_is_foreground(element, deadline)
  }
-@@ -69,7 +69,7 @@ pub(crate) fn ensure_keyboard_delivery_ready(
+@@ -69,8 +69,11 @@ pub(crate) fn ensure_keyboard_delivery_ready(
      deadline: Deadline,
  ) -> Result<bool, AdapterError> {
      deadline.ensure_remaining()?;
 -    corroborate_verified_process(element)?;
-+    corroborate_verified_process(element, deadline)?;
++    let _authority = crate::tree::element::qualify_verified(element, deadline)?;
      ensure_elevation_allows(element)?;
++    deadline.ensure_remaining()?;
++    let _after = crate::tree::element::qualify_verified(element, deadline)?;
++    deadline.ensure_remaining()?;
      crate::actions::focus::keyboard_focus_ready(element)
  }
+
 diff --git a/crates/windows/src/actions/scroll.rs b/crates/windows/src/actions/scroll.rs
 index 5b27aeb..b31bc07 100644
 --- a/crates/windows/src/actions/scroll.rs
@@ -4658,7 +4662,7 @@ index 5b27aeb..b31bc07 100644
                  Ok(()) => classify_success()?,
                  Err(error) => classify_write("Scroll", SCROLL_LABEL, &error)?,
 diff --git a/crates/windows/src/actions/scroll_into_view.rs b/crates/windows/src/actions/scroll_into_view.rs
-index f27e44c..f761e44 100644
+index f27e44c..8900d52 100644
 --- a/crates/windows/src/actions/scroll_into_view.rs
 +++ b/crates/windows/src/actions/scroll_into_view.rs
 @@ -31,7 +31,7 @@ mod imp {
@@ -4715,9 +4719,9 @@ index f27e44c..f761e44 100644
 +        };
 +        match nearest_scroll_viewport(element, walker, deadline) {
 +            Ok(viewport) => Ok(viewport),
-+            Err(crate::tree::walk::walker_source::ViewportError::Incomplete) => {
-+                Err(deadline.timeout_error())
-+            }
++            Err(crate::tree::walk::walker_source::ViewportError::Incomplete) => Err(
++                crate::actions::scroll_ladder::incomplete_viewport_error(deadline),
++            ),
 +            Err(crate::tree::walk::walker_source::ViewportError::Rejected(error)) => Err(error),
 +        }
      }
@@ -4741,10 +4745,31 @@ index f27e44c..f761e44 100644
                      Ok(()) => InvokeOutcome::Succeeded,
                      Err(error) => match failure_of(&error) {
 diff --git a/crates/windows/src/actions/scroll_ladder.rs b/crates/windows/src/actions/scroll_ladder.rs
-index 0e46949..9e1eb51 100644
+index 0e46949..a23e447 100644
 --- a/crates/windows/src/actions/scroll_ladder.rs
 +++ b/crates/windows/src/actions/scroll_ladder.rs
-@@ -188,7 +188,7 @@ mod imp {
+@@ -15,6 +15,20 @@ use crate::tree::element::UIAElement;
+ pub(crate) const MAX_ANCESTOR_SCROLLS: usize = 10;
+ pub(crate) const LADDER_SCROLL_LABEL: &str = "ScrollPattern";
+
++#[cfg(target_os = "windows")]
++pub(crate) fn incomplete_viewport_error(deadline: Deadline) -> AdapterError {
++    if deadline.is_expired() {
++        deadline.timeout_error()
++    } else {
++        AdapterError::new(
++            ErrorCode::StaleRef,
++            "The scroll viewport ancestor could not be read",
++        )
++        .with_suggestion("Refresh the snapshot before retrying")
++        .with_disposition(DeliverySemantics::not_delivered())
++    }
++}
++
+ /// Center the target without page-sized oscillation; view size is percent of content.
+ #[cfg(target_os = "windows")]
+ pub(crate) fn centered_scroll_percent(
+@@ -188,7 +202,7 @@ mod imp {
      use crate::tree::properties::property_ids::TreeProperty;
      use crate::tree::properties::property_outcome::{PropertyOutcome, PropertyValue};
      use crate::tree::properties::read_one;
@@ -4753,7 +4778,7 @@ index 0e46949..9e1eb51 100644
      use agent_desktop_core::{ErrorCode, LocatorField, Rect};
      use uiautomation::patterns::UIScrollPattern;
 
-@@ -200,14 +200,17 @@ mod imp {
+@@ -200,14 +214,17 @@ mod imp {
          deadline: Deadline,
      ) -> Result<Option<DeliveryOutcome>, AdapterError> {
          deadline.ensure_remaining()?;
@@ -4767,13 +4792,13 @@ index 0e46949..9e1eb51 100644
              Ok(None) => Ok(None),
 -            Err(crate::tree::walk::walker_source::BudgetExpired) => Err(deadline.timeout_error()),
 +            Err(crate::tree::walk::walker_source::ViewportError::Incomplete) => {
-+                Err(deadline.timeout_error())
++                Err(super::incomplete_viewport_error(deadline))
 +            }
 +            Err(crate::tree::walk::walker_source::ViewportError::Rejected(error)) => Err(error),
              Ok(Some(ancestor)) => {
                  scroll_ancestor_until_visible(element, &ancestor, deadline).map(Some)
              }
-@@ -219,8 +222,13 @@ mod imp {
+@@ -219,8 +236,13 @@ mod imp {
          ancestor: &UIAElement,
          deadline: Deadline,
      ) -> Result<DeliveryOutcome, AdapterError> {
@@ -4789,7 +4814,7 @@ index 0e46949..9e1eb51 100644
          let mut scroll_once =
              |direction: &Direction| scroll_cached_ancestor(element, ancestor, direction, deadline);
          ladder_judged_for(deadline, &mut next_direction, &mut scroll_once)
-@@ -249,7 +257,7 @@ mod imp {
+@@ -249,7 +271,7 @@ mod imp {
          context: &str,
      ) -> Result<VisibilitySample, AdapterError> {
          deadline.ensure_remaining()?;
@@ -4798,7 +4823,7 @@ index 0e46949..9e1eb51 100644
          let bounds = match read_one(element, TreeProperty::BoundingRectangle).bounds() {
              LocatorField::Known(bounds) => Some(bounds),
              LocatorField::Absent => None,
-@@ -285,7 +293,7 @@ mod imp {
+@@ -285,7 +307,7 @@ mod imp {
          deadline: Deadline,
      ) -> Result<(), AdapterError> {
          deadline.ensure_remaining()?;
@@ -4807,7 +4832,7 @@ index 0e46949..9e1eb51 100644
          let pattern = match ancestor.0.get_pattern::<UIScrollPattern>() {
              Ok(pattern) => pattern,
              Err(error) => {
-@@ -299,7 +307,7 @@ mod imp {
+@@ -299,7 +321,7 @@ mod imp {
          let bounds = crate::actions::scroll::known_bounds(element).ok_or_else(|| {
              AdapterError::new(ErrorCode::ActionFailed, "Missing scroll target bounds")
          })?;
@@ -4816,7 +4841,7 @@ index 0e46949..9e1eb51 100644
              AdapterError::new(ErrorCode::ActionFailed, "Missing scroll viewport bounds")
          })?;
          let horizontal = matches!(direction, Direction::Left | Direction::Right);
-@@ -325,13 +333,13 @@ mod imp {
+@@ -325,13 +347,13 @@ mod imp {
              offset,
          )?;
          deadline.ensure_remaining()?;
@@ -4832,6 +4857,26 @@ index 0e46949..9e1eb51 100644
          match pattern.set_scroll_percent(x, y) {
              Ok(()) => {
                  classify_success()?;
+diff --git a/crates/windows/src/actions/scroll_ladder_tests.rs b/crates/windows/src/actions/scroll_ladder_tests.rs
+index 296b8b6..0ef9e30 100644
+--- a/crates/windows/src/actions/scroll_ladder_tests.rs
++++ b/crates/windows/src/actions/scroll_ladder_tests.rs
+@@ -19,6 +19,15 @@ fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
+     }
+ }
+
++#[test]
++fn incomplete_ancestor_read_distinguishes_stale_from_expired() {
++    let open = super::incomplete_viewport_error(Deadline::after(5_000).unwrap());
++    assert_eq!(open.code, ErrorCode::StaleRef);
++    assert_eq!(open.disposition, DeliverySemantics::not_delivered());
++    let expired = super::incomplete_viewport_error(Deadline::after(0).unwrap());
++    assert_eq!(expired.code, ErrorCode::Timeout);
++}
++
+ #[test]
+ fn direction_priority_matches_macos_vertical_before_horizontal() {
+     let viewport = rect(100.0, 100.0, 200.0, 200.0);
 diff --git a/crates/windows/src/actions/select.rs b/crates/windows/src/actions/select.rs
 index bc54346..3996f4d 100644
 --- a/crates/windows/src/actions/select.rs
@@ -5442,7 +5487,7 @@ index 0000000..51ff529
 +    })
 +}
 diff --git a/crates/windows/src/system/adapter.rs b/crates/windows/src/system/adapter.rs
-index 3b55002..1b1c1a2 100644
+index 3b55002..8b48be2 100644
 --- a/crates/windows/src/system/adapter.rs
 +++ b/crates/windows/src/system/adapter.rs
 @@ -229,6 +229,7 @@ impl SystemOps for WindowsAdapter {
@@ -5453,6 +5498,23 @@ index 3b55002..1b1c1a2 100644
          crate::input::native_owner::ensure_interactive_desktop()?;
          let result = crate::system::window::window_activate::focus_window(win, lease);
          crate::input::native_owner::finish_unit_result(result)
+@@ -269,6 +270,16 @@ impl SystemOps for WindowsAdapter {
+         crate::system::key_dispatch::press_for_app_impl(process, combo, policy, lease.deadline())
+     }
+
++    fn press_key_for_window(
++        &self,
++        window: &WindowInfo,
++        combo: &KeyCombo,
++        policy: InteractionPolicy,
++        lease: &InteractionLease,
++    ) -> Result<ActionResult, AdapterError> {
++        crate::system::key_dispatch::press_for_window_impl(window, combo, policy, lease.deadline())
++    }
++
+     /// The core default blocks nothing; Windows ships its own dangerous-combo
+     /// list so the skill-documented guard actually enforces on this
+     /// platform. `--force` is honored entirely in core.
 diff --git a/crates/windows/src/system/capture/capture_backend.rs b/crates/windows/src/system/capture/capture_backend.rs
 index f33a96f..1803025 100644
 --- a/crates/windows/src/system/capture/capture_backend.rs
@@ -6130,6 +6192,66 @@ index 75b4c76..b091e04 100644
              scale_factor: scale,
          },
          deadline,
+diff --git a/crates/windows/src/system/key_dispatch.rs b/crates/windows/src/system/key_dispatch.rs
+index 4281d59..fae5331 100644
+--- a/crates/windows/src/system/key_dispatch.rs
++++ b/crates/windows/src/system/key_dispatch.rs
+@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
+
+ use agent_desktop_core::{
+     ActionResult, AdapterError, Deadline, DeliverySemantics, ErrorCode, InteractionPolicy,
+-    KeyCombo, ProcessId, ProcessIdentity,
++    KeyCombo, ProcessId, ProcessIdentity, WindowInfo,
+ };
+
+ use crate::input::elevation::ensure_target_integrity_allows_input;
+@@ -12,6 +12,46 @@ use crate::system::process_identity;
+ const KEYBOARD_FOCUS_WAIT: Duration = Duration::from_millis(500);
+ const KEYBOARD_FOCUS_POLL: Duration = Duration::from_millis(5);
+
++/// Keep the exact selected window and its owner generation through the
++/// foreground and keyboard-focus waits. Individual sends still require their
++/// own receiver guards at the input seam.
++pub(crate) fn press_for_window_impl(
++    window: &WindowInfo,
++    combo: &KeyCombo,
++    policy: InteractionPolicy,
++    deadline: Deadline,
++) -> Result<ActionResult, AdapterError> {
++    let instance = window
++        .process_instance
++        .as_deref()
++        .filter(|s| !s.is_empty())
++        .ok_or_else(|| {
++            AdapterError::new(
++                ErrorCode::StaleRef,
++                "Window process identity is unavailable",
++            )
++        })?;
++    let expected = super::window::window_identity::qualify_window(window, deadline)?;
++    let process = ProcessIdentity::new(window.pid, instance);
++    ensure_injection_integrity(process.pid)?;
++    ensure_foreground_for_delivery(&process, policy)?;
++    require_keyboard_focus(process.pid, &process.instance, deadline)?;
++    let actual = super::window::window_identity::qualify_window(window, deadline)?;
++    if actual.owner_pid() != expected.owner_pid()
++        || actual.owner_token() != expected.owner_token()
++        || !super::window::window_ops::is_foreground_window(
++            super::window::window_ops::parse_handle(&window.id),
++        )
++    {
++        return Err(focus_lost_before_delivery(process.pid));
++    }
++    deadline.ensure_remaining()?;
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
++    deadline.ensure_remaining()?;
++    run_synthesize(combo, deadline)?;
++    post_delivery_process_result(&process)
++}
++
+ /// Delivers a key combo to a named process by composing the keyboard primitive
+ /// under a verify-only focus gate. Core's headed path already activated before
+ /// this runs; this method never calls window activation.
 diff --git a/crates/windows/src/system/runtime/hresult.rs b/crates/windows/src/system/runtime/hresult.rs
 index d176588..3d558cd 100644
 --- a/crates/windows/src/system/runtime/hresult.rs
