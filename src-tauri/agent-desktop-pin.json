@@ -11,7 +11,7 @@
   "bundleIdentifier": "dev.guilhermexp.clovy.computer-use-driver",
   "executable": "clovy-computer-use-driver",
   "minimumMacOSVersion": "14.0",
-  "patchSha256": "d87f25e04676059aecb1070d4dc0ec3ee28b018ff2fc3833e7d2c82ea8a547cb",
+  "patchSha256": "3c30dee33bd4f7f797817fd446a1ae158c79163e1e4bb449b13063533ffe5dd6",
   "ownedRuntimeSourceSha256": "48342df75f2784ea7d32ce32b2f33bdc71f2c1865eaaf7eb084ea739e9b9740a",
-  "sourceReviewSha256": "f5a48fe7608d9d3ad607b921b383d0a217f3c712b64fa28480a7d6f896cc1d07"
+  "sourceReviewSha256": "ec5065eb1aa77b5423c8769c4916f3eefc4fb23e99f02b4b81ba1767c18efbe1"
 }

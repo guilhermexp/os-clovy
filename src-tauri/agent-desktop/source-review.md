@@ -33,9 +33,12 @@ guards; this increment does not establish native UIA acceptance.
 Process-generation mismatches and disappeared processes retain the StaleRef
 contract; a private or indeterminate policy classification is PolicyDenied.
 Live UIA qualification observes the existing deadline before and after its
-native and filesystem checks. Root observe/resolve guards are partial: child
-and sibling cache-prefetch still require metadata-first qualification before
-this source can be considered protected for tree traversal.
+native and filesystem checks. Window tree discovery now obtains child and
+sibling elements without content-prefetch; each node's process and root
+provenance are qualified before its element-scoped cache or live read. A
+qualification error propagates through the walk and resolver. Related-element
+reads such as LabeledBy still need their own guard; this source is not yet
+qualified for tree traversal as a whole.
 Windows UIA descendants, capture, input and other native guards, macOS guards,
 a newly prepared engine, and native acceptance remain pending. This partial
 change does not qualify an existing engine artifact.

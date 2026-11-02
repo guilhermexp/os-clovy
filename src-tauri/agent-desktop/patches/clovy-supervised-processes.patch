@@ -4572,6 +4572,57 @@ index 0e46949..a1ab089 100644
          let (x, y) = if horizontal {
              (percent, -1.0)
          } else {
+diff --git a/crates/windows/src/actions/select_search.rs b/crates/windows/src/actions/select_search.rs
+index f1cda56..6e38fcf 100644
+--- a/crates/windows/src/actions/select_search.rs
++++ b/crates/windows/src/actions/select_search.rs
+@@ -81,7 +81,8 @@ mod imp {
+         prior: Option<&UIAElement>,
+     ) -> Result<Option<UIAElement>, AdapterError> {
+         let client = automation_client()?;
+-        let source = UiaTreeSource::for_root(root)?;
++        let _root_authority = crate::tree::element::qualify_verified(root, deadline)?;
++        let source = UiaTreeSource::for_root(root, deadline)?;
+         let prepared = source.prepare_root(root)?;
+         let mut stack = Vec::new();
+         push_children(&source, (&prepared, 1), deadline, 0, &mut stack)?;
+@@ -93,7 +94,25 @@ mod imp {
+             if visited > MAX_SELECT_NODES {
+                 return Err(node_budget_error());
+             }
+-            if selection_item_available(&candidate) && name_matches(&candidate, value) {
++            let provenance = root.1.as_ref().ok_or_else(|| {
++                AdapterError::new(ErrorCode::StaleRef, "Root identity is unavailable")
++            })?;
++            let candidate = crate::tree::element::bind_root(
++                candidate,
++                provenance.root_pid,
++                &provenance.root_token,
++                deadline,
++            )?;
++            let _candidate_authority =
++                crate::tree::element::qualify_verified(&candidate, deadline)?;
++            let available = selection_item_available(&candidate);
++            deadline.ensure_remaining()?;
++            let _candidate_after_read =
++                crate::tree::element::qualify_verified(&candidate, deadline)?;
++            if available && name_matches(&candidate, value) {
++                deadline.ensure_remaining()?;
++                let _candidate_after_name =
++                    crate::tree::element::qualify_verified(&candidate, deadline)?;
+                 match &found {
+                     None => found = Some(candidate.clone()),
+                     Some(prev) if same_element(&client, prev, &candidate) => {}
+@@ -112,6 +131,9 @@ mod imp {
+                 )?;
+             }
+         }
++        if let Some(candidate) = &found {
++            let _authority = crate::tree::element::qualify_verified(candidate, deadline)?;
++        }
+         Ok(found)
+     }
+
 diff --git a/crates/windows/src/lib.rs b/crates/windows/src/lib.rs
 index 44d3f2c..63dd5c2 100644
 --- a/crates/windows/src/lib.rs
@@ -4591,10 +4642,10 @@ index 44d3f2c..63dd5c2 100644
 
 diff --git a/crates/windows/src/private_browser_guard.rs b/crates/windows/src/private_browser_guard.rs
 new file mode 100644
-index 0000000..08d7b32
+index 0000000..69a458b
 --- /dev/null
 +++ b/crates/windows/src/private_browser_guard.rs
-@@ -0,0 +1,205 @@
+@@ -0,0 +1,210 @@
 +//! Private host configuration and per-use process image qualification.
 +use agent_desktop_core::{AdapterError, ErrorCode, ProcessId};
 +
@@ -4649,11 +4700,15 @@ index 0000000..08d7b32
 +    #[cfg(target_os = "windows")]
 +    _handle: ProcessHandle,
 +    token: String,
++    pid: ProcessId,
 +}
 +
 +impl QualifiedProcess {
 +    pub(crate) fn token(&self) -> &str {
 +        &self.token
++    }
++    pub(crate) fn pid(&self) -> ProcessId {
++        self.pid
 +    }
 +}
 +
@@ -4756,6 +4811,7 @@ index 0000000..08d7b32
 +    Ok(QualifiedProcess {
 +        _handle: handle,
 +        token,
++        pid,
 +    })
 +}
 +
@@ -5630,7 +5686,7 @@ index 6a629ce..e18f647 100644
      Ok(WindowInfo {
          id: expected.id.clone(),
 diff --git a/crates/windows/src/tree/element.rs b/crates/windows/src/tree/element.rs
-index 473e0cc..a7b89d3 100644
+index 473e0cc..e9eeb75 100644
 --- a/crates/windows/src/tree/element.rs
 +++ b/crates/windows/src/tree/element.rs
 @@ -9,6 +9,8 @@ use agent_desktop_core::{AdapterError, ErrorCode, NativeHandle};
@@ -5667,7 +5723,7 @@ index 473e0cc..a7b89d3 100644
      }
 
      /// The verified process identity, if this element resolved through the
-@@ -83,6 +99,88 @@ impl UIAElement {
+@@ -83,6 +99,120 @@ impl UIAElement {
              .as_ref()
              .map(|payload| (payload.pid, payload.token.as_str()))
      }
@@ -5702,6 +5758,38 @@ index 473e0cc..a7b89d3 100644
 +    }
 +    deadline.ensure_remaining()?;
 +    Ok(authority)
++}
++
++#[cfg(target_os = "windows")]
++pub(crate) fn bind_root(
++    element: UIAElement,
++    root_pid: u32,
++    root_token: &str,
++    deadline: agent_desktop_core::Deadline,
++) -> Result<UIAElement, AdapterError> {
++    deadline.ensure_remaining()?;
++    let _root = crate::private_browser_guard::qualify_expected(
++        agent_desktop_core::ProcessId::new(root_pid),
++        root_token,
++    )?;
++    deadline.ensure_remaining()?;
++    let pid = element
++        .0
++        .get_process_id()
++        .map_err(|_| AdapterError::new(ErrorCode::StaleRef, "Element identity is unavailable"))?;
++    let authority = qualify_current(&element, deadline)?;
++    if authority.pid() != agent_desktop_core::ProcessId::new(pid) {
++        return Err(AdapterError::new(
++            ErrorCode::StaleRef,
++            "Element identity changed",
++        ));
++    }
++    Ok(element.with_verified_process(
++        pid,
++        authority.token().to_owned(),
++        root_pid,
++        root_token.to_owned(),
++    ))
 +}
 +
 +#[cfg(target_os = "windows")]
@@ -5981,7 +6069,7 @@ index 9f99715..dfa161f 100644
          live_label,
      )
 diff --git a/crates/windows/src/tree/live_read_tests.rs b/crates/windows/src/tree/live_read_tests.rs
-index 8492555..f674609 100644
+index 8492555..ad008e1 100644
 --- a/crates/windows/src/tree/live_read_tests.rs
 +++ b/crates/windows/src/tree/live_read_tests.rs
 @@ -28,7 +28,12 @@ pub(super) fn verified_handle(fixture: &HostedFixture) -> Result<NativeHandle, A
@@ -6026,11 +6114,39 @@ index 8492555..f674609 100644
          .into_native_handle();
      let downcast = handle
          .downcast_ref::<UIAElement>()
+@@ -217,8 +232,16 @@ fn the_payload_type_round_trips_through_a_native_handle() {
+ fn blank_secure_entry(fixture: &HostedFixture) -> RefEntry {
+     let deadline = deadline();
+     let root = root_from_hwnd(fixture.handle(), deadline).expect("a fixture root");
+-    let source =
+-        crate::tree::walk::walker_source::UiaTreeSource::for_root(&root).expect("a tree source");
++    let root = crate::tree::walk::walker_fake::bind_fixture_root(
++        root,
++        crate::tree::walk::walker_fake::deadline(),
++    )
++    .expect("qualified fixture root");
++    let source = crate::tree::walk::walker_source::UiaTreeSource::for_root(
++        &root,
++        crate::tree::walk::walker_fake::deadline(),
++    )
++    .expect("a tree source");
+     let prepared = source.prepare_root(&root).expect("a prepared root");
+     let budget = crate::tree::walk::walker::WalkBudget::new(10, deadline);
+     let mut prefix = Vec::new();
+@@ -291,7 +314,7 @@ fn find_secure(
+     if depth >= 10 {
+         return Ok(None);
+     }
+-    let (properties, node_evidence, failed) = source.evidence(element);
++    let (properties, node_evidence, failed) = source.evidence(element).expect("qualified evidence");
+     if properties.is_secure() {
+         let mut path = agent_desktop_core::refs::RefPath::default();
+         path.extend_from_slice(prefix);
 diff --git a/crates/windows/src/tree/observe.rs b/crates/windows/src/tree/observe.rs
-index e4a6985..4fb0c35 100644
+index e4a6985..c41059e 100644
 --- a/crates/windows/src/tree/observe.rs
 +++ b/crates/windows/src/tree/observe.rs
-@@ -49,8 +49,15 @@ pub(crate) fn observe_tree(
+@@ -49,8 +49,30 @@ pub(crate) fn observe_tree(
      adapter: &crate::adapter::WindowsAdapter,
  ) -> Result<ObservedTree, AdapterError> {
      let request = (*request).validate()?;
@@ -6043,11 +6159,26 @@ index e4a6985..4fb0c35 100644
 +    re_verify_root(root, request.deadline)?;
      let element = surface_root(root, request.surface, request.deadline)?;
 +    #[cfg(target_os = "windows")]
++    let _root_after_surface = qualify_root(root, request.deadline)?;
++    #[cfg(target_os = "windows")]
++    let element = match root {
++        ObservationRoot::Window(window) => crate::tree::element::bind_root(
++            element,
++            window.pid.get(),
++            window
++                .process_instance
++                .as_deref()
++                .ok_or_else(window_identity_changed)?,
++            request.deadline,
++        )?,
++        ObservationRoot::Element { .. } => element,
++    };
++    #[cfg(target_os = "windows")]
 +    let _element_authority = crate::tree::element::qualify_current(&element, request.deadline)?;
      let chromium_root = chromium::is_chromium_root(&element);
      let budget = WalkBudget::new(request.max_logical_depth, request.deadline)
          .with_max_raw_depth(request.max_raw_depth.min(DEFAULT_MAX_RAW_DEPTH));
-@@ -65,7 +72,7 @@ pub(crate) fn observe_tree(
+@@ -65,7 +87,7 @@ pub(crate) fn observe_tree(
              outcome,
              walk_duration: walk_started.elapsed(),
          },
@@ -6056,7 +6187,7 @@ index e4a6985..4fb0c35 100644
      )
  }
 
-@@ -164,7 +171,13 @@ fn still_thin_after_settle() -> AdapterError {
+@@ -164,7 +186,13 @@ fn still_thin_after_settle() -> AdapterError {
  }
 
  /// Rechecks stored ownership and generation evidence after the UIA read.
@@ -6071,7 +6202,7 @@ index e4a6985..4fb0c35 100644
      match root {
          ObservationRoot::Window(window) => {
              let handle = hwnd_of(&window.id)?;
-@@ -174,10 +187,48 @@ fn re_verify_root(root: ObservationRoot<'_>) -> Result<(), AdapterError> {
+@@ -174,10 +202,48 @@ fn re_verify_root(root: ObservationRoot<'_>) -> Result<(), AdapterError> {
                      window,
                  )
                  .ok_or_else(window_identity_changed)?;
@@ -6153,19 +6284,43 @@ index 67cfc47..19cf46f 100644
          result.is_ok(),
          "a live fixture root must pass the liveness gate: {result:?}"
 diff --git a/crates/windows/src/tree/resolve/mod.rs b/crates/windows/src/tree/resolve/mod.rs
-index 123d6fd..8a7798f 100644
+index 123d6fd..040b44f 100644
 --- a/crates/windows/src/tree/resolve/mod.rs
 +++ b/crates/windows/src/tree/resolve/mod.rs
-@@ -93,7 +93,7 @@ fn resolve_attempt(entry: &RefEntry, deadline: Deadline) -> Result<NativeHandle,
-         .and_then(|candidate| accept_path_landing(&source, candidate, entry))
-         .or_else(|| repair_past_leading_chrome(&source, &prepared, entry, &budget))
-     {
+@@ -77,7 +77,7 @@ fn resolve_attempt(entry: &RefEntry, deadline: Deadline) -> Result<NativeHandle,
+         return Err(stale_ref_error(entry));
+     }
+     let root = resolve_window_root(entry, deadline)?;
+-    let source = UiaTreeSource::for_root(&root)?;
++    let source = UiaTreeSource::for_root(&root, deadline)?;
+     let prepared = source.prepare_root(&root)?;
+
+     let budget = resolve_walk_budget(deadline);
+@@ -87,13 +87,16 @@ fn resolve_attempt(entry: &RefEntry, deadline: Deadline) -> Result<NativeHandle,
+     } else {
+         PathLanding::not_walked()
+     };
+-    if let Some(accepted) = path
+-        .element
+-        .as_ref()
+-        .and_then(|candidate| accept_path_landing(&source, candidate, entry))
+-        .or_else(|| repair_past_leading_chrome(&source, &prepared, entry, &budget))
+-    {
 -        return Ok(into_verified_handle(accepted, entry));
++    let accepted = match path.element.as_ref() {
++        Some(candidate) => accept_path_landing(&source, candidate, entry)?,
++        None => None,
++    };
++    let accepted = match accepted {
++        Some(candidate) => Some(candidate),
++        None => repair_past_leading_chrome(&source, &prepared, entry, &budget)?,
++    };
++    if let Some(accepted) = accepted {
 +        return into_verified_handle(accepted, entry, deadline);
      }
 
      let mut searched = Vec::new();
-@@ -122,7 +122,7 @@ fn resolve_attempt(entry: &RefEntry, deadline: Deadline) -> Result<NativeHandle,
+@@ -122,7 +125,7 @@ fn resolve_attempt(entry: &RefEntry, deadline: Deadline) -> Result<NativeHandle,
              let Some(candidate) = searched.into_iter().nth(index) else {
                  return Err(stale_ref_error(entry));
              };
@@ -6174,7 +6329,7 @@ index 123d6fd..8a7798f 100644
          }
          SearchVerdict::Ambiguous => Err(ambiguous_target_error(entry, searched.len())),
      }
-@@ -216,21 +216,48 @@ fn classify_search(
+@@ -216,21 +219,48 @@ fn classify_search(
      }
  }
 
@@ -6231,7 +6386,7 @@ index 123d6fd..8a7798f 100644
  }
 
  #[cfg(target_os = "windows")]
-@@ -332,6 +359,7 @@ pub(crate) fn resolve_window_root(
+@@ -332,6 +362,7 @@ pub(crate) fn resolve_window_root(
          bounds: None,
          state: Default::default(),
      };
@@ -6239,11 +6394,69 @@ index 123d6fd..8a7798f 100644
      crate::system::window::window_identity::WindowIdentityEvidence::from_info(
          crate::system::window::window_ops::parse_handle(&window.id),
          &window,
+@@ -340,10 +371,23 @@ pub(crate) fn resolve_window_root(
+     .verify_stored()
+     .map_err(|_| verify_stored_failure_error(entry, deadline))?;
+
+-    crate::tree::surfaces::surface_root(
++    let element = crate::tree::surfaces::surface_root(
+         agent_desktop_core::ObservationRoot::Window(&window),
+         entry.source.source_surface,
+         deadline,
++    )?;
++    deadline.ensure_remaining()?;
++    let _authority_after_surface =
++        crate::system::window::window_identity::qualify_window(&window, deadline)?;
++    crate::tree::element::bind_root(
++        element,
++        entry.process.pid.get(),
++        entry
++            .process
++            .process_instance
++            .as_deref()
++            .ok_or_else(|| stale_ref_error(entry))?,
++        deadline,
+     )
+ }
+
+diff --git a/crates/windows/src/tree/resolve/resolve_ambiguity_tests.rs b/crates/windows/src/tree/resolve/resolve_ambiguity_tests.rs
+index ca89e32..d2b9daa 100644
+--- a/crates/windows/src/tree/resolve/resolve_ambiguity_tests.rs
++++ b/crates/windows/src/tree/resolve/resolve_ambiguity_tests.rs
+@@ -45,7 +45,13 @@ fn duplicate_evidence_candidates_settle_ambiguous_target_carrying_no_application
+     let deadline = crate::tree::walk::walker_fake::deadline();
+     let root = crate::tree::automation::root_from_hwnd(hosted.handle, deadline)
+         .expect("the hosted window resolves");
+-    let source = UiaTreeSource::for_root(&root).expect("a tree source");
++    let root = crate::tree::walk::walker_fake::bind_fixture_root(
++        root,
++        crate::tree::walk::walker_fake::deadline(),
++    )
++    .expect("qualified fixture root");
++    let source = UiaTreeSource::for_root(&root, crate::tree::walk::walker_fake::deadline())
++        .expect("a tree source");
+     let prepared = source.prepare_root(&root).expect("a prepared root");
+     let budget = WalkBudget::new(10, deadline);
+
 diff --git a/crates/windows/src/tree/resolve/resolve_anchor.rs b/crates/windows/src/tree/resolve/resolve_anchor.rs
-index 3990eff..8aca766 100644
+index 3990eff..159b009 100644
 --- a/crates/windows/src/tree/resolve/resolve_anchor.rs
 +++ b/crates/windows/src/tree/resolve/resolve_anchor.rs
-@@ -96,7 +96,7 @@ fn resolve_locator_anchor_once(
+@@ -78,7 +78,7 @@ fn resolve_locator_anchor_once(
+     }
+
+     let root = crate::tree::resolve::resolve_window_root(entry, deadline)?;
+-    let source = UiaTreeSource::for_root(&root)?;
++    let source = UiaTreeSource::for_root(&root, deadline)?;
+     let prepared = source.prepare_root(&root)?;
+     let budget = resolve_walk_budget(deadline);
+
+@@ -92,11 +92,11 @@ fn resolve_locator_anchor_once(
+     let Some(candidate) = landing.element else {
+         return Err(stale_ref_error(entry));
+     };
+-    let (_, evidence, _) = source.evidence(&candidate);
++    let (_, evidence, _) = source.evidence(&candidate)?;
      anchor_role_verdict(entry, &evidence)?;
      match anchor_geometry_verdict(entry, &evidence) {
          AnchorGeometryVerdict::Promote => {
@@ -6252,14 +6465,606 @@ index 3990eff..8aca766 100644
          }
          AnchorGeometryVerdict::SettleStale => Err(stale_ref_error(entry)),
          AnchorGeometryVerdict::Retry => Err(identity_unknown_error(entry)),
+diff --git a/crates/windows/src/tree/resolve/resolve_anchor_tests.rs b/crates/windows/src/tree/resolve/resolve_anchor_tests.rs
+index b534f1b..aafe8dd 100644
+--- a/crates/windows/src/tree/resolve/resolve_anchor_tests.rs
++++ b/crates/windows/src/tree/resolve/resolve_anchor_tests.rs
+@@ -12,8 +12,16 @@ fn blank_entry_with_path(fixture: &HostedFixture, path: Vec<usize>) -> RefEntry
+     let deadline = deadline();
+     let root = crate::tree::automation::root_from_hwnd(fixture.handle(), deadline)
+         .expect("a fixture root");
+-    let source =
+-        crate::tree::walk::walker_source::UiaTreeSource::for_root(&root).expect("a source");
++    let root = crate::tree::walk::walker_fake::bind_fixture_root(
++        root,
++        crate::tree::walk::walker_fake::deadline(),
++    )
++    .expect("qualified fixture root");
++    let source = crate::tree::walk::walker_source::UiaTreeSource::for_root(
++        &root,
++        crate::tree::walk::walker_fake::deadline(),
++    )
++    .expect("a source");
+     let prepared = source.prepare_root(&root).expect("a prepared root");
+     let budget = crate::tree::walk::walker::WalkBudget::new(10, deadline);
+     let found = walk_first_secure(&source, &prepared, &budget)
+@@ -130,8 +138,16 @@ fn a_role_refuted_landing_settles_stale() {
+     let deadline = deadline();
+     let root = crate::tree::automation::root_from_hwnd(fixture.handle(), deadline)
+         .expect("a fixture root");
+-    let source =
+-        crate::tree::walk::walker_source::UiaTreeSource::for_root(&root).expect("a source");
++    let root = crate::tree::walk::walker_fake::bind_fixture_root(
++        root,
++        crate::tree::walk::walker_fake::deadline(),
++    )
++    .expect("qualified fixture root");
++    let source = crate::tree::walk::walker_source::UiaTreeSource::for_root(
++        &root,
++        crate::tree::walk::walker_fake::deadline(),
++    )
++    .expect("a source");
+     let prepared = source.prepare_root(&root).expect("a prepared root");
+     let landing = crate::tree::resolve::resolve_search::descent::descend_path(
+         &source,
+@@ -144,7 +160,7 @@ fn a_role_refuted_landing_settles_stale() {
+     let landed = landing.element.expect(
+         "the stored path must land on a live element for the role guard to be what refuses it",
+     );
+-    let (_, evidence, _) = source.evidence(&landed);
++    let (_, evidence, _) = source.evidence(&landed).expect("qualified evidence");
+     assert!(
+         evidence
+             .role
+diff --git a/crates/windows/src/tree/resolve/resolve_chrome_repair.rs b/crates/windows/src/tree/resolve/resolve_chrome_repair.rs
+index ef9ea05..bd4be54 100644
+--- a/crates/windows/src/tree/resolve/resolve_chrome_repair.rs
++++ b/crates/windows/src/tree/resolve/resolve_chrome_repair.rs
+@@ -11,7 +11,7 @@
+ //! search the declined landing fell through to then read every one of the
+ //! expanded key's thousands of subkeys and spent the whole deadline.
+
+-use agent_desktop_core::RefEntry;
++use agent_desktop_core::{AdapterError, RefEntry};
+
+ use super::resolve_search::{
+     NodeAdmission, SEARCH_DESCENT, admit_node, can_use_path_fast_path, descent,
+@@ -49,9 +49,9 @@ pub(crate) fn repair_past_leading_chrome<S: TreeSource>(
+     root: &S::Node,
+     entry: &RefEntry,
+     budget: &WalkBudget,
+-) -> Option<S::Node> {
++) -> Result<Option<S::Node>, AdapterError> {
+     if !can_use_path_fast_path(entry) {
+-        return None;
++        return Ok(None);
+     }
+     let mut parent = None;
+     let mut current = root.clone();
+@@ -59,31 +59,41 @@ pub(crate) fn repair_past_leading_chrome<S: TreeSource>(
+     for &index in entry.scope.path.iter() {
+         let take = index.saturating_add(MAX_LEADING_CHROME + 1);
+         let children =
+-            descent::read_children(source, &current, budget, &SEARCH_DESCENT, Some(take)).ok()?;
+-        let chrome = children
+-            .elements
+-            .iter()
+-            .take(MAX_LEADING_CHROME)
+-            .take_while(|child| is_leading_chrome(source, child))
+-            .count();
++            match descent::read_children(source, &current, budget, &SEARCH_DESCENT, Some(take)) {
++                Ok(children) => children,
++                Err(_) => return Ok(None),
++            };
++        let mut chrome = 0;
++        for child in children.elements.iter().take(MAX_LEADING_CHROME) {
++            if !is_leading_chrome(source, child)? {
++                break;
++            }
++            chrome += 1;
++        }
+         if chrome > 0 && index >= chrome {
+-            return None;
++            return Ok(None);
+         }
+         shifted |= chrome > 0;
+-        let next = children.elements.get(index + chrome)?.clone();
++        let Some(next) = children.elements.get(index + chrome).cloned() else {
++            return Ok(None);
++        };
+         parent = Some(std::mem::replace(&mut current, next));
+     }
+-    let parent = parent?;
+-    (shifted && is_unique_identity_match(source, &parent, &current, entry, budget))
+-        .then_some(current)
++    let Some(parent) = parent else {
++        return Ok(None);
++    };
++    Ok(
++        (shifted && is_unique_identity_match(source, &parent, &current, entry, budget)?)
++            .then_some(current),
++    )
+ }
+
+-fn is_leading_chrome<S: TreeSource>(source: &S, node: &S::Node) -> bool {
+-    let (_, evidence, _) = source.evidence(node);
+-    evidence
++fn is_leading_chrome<S: TreeSource>(source: &S, node: &S::Node) -> Result<bool, AdapterError> {
++    let (_, evidence, _) = source.evidence(node)?;
++    Ok(evidence
+         .role
+         .known()
+-        .is_some_and(|role| LEADING_CHROME_ROLES.contains(&role.as_str()))
++        .is_some_and(|role| LEADING_CHROME_ROLES.contains(&role.as_str())))
+ }
+
+ fn is_unique_identity_match<S: TreeSource>(
+@@ -92,7 +102,7 @@ fn is_unique_identity_match<S: TreeSource>(
+     landing: &S::Node,
+     entry: &RefEntry,
+     budget: &WalkBudget,
+-) -> bool {
++) -> Result<bool, AdapterError> {
+     let Ok(siblings) = descent::read_children(
+         source,
+         parent,
+@@ -100,21 +110,21 @@ fn is_unique_identity_match<S: TreeSource>(
+         &SEARCH_DESCENT,
+         Some(SIBLING_CHECK_CAP + 1),
+     ) else {
+-        return false;
++        return Ok(false);
+     };
+     if !siblings.complete || siblings.elements.len() > SIBLING_CHECK_CAP {
+-        return false;
++        return Ok(false);
+     }
+     let mut matched = None;
+     for sibling in &siblings.elements {
+-        let (_, evidence, _) = source.evidence(sibling);
++        let (_, evidence, _) = source.evidence(sibling)?;
+         match admit_node(entry, &evidence) {
+             NodeAdmission::Collect if matched.is_none() => matched = Some(sibling),
+-            NodeAdmission::Collect | NodeAdmission::Unread => return false,
++            NodeAdmission::Collect | NodeAdmission::Unread => return Ok(false),
+             NodeAdmission::Reject => {}
+         }
+     }
+-    matched.is_some_and(|only| source.same_element(only, landing))
++    Ok(matched.is_some_and(|only| source.same_element(only, landing)))
+ }
+
+ #[cfg(test)]
+diff --git a/crates/windows/src/tree/resolve/resolve_chrome_repair_tests.rs b/crates/windows/src/tree/resolve/resolve_chrome_repair_tests.rs
+index 6fc647c..851f565 100644
+--- a/crates/windows/src/tree/resolve/resolve_chrome_repair_tests.rs
++++ b/crates/windows/src/tree/resolve/resolve_chrome_repair_tests.rs
+@@ -55,7 +55,8 @@ fn classes_root_entry() -> RefEntry {
+ fn a_path_recorded_before_scroll_bars_appeared_lands_past_them() {
+     let tree = grown_outline("HKEY_CURRENT_USER");
+
+-    let repaired = repair_past_leading_chrome(&tree, &0, &classes_root_entry(), &budget(10));
++    let repaired =
++        repair_past_leading_chrome(&tree, &0, &classes_root_entry(), &budget(10)).unwrap();
+
+     assert_eq!(
+         repaired,
+@@ -75,7 +76,8 @@ fn a_path_with_no_leading_chrome_is_left_to_the_other_tiers() {
+     let tree = tree_item(tree, CLASSES_ROOT, "HKEY_CLASSES_ROOT");
+     let tree = tree_item(tree, CURRENT_USER, "HKEY_CURRENT_USER");
+
+-    let repaired = repair_past_leading_chrome(&tree, &0, &classes_root_entry(), &budget(10));
++    let repaired =
++        repair_past_leading_chrome(&tree, &0, &classes_root_entry(), &budget(10)).unwrap();
+
+     assert_eq!(
+         repaired, None,
+@@ -88,7 +90,8 @@ fn a_path_with_no_leading_chrome_is_left_to_the_other_tiers() {
+ fn a_duplicate_sibling_identity_declines_the_repaired_landing() {
+     let tree = grown_outline("HKEY_CLASSES_ROOT");
+
+-    let repaired = repair_past_leading_chrome(&tree, &0, &classes_root_entry(), &budget(10));
++    let repaired =
++        repair_past_leading_chrome(&tree, &0, &classes_root_entry(), &budget(10)).unwrap();
+
+     assert_eq!(
+         repaired, None,
+@@ -114,7 +117,7 @@ fn a_path_that_already_counts_the_chrome_is_not_shifted_into_a_neighbour() {
+     let mut entry = classes_root_entry();
+     entry.scope.path = vec![0, 3, 0].into();
+
+-    let repaired = repair_past_leading_chrome(&tree, &0, &entry, &budget(10));
++    let repaired = repair_past_leading_chrome(&tree, &0, &entry, &budget(10)).unwrap();
+
+     assert_eq!(
+         repaired, None,
+@@ -142,7 +145,7 @@ fn a_content_index_is_never_shifted_into_another_container() {
+     let mut entry = classes_root_entry();
+     entry.scope.path = vec![0, 3, 0].into();
+
+-    let repaired = repair_past_leading_chrome(&tree, &0, &entry, &budget(10));
++    let repaired = repair_past_leading_chrome(&tree, &0, &entry, &budget(10)).unwrap();
+
+     assert_eq!(
+         repaired, None,
+@@ -170,7 +173,7 @@ fn an_ambiguous_deeper_level_declines_even_after_an_earlier_shift() {
+     let mut entry = classes_root_entry();
+     entry.scope.path = vec![0, 0, 3, 0].into();
+
+-    let repaired = repair_past_leading_chrome(&tree, &0, &entry, &budget(10));
++    let repaired = repair_past_leading_chrome(&tree, &0, &entry, &budget(10)).unwrap();
+
+     assert_eq!(
+         repaired, None,
+diff --git a/crates/windows/src/tree/resolve/resolve_descent_tests.rs b/crates/windows/src/tree/resolve/resolve_descent_tests.rs
+index 5bdf16a..8333b45 100644
+--- a/crates/windows/src/tree/resolve/resolve_descent_tests.rs
++++ b/crates/windows/src/tree/resolve/resolve_descent_tests.rs
+@@ -83,14 +83,17 @@ impl TreeSource for StubTree {
+         left == right
+     }
+
+-    fn evidence(&self, _node: &usize) -> (ElementProperties, LocatorEvidence, u64) {
++    fn evidence(
++        &self,
++        _node: &usize,
++    ) -> Result<(ElementProperties, LocatorEvidence, u64), agent_desktop_core::AdapterError> {
+         let properties = ElementProperties::from_reads(Vec::new());
+         let vocabulary = walk_vocabulary(&properties, &LabelOutcome::Unlabelled);
+-        (
++        Ok((
+             properties.clone(),
+             properties.locator_evidence(vocabulary),
+             0,
+-        )
++        ))
+     }
+
+     fn is_web_wrapper(&self, _node: &usize, _properties: &ElementProperties) -> bool {
+diff --git a/crates/windows/src/tree/resolve/resolve_landing_tests.rs b/crates/windows/src/tree/resolve/resolve_landing_tests.rs
+index 12c500d..d72a237 100644
+--- a/crates/windows/src/tree/resolve/resolve_landing_tests.rs
++++ b/crates/windows/src/tree/resolve/resolve_landing_tests.rs
+@@ -151,11 +151,14 @@ impl TreeSource for Counting<'_> {
+     fn evidence(
+         &self,
+         node: &usize,
+-    ) -> (
+-        crate::tree::properties::ElementProperties,
+-        agent_desktop_core::LocatorEvidence,
+-        u64,
+-    ) {
++    ) -> Result<
++        (
++            crate::tree::properties::ElementProperties,
++            agent_desktop_core::LocatorEvidence,
++            u64,
++        ),
++        agent_desktop_core::AdapterError,
++    > {
+         self.inner.evidence(node)
+     }
+
+diff --git a/crates/windows/src/tree/resolve/resolve_pair_window.rs b/crates/windows/src/tree/resolve/resolve_pair_window.rs
+index 635ca40..5b6ea79 100644
+--- a/crates/windows/src/tree/resolve/resolve_pair_window.rs
++++ b/crates/windows/src/tree/resolve/resolve_pair_window.rs
+@@ -219,7 +219,8 @@ pub(crate) fn collect_marked(
+                 out.push(evidence);
+             }
+         },
+-    );
++    )
++    .expect("qualified marked-control traversal");
+ }
+
+ pub(crate) fn automation_id(evidence: &LocatorEvidence) -> Option<ElementIdentifier> {
+diff --git a/crates/windows/src/tree/resolve/resolve_path_fallback_tests.rs b/crates/windows/src/tree/resolve/resolve_path_fallback_tests.rs
+index 1c77de1..4b8d2ed 100644
+--- a/crates/windows/src/tree/resolve/resolve_path_fallback_tests.rs
++++ b/crates/windows/src/tree/resolve/resolve_path_fallback_tests.rs
+@@ -22,7 +22,8 @@ fn catalogue(
+             path.extend_from_slice(prefix);
+             out.push((path, evidence));
+         },
+-    );
++    )
++    .expect("qualified catalogue");
+ }
+
+ fn stored_entry(
+@@ -69,7 +70,13 @@ fn the_path_tier_settles_on_the_element_the_stored_path_names_and_on_no_other()
+     let deadline = crate::tree::walk::walker_fake::deadline();
+     let root = crate::tree::automation::root_from_hwnd(fixture.handle(), deadline)
+         .expect("the fixture window resolves");
+-    let source = UiaTreeSource::for_root(&root).expect("a tree source");
++    let root = crate::tree::walk::walker_fake::bind_fixture_root(
++        root,
++        crate::tree::walk::walker_fake::deadline(),
++    )
++    .expect("qualified fixture root");
++    let source = UiaTreeSource::for_root(&root, crate::tree::walk::walker_fake::deadline())
++        .expect("a tree source");
+     let prepared = source.prepare_root(&root).expect("a prepared root");
+     let budget = WalkBudget::new(10, deadline);
+
+@@ -115,6 +122,7 @@ fn the_path_tier_settles_on_the_element_the_stored_path_names_and_on_no_other()
+             &land(&target_path),
+             &entry
+         )
++        .expect("qualified evidence")
+         .is_some(),
+         "the tier must settle on the element the stored path names"
+     );
+@@ -124,6 +132,7 @@ fn the_path_tier_settles_on_the_element_the_stored_path_names_and_on_no_other()
+             &land(&decoy_path),
+             &entry
+         )
++        .expect("qualified evidence")
+         .is_none(),
+         "a same-role landing the stored identity refutes is never this tier's answer"
+     );
+@@ -145,7 +154,13 @@ fn a_refuted_element_at_the_stored_path_falls_through_to_the_broad_search() {
+     let deadline = crate::tree::walk::walker_fake::deadline();
+     let root = crate::tree::automation::root_from_hwnd(fixture.handle(), deadline)
+         .expect("the fixture window resolves");
+-    let source = UiaTreeSource::for_root(&root).expect("a tree source");
++    let root = crate::tree::walk::walker_fake::bind_fixture_root(
++        root,
++        crate::tree::walk::walker_fake::deadline(),
++    )
++    .expect("qualified fixture root");
++    let source = UiaTreeSource::for_root(&root, crate::tree::walk::walker_fake::deadline())
++        .expect("a tree source");
+     let prepared = source.prepare_root(&root).expect("a prepared root");
+     let budget = WalkBudget::new(10, deadline);
+
+@@ -192,7 +207,7 @@ fn a_refuted_element_at_the_stored_path_falls_through_to_the_broad_search() {
+     .expect("the path walk answers")
+     .element
+     .expect("the stored path still lands on a live element");
+-    let (_, landed_evidence, _) = source.evidence(&landed);
++    let (_, landed_evidence, _) = source.evidence(&landed).expect("qualified evidence");
+     assert_eq!(
+         landed_evidence.role.known(),
+         target.role.known(),
+@@ -209,7 +224,7 @@ fn a_refuted_element_at_the_stored_path_falls_through_to_the_broad_search() {
+     let resolved = handle
+         .downcast_ref::<UIAElement>()
+         .expect("the resolved handle carries a UI Automation element");
+-    let (_, resolved_evidence, _) = source.evidence(resolved);
++    let (_, resolved_evidence, _) = source.evidence(resolved).expect("qualified evidence");
+
+     assert_eq!(
+         resolved_evidence.name.known(),
+diff --git a/crates/windows/src/tree/resolve/resolve_retry_tests.rs b/crates/windows/src/tree/resolve/resolve_retry_tests.rs
+index 075865b..27c4f6e 100644
+--- a/crates/windows/src/tree/resolve/resolve_retry_tests.rs
++++ b/crates/windows/src/tree/resolve/resolve_retry_tests.rs
+@@ -268,7 +268,13 @@ fn a_structurally_unverifiable_entry_settles_stale_in_one_attempt() {
+     let deadline = crate::tree::walk::walker_fake::deadline();
+     let root = crate::tree::automation::root_from_hwnd(fixture.handle(), deadline)
+         .expect("the fixture window resolves");
+-    let source = UiaTreeSource::for_root(&root).expect("a tree source");
++    let root = crate::tree::walk::walker_fake::bind_fixture_root(
++        root,
++        crate::tree::walk::walker_fake::deadline(),
++    )
++    .expect("qualified fixture root");
++    let source = UiaTreeSource::for_root(&root, crate::tree::walk::walker_fake::deadline())
++        .expect("a tree source");
+     let prepared = source.prepare_root(&root).expect("a prepared root");
+     let budget = WalkBudget::new(10, deadline);
+     let found = find_password(&source, &prepared, &budget)
+diff --git a/crates/windows/src/tree/resolve/resolve_search.rs b/crates/windows/src/tree/resolve/resolve_search.rs
+index bba7ab9..e1cb4c7 100644
+--- a/crates/windows/src/tree/resolve/resolve_search.rs
++++ b/crates/windows/src/tree/resolve/resolve_search.rs
+@@ -145,15 +145,15 @@ pub(crate) fn accept_path_landing(
+     source: &UiaTreeSource,
+     candidate: &UIAElement,
+     entry: &RefEntry,
+-) -> Option<UIAElement> {
+-    let (_, evidence, _) = source.evidence(candidate);
++) -> Result<Option<UIAElement>, AdapterError> {
++    let (_, evidence, _) = source.evidence(candidate)?;
+     if geometry_contradicts(entry, &evidence) {
+-        return None;
++        return Ok(None);
+     }
+-    match admit_node(entry, &evidence) {
++    Ok(match admit_node(entry, &evidence) {
+         NodeAdmission::Collect => Some(candidate.clone()),
+         NodeAdmission::Unread | NodeAdmission::Reject => None,
+-    }
++    })
+ }
+
+ /// The geometry promotion eligibility predicate.
+@@ -326,7 +326,7 @@ pub(crate) fn search_under(
+     }
+     ctx.budget.deadline.ensure_remaining()?;
+
+-    let (_, evidence, _) = ctx.source.evidence(element);
++    let (_, evidence, _) = ctx.source.evidence(element)?;
+     match admit_node(ctx.entry, &evidence) {
+         NodeAdmission::Collect => out.push(build_candidate(element, &evidence)),
+         NodeAdmission::Unread => *unread_region = true,
+diff --git a/crates/windows/src/tree/resolve/resolve_search_tests.rs b/crates/windows/src/tree/resolve/resolve_search_tests.rs
+index a9f7667..33d7cb8 100644
+--- a/crates/windows/src/tree/resolve/resolve_search_tests.rs
++++ b/crates/windows/src/tree/resolve/resolve_search_tests.rs
+@@ -219,23 +219,13 @@ fn should_stop_collecting_fires_only_past_one_match_with_no_stored_hash() {
+ fn a_ref_stored_for_the_live_secure_edit_promotes_on_geometry_alone() {
+     ensure_test_apartment();
+     let fixture = crate::tree::fixture::HostedFixture::spawn().expect("a fixture host starts");
+-    let source = UiaTreeSource::for_root(
+-        &crate::tree::automation::root_from_hwnd(
+-            fixture.handle(),
+-            crate::tree::walk::walker_fake::deadline(),
+-        )
+-        .expect("the fixture resolves"),
+-    )
+-    .expect("a tree source");
+-    let prepared = source
+-        .prepare_root(
+-            &crate::tree::automation::root_from_hwnd(
+-                fixture.handle(),
+-                crate::tree::walk::walker_fake::deadline(),
+-            )
+-            .expect("the fixture resolves"),
+-        )
+-        .expect("a prepared root");
++    let deadline = crate::tree::walk::walker_fake::deadline();
++    let root = crate::tree::automation::root_from_hwnd(fixture.handle(), deadline)
++        .expect("the fixture resolves");
++    let root = crate::tree::walk::walker_fake::bind_fixture_root(root, deadline)
++        .expect("qualified fixture root");
++    let source = UiaTreeSource::for_root(&root, deadline).expect("a tree source");
++    let prepared = source.prepare_root(&root).expect("a prepared root");
+     let budget = WalkBudget::new(10, crate::tree::walk::walker_fake::deadline());
+     let found = find_secure(&source, &prepared, &budget)
+         .expect("the fixture walk succeeds")
+diff --git a/crates/windows/src/tree/resolve/resolve_tests.rs b/crates/windows/src/tree/resolve/resolve_tests.rs
+index 92d821b..e51e241 100644
+--- a/crates/windows/src/tree/resolve/resolve_tests.rs
++++ b/crates/windows/src/tree/resolve/resolve_tests.rs
+@@ -7,8 +7,9 @@ fn capture_identified(
+     root: &UIAElement,
+     deadline: agent_desktop_core::Deadline,
+ ) -> Option<(Option<ElementIdentifier>, Option<String>, Option<String>)> {
+-    let source = UiaTreeSource::for_root(root).ok()?;
+-    let prepared = source.prepare_root(root).ok()?;
++    let root = crate::tree::walk::walker_fake::bind_fixture_root(root.clone(), deadline).ok()?;
++    let source = UiaTreeSource::for_root(&root, deadline).ok()?;
++    let prepared = source.prepare_root(&root).ok()?;
+     let budget = WalkBudget::new(10, deadline);
+     walk_for_identity(&source, &prepared, &budget)
+ }
+@@ -105,7 +106,13 @@ fn a_blank_secure_ref_resolves_through_the_path_and_geometry_tier() {
+     let deadline = crate::tree::walk::walker_fake::deadline();
+     let root = crate::tree::automation::root_from_hwnd(fixture.handle(), deadline)
+         .expect("the fixture window resolves");
+-    let source = UiaTreeSource::for_root(&root).expect("a tree source");
++    let root = crate::tree::walk::walker_fake::bind_fixture_root(
++        root,
++        crate::tree::walk::walker_fake::deadline(),
++    )
++    .expect("qualified fixture root");
++    let source = UiaTreeSource::for_root(&root, crate::tree::walk::walker_fake::deadline())
++        .expect("a tree source");
+     let prepared = source.prepare_root(&root).expect("a prepared root");
+     let budget = WalkBudget::new(10, deadline);
+
+@@ -198,7 +205,13 @@ fn a_ref_whose_window_belongs_to_another_process_never_resolves_into_it() {
+     let deadline = crate::tree::walk::walker_fake::deadline();
+     let root = crate::tree::automation::root_from_hwnd(fixture.handle(), deadline)
+         .expect("the fixture window resolves");
+-    let source = UiaTreeSource::for_root(&root).expect("a tree source");
++    let root = crate::tree::walk::walker_fake::bind_fixture_root(
++        root,
++        crate::tree::walk::walker_fake::deadline(),
++    )
++    .expect("qualified fixture root");
++    let source = UiaTreeSource::for_root(&root, crate::tree::walk::walker_fake::deadline())
++        .expect("a tree source");
+     let prepared = source.prepare_root(&root).expect("a prepared root");
+     let budget = WalkBudget::new(10, deadline);
+
+diff --git a/crates/windows/src/tree/resolve/resolve_tie_break_tests.rs b/crates/windows/src/tree/resolve/resolve_tie_break_tests.rs
+index 3ff7e15..3c582b6 100644
+--- a/crates/windows/src/tree/resolve/resolve_tie_break_tests.rs
++++ b/crates/windows/src/tree/resolve/resolve_tie_break_tests.rs
+@@ -28,7 +28,13 @@ fn the_bounds_tie_break_resolves_the_stored_candidate_not_the_first_collected()
+     let deadline = crate::tree::walk::walker_fake::deadline();
+     let root = crate::tree::automation::root_from_hwnd(hosted.handle, deadline)
+         .expect("the hosted window resolves");
+-    let source = UiaTreeSource::for_root(&root).expect("a tree source");
++    let root = crate::tree::walk::walker_fake::bind_fixture_root(
++        root,
++        crate::tree::walk::walker_fake::deadline(),
++    )
++    .expect("qualified fixture root");
++    let source = UiaTreeSource::for_root(&root, crate::tree::walk::walker_fake::deadline())
++        .expect("a tree source");
+     let prepared = source.prepare_root(&root).expect("a prepared root");
+     let budget = WalkBudget::new(10, deadline);
+
+@@ -106,7 +112,7 @@ fn the_bounds_tie_break_resolves_the_stored_candidate_not_the_first_collected()
+     let resolved = handle
+         .downcast_ref::<UIAElement>()
+         .expect("the resolved handle carries a UI Automation element");
+-    let (_, resolved_evidence, _) = source.evidence(resolved);
++    let (_, resolved_evidence, _) = source.evidence(resolved).expect("qualified evidence");
+     assert_eq!(
+         crate::tree::resolve::resolve_match::bounds_hash_of(&resolved_evidence),
+         Some(target_hash),
+@@ -132,7 +138,7 @@ fn catalogue_marked(
+     if depth >= 8 {
+         return;
+     }
+-    let (_, evidence, _) = source.evidence(element);
++    let (_, evidence, _) = source.evidence(element).expect("qualified evidence");
+     if evidence
+         .name
+         .known()
+@@ -207,7 +213,13 @@ fn the_fast_path_refuses_a_contradicting_hash_and_still_accepts_an_agreeing_one(
+     let deadline = crate::tree::walk::walker_fake::deadline();
+     let root = crate::tree::automation::root_from_hwnd(hosted.handle, deadline)
+         .expect("the hosted window resolves");
+-    let source = UiaTreeSource::for_root(&root).expect("a tree source");
++    let root = crate::tree::walk::walker_fake::bind_fixture_root(
++        root,
++        crate::tree::walk::walker_fake::deadline(),
++    )
++    .expect("qualified fixture root");
++    let source = UiaTreeSource::for_root(&root, crate::tree::walk::walker_fake::deadline())
++        .expect("a tree source");
+     let prepared = source.prepare_root(&root).expect("a prepared root");
+     let budget = WalkBudget::new(10, deadline);
+
+@@ -259,7 +271,9 @@ fn the_fast_path_refuses_a_contradicting_hash_and_still_accepts_an_agreeing_one(
+             .element
+             .expect("the stored path still lands on a live element");
+     assert!(
+-        accept_path_landing(&source, &landed_on_impostor, &contradicting).is_none(),
++        accept_path_landing(&source, &landed_on_impostor, &contradicting)
++            .expect("qualified evidence")
++            .is_none(),
+         "a live bounds hash that contradicts the stored one must not be accepted by the fast path"
+     );
+
+@@ -268,7 +282,7 @@ fn the_fast_path_refuses_a_contradicting_hash_and_still_accepts_an_agreeing_one(
+     let resolved = handle
+         .downcast_ref::<UIAElement>()
+         .expect("the resolved handle carries a UI Automation element");
+-    let (_, resolved_evidence, _) = source.evidence(resolved);
++    let (_, resolved_evidence, _) = source.evidence(resolved).expect("qualified evidence");
+     assert_eq!(
+         crate::tree::resolve::resolve_match::bounds_hash_of(&resolved_evidence),
+         Some(stored_hash),
+@@ -285,7 +299,9 @@ fn the_fast_path_refuses_a_contradicting_hash_and_still_accepts_an_agreeing_one(
+         impostor_path.clone(),
+     );
+     assert!(
+-        accept_path_landing(&source, &landed_on_impostor, &equal_hash_entry).is_some(),
++        accept_path_landing(&source, &landed_on_impostor, &equal_hash_entry)
++            .expect("qualified evidence")
++            .is_some(),
+         "equal hashes must not be refused"
+     );
+ }
 diff --git a/crates/windows/src/tree/surfaces.rs b/crates/windows/src/tree/surfaces.rs
-index c4b458d..5f3baa7 100644
+index c4b458d..304df81 100644
 --- a/crates/windows/src/tree/surfaces.rs
 +++ b/crates/windows/src/tree/surfaces.rs
-@@ -34,6 +34,8 @@ pub(crate) fn surface_root(
+@@ -34,6 +34,11 @@ pub(crate) fn surface_root(
          (ObservationRoot::Window(window), SnapshotSurface::Sheet) => {
              let handle = focused_hwnd_of(&window.id)?;
              let element = root_from_hwnd(handle, deadline)?;
++            #[cfg(target_os = "windows")]
++            let _window_authority =
++                crate::system::window::window_identity::qualify_window(window, deadline)?;
 +            #[cfg(target_os = "windows")]
 +            let _authority = crate::tree::element::qualify_current(&element, deadline)?;
              if window_is_modal_sheet(&element) {
@@ -6677,3 +7482,633 @@ index b1d96d0..07e0ffd 100644
          Ok(Some(utf16_range(&prefix_text, &selection_text)))
      }
  }
+diff --git a/crates/windows/src/tree/walk/cache.rs b/crates/windows/src/tree/walk/cache.rs
+index 929e215..267e6fc 100644
+--- a/crates/windows/src/tree/walk/cache.rs
++++ b/crates/windows/src/tree/walk/cache.rs
+@@ -159,19 +159,25 @@ mod imp {
+     /// The description itself never leaves this function. It names modules,
+     /// process ids and provider ids, and `ref_action.rs` clones adapter error
+     /// text into session trace segments, so it must not reach an error or a
+-    /// log line. A root whose own process id cannot be read falls back to
+-    /// `Batch` for the same reason an unreadable description does: nothing
+-    /// here can rule out a provider delegated into that process, so guessing
+-    /// `Skip` risks the exact per-property RPC cost this policy exists to
+-    /// avoid.
+-    pub fn policy_for_root(root: &UIAElement) -> CachePolicy {
+-        match root.0.get_process_id() {
+-            Ok(target_pid) => policy_for(
+-                &read_one(root, TreeProperty::ProviderDescription),
+-                target_pid,
+-            ),
+-            Err(_) => CachePolicy::Batch,
+-        }
++    /// log line. An unavailable process identity is an error. An unreadable
++    /// description still chooses the conservative batch policy.
++    pub fn policy_for_root(
++        root: &UIAElement,
++        deadline: agent_desktop_core::Deadline,
++    ) -> Result<CachePolicy, AdapterError> {
++        let _authority = crate::tree::element::qualify_verified(root, deadline)?;
++        let target_pid = root.0.get_process_id().map_err(|_| {
++            AdapterError::new(
++                agent_desktop_core::ErrorCode::StaleRef,
++                "Root identity is unavailable",
++            )
++        })?;
++        deadline.ensure_remaining()?;
++        let _authority = crate::tree::element::qualify_verified(root, deadline)?;
++        let description = read_one(root, TreeProperty::ProviderDescription);
++        deadline.ensure_remaining()?;
++        let _authority = crate::tree::element::qualify_verified(root, deadline)?;
++        Ok(policy_for(&description, target_pid))
+     }
+ }
+
+diff --git a/crates/windows/src/tree/walk/cache_tests.rs b/crates/windows/src/tree/walk/cache_tests.rs
+index 4c8d506..90b7421 100644
+--- a/crates/windows/src/tree/walk/cache_tests.rs
++++ b/crates/windows/src/tree/walk/cache_tests.rs
+@@ -275,6 +275,12 @@ mod windows_only {
+         )
+         .expect("the fixture window resolves");
+
+-        assert_eq!(policy_for_root(&root), CachePolicy::Batch);
++        let deadline = Deadline::standard().expect("a standard deadline");
++        let root = crate::tree::walk::walker_fake::bind_fixture_root(root, deadline)
++            .expect("qualified fixture root");
++        assert_eq!(
++            policy_for_root(&root, deadline).expect("qualified policy"),
++            CachePolicy::Batch
++        );
+     }
+ }
+diff --git a/crates/windows/src/tree/walk/walker.rs b/crates/windows/src/tree/walk/walker.rs
+index d289fef..5ce8b98 100644
+--- a/crates/windows/src/tree/walk/walker.rs
++++ b/crates/windows/src/tree/walk/walker.rs
+@@ -95,11 +95,14 @@ pub trait TreeSource {
+     fn evidence(
+         &self,
+         node: &Self::Node,
+-    ) -> (
+-        crate::tree::properties::ElementProperties,
+-        LocatorEvidence,
+-        u64,
+-    );
++    ) -> Result<
++        (
++            crate::tree::properties::ElementProperties,
++            LocatorEvidence,
++            u64,
++        ),
++        AdapterError,
++    >;
+
+     /// Whether this element is a transparent wrapper that costs raw depth but
+     /// no logical depth.
+diff --git a/crates/windows/src/tree/walk/walker_enumerate.rs b/crates/windows/src/tree/walk/walker_enumerate.rs
+index 13ebc9a..bf804ae 100644
+--- a/crates/windows/src/tree/walk/walker_enumerate.rs
++++ b/crates/windows/src/tree/walk/walker_enumerate.rs
+@@ -64,6 +64,7 @@ pub struct TreeWalk<'a, S: TreeSource> {
+     complete: bool,
+     failures: Vec<AdapterError>,
+     suppressed_failures: u32,
++    fatal: Option<AdapterError>,
+ }
+
+ impl<'a, S: TreeSource> TreeWalk<'a, S> {
+@@ -76,6 +77,7 @@ impl<'a, S: TreeSource> TreeWalk<'a, S> {
+             complete: true,
+             failures: Vec::new(),
+             suppressed_failures: 0,
++            fatal: None,
+         }
+     }
+
+@@ -100,6 +102,9 @@ impl<'a, S: TreeSource> TreeWalk<'a, S> {
+         logical_depth: u8,
+         raw_depth: u8,
+     ) -> Option<ObservedSubtree> {
++        if self.fatal.is_some() {
++            return None;
++        }
+         if self.budget.deadline.ensure_remaining().is_err() {
+             self.note_deadline_exhausted();
+             return None;
+@@ -124,6 +129,9 @@ impl<'a, S: TreeSource> TreeWalk<'a, S> {
+                 self.ancestors.len()
+             )));
+         }
++        if let Some(error) = self.fatal {
++            return Err(error);
++        }
+         let mut failures = self.failures;
+         if let Some(last) = failures.last_mut() {
+             annotate_suppressed(last, self.suppressed_failures);
+@@ -144,7 +152,13 @@ impl<'a, S: TreeSource> TreeWalk<'a, S> {
+         raw_depth: u8,
+     ) -> Option<ObservedSubtree> {
+         self.note_visit(logical_depth, raw_depth);
+-        let (properties, evidence, read_failures) = self.source.evidence(node);
++        let (properties, evidence, read_failures) = match self.source.evidence(node) {
++            Ok(evidence) => evidence,
++            Err(error) => {
++                self.fatal = Some(error);
++                return None;
++            }
++        };
+         self.stats.reads.counts.observation_attempts += 1;
+         self.stats.reads.health.native_read_failures += read_failures;
+         let web_wrapper = self.source.is_web_wrapper(node, &properties);
+@@ -263,6 +277,9 @@ impl<'a, S: TreeSource> TreeWalk<'a, S> {
+         let mut children = Vec::new();
+         let mut predecessors_complete = true;
+         for (child_index, child) in read.elements.into_iter().enumerate() {
++            if self.fatal.is_some() {
++                break;
++            }
+             match self.visit(child, depths.0, depths.1.saturating_add(1)) {
+                 Some(subtree) => {
+                     complete &= subtree.is_complete();
+diff --git a/crates/windows/src/tree/walk/walker_fake.rs b/crates/windows/src/tree/walk/walker_fake.rs
+index 10b8e07..7a8463d 100644
+--- a/crates/windows/src/tree/walk/walker_fake.rs
++++ b/crates/windows/src/tree/walk/walker_fake.rs
+@@ -19,6 +19,21 @@ use crate::tree::{
+ #[cfg(target_os = "windows")]
+ use std::ops::ControlFlow;
+
++#[cfg(target_os = "windows")]
++pub(crate) fn bind_fixture_root(
++    root: UIAElement,
++    deadline: Deadline,
++) -> Result<UIAElement, AdapterError> {
++    if root.1.is_some() {
++        let _authority = crate::tree::element::qualify_verified(&root, deadline)?;
++        return Ok(root);
++    }
++    let authority = crate::tree::element::qualify_current(&root, deadline)?;
++    let pid = authority.pid().get();
++    let token = authority.token().to_owned();
++    crate::tree::element::bind_root(root, pid, &token, deadline)
++}
++
+ /// The benign end-of-list pair A14-3 measured: `code() == 0` with `result()`
+ /// `None`, on both build 17763 and build 26100.
+ pub(crate) const EXHAUSTION: UiaFailure = UiaFailure::Sentinel(ERR_NONE);
+@@ -159,15 +174,18 @@ impl TreeSource for FakeTree {
+         self.alias_of(*left) == self.alias_of(*right)
+     }
+
+-    fn evidence(&self, node: &i32) -> (ElementProperties, LocatorEvidence, u64) {
++    fn evidence(
++        &self,
++        node: &i32,
++    ) -> Result<(ElementProperties, LocatorEvidence, u64), AdapterError> {
+         let properties =
+             ElementProperties::from_reads(self.reads.get(node).cloned().unwrap_or_default());
+         let vocabulary = walk_vocabulary(&properties, &LabelOutcome::Unlabelled);
+-        (
++        Ok((
+             properties.clone(),
+             properties.locator_evidence(vocabulary),
+             0,
+-        )
++        ))
+     }
+
+     fn is_web_wrapper(&self, node: &i32, _properties: &ElementProperties) -> bool {
+@@ -295,7 +313,7 @@ fn scan_at<T>(
+     if prefix.len() >= limits.max_depth as usize {
+         return Ok(None);
+     }
+-    let (properties, evidence, failed) = source.evidence(element);
++    let (properties, evidence, failed) = source.evidence(element)?;
+     if let ControlFlow::Break(value) = visit(prefix, properties, evidence, failed) {
+         return Ok(Some(value));
+     }
+@@ -326,14 +344,14 @@ pub(crate) fn walk_all(
+     budget: &WalkBudget,
+     max_depth: u8,
+     visit: &mut impl FnMut(&[usize], LocatorEvidence),
+-) {
++) -> Result<(), AdapterError> {
+     walk_all_at(
+         source,
+         root,
+         ScanLimits { budget, max_depth },
+         &mut Vec::new(),
+         visit,
+-    );
++    )
+ }
+
+ #[cfg(target_os = "windows")]
+@@ -343,19 +361,21 @@ fn walk_all_at(
+     limits: ScanLimits<'_>,
+     prefix: &mut Vec<usize>,
+     visit: &mut impl FnMut(&[usize], LocatorEvidence),
+-) {
++) -> Result<(), AdapterError> {
+     if prefix.len() >= limits.max_depth as usize {
+-        return;
++        return Ok(());
+     }
+-    let (_, evidence, _) = source.evidence(element);
++    let (_, evidence, _) = source.evidence(element)?;
+     visit(prefix, evidence);
+     let mut ignored = false;
+     let Ok(children) = enumerate_children(source, element, limits.budget, &mut ignored) else {
+-        return;
++        return Ok(());
+     };
+     for (index, child) in children.iter().enumerate() {
+         prefix.push(index);
+-        walk_all_at(source, child, limits, prefix, visit);
++        let result = walk_all_at(source, child, limits, prefix, visit);
+         prefix.pop();
++        result?;
+     }
++    Ok(())
+ }
+diff --git a/crates/windows/src/tree/walk/walker_source.rs b/crates/windows/src/tree/walk/walker_source.rs
+index 9feff85..e10da5a 100644
+--- a/crates/windows/src/tree/walk/walker_source.rs
++++ b/crates/windows/src/tree/walk/walker_source.rs
+@@ -9,7 +9,7 @@ mod imp {
+     use crate::tree::element::UIAElement;
+     use crate::tree::name_evidence::read_label;
+     use crate::tree::properties::property_ids::TreeProperty;
+-    use crate::tree::properties::{read_cached, read_live, read_one, rect_has_area};
++    use crate::tree::properties::{read_cached, read_live_bounded, read_one, rect_has_area};
+     use crate::tree::walk::cache::{build_walk_cache_request, policy_for_root};
+     use crate::tree::walk::walker::{DEFAULT_MAX_RAW_DEPTH, NodeKey, TreeSource, walk_vocabulary};
+     use agent_desktop_core::{AdapterError, Deadline, LocatorField, Rect};
+@@ -157,6 +157,9 @@ mod imp {
+         client: UIAutomation,
+         walker: UITreeWalker,
+         cache: Option<UICacheRequest>,
++        deadline: Deadline,
++        root_pid: u32,
++        root_token: String,
+         /// Whether the root is Chromium/Electron provenance (the provenance
+         /// gate): the transparent-wrapper depth skip must only fire under
+         /// detected Chromium/WebView2 provenance, because the identical
+@@ -166,40 +169,45 @@ mod imp {
+     }
+
+     impl UiaTreeSource {
+-        pub fn for_root(root: &UIAElement) -> Result<Self, AdapterError> {
++        pub fn for_root(root: &UIAElement, deadline: Deadline) -> Result<Self, AdapterError> {
++            let _authority = crate::tree::element::qualify_verified(root, deadline)?;
++            let payload = root.1.as_ref().ok_or_else(|| {
++                AdapterError::new(
++                    agent_desktop_core::ErrorCode::StaleRef,
++                    "Root identity is unavailable",
++                )
++            })?;
+             let client = automation_client()?;
+             let walker = client
+                 .get_raw_view_walker()
+                 .map_err(|error| uia_error(&error, "open the raw view tree walker"))?;
+-            let cache = if policy_for_root(root).batches() {
++            deadline.ensure_remaining()?;
++            let _authority = crate::tree::element::qualify_verified(root, deadline)?;
++            let cache = if policy_for_root(root, deadline)?.batches() {
+                 Some(build_walk_cache_request(&client)?)
+             } else {
+                 None
+             };
++            deadline.ensure_remaining()?;
++            let _authority = crate::tree::element::qualify_verified(root, deadline)?;
++            let chromium_provenance = crate::tree::chromium::is_chromium_root(root);
++            deadline.ensure_remaining()?;
+             Ok(Self {
+                 client,
+                 walker,
+                 cache,
+-                chromium_provenance: crate::tree::chromium::is_chromium_root(root),
++                deadline,
++                root_pid: payload.root_pid,
++                root_token: payload.root_token.clone(),
++                chromium_provenance,
+             })
+         }
+
+-        /// Prefetches the walk property set onto the caller's root.
+-        ///
+-        /// The root arrives from `ElementFromHandle` or from a stored ref, so
+-        /// it carries no cache of its own; without this the root alone would
+-        /// read `Unknown` for every property while its children read fine.
++        /// Validate the root without prefetching content. Each node is cached
++        /// only after its own process has been qualified in `evidence`.
+         pub fn prepare_root(&self, root: &UIAElement) -> Result<UIAElement, AdapterError> {
+-            match &self.cache {
+-                Some(request) => root
+-                    .0
+-                    .build_updated_cache(request)
+-                    .map(UIAElement::from)
+-                    .map_err(|error| {
+-                        uia_error(&error, "prefetch the properties of a root element")
+-                    }),
+-                None => Ok(root.clone()),
+-            }
++            let _authority = crate::tree::element::qualify_verified(root, self.deadline)?;
++            Ok(root.clone())
+         }
+
+         /// Whether the root this source walks carries Chromium provenance; the
+@@ -214,21 +222,17 @@ mod imp {
+         type Node = UIAElement;
+
+         fn first_child(&self, node: &UIAElement) -> Result<UIAElement, UiaFailure> {
+-            match &self.cache {
+-                Some(request) => self.walker.get_first_child_build_cache(&node.0, request),
+-                None => self.walker.get_first_child(&node.0),
+-            }
+-            .map(UIAElement::from)
+-            .map_err(|error| failure_of(&error))
++            self.walker
++                .get_first_child(&node.0)
++                .map(UIAElement::from)
++                .map_err(|error| failure_of(&error))
+         }
+
+         fn next_sibling(&self, node: &UIAElement) -> Result<UIAElement, UiaFailure> {
+-            match &self.cache {
+-                Some(request) => self.walker.get_next_sibling_build_cache(&node.0, request),
+-                None => self.walker.get_next_sibling(&node.0),
+-            }
+-            .map(UIAElement::from)
+-            .map_err(|error| failure_of(&error))
++            self.walker
++                .get_next_sibling(&node.0)
++                .map(UIAElement::from)
++                .map_err(|error| failure_of(&error))
+         }
+
+         fn identity(&self, node: &UIAElement) -> NodeKey {
+@@ -242,23 +246,121 @@ mod imp {
+         fn evidence(
+             &self,
+             node: &UIAElement,
+-        ) -> (
+-            crate::tree::properties::ElementProperties,
+-            agent_desktop_core::LocatorEvidence,
+-            u64,
+-        ) {
+-            let (properties, errors) = match &self.cache {
+-                Some(_) => read_cached(node),
+-                None => read_live(node),
++        ) -> Result<
++            (
++                crate::tree::properties::ElementProperties,
++                agent_desktop_core::LocatorEvidence,
++                u64,
++            ),
++            AdapterError,
++        > {
++            self.deadline.ensure_remaining()?;
++            let _root = crate::private_browser_guard::qualify_expected(
++                agent_desktop_core::ProcessId::new(self.root_pid),
++                &self.root_token,
++            )?;
++            self.deadline.ensure_remaining()?;
++            let _expected = if node.1.is_some() {
++                if !node.matches_root(self.root_pid, &self.root_token) {
++                    return Err(AdapterError::new(
++                        agent_desktop_core::ErrorCode::StaleRef,
++                        "Element root identity changed",
++                    ));
++                }
++                Some(crate::tree::element::qualify_verified(node, self.deadline)?)
++            } else {
++                None
++            };
++            let node_authority = crate::tree::element::qualify_current(node, self.deadline)?;
++            let pid = node.0.get_process_id().map_err(|_| {
++                AdapterError::new(
++                    agent_desktop_core::ErrorCode::StaleRef,
++                    "Element identity changed",
++                )
++            })?;
++            if agent_desktop_core::ProcessId::new(pid) != node_authority.pid() {
++                return Err(AdapterError::new(
++                    agent_desktop_core::ErrorCode::StaleRef,
++                    "Element identity changed",
++                ));
++            }
++            self.deadline.ensure_remaining()?;
++            let cached;
++            let (read_node, is_cached) = if let Some(request) = &self.cache {
++                cached = UIAElement::from(
++                    node.0
++                        .build_updated_cache(request)
++                        .map_err(|error| uia_error(&error, "prefetch element properties"))?,
++                );
++                self.deadline.ensure_remaining()?;
++                let cached_pid = cached.0.get_process_id().map_err(|_| {
++                    AdapterError::new(
++                        agent_desktop_core::ErrorCode::StaleRef,
++                        "Element identity changed",
++                    )
++                })?;
++                self.deadline.ensure_remaining()?;
++                let _node_after_pid = crate::private_browser_guard::qualify_expected(
++                    agent_desktop_core::ProcessId::new(pid),
++                    node_authority.token(),
++                )?;
++                self.deadline.ensure_remaining()?;
++                let _root_after_pid = crate::private_browser_guard::qualify_expected(
++                    agent_desktop_core::ProcessId::new(self.root_pid),
++                    &self.root_token,
++                )?;
++                self.deadline.ensure_remaining()?;
++                if cached_pid != pid
++                    || !self
++                        .client
++                        .compare_elements(&node.0, &cached.0)
++                        .unwrap_or(false)
++                {
++                    return Err(AdapterError::new(
++                        agent_desktop_core::ErrorCode::StaleRef,
++                        "Element identity changed",
++                    ));
++                }
++                self.deadline.ensure_remaining()?;
++                let _same = crate::private_browser_guard::qualify_expected(
++                    agent_desktop_core::ProcessId::new(pid),
++                    node_authority.token(),
++                )?;
++                self.deadline.ensure_remaining()?;
++                let _root_after = crate::private_browser_guard::qualify_expected(
++                    agent_desktop_core::ProcessId::new(self.root_pid),
++                    &self.root_token,
++                )?;
++                self.deadline.ensure_remaining()?;
++                (&cached, true)
++            } else {
++                (node, false)
++            };
++            let (properties, errors) = if is_cached {
++                read_cached(read_node)
++            } else {
++                read_live_bounded(read_node, self.deadline)
+             };
+             let failed = u64::try_from(errors.len()).unwrap_or(u64::MAX);
+-            let label = read_label(node, self.cache.is_some());
++            self.deadline.ensure_remaining()?;
++            let _root_after_read = crate::private_browser_guard::qualify_expected(
++                agent_desktop_core::ProcessId::new(self.root_pid),
++                &self.root_token,
++            )?;
++            self.deadline.ensure_remaining()?;
++            let _node_after_read = crate::private_browser_guard::qualify_expected(
++                agent_desktop_core::ProcessId::new(pid),
++                node_authority.token(),
++            )?;
++            self.deadline.ensure_remaining()?;
++            let label = read_label(read_node, is_cached);
++            self.deadline.ensure_remaining()?;
+             let vocabulary = walk_vocabulary(&properties, &label);
+-            (
++            Ok((
+                 properties.clone(),
+                 properties.locator_evidence(vocabulary),
+                 failed,
+-            )
++            ))
+         }
+
+         fn is_web_wrapper(
+@@ -286,7 +388,10 @@ mod imp {
+     pub struct UiaTreeSource;
+
+     impl UiaTreeSource {
+-        pub fn for_root(_root: &UIAElement) -> Result<Self, AdapterError> {
++        pub fn for_root(
++            _root: &UIAElement,
++            _deadline: agent_desktop_core::Deadline,
++        ) -> Result<Self, AdapterError> {
+             Ok(Self)
+         }
+
+@@ -317,16 +422,19 @@ mod imp {
+         fn evidence(
+             &self,
+             _node: &UIAElement,
+-        ) -> (
+-            crate::tree::properties::ElementProperties,
+-            agent_desktop_core::LocatorEvidence,
+-            u64,
+-        ) {
++        ) -> Result<
+             (
++                crate::tree::properties::ElementProperties,
++                agent_desktop_core::LocatorEvidence,
++                u64,
++            ),
++            AdapterError,
++        > {
++            Ok((
+                 ElementProperties::default(),
+                 ElementProperties::default().locator_evidence(ResolvedVocabulary::unknown()),
+                 0,
+-            )
++            ))
+         }
+
+         fn is_web_wrapper(
+@@ -357,7 +465,7 @@ pub fn walk_uia_subtree(
+     root_source: &ObservationRoot<'_>,
+     budget: WalkBudget,
+ ) -> Result<WalkOutcome, AdapterError> {
+-    let source = UiaTreeSource::for_root(root)?;
++    let source = UiaTreeSource::for_root(root, budget.deadline)?;
+     let prepared = source.prepare_root(root)?;
+     walk_from_root(&source, &prepared, root_source, budget)
+ }
+diff --git a/crates/windows/src/tree/walk/walker_source_tests.rs b/crates/windows/src/tree/walk/walker_source_tests.rs
+index 9d645ac..797da4a 100644
+--- a/crates/windows/src/tree/walk/walker_source_tests.rs
++++ b/crates/windows/src/tree/walk/walker_source_tests.rs
+@@ -181,7 +181,13 @@ mod windows_only {
+         let root =
+             root_from_hwnd(fixture.handle(), deadline()).expect("the fixture window resolves");
+
+-        let source = UiaTreeSource::for_root(&root).expect("the source constructs");
++        let root = crate::tree::walk::walker_fake::bind_fixture_root(
++            root,
++            crate::tree::walk::walker_fake::deadline(),
++        )
++        .expect("qualified fixture root");
++        let source = UiaTreeSource::for_root(&root, crate::tree::walk::walker_fake::deadline())
++            .expect("the source constructs");
+         assert!(
+             !source.chromium_provenance(),
+             "the crate's own fixture must not be treated as Chromium provenance"
+diff --git a/crates/windows/src/tree/walk/walker_tests.rs b/crates/windows/src/tree/walk/walker_tests.rs
+index 80f1b92..de55840 100644
+--- a/crates/windows/src/tree/walk/walker_tests.rs
++++ b/crates/windows/src/tree/walk/walker_tests.rs
+@@ -6,6 +6,58 @@ use crate::tree::walk::walker_fake::{
+ };
+ use agent_desktop_core::{Deadline, ErrorCode};
+
++#[test]
++fn a_policy_refusal_aborts_the_walk_before_later_evidence() {
++    use std::cell::Cell;
++    struct RefusingTree {
++        inner: FakeTree,
++        later_read: Cell<bool>,
++    }
++    impl TreeSource for RefusingTree {
++        type Node = i32;
++        fn first_child(&self, node: &i32) -> Result<i32, UiaFailure> {
++            self.inner.first_child(node)
++        }
++        fn next_sibling(&self, node: &i32) -> Result<i32, UiaFailure> {
++            self.inner.next_sibling(node)
++        }
++        fn identity(&self, node: &i32) -> NodeKey {
++            self.inner.identity(node)
++        }
++        fn same_element(&self, a: &i32, b: &i32) -> bool {
++            self.inner.same_element(a, b)
++        }
++        fn evidence(
++            &self,
++            node: &i32,
++        ) -> Result<(ElementProperties, LocatorEvidence, u64), AdapterError> {
++            if *node == 2 {
++                return Err(AdapterError::new(ErrorCode::PolicyDenied, "Refused"));
++            }
++            if *node == 3 {
++                self.later_read.set(true);
++            }
++            self.inner.evidence(node)
++        }
++        fn is_web_wrapper(&self, node: &i32, properties: &ElementProperties) -> bool {
++            self.inner.is_web_wrapper(node, properties)
++        }
++    }
++    let tree = RefusingTree {
++        inner: FakeTree::default().with_children(1, &[2, 3]),
++        later_read: Cell::new(false),
++    };
++    let mut walk = TreeWalk::new(&tree, budget(10));
++    walk.visit(1, 0, 0);
++    assert_eq!(walk.ancestor_depth(), 0);
++    let error = match walk.finish() {
++        Err(error) => error,
++        Ok(_) => panic!("policy refusal must fail the walk"),
++    };
++    assert_eq!(error.code, ErrorCode::PolicyDenied);
++    assert!(!tree.later_read.get());
++}
++
+ /// The fakes encode the measured pair, not a reading of the crate. If this
+ /// fails, every other fake-driven assertion below is testing the wrong model.
+ #[test]
