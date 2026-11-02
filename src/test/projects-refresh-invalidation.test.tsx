@@ -120,6 +120,7 @@ function useSurfaces(selected = "b") {
   useNoteProcessingEvents({
     dispatch,
     noteSaveController: controller,
+    folderChangesRef: useRef({ notes: new Map(), deletedProjects: new Map() }),
     notes: state.notes,
     selectedNote: state.selectedNote,
     liveTranscriptEvents,

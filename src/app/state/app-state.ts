@@ -25,6 +25,7 @@ export type NotesAction =
   | { type: "bootstrapLoaded"; payload: BootstrapResponse }
   | { type: "noteLoaded"; note: NoteDto }
   | { type: "noteUpdated"; note: NoteDto }
+  | { type: "noteUpdatedPreservingFolders"; note: NoteDto }
   | { type: "noteFoldersReconciled"; noteId: string; folderIds: string[] }
   | {
       type: "notePatched";
@@ -97,6 +98,14 @@ export function notesReducer(state: NotesState, action: NotesAction): NotesState
     // regress an in-flight pipeline or reopen a terminal one.
     case "noteUpdated":
       return applyNoteUpdate(state, mergeNoteUpdate(state, action.note));
+    case "noteUpdatedPreservingFolders": {
+      const current =
+        state.selectedNote?.id === action.note.id
+          ? state.selectedNote
+          : state.notes.find((note) => note.id === action.note.id);
+      const note = { ...action.note, folderIds: current?.folderIds ?? action.note.folderIds };
+      return applyNoteUpdate(state, mergeNoteUpdate(state, note));
+    }
     case "noteFoldersReconciled":
       return {
         ...state,
@@ -167,6 +176,12 @@ export function notesReducer(state: NotesState, action: NotesAction): NotesState
               }
             : note,
         ),
+        selectedNote: state.selectedNote?.folderIds.includes(action.folderId)
+          ? {
+              ...state.selectedNote,
+              folderIds: state.selectedNote.folderIds.filter((id) => id !== action.folderId),
+            }
+          : state.selectedNote,
       };
     case "foldersLoaded":
       return {

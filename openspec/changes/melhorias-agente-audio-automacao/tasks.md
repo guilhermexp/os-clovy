@@ -63,3 +63,5 @@ Qualificação atual após review round 3: 5.1 concluída com payload novo `0e7b
 Rodadas integradas da box: `.tmp/verify/T7/integrated-60/report.md` preserva o resultado original; `.tmp/verify/T7/integrated-review-fixes-61/report.md` registra F40–F45 e distingue testes portáveis de provas nativas pendentes. A rodada 62 está em `.tmp/verify/T7/integrated-gates-62/report.md`. Esses registros não concluem 7.2 nem substituem revisão independente, plataforma suportada ou os critérios de 7.3–7.5.
 
 As correções após a revisão de F40–F45 e suas provas estão em `.tmp/verify/T7/integrated-review-fixes-63/report.md`. Elas também requerem revisão independente e não antecipam os gates nativos.
+
+A rodada `.tmp/verify/T7/integrated-review-fixes-64/report.md` registra a reconciliação de associações e suas provas na box; a revisão independente e os critérios nativos continuam pendentes.

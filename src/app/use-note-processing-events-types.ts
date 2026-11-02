@@ -6,6 +6,7 @@ import type { NotesAction } from "./state/app-state";
 export type UseNoteProcessingEventsDependencies = {
   dispatch: React.Dispatch<NotesAction>;
   noteSaveController: NoteSaveController;
+  folderChangesRef: import("./folder-changes").FolderChanges;
   notes: NoteListItemDto[];
   selectedNote: NoteDto | undefined;
   liveTranscriptEvents: LiveTranscriptEventDto[];

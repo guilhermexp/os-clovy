@@ -16,6 +16,7 @@ import { COMPLETED_DEMO_SESSION_PREFIX } from "../lib/completed-sessions-demo-id
 import { getCurrentDataPartitionName } from "../lib/data-partition";
 import type { CreateAppDomainActionsDependencies } from "./app-domain-actions-types";
 import { markSessionFolderEdited } from "./session-folder-edits";
+import { markFolderChange } from "./folder-changes";
 
 export function createAppDomainActions(dependencies: CreateAppDomainActionsDependencies) {
   const {
@@ -28,6 +29,7 @@ export function createAppDomainActions(dependencies: CreateAppDomainActionsDepen
     sessionCompletionWritesRef,
     sessionFolders,
     sessionFolderEditsRef,
+    folderChangesRef,
     setActiveAgentSession,
     setActiveView,
     setAgentOrigin,
@@ -42,9 +44,8 @@ export function createAppDomainActions(dependencies: CreateAppDomainActionsDepen
       // Deleting a project strips its association from any notes and agent
       // sessions but never deletes them — they stay in your library.
       await deleteFolder(folderId, false);
+      markFolderChange(folderChangesRef.current.deletedProjects, folderId);
       dispatch({ type: "folderDeleted", folderId });
-      for (const sessionId of Object.keys(sessionFolders))
-        markSessionFolderEdited(sessionFolderEditsRef, sessionId);
       setSessionFolders((prev) => {
         const next: Record<string, string[]> = {};
         for (const [sessionId, folderIds] of Object.entries(prev)) {
@@ -67,6 +68,7 @@ export function createAppDomainActions(dependencies: CreateAppDomainActionsDepen
     try {
       await noteSaveController.flush(noteId);
       const note = await removeNoteFromFolder(noteId, folderId);
+      markFolderChange(folderChangesRef.current.notes, noteId);
       dispatch({ type: "noteUpdated", note });
     } catch (err) {
       setError(messageFromError(err));
@@ -90,10 +92,12 @@ export function createAppDomainActions(dependencies: CreateAppDomainActionsDepen
       for (const existing of note.folderIds) {
         if (existing === folderId) continue;
         const updated = await removeNoteFromFolder(noteId, existing);
+        markFolderChange(folderChangesRef.current.notes, noteId);
         dispatch({ type: "noteUpdated", note: updated });
       }
       if (!note.folderIds.includes(folderId)) {
         const updated = await assignNoteToFolder(noteId, folderId);
+        markFolderChange(folderChangesRef.current.notes, noteId);
         dispatch({ type: "noteUpdated", note: updated });
       }
     } catch (err) {

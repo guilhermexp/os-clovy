@@ -2,6 +2,8 @@ import { act, render, renderHook, screen, waitFor } from "@testing-library/react
 import { useReducer, useRef, useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NoteSaveController } from "../app/note-save-controller";
+import { createAppDomainActions } from "../app/app-domain-actions";
+import type { CreateAppDomainActionsDependencies } from "../app/app-domain-actions-types";
 import { createInitialState, notesReducer } from "../app/state/app-state";
 import { useNoteProcessingEvents } from "../app/use-note-processing-events";
 import { useSessionMetadata } from "../app/use-session-metadata";
@@ -24,6 +26,9 @@ const mocks = vi.hoisted(() => ({
   listNotes: vi.fn(),
   listCompletedSessions: vi.fn(),
   listSessionFolders: vi.fn(),
+  deleteFolder: vi.fn(),
+  assignNoteToFolder: vi.fn(),
+  removeNoteFromFolder: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 vi.mock("../lib/tauri", async (original) => ({
@@ -83,6 +88,7 @@ function useNotes() {
   useNoteProcessingEvents({
     dispatch,
     noteSaveController: controller,
+    folderChangesRef: useRef({ notes: new Map(), deletedProjects: new Map() }),
     notes: state.notes,
     selectedNote: state.selectedNote,
     liveTranscriptEvents,
@@ -90,6 +96,33 @@ function useNotes() {
     setError,
   });
   return { state, dispatch, controller, error };
+}
+
+function actionDependencies(
+  overrides: Partial<CreateAppDomainActionsDependencies>,
+): CreateAppDomainActionsDependencies {
+  return {
+    agentSessions: [],
+    completedSessions: {},
+    dispatch: vi.fn(),
+    noteSaveController: new NoteSaveController({
+      persist: async (id, patch) => ({ ...note("original"), id, ...patch }),
+    }),
+    pendingSessionProjectRef: { current: null },
+    sessionCompletionTouchedRef: { current: new Set() },
+    sessionCompletionWritesRef: { current: new Map() },
+    sessionFolders: {},
+    sessionFolderEditsRef: { current: new Map() },
+    folderChangesRef: { current: { notes: new Map(), deletedProjects: new Map() } },
+    setActiveAgentSession: vi.fn(),
+    setActiveView: vi.fn(),
+    setAgentOrigin: vi.fn(),
+    setCompletedSessions: vi.fn(),
+    setError: vi.fn(),
+    setSessionFolders: vi.fn(),
+    state: createInitialState(),
+    ...overrides,
+  };
 }
 beforeEach(() => {
   vi.clearAllMocks();
@@ -103,9 +136,136 @@ beforeEach(() => {
   mocks.listNotes.mockResolvedValue({ items: [note("new")], hasMore: false });
   mocks.listSessionFolders.mockResolvedValue([]);
   mocks.listCompletedSessions.mockResolvedValue([]);
+  mocks.deleteFolder.mockResolvedValue(undefined);
 });
 
 describe("native mutation invalidation", () => {
+  it("deleting a project does not resurrect another project's removed association or a pending deleted-project member", async () => {
+    const pending = deferred<Array<{ sessionId: string; folderId: string }>>();
+    mocks.listSessionFolders.mockReturnValueOnce(pending.promise);
+    const { result } = renderHook(() => {
+      const [folders, setFolders] = useState<Record<string, string[]>>({ a: ["x"] });
+      const edits = useRef(new Map<string, number>());
+      const touched = useRef(new Set<string>());
+      const folderChangesRef = useRef({
+        notes: new Map<string, number>(),
+        deletedProjects: new Map<string, number>(),
+      });
+      useSessionMetadata({
+        appBlocked: false,
+        bootstrapped: false,
+        currentDataPartitionName: "default",
+        sessionFolderEditsRef: edits,
+        folderChangesRef,
+        sessionCompletionTouchedRef: touched,
+        setCompletedSessions: () => {},
+        setSessionFolders: setFolders,
+        setError: () => {},
+      });
+      const actions = createAppDomainActions(
+        actionDependencies({
+          sessionFolders: folders,
+          sessionFolderEditsRef: edits,
+          folderChangesRef,
+          setSessionFolders: setFolders,
+        }),
+      );
+      return { folders, setFolders, actions };
+    });
+    await emit({ profile: "default", kind: "projects" });
+    await waitFor(() => expect(mocks.listSessionFolders).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      result.current.setFolders((current) => ({ ...current, late: ["p"] }));
+      await result.current.actions.handleDeleteFolder("p");
+    });
+    await act(async () => pending.resolve([{ sessionId: "late", folderId: "p" }]));
+    await waitFor(() => expect(result.current.folders).toEqual({}));
+  });
+
+  it.each([
+    ["remove", true],
+    ["move", true],
+    ["move", false],
+    ["delete", true],
+  ] as const)("preserves local %s against an older note read (edit: %s)", async (operation, edit) => {
+    const pending = deferred<NoteDto>();
+    const initial = { ...note("original"), folderIds: ["p"] };
+    const { result } = renderHook(() => {
+      const [state, dispatch] = useReducer(notesReducer, {
+        ...createInitialState(),
+        notes: [initial],
+        selectedNote: initial,
+        selectedNoteId: "note",
+      });
+      const [live, setLive] = useState<LiveTranscriptEventDto[]>([]);
+      const [, setError] = useState<string | null>(null);
+      const controller = useRef(
+        new NoteSaveController({
+          debounceMs: 60000,
+          persist: async (id, patch) => ({ ...note("original"), id, ...patch }),
+        }),
+      ).current;
+      const folderChangesRef = useRef({
+        notes: new Map<string, number>(),
+        deletedProjects: new Map<string, number>(),
+      });
+      useNoteProcessingEvents({
+        dispatch,
+        noteSaveController: controller,
+        folderChangesRef,
+        notes: state.notes,
+        selectedNote: state.selectedNote,
+        liveTranscriptEvents: live,
+        setLiveTranscriptEvents: setLive,
+        setError,
+      });
+      const actions = createAppDomainActions(
+        actionDependencies({
+          state,
+          dispatch,
+          noteSaveController: controller,
+          folderChangesRef,
+          setError,
+        }),
+      );
+      return { state, dispatch, controller, actions };
+    });
+    mocks.getNote.mockReturnValueOnce(pending.promise);
+    mocks.removeNoteFromFolder.mockResolvedValue({
+      ...note(edit ? "local" : "original"),
+      folderIds: [],
+    });
+    mocks.assignNoteToFolder.mockResolvedValue({
+      ...note(edit ? "local" : "original"),
+      folderIds: ["q"],
+    });
+    await emit({ profile: "default", kind: "notes" });
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledTimes(1));
+    if (edit) {
+      act(() => {
+        result.current.controller.queue("note", { editedContent: "local" });
+        result.current.dispatch({
+          type: "noteUpdated",
+          note: { ...initial, editedContent: "local" },
+        });
+      });
+    }
+    await act(async () => {
+      if (operation === "remove")
+        await result.current.actions.handleRemoveNoteFromFolder("note", "p");
+      else if (operation === "move") await result.current.actions.handleSetNoteFolder("note", "q");
+      else await result.current.actions.handleDeleteFolder("p");
+    });
+    await act(async () =>
+      pending.resolve({ ...initial, editedContent: edit ? "original" : "native body" }),
+    );
+    await waitFor(() =>
+      expect(result.current.state.selectedNote?.folderIds).toEqual(
+        operation === "move" ? ["q"] : [],
+      ),
+    );
+    expect(result.current.state.selectedNote?.editedContent).toBe(edit ? "local" : "native body");
+  });
   it("applies the newest assignment when an older queued native update is superseded", async () => {
     type Folders = Record<string, string[]>;
     const updates: React.SetStateAction<Folders>[] = [];
@@ -117,6 +277,7 @@ describe("native mutation invalidation", () => {
         bootstrapped: false,
         currentDataPartitionName: "default",
         sessionFolderEditsRef: useRef(new Map()),
+        folderChangesRef: useRef({ notes: new Map(), deletedProjects: new Map() }),
         sessionCompletionTouchedRef: useRef(new Set()),
         setCompletedSessions: () => {},
         setSessionFolders: (update) => {
@@ -155,6 +316,7 @@ describe("native mutation invalidation", () => {
         bootstrapped: false,
         currentDataPartitionName: "default",
         sessionFolderEditsRef: edits,
+        folderChangesRef: useRef({ notes: new Map(), deletedProjects: new Map() }),
         sessionCompletionTouchedRef: touched,
         setCompletedSessions: () => {},
         setSessionFolders: (update) => {
@@ -194,6 +356,7 @@ describe("native mutation invalidation", () => {
           bootstrapped: true,
           currentDataPartitionName: partition,
           sessionFolderEditsRef: useRef(new Map<string, number>()),
+          folderChangesRef: useRef({ notes: new Map(), deletedProjects: new Map() }),
           sessionCompletionTouchedRef: touched,
           setCompletedSessions,
           setSessionFolders,
@@ -307,6 +470,7 @@ describe("native mutation invalidation", () => {
         bootstrapped: true,
         currentDataPartitionName: "default",
         sessionFolderEditsRef: edits,
+        folderChangesRef: useRef({ notes: new Map(), deletedProjects: new Map() }),
         sessionCompletionTouchedRef: touched,
         setCompletedSessions,
         setSessionFolders,
@@ -434,6 +598,7 @@ describe("native mutation invalidation", () => {
         bootstrapped: false,
         currentDataPartitionName: "default",
         sessionFolderEditsRef: useRef(new Map<string, number>()),
+        folderChangesRef: useRef({ notes: new Map(), deletedProjects: new Map() }),
         sessionCompletionTouchedRef: touched,
         setCompletedSessions,
         setSessionFolders,

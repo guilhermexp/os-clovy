@@ -18,6 +18,7 @@ export type CreateAppDomainActionsDependencies = {
   sessionCompletionWritesRef: React.MutableRefObject<Map<string, Promise<unknown>>>;
   sessionFolders: Record<string, string[]>;
   sessionFolderEditsRef: import("./session-folder-edits").SessionFolderEdits;
+  folderChangesRef: import("./folder-changes").FolderChanges;
   setActiveAgentSession: (session: AgentSessionDto | undefined) => void;
   setActiveView: React.Dispatch<React.SetStateAction<SidebarView>>;
   setAgentOrigin: React.Dispatch<

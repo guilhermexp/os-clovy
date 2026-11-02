@@ -38,6 +38,7 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
   const {
     dispatch,
     noteSaveController,
+    folderChangesRef,
     notes,
     selectedNote,
     liveTranscriptEvents,
@@ -101,6 +102,8 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
               await noteSaveController.flush(noteId);
               if (!isCurrent() || noteRequests.get(noteId) !== request) return;
               const editVersion = noteSaveController.getEditVersion(noteId);
+              const folderVersion = folderChangesRef.current.notes.get(noteId);
+              const deletedProjects = new Map(folderChangesRef.current.deletedProjects);
               const note = await getNote(noteId);
               if (
                 isCurrent() &&
@@ -109,13 +112,21 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
                 noteRequests.get(noteId) === request &&
                 !deletedNoteIdsRef.current.has(noteId)
               ) {
+                const folderChanged = folderVersion !== folderChangesRef.current.notes.get(noteId);
+                const folderIds = note.folderIds.filter(
+                  (id) =>
+                    folderChangesRef.current.deletedProjects.get(id) === deletedProjects.get(id),
+                );
                 if (
                   editVersion === noteSaveController.getEditVersion(noteId) &&
                   !noteSaveController.hasPending(noteId)
                 ) {
-                  dispatch({ type: "noteUpdated", note });
-                } else {
-                  dispatch({ type: "noteFoldersReconciled", noteId, folderIds: note.folderIds });
+                  dispatch({
+                    type: folderChanged ? "noteUpdatedPreservingFolders" : "noteUpdated",
+                    note: { ...note, folderIds },
+                  });
+                } else if (!folderChanged) {
+                  dispatch({ type: "noteFoldersReconciled", noteId, folderIds });
                 }
               }
             }
@@ -125,6 +136,8 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
                 noteSaveController.getEditVersion(note.id),
               ]),
             );
+            const folderVersions = new Map(folderChangesRef.current.notes);
+            const deletedProjects = new Map(folderChangesRef.current.deletedProjects);
             const pendingAtRead = new Set(
               visibleNotesRef.current
                 .filter((note) => noteSaveController.hasPending(note.id))
@@ -134,12 +147,19 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
             if (isCurrent() && request === latestRequest) {
               dispatch({
                 type: "notesInvalidated",
-                notes: response.items,
+                notes: response.items.map((note) => ({
+                  ...note,
+                  folderIds: note.folderIds.filter(
+                    (id) =>
+                      folderChangesRef.current.deletedProjects.get(id) === deletedProjects.get(id),
+                  ),
+                })),
                 preserveIds: response.items
                   .filter(
                     (note) =>
                       pendingAtRead.has(note.id) ||
                       noteSaveController.hasPending(note.id) ||
+                      folderVersions.get(note.id) !== folderChangesRef.current.notes.get(note.id) ||
                       (editVersions.get(note.id) ?? 0) !==
                         noteSaveController.getEditVersion(note.id),
                   )
