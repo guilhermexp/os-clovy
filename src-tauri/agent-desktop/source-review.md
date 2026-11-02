@@ -10,9 +10,13 @@ the upstream evidence checkout and its builds.
 
 The preparer also authenticates a snapshot of Clovy's shared private-browser
 runtime identity source and stages those exact bytes in the archived workspace.
-The native OS guards that will consume it, a newly prepared engine, and their
-macOS and Windows acceptance remain pending; this input binding does not prove
-those guards or qualify an existing engine artifact.
+The Windows window inventory and strict window resolution now consume that
+source to reject the private browser or an indeterminate process identity
+before reading window titles. The process image and birth are read from the
+same process handle; stored targets must match their expected generation.
+Windows UIA descendants, capture, input and other native guards, macOS guards,
+a newly prepared engine, and native acceptance remain pending. This partial
+change does not qualify an existing engine artifact.
 
 The source commit is less than seven days old. The specific reason to use it
 is the Windows CLI shutdown correction in `0768da43` (the main thread's UIA

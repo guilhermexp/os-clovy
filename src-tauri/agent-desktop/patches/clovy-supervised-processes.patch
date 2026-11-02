@@ -4472,3 +4472,234 @@
              let context = CommandContext::new(session_id, cli.trace, cli.trace_strict)
                  .map_err(pre_dispatch_error)?
                  .with_headed(cli.interaction.headed)
+diff --git a/crates/windows/Cargo.toml b/crates/windows/Cargo.toml
+index 82d6d61..c253888 100644
+--- a/crates/windows/Cargo.toml
++++ b/crates/windows/Cargo.toml
+@@ -26,6 +26,7 @@ windows = { version = "0.62.2", features = [
+   "Win32_Graphics_Dxgi_Common",
+   "Win32_Graphics_Gdi",
+   "Win32_Graphics_Imaging",
++  "Win32_Storage_FileSystem",
+   "Win32_System_Com",
+   "Win32_System_Com_StructuredStorage",
+   "Win32_System_WinRT_Direct3D11",
+diff --git a/crates/windows/src/lib.rs b/crates/windows/src/lib.rs
+index 44d3f2c..63dd5c2 100644
+--- a/crates/windows/src/lib.rs
++++ b/crates/windows/src/lib.rs
+@@ -2,8 +2,12 @@
+
+ mod actions;
+ mod adapter;
++#[cfg(target_os = "windows")]
++#[path = "../../../.clovy-owned-runtime.rs"]
++mod computer_use_owned_runtime;
+ mod input;
+ mod notifications;
++mod private_browser_guard;
+ mod system;
+ pub mod tree;
+
+diff --git a/crates/windows/src/private_browser_guard.rs b/crates/windows/src/private_browser_guard.rs
+new file mode 100644
+index 0000000..cbb4ead
+--- /dev/null
++++ b/crates/windows/src/private_browser_guard.rs
+@@ -0,0 +1,97 @@
++//! Private host configuration and per-use process image qualification.
++use agent_desktop_core::{AdapterError, ErrorCode, ProcessId};
++
++fn denied() -> AdapterError {
++    AdapterError::new(
++        ErrorCode::WindowNotFound,
++        "This target cannot be controlled here",
++    )
++    .with_suggestion("Use Browser use or take over manually.")
++}
++
++#[cfg(target_os = "windows")]
++fn runtime() -> Result<&'static crate::computer_use_owned_runtime::OwnedBrowserRuntime, AdapterError>
++{
++    use crate::computer_use_owned_runtime::OwnedBrowserRuntime;
++    use std::{path::PathBuf, sync::OnceLock};
++    static RUNTIME: OnceLock<Option<OwnedBrowserRuntime>> = OnceLock::new();
++    RUNTIME
++        .get_or_init(|| {
++            let namespace =
++                PathBuf::from(std::env::var_os("CLOVY_COMPUTER_USE_BROWSER_NAMESPACE")?);
++            let image = PathBuf::from(std::env::var_os("CLOVY_COMPUTER_USE_BROWSER_IMAGE")?);
++            if !namespace.is_absolute() || !image.is_absolute() {
++                return None;
++            }
++            Some(OwnedBrowserRuntime::new(namespace, image))
++        })
++        .as_ref()
++        .ok_or_else(denied)
++}
++
++#[cfg(target_os = "windows")]
++pub(crate) fn require_context() -> Result<(), AdapterError> {
++    runtime().map(|_| ())
++}
++
++#[cfg(not(target_os = "windows"))]
++pub(crate) fn require_context() -> Result<(), AdapterError> {
++    Err(denied())
++}
++
++/// Read the executable and creation time from one process object. An unknown
++/// identity or private image is never evidence authorizing a read.
++#[cfg(target_os = "windows")]
++pub(crate) fn qualify(pid: ProcessId) -> Result<String, AdapterError> {
++    use std::{os::windows::ffi::OsStringExt, path::PathBuf};
++    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
++    use windows_sys::Win32::System::Threading::{
++        GetProcessTimes, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
++        QueryFullProcessImageNameW,
++    };
++    let runtime = runtime()?;
++    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, u32::from(pid)) };
++    if handle.is_null() {
++        return Err(denied());
++    }
++    let mut path = vec![0u16; 32768];
++    let mut len = path.len() as u32;
++    let mut created = FILETIME::default();
++    let mut exit = FILETIME::default();
++    let mut kernel = FILETIME::default();
++    let mut user = FILETIME::default();
++    let image_ok = unsafe {
++        QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, path.as_mut_ptr(), &mut len)
++    } != 0;
++    let birth_ok =
++        unsafe { GetProcessTimes(handle, &mut created, &mut exit, &mut kernel, &mut user) } != 0;
++    unsafe {
++        CloseHandle(handle);
++    }
++    if !image_ok || !birth_ok {
++        return Err(denied());
++    }
++    path.truncate(len as usize);
++    let path = PathBuf::from(std::ffi::OsString::from_wide(&path));
++    let ticks = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
++    if ticks == 0 || !matches!(runtime.owns(&path), Ok(false)) {
++        return Err(denied());
++    }
++    Ok(format!(
++        "windows-proc-v1:{}:{}",
++        ticks / 10_000_000,
++        ticks % 10_000_000
++    ))
++}
++
++#[cfg(not(target_os = "windows"))]
++pub(crate) fn qualify(_pid: ProcessId) -> Result<String, AdapterError> {
++    Err(denied())
++}
++
++pub(crate) fn qualify_expected(pid: ProcessId, expected: &str) -> Result<(), AdapterError> {
++    if qualify(pid)? != expected {
++        return Err(denied());
++    }
++    Ok(())
++}
+diff --git a/crates/windows/src/system/window/window_ops.rs b/crates/windows/src/system/window/window_ops.rs
+index ca7efde..809b0e8 100644
+--- a/crates/windows/src/system/window/window_ops.rs
++++ b/crates/windows/src/system/window/window_ops.rs
+@@ -138,6 +138,7 @@ fn list_windows_live_once(
+     filter: &WindowFilter,
+     deadline: Deadline,
+ ) -> Result<Vec<WindowInfo>, AdapterError> {
++    crate::private_browser_guard::require_context()?;
+     #[cfg(test)]
+     enumeration_calls::record();
+
+@@ -161,11 +162,24 @@ fn list_windows_live_once(
+         let Some((pid, token, app)) = identity_facts(window.handle) else {
+             return true;
+         };
++        let Some(owner) = super::window_identity::live_window_owner(window.handle) else {
++            return true;
++        };
++        if crate::private_browser_guard::qualify(owner).is_err()
++            || token.as_deref().is_none_or(|token| {
++                crate::private_browser_guard::qualify_expected(pid, token).is_err()
++            })
++        {
++            return true;
++        }
+         if let Some(filter_name) = app_filter {
+             if !app_name_matches(&app, filter_name) {
+                 return true;
+             }
+         }
++        if super::window_identity::live_window_owner(window.handle) != Some(owner) {
++            return true;
++        }
+         let title = super::window_identity::live_window_title(window.handle).unwrap_or_default();
+         let focused = !focused_seen && is_foreground_window(window.handle);
+         if filter.focused_only && !focused {
+diff --git a/crates/windows/src/system/window/window_resolve.rs b/crates/windows/src/system/window/window_resolve.rs
+index 6a629ce..765fc3f 100644
+--- a/crates/windows/src/system/window/window_resolve.rs
++++ b/crates/windows/src/system/window/window_resolve.rs
+@@ -30,13 +30,27 @@ pub(crate) fn resolve_window_strict(
+             "headed focus requires a process-instance token on the stored window",
+         ));
+     };
++    let owner = super::window_identity::live_window_owner(handle).ok_or_else(|| {
++        AdapterError::new(ErrorCode::WindowNotFound, "Window owner is unavailable")
++    })?;
++    crate::private_browser_guard::qualify(owner)?;
++    crate::private_browser_guard::qualify_expected(evidence.pid, evidence.process_instance)?;
++    if super::window_identity::live_window_owner(handle) != Some(owner) {
++        return Err(AdapterError::new(
++            ErrorCode::WindowNotFound,
++            "Window owner changed",
++        ));
++    }
++    deadline.ensure_remaining()?;
+     evidence.verify_stored()?;
+-    live_window_info(handle, expected)
++    deadline.ensure_remaining()?;
++    live_window_info(handle, expected, deadline)
+ }
+
+ fn live_window_info(
+     handle: super::window_enum::WindowHandle,
+     expected: &WindowInfo,
++    deadline: Deadline,
+ ) -> Result<WindowInfo, AdapterError> {
+     let mut found = None;
+     enumerate_top_level(|window| {
+@@ -58,6 +72,28 @@ fn live_window_info(
+             "window is no longer an agent-visible top-level window",
+         ));
+     }
++    let owner = super::window_identity::live_window_owner(handle).ok_or_else(|| {
++        AdapterError::new(ErrorCode::WindowNotFound, "Window owner is unavailable")
++    })?;
++    crate::private_browser_guard::qualify(owner)?;
++    crate::private_browser_guard::qualify_expected(
++        expected.pid,
++        expected.process_instance.as_deref().ok_or_else(|| {
++            AdapterError::new(ErrorCode::StaleRef, "Window generation is unavailable")
++        })?,
++    )?;
++    let evidence = WindowIdentityEvidence::from_info(handle, expected).ok_or_else(|| {
++        AdapterError::new(ErrorCode::StaleRef, "Window generation is unavailable")
++    })?;
++    if super::window_identity::live_window_owner(handle) != Some(owner)
++        || !evidence.owns_handle_now()?
++    {
++        return Err(AdapterError::new(
++            ErrorCode::WindowNotFound,
++            "Window owner changed",
++        ));
++    }
++    deadline.ensure_remaining()?;
+     let focused = is_foreground_window(handle);
+     Ok(WindowInfo {
+         id: expected.id.clone(),
