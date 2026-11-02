@@ -23,18 +23,14 @@ impl ActiveSilence {
         }
         let frames = self.frames(now, rate);
         self.paused = true;
+        self.since = now;
         frames
     }
-    pub(super) fn resume(&mut self, now: Instant) {
-        self.since = now;
+    pub(super) fn resume(&mut self) {
         self.paused = false;
     }
     pub(super) fn finish(&self, now: Instant, rate: u32) -> u32 {
-        if self.paused {
-            0
-        } else {
-            self.frames(now, rate)
-        }
+        self.frames(now, rate)
     }
     fn frames(&self, now: Instant, rate: u32) -> u32 {
         (now.saturating_duration_since(self.since).as_secs_f64() * f64::from(rate))
@@ -53,8 +49,8 @@ mod tests {
         let mut clock = ActiveSilence::new(start);
         clock.packet(start + Duration::from_secs(1));
         assert_eq!(clock.pause(start + Duration::from_secs(3), 100), 200);
-        assert_eq!(clock.finish(start + Duration::from_secs(103), 100), 0);
-        clock.resume(start + Duration::from_secs(103));
-        assert_eq!(clock.finish(start + Duration::from_secs(106), 100), 300);
+        assert_eq!(clock.finish(start + Duration::from_secs(3), 100), 0);
+        clock.resume();
+        assert_eq!(clock.finish(start + Duration::from_secs(6), 100), 300);
     }
 }

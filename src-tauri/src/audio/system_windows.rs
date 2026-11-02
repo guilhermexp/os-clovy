@@ -114,7 +114,7 @@ impl SystemAudioCapture {
     }
 
     pub fn resume(&mut self) {
-        self.pause_state.resume();
+        self.pause_state.resume(Instant::now());
     }
 
     pub fn status(&self) -> (AudioLevelDto, i64, Option<String>) {
@@ -258,10 +258,11 @@ fn run_capture_loop(
     let mut silence = ActiveSilence::new(Instant::now());
     let mut was_paused = false;
     while !stop_requested.load(Ordering::Acquire) {
-        if let Some(pause_time) = pause_state.snapshot() {
+        let pause = pause_state.snapshot();
+        if pause.paused {
             if !was_paused {
                 backend.pause()?;
-                let frames = silence.pause(pause_time, backend.sample_rate);
+                let frames = silence.pause(pause.active_time, backend.sample_rate);
                 if frames > 0 {
                     write_silence(&mut writer, frames, backend.channels, &stats)?;
                 }
@@ -272,12 +273,12 @@ fn run_capture_loop(
         }
         if was_paused {
             backend.resume()?;
-            silence.resume(Instant::now());
+            silence.resume();
             was_paused = false;
         }
         let wrote_packet = backend.write_next_packet(&mut writer, &stats)?;
         if wrote_packet {
-            silence.packet(Instant::now());
+            silence.packet(pause_state.snapshot().active_time);
             continue;
         }
         // A zero packet size means WASAPI has not delivered a packet yet, not
@@ -286,7 +287,7 @@ fn run_capture_loop(
         // trailing idle tail falls back to wall-clock padding on stop.
         thread::sleep(CAPTURE_POLL_INTERVAL);
     }
-    let end = pause_state.snapshot().unwrap_or_else(Instant::now);
+    let end = pause_state.snapshot().active_time;
     let trailing_silence_frames = silence.finish(end, backend.sample_rate);
     if trailing_silence_frames > 0 {
         write_silence(

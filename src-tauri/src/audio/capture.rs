@@ -37,12 +37,7 @@ pub const MICROPHONE_PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 /// publishes `ACTIVE_RECORDING`, so the watchdog can never declare a timeout
 /// for a capture that is (or is about to be) active — it either abandons a
 /// still-pending build or accepts a published one as success.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CaptureStartState {
-    Pending,
-    Published,
-    Abandoned,
-}
+pub use super::control_admission::CaptureStartState;
 
 pub type CaptureStartHandshake = Mutex<CaptureStartState>;
 
@@ -72,8 +67,7 @@ pub(crate) fn admit_capture_start(
     }
     check_capture_authorization(authorization)?;
     start()?;
-    *state = CaptureStartState::Published;
-    Ok(())
+    super::control_admission::publish_capture_start(state, already_active, authorization)
 }
 
 fn capture_start_abandoned(handshake: &CaptureStartHandshake) -> bool {
@@ -95,6 +89,9 @@ const MICROPHONE_BUFFER_OVERFLOW_WARNING_MESSAGE: &str =
 /// new capture cannot start until the previous one released its devices.
 /// Lock order: this first, then `ACTIVE_RECORDING`.
 static RECORDING_FINALIZATION: Mutex<()> = Mutex::new(());
+// A timed-out native start can still be inside CPAL. Keep its reservation until
+// that worker has cleaned up, without blocking the watchdog or active state.
+static CAPTURE_START_RESERVATION: Mutex<()> = Mutex::new(());
 static ACTIVE_RECORDING: LazyLock<Mutex<Option<ActiveRecording>>> =
     LazyLock::new(|| Mutex::new(None));
 
@@ -350,6 +347,7 @@ pub fn start_capture_with_cancel(
     handshake: Arc<CaptureStartHandshake>,
     authorization: Option<CaptureStartAuthorization>,
 ) -> Result<StartedRecording, AppError> {
+    let _reservation = super::control_admission::reserve_capture_start(&CAPTURE_START_RESERVATION)?;
     // Holds an update install back until this recording is published in
     // `ACTIVE_RECORDING` (or fails); refused while an update installs.
     let _update_gate = crate::update_gate::UPDATE_GATE.begin_recording_start()?;
@@ -621,15 +619,58 @@ pub fn start_capture_with_cancel(
         ),
         warnings: Vec::new(),
     };
-    let mut active = ACTIVE_RECORDING
-        .lock()
-        .map_err(|_| AppError::new("recording_lock_failed", "Recording state is unavailable."))?;
+    // The watchdog must be able to abandon while the native driver is stuck.
+    // Check authority immediately before the native effect, then recheck under
+    // the publication locks after it returns.
+    let started_result = super::control_admission::start_native_capture(
+        &ACTIVE_RECORDING,
+        &handshake,
+        authorization.as_ref(),
+        || {
+            stream
+                .play()
+                .map_err(|error| AppError::new("audio_writer_failed", error.to_string()))?;
+            started = Instant::now();
+            Ok(())
+        },
+    );
+    if let Err(error) = started_result {
+        cleanup_abandoned_capture(
+            writer,
+            partial_path,
+            system_partial_path,
+            live_preview,
+            system_live_preview,
+            system_capture,
+            Some(stream),
+        );
+        return Err(error);
+    }
+    let mut active = match ACTIVE_RECORDING.lock() {
+        Ok(active) => active,
+        Err(_) => {
+            cleanup_abandoned_capture(
+                writer,
+                partial_path,
+                system_partial_path,
+                live_preview,
+                system_live_preview,
+                system_capture,
+                Some(stream),
+            );
+            return Err(AppError::new(
+                "recording_lock_failed",
+                "Recording state is unavailable.",
+            ));
+        }
+    };
     // Commit-or-abandon happens atomically with the publish below (lock
     // order: ACTIVE_RECORDING, then the handshake; the watchdog only ever
     // takes the handshake). Past this block the watchdog treats the build as
     // successfully published and returns it as success.
     {
         let Ok(mut state) = handshake.lock() else {
+            drop(active);
             cleanup_abandoned_capture(
                 writer,
                 partial_path,
@@ -646,10 +687,6 @@ pub fn start_capture_with_cancel(
         };
         if let Err(error) =
             admit_capture_start(&mut state, active.is_some(), authorization.as_ref(), || {
-                stream
-                    .play()
-                    .map_err(|error| AppError::new("audio_writer_failed", error.to_string()))?;
-                started = Instant::now();
                 Ok(())
             })
         {
