@@ -47,6 +47,12 @@ Background is default. Visible mode can be selected before an effect or after
 an explicit unsupported/not-attempted result, never as replay after delivered
 or uncertain input. Cancellation invalidates authority and reaps engine/browser
 processes; no startup orphan or premature profile-lease release is acceptable.
+Anonymous startup recovery and Stop/reaper now share the physical collector:
+existing exclusive lease, durable `Starting` cancellation, original-tree and
+boot checks for `Owned`, and a locked root terminal record before controls are
+retired. Recovery does not kill or replay. Unknown/legacy/corrupt objects and
+unexpected terminal payload are preserved. The browser ADR's 2026-11-02
+addendum documents the holder/terminal format and platform limits.
 Closed tabs and stale references fail explicitly. Saved logins never revive
 old handles. No generic upstream MCP, arbitrary eval, personal-browser attach,
 profile/cookie import or sensitive-field automation is exposed.

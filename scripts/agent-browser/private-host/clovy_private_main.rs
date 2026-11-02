@@ -22,6 +22,8 @@ mod validation;
 
 mod clovy_browser_grant;
 mod clovy_browser_process_identity;
+#[allow(dead_code)] // Shared recovery implementation; host uses directory flush.
+mod clovy_browser_recovery;
 mod clovy_private_launch;
 use native::{
     browser::{BrowserManager, WaitUntil},

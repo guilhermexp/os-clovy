@@ -11,10 +11,9 @@ use super::{
     policy::{validate_final_public_url, PolicyConfig, Resolver, SystemResolver},
     proxy::PinningProxy,
 };
-use clovy_browser_grant::{
-    lock_profile, open_existing_plain, plain_metadata, profile_object_identity, same_open_file,
-    Grant, Owned,
-};
+#[cfg(test)]
+use clovy_browser_grant::open_existing_plain;
+use clovy_browser_grant::{lock_profile, Grant, Owned};
 use clovy_browser_recovery::{RecoveryProfile, RecoveryRoot};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -972,97 +971,15 @@ fn verify_bundle(config: &EngineConfig) -> Result<()> {
 const RESERVED_RECEIPT: &str = ".clovy-reserved.json";
 const STARTING_MARKER: &str = ".clovy-starting";
 
+#[cfg(test)]
 fn marker_absent(profile: &std::path::Path) -> bool {
     matches!(fs::symlink_metadata(profile.join(STARTING_MARKER)), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
 
-fn read_recovery_receipt(profile: &RecoveryProfile, nonce: &str) -> std::io::Result<(Value, File)> {
-    if !uuid::Uuid::parse_str(nonce).is_ok_and(|id| {
-        let mut buffer = uuid::Uuid::encode_buffer();
-        &*id.hyphenated().encode_lower(&mut buffer) == nonce
-    }) {
-        return Err(std::io::Error::other("invalid nonce"));
-    }
-    let mut file = profile.open_file(RESERVED_RECEIPT, false)?;
-    let mut bytes = Vec::new();
-    (&mut file).take(4097).read_to_end(&mut bytes)?;
-    if bytes.len() > 4096 || !profile.same_file(RESERVED_RECEIPT, &file) {
-        return Err(std::io::Error::other("receipt changed"));
-    }
-    let value: Value = serde_json::from_slice(&bytes)?;
-    let phase = value["phase"]
-        .as_str()
-        .ok_or_else(|| std::io::Error::other("invalid phase"))?;
-    if value["version"] != 1
-        || value["nonce"] != nonce
-        || value["rootIdentity"] != json!(profile.root_identity())
-        || value["profileIdentity"] != json!(profile.identity())
-        || value["ownerProcessId"]
-            .as_u64()
-            .and_then(|v| u32::try_from(v).ok())
-            .filter(|v| *v > 0)
-            .is_none()
-        || value["ownerBirth"].as_u64().is_none()
-        || !matches!(phase, "Reserved" | "Starting" | "Cancelled" | "Owned")
-    {
-        return Err(std::io::Error::other("invalid receipt"));
-    }
-    if phase == "Owned" {
-        let owned: Owned = serde_json::from_value(
-            value
-                .get("owned")
-                .cloned()
-                .ok_or_else(|| std::io::Error::other("missing owner"))?,
-        )?;
-        if owned.version != 1
-            || owned.nonce != nonce
-            || owned.root_identity != profile.root_identity()
-            || owned.profile_identity != profile.identity()
-            || Some(u64::from(owned.parent_pid)) != value["ownerProcessId"].as_u64()
-            || Some(owned.parent_birth) != value["ownerBirth"].as_u64()
-            || owned.host_pid == 0
-            || owned.host_birth == 0
-        {
-            return Err(std::io::Error::other("invalid owner"));
-        }
-    } else if value.get("owned").is_some() {
-        return Err(std::io::Error::other("unexpected owner"));
-    }
-    if phase != "Reserved" {
-        let mut marker = profile.open_file(STARTING_MARKER, false)?;
-        let mut content = Vec::new();
-        (&mut marker).take(32).read_to_end(&mut content)?;
-        if content != b"Starting\n" || !profile.same_file(STARTING_MARKER, &marker) {
-            return Err(std::io::Error::other("invalid marker"));
-        }
-    }
-    Ok((value, file))
-}
-
 fn delete_stopped_profile(profile: RecoveryProfile, held: Option<File>, nonce: &str) {
-    let (lease, already_locked) = match held {
-        Some(lease) => (lease, true),
-        None => match profile.open_file(".clovy-lease", true) {
-            Ok(lease) => (lease, false),
-            Err(_) => return,
-        },
-    };
-    // A root-held lock is already exclusive; after handoff the tree has ended
-    // and this new handle must acquire the same physical lease itself.
-    if !profile.same_file(".clovy-lease", &lease) {
-        return;
+    if let Err(error) = profile.delete_stopped(held, nonce) {
+        eprintln!("Browser anonymous profile retained: {error}");
     }
-    if !already_locked && lock_profile(&lease).is_err() {
-        return;
-    }
-    let Ok((_receipt, file)) = read_recovery_receipt(&profile, nonce) else {
-        return;
-    };
-    if !profile.same_file(RESERVED_RECEIPT, &file) || !profile.same_file(".clovy-lease", &lease) {
-        return;
-    }
-    let _ = profile.delete();
-    drop(lease);
 }
 
 fn publish_reserved(profile: &RecoveryProfile, name: &str) -> std::io::Result<()> {
@@ -1110,6 +1027,7 @@ fn mark_starting(profile: &RecoveryProfile, name: &str) -> std::io::Result<()> {
     profile.replace_receipt(&serde_json::to_vec(&receipt)?)
 }
 
+#[cfg(test)]
 fn process_definitely_absent(pid: u32) -> bool {
     if pid == 0 || pid > i32::MAX as u32 {
         return false;
@@ -1157,194 +1075,25 @@ fn roots_overlap(config: &EngineConfig) -> bool {
 }
 
 fn recover_reserved_profiles(config: &EngineConfig) {
-    let root = &config.temporary_root;
-    // Do not traverse a symlink or junction, including one in the root's ancestry.
-    if root.ancestors().any(|path| plain_metadata(path).is_err())
-        || !plain_metadata(root).is_ok_and(|metadata| metadata.is_dir())
-        || roots_overlap(config)
-    {
+    if roots_overlap(config) {
         return;
     }
-    let Ok(entries) = fs::read_dir(root) else {
+    let Ok(root) = RecoveryRoot::open(&config.temporary_root) else {
         return;
     };
-    for entry in entries.flatten() {
-        let profile = entry.path();
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        if uuid::Uuid::parse_str(&name).ok().map(|id| id.to_string()) != Some(name.clone())
-            || !plain_metadata(&profile).is_ok_and(|metadata| metadata.is_dir())
-            || !marker_absent(&profile)
-        {
-            continue;
+    match root.recover() {
+        Ok(diagnostics) => {
+            for diagnostic in diagnostics {
+                eprintln!("Browser recovery retained {diagnostic}");
+            }
         }
-        let Ok(lease) = open_existing_plain(&profile.join(".clovy-lease"), true) else {
-            continue;
-        };
-        if lock_profile(&lease).is_err() {
-            continue;
-        }
-        let Ok(mut receipt) = open_existing_plain(&profile.join(RESERVED_RECEIPT), false) else {
-            continue;
-        };
-        let mut bytes = Vec::new();
-        if (&mut receipt).take(4097).read_to_end(&mut bytes).is_err() || bytes.len() > 4096 {
-            continue;
-        }
-        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
-            continue;
-        };
-        let Some(pid) = value["ownerProcessId"]
-            .as_u64()
-            .and_then(|pid| u32::try_from(pid).ok())
-        else {
-            continue;
-        };
-        if value["version"] != 1
-            || value["nonce"] != name
-            || value["phase"] != "Reserved"
-            || profile_object_identity(root)
-                .ok()
-                .map(|identity| json!(identity))
-                != Some(value["rootIdentity"].clone())
-            || profile_object_identity(&profile)
-                .ok()
-                .map(|identity| json!(identity))
-                != Some(value["profileIdentity"].clone())
-            || !process_definitely_absent(pid)
-            || !marker_absent(&profile)
-            || !same_open_file(&lease, &profile.join(".clovy-lease"))
-            || !same_open_file(&receipt, &profile.join(RESERVED_RECEIPT))
-            || !plain_metadata(&profile).is_ok_and(|metadata| metadata.is_dir())
-            || !process_definitely_absent(pid)
-        {
-            continue;
-        }
-        // Retain the exclusive lease through deletion. Invalid, legacy, live,
-        // Starting and busy profiles are never removed by this sweep.
-        let _ = fs::remove_dir_all(&profile);
+        Err(error) => eprintln!("Browser recovery enumeration failed: {error}"),
     }
 }
 
 #[cfg(unix)]
 fn unix_group_exited(group: i32) -> bool {
-    // Zombies have already exited and cannot use the profile. Waiting for an
-    // unrelated init process to reap them would keep a lease forever on some
-    // containers. Live descendants, including a stopped one, keep the lease.
-    if unsafe { libc::kill(-group, 0) } < 0
-        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-    {
-        return true;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let Ok(entries) = fs::read_dir("/proc") else {
-            return false;
-        };
-        for entry in entries {
-            let Ok(entry) = entry else { return false };
-            let Some(pid) = entry
-                .file_name()
-                .to_str()
-                .and_then(|s| s.parse::<i32>().ok())
-            else {
-                continue;
-            };
-            let stat = match fs::read_to_string(entry.path().join("stat")) {
-                Ok(stat) => stat,
-                Err(_) => {
-                    let observed = unsafe { libc::getpgid(pid) };
-                    if observed == group
-                        || (observed < 0
-                            && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH))
-                    {
-                        return false;
-                    }
-                    continue;
-                }
-            };
-            let Some((_, tail)) = stat.rsplit_once(')') else {
-                return false;
-            };
-            let mut fields = tail.split_whitespace();
-            let (Some(state), Some(_parent), Some(observed_group)) = (
-                fields.next(),
-                fields.next(),
-                fields.next().and_then(|value| value.parse::<i32>().ok()),
-            ) else {
-                return false;
-            };
-            if observed_group == group && !matches!(state, "Z" | "X") {
-                return false;
-            }
-        }
-        true
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // libproc returns a PID count (not a byte count) for this wrapper.
-        let mut pids = vec![0i32; 4096];
-        let count = unsafe {
-            browser_list_process_group(
-                group,
-                pids.as_mut_ptr().cast(),
-                std::mem::size_of_val(pids.as_slice()) as i32,
-            )
-        };
-        if count <= 0 || count as usize >= pids.len() {
-            return false;
-        }
-        for pid in pids.into_iter().take(count as usize) {
-            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-            let size = std::mem::size_of_val(&info) as i32;
-            let read = unsafe {
-                browser_process_info(
-                    pid,
-                    libc::PROC_PIDTBSDINFO,
-                    0,
-                    std::ptr::from_mut(&mut info).cast(),
-                    size,
-                )
-            };
-            if read != size {
-                let observed = unsafe { libc::getpgid(pid) };
-                if observed == group
-                    || (observed < 0
-                        && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH))
-                {
-                    return false;
-                }
-                continue;
-            }
-            if info.pbi_pgid == group as u32 && info.pbi_status != libc::SZOMB {
-                return false;
-            }
-        }
-        true
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        false
-    }
-}
-#[cfg(target_os = "macos")]
-#[link(name = "proc")]
-extern "C" {
-    #[link_name = "proc_listpgrppids"]
-    fn browser_list_process_group(
-        group: libc::pid_t,
-        buffer: *mut libc::c_void,
-        size: libc::c_int,
-    ) -> libc::c_int;
-    #[link_name = "proc_pidinfo"]
-    fn browser_process_info(
-        pid: libc::c_int,
-        flavor: libc::c_int,
-        arg: u64,
-        buffer: *mut libc::c_void,
-        size: libc::c_int,
-    ) -> libc::c_int;
+    clovy_browser_process_identity::unix_group_exited(group)
 }
 
 #[cfg(test)]
@@ -1508,10 +1257,7 @@ mod lifecycle_tests {
                 false,
             );
             let _next = AgentBrowserTransport::new(config);
-            assert!(
-                profile.is_dir(),
-                "uncertain profile must be preserved until capability GC"
-            );
+            assert!(!profile.exists(), "eligible abandoned profile was retained");
         }
     }
     #[cfg(unix)]
@@ -1961,10 +1707,10 @@ mod lifecycle_tests {
 
         let _transport = AgentBrowserTransport::new(config.clone());
         assert!(!eligible.exists());
+        assert!(!starting.exists());
         for profile in [
             &live,
             &busy,
-            &starting,
             &corrupt,
             &legacy,
             &linked_receipt,

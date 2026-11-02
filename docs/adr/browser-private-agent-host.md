@@ -137,3 +137,54 @@ The parent exposes a definite visibility requirement, with snapshots as the
 read alternative and human takeover when an image is required. It never
 activates the tab automatically or substitutes a retained surface image. Native
 hidden-image capture remains a documented API limit, not a passing PNG claim.
+
+## 2026-11-02 addendum: anonymous crash recovery retains physical authority
+
+Startup, Stop and the idle reaper use the same handle-relative collector.
+Startup opens the entire root ancestry without following links, then acquires
+the existing physical lease and rereads the receipt under that lock. It never
+creates a missing lease. A dead original parent with `Starting` and no `Owned`
+is cancelled durably before collection. A bootstrap that has not acquired the
+lease has no authority; its post-lock validation refuses the cancelled phase.
+`Cancelled` is recoverable after another crash. Stop instead derives authority
+from its cancelled Slot and the exit of the original supervised tree; the local
+parent need not die.
+
+`Owned` recovery additionally requires the original host and parent to have
+exited, an empty original Unix group or Windows Job, matching boot identity,
+and the exclusive lease. Free kernel locks after SIGKILL do not establish tree
+exit. PID reuse, unknown birth/boot, denied or incomplete observations preserve
+the profile. Recovery neither kills processes nor replays browser operations.
+Linux uses its boot UUID, Darwin `kern.bootsessionuuid`, and Windows the native
+boot-environment GUID. Older receipts lacking a comparable boot identity stay
+uncollected. The Windows native query layout follows
+[PHNT's declarations](https://github.com/winsiderss/phnt/blob/master/ntexapi.h).
+
+Before moving a profile, the collector publishes a private holder containing
+a versioned receipt of its root, holder and profile identities. Relative
+no-replace rename plus checks before and after the move preserve collisions
+and changed entries. Payload traversal preserves the three controls only at
+the profile's first level. Each traversed entry is opened without following
+links and checked against its enumerated identity.
+
+After payload removal and directory synchronization, a versioned
+`.clovy-gc-complete-<profile UUID>.json` record is published without replacement
+in the root. It binds all directory/control identities and the full authorized
+receipt. The collector locks this exact record before removing any controls;
+the original lease remains held through profile retirement. The record is the
+remaining exclusion authority when the lease disappears. A restarted collector
+validates and locks the record, removes only identified remaining controls and
+empty directories, and retires the record last after synchronizing absence.
+It never traverses unexpected terminal payload. Legacy, corrupt, linked,
+foreign or unidentifiable temporary objects are preserved, not adopted by name.
+
+This adds small durable control records rather than losing crash recovery when
+the last in-profile receipt is removed. Unix operations use directory FDs,
+`openat`, no-follow opens, no-replace rename and `unlinkat`. They do not promise
+atomic inode-conditioned unlink against an arbitrary hostile filesystem owner
+with the same UID. Windows retains enumerated file IDs, deletes through the
+same identified handle, and requests write/append rights only on directories
+that need mutation or synchronization. Flush uses
+[NtFlushBuffersFileEx with flags zero](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntflushbuffersfileex),
+propagating failures. Type checks are not native filesystem, crash-power-loss,
+sharing-mode or signed application acceptance.

@@ -21,6 +21,18 @@ no socket, discovery service, debugger port, provider plugin or streaming server
 The authentication capability is possession of the inherited private pipes;
 the token correlates the child, and is never an argument or environment value.
 
+Anonymous recovery shares the supervisor's handle-relative collector. Under
+the existing exclusive lease, dead-parent `Starting` becomes durably
+`Cancelled`; a late bootstrap must fail its post-lock phase/parent validation.
+`Owned` additionally requires original host/parent exit, matching native boot
+identity and an empty original group/Job. No recovery path kills or replays.
+Stop uses its cancelled Slot and completed tree termination instead of parent
+death. A private identified holder and locked root `PayloadGone` record keep
+cleanup resumable after controls disappear. Terminal recovery removes only
+identified controls and empty directories, preserving unexpected payload,
+unknown entries and all persistent profiles. A lease is never recreated.
+See the 2026-11-02 addendum in `docs/adr/browser-private-agent-host.md`.
+
 Every subsequent JSON line is bounded to 16 MiB and contains `id:u64` and an
 `action`. Unknown action fields are rejected. Responses are
 `{id,delivery,data? ,error?:{code,message}}`; error codes come from a finite local

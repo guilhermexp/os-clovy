@@ -169,7 +169,7 @@ pub(crate) fn sync_profile_directory(profile: &Path) -> io::Result<()> {
     #[cfg(unix)]
     File::open(profile)?.sync_all()?;
     #[cfg(windows)]
-    let _ = profile;
+    super::clovy_browser_recovery::sync_directory_path(profile)?;
     Ok(())
 }
 
@@ -467,9 +467,76 @@ pub(crate) fn boot_identity() -> io::Result<Option<String>> {
         }
         Ok(Some(value.to_owned()))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     {
-        Ok(None)
+        let mut bytes = [0u8; 64];
+        let mut size = bytes.len();
+        if unsafe {
+            libc::sysctlbyname(
+                c"kern.bootsessionuuid".as_ptr(),
+                bytes.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let value = std::str::from_utf8(
+            bytes
+                .get(..size)
+                .ok_or_else(|| io::Error::other("invalid boot identity"))?,
+        )
+        .map_err(io::Error::other)?
+        .trim_end_matches('\0');
+        let id = uuid::Uuid::parse_str(value).map_err(io::Error::other)?;
+        if id.is_nil() {
+            return Err(io::Error::other("invalid boot identity"));
+        }
+        Ok(Some(id.to_string()))
+    }
+    #[cfg(windows)]
+    {
+        // SystemBootEnvironmentInformation (90), PHNT ntexapi.h. Only the
+        // kernel's per-boot GUID is used, never a clock-derived approximation.
+        #[repr(C)]
+        struct BootEnvironment {
+            identifier: [u8; 16],
+            firmware: u32,
+            flags: u64,
+        }
+        #[link(name = "ntdll")]
+        extern "system" {
+            fn NtQuerySystemInformation(
+                class: u32,
+                data: *mut std::ffi::c_void,
+                size: u32,
+                returned: *mut u32,
+            ) -> i32;
+            fn RtlNtStatusToDosError(status: i32) -> u32;
+        }
+        let mut data: BootEnvironment = unsafe { std::mem::zeroed() };
+        let mut returned = 0;
+        let size = std::mem::size_of_val(&data) as u32;
+        let status = unsafe {
+            NtQuerySystemInformation(
+                90,
+                std::ptr::from_mut(&mut data).cast(),
+                size,
+                &mut returned,
+            )
+        };
+        if status < 0 {
+            return Err(io::Error::from_raw_os_error(
+                unsafe { RtlNtStatusToDosError(status) } as i32,
+            ));
+        }
+        let id = uuid::Uuid::from_bytes(data.identifier);
+        if returned != size || id.is_nil() {
+            return Err(io::Error::other("invalid boot identity"));
+        }
+        Ok(Some(id.to_string()))
     }
 }
 
@@ -607,9 +674,13 @@ impl Grant {
             return Err(io::Error::other("persistent lease stays with root"));
         }
         self.validate()?;
+        #[cfg(test)]
+        super::clovy_browser_recovery::checkpoint("grant-before-lock");
         let lease_path = self.profile.join(".clovy-lease");
         let lease = open_existing_plain(&lease_path, true)?;
         lock_profile(&lease)?;
+        #[cfg(test)]
+        super::clovy_browser_recovery::checkpoint("grant-after-lock");
         if !same_open_file(&lease, &lease_path) {
             return Err(io::Error::other("lease changed"));
         }

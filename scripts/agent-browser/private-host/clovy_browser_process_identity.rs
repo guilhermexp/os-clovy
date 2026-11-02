@@ -1,6 +1,191 @@
 //! Native process creation identity used by the browser host and supervisor.
 use std::io;
 
+/// Birth mismatch (PID reuse), denied/partial observations and a live process
+/// are all conservative. An unreaped original zombie has already exited.
+pub(crate) fn process_definitely_exited(pid: u32, birth: u64) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 || birth == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        if unsafe { libc::kill(pid as i32, 0) } < 0 {
+            return io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        }
+        if process_birth(pid).ok() != Some(birth) {
+            return false;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                return false;
+            };
+            stat.rsplit_once(')')
+                .and_then(|(_, tail)| tail.split_whitespace().next())
+                .is_some_and(|state| matches!(state, "Z" | "X"))
+                && process_birth(pid).ok() == Some(birth)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of_val(&info) as i32;
+            (unsafe {
+                libc::proc_pidinfo(
+                    pid as i32,
+                    libc::PROC_PIDTBSDINFO,
+                    0,
+                    std::ptr::from_mut(&mut info).cast(),
+                    size,
+                )
+            }) == size
+                && info.pbi_status == libc::SZOMB
+                && process_birth(pid).ok() == Some(birth)
+        }
+    }
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+            fn WaitForSingleObject(handle: *mut std::ffi::c_void, timeout: u32) -> u32;
+            fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+        }
+        let handle = unsafe { OpenProcess(0x00101000, 0, pid) };
+        if handle.is_null() {
+            return io::Error::last_os_error().raw_os_error() == Some(87);
+        }
+        let exited = process_birth(pid).ok() == Some(birth)
+            && unsafe { WaitForSingleObject(handle, 0) } == 0;
+        unsafe {
+            CloseHandle(handle);
+        }
+        exited
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn unix_group_exited(group: i32) -> bool {
+    if group <= 0 {
+        return false;
+    }
+    // Zombies have already exited and cannot use the profile. Waiting for an
+    // unrelated init process to reap them would keep a lease forever on some
+    // containers. Live descendants, including a stopped one, keep the lease.
+    if unsafe { libc::kill(-group, 0) } < 0
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return false;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { return false };
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|s| s.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            let stat = match std::fs::read_to_string(entry.path().join("stat")) {
+                Ok(stat) => stat,
+                Err(_) => {
+                    let observed = unsafe { libc::getpgid(pid) };
+                    if observed == group
+                        || (observed < 0
+                            && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH))
+                    {
+                        return false;
+                    }
+                    continue;
+                }
+            };
+            let Some((_, tail)) = stat.rsplit_once(')') else {
+                return false;
+            };
+            let mut fields = tail.split_whitespace();
+            let (Some(state), Some(_parent), Some(observed_group)) = (
+                fields.next(),
+                fields.next(),
+                fields.next().and_then(|value| value.parse::<i32>().ok()),
+            ) else {
+                return false;
+            };
+            if observed_group == group && !matches!(state, "Z" | "X") {
+                return false;
+            }
+        }
+        true
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // libproc returns a PID count (not a byte count) for this wrapper.
+        let mut pids = vec![0i32; 4096];
+        let count = unsafe {
+            browser_list_process_group(
+                group,
+                pids.as_mut_ptr().cast(),
+                std::mem::size_of_val(pids.as_slice()) as i32,
+            )
+        };
+        if count <= 0 || count as usize >= pids.len() {
+            return false;
+        }
+        for pid in pids.into_iter().take(count as usize) {
+            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of_val(&info) as i32;
+            let read = unsafe {
+                browser_process_info(
+                    pid,
+                    libc::PROC_PIDTBSDINFO,
+                    0,
+                    std::ptr::from_mut(&mut info).cast(),
+                    size,
+                )
+            };
+            if read != size {
+                let observed = unsafe { libc::getpgid(pid) };
+                if observed == group
+                    || (observed < 0
+                        && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH))
+                {
+                    return false;
+                }
+                continue;
+            }
+            if info.pbi_pgid == group as u32 && info.pbi_status != libc::SZOMB {
+                return false;
+            }
+        }
+        true
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        false
+    }
+}
+#[cfg(target_os = "macos")]
+#[link(name = "proc")]
+extern "C" {
+    #[link_name = "proc_listpgrppids"]
+    fn browser_list_process_group(
+        group: libc::pid_t,
+        buffer: *mut libc::c_void,
+        size: libc::c_int,
+    ) -> libc::c_int;
+    #[link_name = "proc_pidinfo"]
+    fn browser_process_info(
+        pid: libc::c_int,
+        flavor: libc::c_int,
+        arg: u64,
+        buffer: *mut libc::c_void,
+        size: libc::c_int,
+    ) -> libc::c_int;
+}
+
 pub(crate) fn process_birth(pid: u32) -> io::Result<u64> {
     if pid == 0 {
         return Err(io::Error::other("invalid process identity"));
