@@ -14,6 +14,10 @@ The Windows window inventory and strict window resolution now consume that
 source to reject the private browser or an indeterminate process identity
 before reading window titles. The process image and birth are read from the
 same process handle; stored targets must match their expected generation.
+The handle remains open through filesystem classification and the guarded
+title read. Hosted frames retain both process handles; a window owned by its
+target process needs only one qualification. Image lookup uses a small buffer
+and retries with the Windows path limit only when the first buffer is too small.
 Windows UIA descendants, capture, input and other native guards, macOS guards,
 a newly prepared engine, and native acceptance remain pending. This partial
 change does not qualify an existing engine artifact.

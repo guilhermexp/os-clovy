@@ -4503,10 +4503,10 @@ index 44d3f2c..63dd5c2 100644
 
 diff --git a/crates/windows/src/private_browser_guard.rs b/crates/windows/src/private_browser_guard.rs
 new file mode 100644
-index 0000000..cbb4ead
+index 0000000..1cae589
 --- /dev/null
 +++ b/crates/windows/src/private_browser_guard.rs
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,152 @@
 +//! Private host configuration and per-use process image qualification.
 +use agent_desktop_core::{AdapterError, ErrorCode, ProcessId};
 +
@@ -4550,62 +4550,117 @@ index 0000000..cbb4ead
 +
 +/// Read the executable and creation time from one process object. An unknown
 +/// identity or private image is never evidence authorizing a read.
++pub(crate) struct QualifiedProcess {
++    #[cfg(target_os = "windows")]
++    _handle: ProcessHandle,
++    token: String,
++}
++
 +#[cfg(target_os = "windows")]
-+pub(crate) fn qualify(pid: ProcessId) -> Result<String, AdapterError> {
++struct ProcessHandle(windows_sys::Win32::Foundation::HANDLE);
++
++#[cfg(target_os = "windows")]
++impl Drop for ProcessHandle {
++    fn drop(&mut self) {
++        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
++    }
++}
++
++pub(crate) struct QualifiedWindowProcesses {
++    _target: QualifiedProcess,
++    _owner: Option<QualifiedProcess>,
++}
++
++#[cfg(target_os = "windows")]
++pub(crate) fn qualify(pid: ProcessId) -> Result<QualifiedProcess, AdapterError> {
 +    use std::{os::windows::ffi::OsStringExt, path::PathBuf};
-+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
++    use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, FILETIME, GetLastError};
 +    use windows_sys::Win32::System::Threading::{
 +        GetProcessTimes, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 +        QueryFullProcessImageNameW,
 +    };
 +    let runtime = runtime()?;
-+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, u32::from(pid)) };
-+    if handle.is_null() {
++    let handle =
++        ProcessHandle(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, u32::from(pid)) });
++    if handle.0.is_null() {
 +        return Err(denied());
 +    }
-+    let mut path = vec![0u16; 32768];
-+    let mut len = path.len() as u32;
++    let mut small = [0u16; 512];
++    let mut len = small.len() as u32;
++    let ok = unsafe {
++        QueryFullProcessImageNameW(handle.0, PROCESS_NAME_WIN32, small.as_mut_ptr(), &mut len)
++    };
++    let path = if ok != 0 {
++        PathBuf::from(std::ffi::OsString::from_wide(&small[..len as usize]))
++    } else {
++        if unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
++            return Err(denied());
++        }
++        let mut large = vec![0u16; 32768];
++        len = large.len() as u32;
++        if unsafe {
++            QueryFullProcessImageNameW(handle.0, PROCESS_NAME_WIN32, large.as_mut_ptr(), &mut len)
++        } == 0
++        {
++            return Err(denied());
++        }
++        PathBuf::from(std::ffi::OsString::from_wide(&large[..len as usize]))
++    };
 +    let mut created = FILETIME::default();
 +    let mut exit = FILETIME::default();
 +    let mut kernel = FILETIME::default();
 +    let mut user = FILETIME::default();
-+    let image_ok = unsafe {
-+        QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, path.as_mut_ptr(), &mut len)
-+    } != 0;
-+    let birth_ok =
-+        unsafe { GetProcessTimes(handle, &mut created, &mut exit, &mut kernel, &mut user) } != 0;
-+    unsafe {
-+        CloseHandle(handle);
-+    }
-+    if !image_ok || !birth_ok {
++    if unsafe { GetProcessTimes(handle.0, &mut created, &mut exit, &mut kernel, &mut user) } == 0 {
 +        return Err(denied());
 +    }
-+    path.truncate(len as usize);
-+    let path = PathBuf::from(std::ffi::OsString::from_wide(&path));
 +    let ticks = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
 +    if ticks == 0 || !matches!(runtime.owns(&path), Ok(false)) {
 +        return Err(denied());
 +    }
-+    Ok(format!(
-+        "windows-proc-v1:{}:{}",
-+        ticks / 10_000_000,
-+        ticks % 10_000_000
-+    ))
++    Ok(QualifiedProcess {
++        _handle: handle,
++        token: format!(
++            "windows-proc-v1:{}:{}",
++            ticks / 10_000_000,
++            ticks % 10_000_000
++        ),
++    })
 +}
 +
 +#[cfg(not(target_os = "windows"))]
-+pub(crate) fn qualify(_pid: ProcessId) -> Result<String, AdapterError> {
++pub(crate) fn qualify(_pid: ProcessId) -> Result<QualifiedProcess, AdapterError> {
 +    Err(denied())
 +}
 +
-+pub(crate) fn qualify_expected(pid: ProcessId, expected: &str) -> Result<(), AdapterError> {
-+    if qualify(pid)? != expected {
++pub(crate) fn qualify_expected(
++    pid: ProcessId,
++    expected: &str,
++) -> Result<QualifiedProcess, AdapterError> {
++    let authority = qualify(pid)?;
++    if authority.token != expected {
 +        return Err(denied());
 +    }
-+    Ok(())
++    Ok(authority)
++}
++
++pub(crate) fn qualify_window_processes(
++    owner: ProcessId,
++    pid: ProcessId,
++    expected: &str,
++) -> Result<QualifiedWindowProcesses, AdapterError> {
++    let target = qualify_expected(pid, expected)?;
++    let owner = if owner == pid {
++        None
++    } else {
++        Some(qualify(owner)?)
++    };
++    Ok(QualifiedWindowProcesses {
++        _target: target,
++        _owner: owner,
++    })
 +}
 diff --git a/crates/windows/src/system/window/window_ops.rs b/crates/windows/src/system/window/window_ops.rs
-index ca7efde..809b0e8 100644
+index ca7efde..c04c64c 100644
 --- a/crates/windows/src/system/window/window_ops.rs
 +++ b/crates/windows/src/system/window/window_ops.rs
 @@ -138,6 +138,7 @@ fn list_windows_live_once(
@@ -4616,20 +4671,21 @@ index ca7efde..809b0e8 100644
      #[cfg(test)]
      enumeration_calls::record();
 
-@@ -161,11 +162,24 @@ fn list_windows_live_once(
+@@ -161,11 +162,25 @@ fn list_windows_live_once(
          let Some((pid, token, app)) = identity_facts(window.handle) else {
              return true;
          };
 +        let Some(owner) = super::window_identity::live_window_owner(window.handle) else {
 +            return true;
 +        };
-+        if crate::private_browser_guard::qualify(owner).is_err()
-+            || token.as_deref().is_none_or(|token| {
-+                crate::private_browser_guard::qualify_expected(pid, token).is_err()
-+            })
-+        {
++        let Some(token_ref) = token.as_deref() else {
 +            return true;
-+        }
++        };
++        let Ok(_authority) =
++            crate::private_browser_guard::qualify_window_processes(owner, pid, token_ref)
++        else {
++            return true;
++        };
          if let Some(filter_name) = app_filter {
              if !app_name_matches(&app, filter_name) {
                  return true;
@@ -4642,18 +4698,21 @@ index ca7efde..809b0e8 100644
          let focused = !focused_seen && is_foreground_window(window.handle);
          if filter.focused_only && !focused {
 diff --git a/crates/windows/src/system/window/window_resolve.rs b/crates/windows/src/system/window/window_resolve.rs
-index 6a629ce..765fc3f 100644
+index 6a629ce..9376d88 100644
 --- a/crates/windows/src/system/window/window_resolve.rs
 +++ b/crates/windows/src/system/window/window_resolve.rs
-@@ -30,13 +30,27 @@ pub(crate) fn resolve_window_strict(
+@@ -30,13 +30,30 @@ pub(crate) fn resolve_window_strict(
              "headed focus requires a process-instance token on the stored window",
          ));
      };
 +    let owner = super::window_identity::live_window_owner(handle).ok_or_else(|| {
 +        AdapterError::new(ErrorCode::WindowNotFound, "Window owner is unavailable")
 +    })?;
-+    crate::private_browser_guard::qualify(owner)?;
-+    crate::private_browser_guard::qualify_expected(evidence.pid, evidence.process_instance)?;
++    let _authority = crate::private_browser_guard::qualify_window_processes(
++        owner,
++        evidence.pid,
++        evidence.process_instance,
++    )?;
 +    if super::window_identity::live_window_owner(handle) != Some(owner) {
 +        return Err(AdapterError::new(
 +            ErrorCode::WindowNotFound,
@@ -4674,15 +4733,15 @@ index 6a629ce..765fc3f 100644
  ) -> Result<WindowInfo, AdapterError> {
      let mut found = None;
      enumerate_top_level(|window| {
-@@ -58,6 +72,28 @@ fn live_window_info(
+@@ -58,6 +75,28 @@ fn live_window_info(
              "window is no longer an agent-visible top-level window",
          ));
      }
 +    let owner = super::window_identity::live_window_owner(handle).ok_or_else(|| {
 +        AdapterError::new(ErrorCode::WindowNotFound, "Window owner is unavailable")
 +    })?;
-+    crate::private_browser_guard::qualify(owner)?;
-+    crate::private_browser_guard::qualify_expected(
++    let _authority = crate::private_browser_guard::qualify_window_processes(
++        owner,
 +        expected.pid,
 +        expected.process_instance.as_deref().ok_or_else(|| {
 +            AdapterError::new(ErrorCode::StaleRef, "Window generation is unavailable")
