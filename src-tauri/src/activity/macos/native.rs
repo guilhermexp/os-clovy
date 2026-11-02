@@ -193,6 +193,7 @@ pub struct Window {
     pub is_on_screen: bool,
     pub bounds: Bounds,
     pub app_name: String,
+    pub title: String,
 }
 
 pub fn visible_windows() -> Vec<Window> {
@@ -237,6 +238,7 @@ pub fn visible_windows() -> Vec<Window> {
                         && CFBooleanGetValue(visible),
                     app_name: string_value(field(dictionary, "kCGWindowOwnerName"))
                         .unwrap_or_default(),
+                    title: string_value(field(dictionary, "kCGWindowName")).unwrap_or_default(),
                     bounds: Bounds {
                         x: number(bounds, "X").unwrap_or(0.0),
                         y: number(bounds, "Y").unwrap_or(0.0),
