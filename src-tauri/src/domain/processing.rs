@@ -88,6 +88,11 @@ pub type SourceAudioForProcessing = (String, String, PathBuf, bool);
 
 pub const NOTE_PROCESSING_PROGRESS_EVENT: &str = "note-processing-progress";
 
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_GENERATION_COMMITTED: tokio::sync::mpsc::UnboundedSender<()>;
+}
+
 type NoteProcessingProgressSink = Arc<dyn Fn(NoteProcessingProgressDto) + Send + Sync>;
 
 #[derive(Clone, Default)]
@@ -1190,8 +1195,7 @@ pub(crate) async fn process_saved_source_audio_with_progress(
     timing: ProcessingTiming,
     progress: NoteProcessingProgressReporter,
 ) -> Result<NoteDto, AppError> {
-    let progress = progress.scoped();
-    let result = process_saved_source_audio_pipeline(
+    process_saved_source_audio_with_cancellation(
         repos,
         note_id,
         session_id,
@@ -1201,9 +1205,75 @@ pub(crate) async fn process_saved_source_audio_with_progress(
         existing_generated_note,
         manual_notes,
         timing,
-        progress.clone(),
+        progress,
+        std::future::pending(),
+    )
+    .await
+}
+
+/// Cancellation is observed only after the initial status is persisted. Dropping
+/// the pipeline stops further effects, while its owner still runs finalization.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn process_saved_source_audio_with_cancellation(
+    repos: &Repositories,
+    note_id: &str,
+    session_id: &str,
+    source_mode: RecordingSourceMode,
+    sources: Vec<SourceAudioForProcessing>,
+    title: String,
+    existing_generated_note: Option<String>,
+    manual_notes: Option<String>,
+    timing: ProcessingTiming,
+    progress: NoteProcessingProgressReporter,
+    cancellation: impl Future<Output = AppError>,
+) -> Result<NoteDto, AppError> {
+    let progress = progress.scoped();
+    let started = transition_note_processing_stage(
+        repos,
+        note_id,
+        session_id,
+        NoteProcessingStage::Transcribing,
+        ProcessingStatus::Transcribing,
+        &progress,
     )
     .await;
+    let result = match started {
+        Err(error) => Err(error),
+        Ok(()) => {
+            let outcome = {
+                let pipeline = process_saved_source_audio_pipeline(
+                    repos,
+                    note_id,
+                    session_id,
+                    source_mode,
+                    sources,
+                    title,
+                    existing_generated_note,
+                    manual_notes,
+                    timing,
+                    progress.clone(),
+                );
+                tokio::pin!(pipeline);
+                tokio::pin!(cancellation);
+                tokio::select! {
+                    biased;
+                    error = &mut cancellation => Err(error),
+                    result = &mut pipeline => Ok(result),
+                }
+            };
+            match outcome {
+                Ok(result) => result,
+                Err(error) => {
+                    // Generation can have committed its result before its final
+                    // bookkeeping await. Never turn that completed result into failure.
+                    match repos.get_note(note_id).await {
+                        Ok(note) if note.processing_status == ProcessingStatus::Ready => Ok(note),
+                        _ => Err(error),
+                    }
+                }
+            }
+        }
+    };
     complete_note_processing_run(repos, &progress, note_id, session_id, result).await
 }
 
@@ -1223,15 +1293,6 @@ async fn process_saved_source_audio_pipeline(
     let processing_started = Instant::now();
     let note_transcription_started = Instant::now();
     let timeline = FirstEventTimeline::new(timing);
-    transition_note_processing_stage(
-        repos,
-        note_id,
-        session_id,
-        NoteProcessingStage::Transcribing,
-        ProcessingStatus::Transcribing,
-        &progress,
-    )
-    .await?;
     let transcription_provider = crate::providers::configured_transcription_provider();
     // Read once per run: every request of the run, its durable identity and
     // its kept chunks use this model.
@@ -2006,6 +2067,13 @@ async fn process_saved_source_audio_pipeline(
             return Err(error);
         }
     };
+    #[cfg(test)]
+    if TEST_GENERATION_COMMITTED
+        .try_with(|sender| sender.send(()))
+        .is_ok()
+    {
+        tokio::task::yield_now().await;
+    }
     add_processing_complete_checkpoint(repos, session_id, timing, processing_started, "succeeded")
         .await;
     Ok(note)
@@ -5568,6 +5636,266 @@ mod tests {
             .await
             .expect("recording session");
         (repos, recording_session_id)
+    }
+
+    #[tokio::test]
+    async fn cancelled_recovery_finishes_started_pipeline_and_preserves_audio() {
+        let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let _server = install_fake_correction_engine(Arc::new(echo_correction)).await;
+        for target in [
+            NoteProcessingStage::Transcribing,
+            NoteProcessingStage::Generating,
+        ] {
+            let (repos, session_id) = test_source_processing_repositories().await;
+            let note_id: String = sqlx::query_scalar::query_scalar(
+                "SELECT note_id FROM recording_sessions WHERE id = ?",
+            )
+            .bind(&session_id)
+            .fetch_one(&repos.pool)
+            .await
+            .unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let wav = directory.path().join("source.wav");
+            write_three_turn_microphone(&wav);
+            let bytes = std::fs::read(&wav).unwrap();
+            let artifact = repos
+                .create_audio_artifact(
+                    &note_id,
+                    &session_id,
+                    &wav.to_string_lossy(),
+                    10_000,
+                    bytes.len() as i64,
+                    "checksum",
+                )
+                .await
+                .unwrap();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let captured = Arc::clone(&events);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let tx = Mutex::new(Some(tx));
+            let progress = NoteProcessingProgressReporter::new(move |event| {
+                if event.stage == target {
+                    if let Some(tx) = tx.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                }
+                captured.lock().unwrap().push(event);
+            });
+            let (transcriber, _) = scripted_transcriber(vec![Ok("A real transcript")]);
+            let result = TEST_NOTE_TRANSCRIPTION
+                .scope(
+                    (
+                        transcriber,
+                        Arc::new(
+                            RequestPacer::new(18, Duration::from_secs(60))
+                                .with_clock(tokio_clock()),
+                        ),
+                    ),
+                    process_saved_source_audio_with_cancellation(
+                        &repos,
+                        &note_id,
+                        &session_id,
+                        RecordingSourceMode::MicrophonePlusSystem,
+                        vec![(artifact.id.clone(), "microphone".into(), wav.clone(), false)],
+                        "Recovery".into(),
+                        None,
+                        None,
+                        ProcessingTiming::untracked(),
+                        progress,
+                        async {
+                            rx.await.unwrap();
+                            AppError::new("turn_expired", "Stopped")
+                        },
+                    ),
+                )
+                .await;
+            assert_eq!(result.unwrap_err().code, "turn_expired");
+            assert_eq!(
+                repos.get_note(&note_id).await.unwrap().processing_status,
+                ProcessingStatus::Failed
+            );
+            assert_eq!(std::fs::read(&wav).unwrap(), bytes);
+            let artifacts = repos
+                .valid_audio_artifact_paths_for_session(&note_id, &session_id)
+                .await
+                .unwrap();
+            assert!(artifacts.iter().any(|row| row.0 == artifact.id));
+            let events = events.lock().unwrap();
+            assert!(events.iter().any(|event| event.stage == target));
+            let done: Vec<_> = events
+                .iter()
+                .filter(|event| event.stage == NoteProcessingStage::Done)
+                .collect();
+            assert_eq!(done.len(), 1);
+            assert_eq!(done[0].note_id, note_id);
+            assert_eq!(done[0].recording_session_id, session_id);
+            assert_eq!(done[0].processing_status, ProcessingStatus::Failed);
+        }
+        crate::providers::replace_current_settings_for_tests(
+            crate::providers::default_settings_for_tests(),
+        );
+    }
+
+    #[tokio::test]
+    async fn revoked_recovery_before_admission_leaves_the_real_note_untouched() {
+        let (repos, session_id) = test_source_processing_repositories().await;
+        let note_id: String =
+            sqlx::query_scalar::query_scalar("SELECT note_id FROM recording_sessions WHERE id = ?")
+                .bind(&session_id)
+                .fetch_one(&repos.pool)
+                .await
+                .unwrap();
+        repos
+            .set_note_status(&note_id, ProcessingStatus::Ready, None)
+            .await
+            .unwrap();
+        let before = repos.get_note(&note_id).await.unwrap();
+        let binding = crate::mcp_server::turns::TurnBinding {
+            authority: crate::domain::turn_authority::TurnAuthority::new(),
+            session_id: "conversation".into(),
+            run_id: "run".into(),
+            cli: crate::llm::cli::CliKind::Claude,
+            safety_mode: crate::agent_sessions::domain::AgentSafetyMode::Sandboxed,
+            attended: true,
+            surface: "chat".into(),
+        };
+        binding.authority.revoke();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let effect = process_saved_source_audio_with_cancellation(
+            &repos,
+            &note_id,
+            &session_id,
+            RecordingSourceMode::MicrophonePlusSystem,
+            Vec::new(),
+            "Recovery".into(),
+            None,
+            None,
+            ProcessingTiming::untracked(),
+            NoteProcessingProgressReporter::new(move |event| captured.lock().unwrap().push(event)),
+            std::future::pending(),
+        );
+        let error = crate::commands::run_authorized_queued_audio(
+            &repos.pool,
+            &binding,
+            "default",
+            &note_id,
+            &session_id,
+            effect,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "turn_expired");
+        let after = repos.get_note(&note_id).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(before).unwrap(),
+            serde_json::to_value(after).unwrap()
+        );
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_generation_commit_keeps_success_and_emits_done_once() {
+        let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let _server = install_fake_correction_engine(Arc::new(|request| {
+            let prompt = request["messages"]
+                .as_array()
+                .and_then(|messages| messages.last())
+                .and_then(|message| message["content"].as_str())
+                .unwrap_or_default();
+            if prompt.contains("<asr_transcript>") {
+                echo_correction(request)
+            } else {
+                (
+                    200,
+                    crate::llm::endpoint::test_server::chat_reply("Completed meeting notes"),
+                )
+            }
+        }))
+        .await;
+        let (repos, session_id) = test_source_processing_repositories().await;
+        let note_id: String =
+            sqlx::query_scalar::query_scalar("SELECT note_id FROM recording_sessions WHERE id = ?")
+                .bind(&session_id)
+                .fetch_one(&repos.pool)
+                .await
+                .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let wav = directory.path().join("source.wav");
+        write_three_turn_microphone(&wav);
+        let artifact = repos
+            .create_audio_artifact(
+                &note_id,
+                &session_id,
+                &wav.to_string_lossy(),
+                10_000,
+                0,
+                "checksum",
+            )
+            .await
+            .unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let progress =
+            NoteProcessingProgressReporter::new(move |event| captured.lock().unwrap().push(event));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancellation_observed = AtomicBool::new(false);
+        let (transcriber, _) = scripted_transcriber(vec![Ok("A real transcript")]);
+        let result = TEST_GENERATION_COMMITTED
+            .scope(
+                tx,
+                TEST_NOTE_TRANSCRIPTION.scope(
+                    (
+                        transcriber,
+                        Arc::new(
+                            RequestPacer::new(18, Duration::from_secs(60))
+                                .with_clock(tokio_clock()),
+                        ),
+                    ),
+                    process_saved_source_audio_with_cancellation(
+                        &repos,
+                        &note_id,
+                        &session_id,
+                        RecordingSourceMode::MicrophonePlusSystem,
+                        vec![(artifact.id, "microphone".into(), wav, false)],
+                        "Recovery".into(),
+                        None,
+                        None,
+                        ProcessingTiming::untracked(),
+                        progress,
+                        async {
+                            rx.recv().await.unwrap();
+                            cancellation_observed.store(true, Ordering::SeqCst);
+                            AppError::new("turn_expired", "Stopped")
+                        },
+                    ),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(cancellation_observed.load(Ordering::SeqCst));
+        assert_eq!(result.processing_status, ProcessingStatus::Ready);
+        assert_eq!(
+            repos.get_note(&note_id).await.unwrap().generated_content,
+            result.generated_content
+        );
+        assert!(result
+            .generated_content
+            .as_deref()
+            .unwrap()
+            .contains("Completed meeting notes"));
+        let events = events.lock().unwrap();
+        let done: Vec<_> = events
+            .iter()
+            .filter(|event| event.stage == NoteProcessingStage::Done)
+            .collect();
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].note_id, note_id);
+        assert_eq!(done[0].recording_session_id, session_id);
+        assert_eq!(done[0].processing_status, ProcessingStatus::Ready);
+        crate::providers::replace_current_settings_for_tests(
+            crate::providers::default_settings_for_tests(),
+        );
     }
 
     #[tokio::test]
