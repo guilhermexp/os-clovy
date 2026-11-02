@@ -12,8 +12,8 @@ use super::{
     proxy::PinningProxy,
 };
 use clovy_browser_grant::{
-    lock_profile, open_existing_plain, plain_metadata, profile_object_identity, same_open_file, Grant,
-    Owned,
+    lock_profile, open_existing_plain, plain_metadata, profile_object_identity, same_open_file,
+    Grant, Owned,
 };
 use clovy_browser_recovery::{RecoveryProfile, RecoveryRoot};
 use serde_json::{json, Value};
@@ -1242,7 +1242,8 @@ fn unix_group_exited(group: i32) -> bool {
         let Ok(entries) = fs::read_dir("/proc") else {
             return false;
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let Ok(entry) = entry else { return false };
             let Some(pid) = entry
                 .file_name()
                 .to_str()
@@ -1250,21 +1251,31 @@ fn unix_group_exited(group: i32) -> bool {
             else {
                 continue;
             };
-            let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
-                if unsafe { libc::getpgid(pid) } == group {
-                    return false;
+            let stat = match fs::read_to_string(entry.path().join("stat")) {
+                Ok(stat) => stat,
+                Err(_) => {
+                    let observed = unsafe { libc::getpgid(pid) };
+                    if observed == group
+                        || (observed < 0
+                            && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH))
+                    {
+                        return false;
+                    }
+                    continue;
                 }
-                continue;
             };
-            let Some(fields) = stat
-                .rsplit_once(')')
-                .map(|(_, tail)| tail.split_whitespace().collect::<Vec<_>>())
-            else {
-                continue;
+            let Some((_, tail)) = stat.rsplit_once(')') else {
+                return false;
             };
-            if fields.get(2).and_then(|p| p.parse::<i32>().ok()) == Some(group)
-                && !matches!(fields.first().copied(), Some("Z" | "X"))
-            {
+            let mut fields = tail.split_whitespace();
+            let (Some(state), Some(_parent), Some(observed_group)) = (
+                fields.next(),
+                fields.next(),
+                fields.next().and_then(|value| value.parse::<i32>().ok()),
+            ) else {
+                return false;
+            };
+            if observed_group == group && !matches!(state, "Z" | "X") {
                 return false;
             }
         }
@@ -1297,7 +1308,11 @@ fn unix_group_exited(group: i32) -> bool {
                 )
             };
             if read != size {
-                if unsafe { libc::getpgid(pid) } == group {
+                let observed = unsafe { libc::getpgid(pid) };
+                if observed == group
+                    || (observed < 0
+                        && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH))
+                {
                     return false;
                 }
                 continue;
