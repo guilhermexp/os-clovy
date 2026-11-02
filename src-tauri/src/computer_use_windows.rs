@@ -723,12 +723,15 @@ fn verify_window_owner(window: HWND, expected_pid: u32) -> Result<()> {
 }
 
 fn verify_hosted_target(window: HWND, owner: u32, target: u32) -> Result<()> {
-    if owner == target {
-        return Ok(());
-    }
     let mut class = [0u16; 128];
     let len = unsafe { GetClassNameW(window, &mut class) };
-    if len <= 0 || String::from_utf16_lossy(&class[..len as usize]) != "ApplicationFrameWindow" {
+    if len <= 0 {
+        bail!("The authorized window class is unavailable");
+    }
+    if String::from_utf16_lossy(&class[..len as usize]) != "ApplicationFrameWindow" {
+        if owner == target {
+            return Ok(());
+        }
         bail!("The authorized hosted frame changed");
     }
     let name: Vec<u16> = "Windows.UI.Core.CoreWindow"
@@ -741,6 +744,7 @@ fn verify_hosted_target(window: HWND, owner: u32, target: u32) -> Result<()> {
             FindWindowExW(Some(window), after, PCWSTR(name.as_ptr()), PCWSTR::null())
         } {
             Ok(child) => child,
+            Err(_) if owner == target => return Ok(()),
             Err(_) => bail!("The authorized hosted window is unavailable"),
         };
         let mut child_pid = 0;

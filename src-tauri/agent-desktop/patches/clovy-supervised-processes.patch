@@ -71,7 +71,7 @@ index 31bf0ee..62a8ff1 100644
          to: Point { x: 1.0, y: 1.0 },
          duration_ms: None,
 diff --git a/crates/core/src/actions/headed_focus.rs b/crates/core/src/actions/headed_focus.rs
-index 3279848..1b3fe19 100644
+index 3279848..05e9770 100644
 --- a/crates/core/src/actions/headed_focus.rs
 +++ b/crates/core/src/actions/headed_focus.rs
 @@ -17,6 +17,7 @@ pub(crate) fn focus_entry_window(
@@ -82,6 +82,43 @@ index 3279848..1b3fe19 100644
          id: window_id.to_string(),
          title: entry.source.source_window_title.clone().unwrap_or_default(),
          app: entry.source.source_app.clone().unwrap_or_default(),
+@@ -56,10 +57,32 @@ pub(crate) fn focus_exact_window(
+         .into());
+     }
+     adapter.focus_window(&live, lease)?;
+-    context.trace_lazy(
+-        "input.focus_window",
+-        || json!({ "pid": live.pid, "window_id": live.id, "ok": true }),
+-    )?;
++    context
++        .trace_lazy(
++            "input.focus_window",
++            || json!({ "pid": live.pid, "window_id": live.id, "ok": true }),
++        )
++        .map_err(|error| {
++            let mut error = crate::ref_action::into_adapter_error(error);
++            let mut details = error.details.take().unwrap_or_else(|| json!({}));
++            if !details.is_object() {
++                details = json!({"native_details": details});
++            }
++            let fields = details.as_object_mut().expect("object constructed above");
++            fields
++                .entry("native_disposition")
++                .or_insert_with(|| json!(error.disposition));
++            let focus = json!({"attempted": true, "confirmed": true, "window_id": live.id,
++            "pid": live.pid, "process_instance": live.process_instance});
++            let effects = match fields.remove("preparatory_effects") {
++                Some(previous) => json!({"previous": previous, "focus": focus}),
++                None => json!({"focus": focus}),
++            };
++            fields.insert("preparatory_effects".into(), effects);
++            error
++                .with_details(details)
++                .with_disposition(crate::DeliverySemantics::delivered_unverified())
++        })?;
+     Ok(live)
+ }
+
 diff --git a/crates/core/src/actions/post_action.rs b/crates/core/src/actions/post_action.rs
 index 1341e17..fff0436 100644
 --- a/crates/core/src/actions/post_action.rs
@@ -2233,24 +2270,242 @@ index 25a4e4f..d7145c0 100644
              source_window_id: Some("w-1".into()),
              source_window_title: Some("Fixture".into()),
 diff --git a/crates/core/src/ref_action/mod.rs b/crates/core/src/ref_action/mod.rs
-index 84705d1..91bed23 100644
+index 84705d1..09154f9 100644
 --- a/crates/core/src/ref_action/mod.rs
 +++ b/crates/core/src/ref_action/mod.rs
-@@ -130,6 +130,14 @@ pub(crate) fn dispatch_resolved(
-         .with_verified_point(preflight.verified_point.clone())
-         .with_expected_process(expected_process.clone());
-     let final_target = ResolvedRefAction::new(target, &handle);
-+    if crate::commands::clovy_safety::supervised() {
-+        crate::commands::clovy_safety::guard_ref_target(
-+            final_target.adapter,
-+            final_target.entry,
-+            final_target.handle,
-+            lease.deadline(),
+@@ -62,108 +62,137 @@ pub(crate) fn dispatch_resolved(
+     mut request: ActionRequest,
+     lease: &crate::InteractionLease,
+ ) -> Result<ActionResult, AppError> {
+-    let process_instance = target
+-        .entry
+-        .process
+-        .process_instance
+-        .as_deref()
+-        .filter(|instance| !instance.is_empty())
+-        .ok_or_else(|| AdapterError::stale_ref_because("target process instance is unavailable"))?;
+-    let expected_process = crate::ProcessIdentity::new(target.entry.process.pid, process_instance);
+-    let mut handle = target
+-        .adapter
+-        .resolve_element_strict(target.entry, target.deadline)
+-        .map_err(mark_pre_dispatch_resolution_failure)
+-        .inspect_err(|error| {
+-            crate::ref_action::ref_action_wait_support::trace_resolve_error(
+-                target.context,
+-                target.ref_id,
+-                error,
+-            )
+-        })?;
+-    crate::ref_action::ref_action_wait_support::trace_resolve_ok(target.context, target.ref_id);
+-    let initial_target = ResolvedRefAction::new(target, &handle);
+-    let preflight = match stable_preflight(&initial_target, &request) {
+-        Ok(preflight) => preflight,
+-        Err(error) => {
+-            let error = into_adapter_error(error);
+-            if !crate::ref_action::ref_action_wait_evidence::should_scroll_after_preflight(
+-                &request, &error,
+-            ) {
+-                return Err(error.into());
+-            }
+-            let recovered = match target
+-                .adapter
+-                .scroll_ref_into_view(target.entry, &handle, lease)
+-            {
+-                Ok(recovered) => recovered,
+-                Err(scroll_error) => {
+-                    trace_scroll_error(&target, &scroll_error);
+-                    return Err(
++    let mut scroll_may_have_changed_view = false;
++    let result = (|| {
++        let process_instance = target
++            .entry
++            .process
++            .process_instance
++            .as_deref()
++            .filter(|instance| !instance.is_empty())
++            .ok_or_else(|| {
++                AdapterError::stale_ref_because("target process instance is unavailable")
++            })?;
++        let expected_process =
++            crate::ProcessIdentity::new(target.entry.process.pid, process_instance);
++        let mut handle = target
++            .adapter
++            .resolve_element_strict(target.entry, target.deadline)
++            .map_err(mark_pre_dispatch_resolution_failure)
++            .inspect_err(|error| {
++                crate::ref_action::ref_action_wait_support::trace_resolve_error(
++                    target.context,
++                    target.ref_id,
++                    error,
++                )
++            })?;
++        crate::ref_action::ref_action_wait_support::trace_resolve_ok(target.context, target.ref_id);
++        let initial_target = ResolvedRefAction::new(target, &handle);
++        let preflight = match stable_preflight(&initial_target, &request) {
++            Ok(preflight) => preflight,
++            Err(error) => {
++                let error = into_adapter_error(error);
++                if !crate::ref_action::ref_action_wait_evidence::should_scroll_after_preflight(
++                    &request, &error,
++                ) {
++                    return Err(error.into());
++                }
++                let recovered =
++                    match target
++                        .adapter
++                        .scroll_ref_into_view(target.entry, &handle, lease)
++                    {
++                        Ok(recovered) => {
++                            scroll_may_have_changed_view = true;
++                            recovered
++                        }
++                        Err(scroll_error) => {
++                            scroll_may_have_changed_view =
++                                scroll_error.disposition != crate::DeliverySemantics::NotDelivered;
++                            trace_scroll_error(&target, &scroll_error);
++                            return Err(
+                         crate::ref_action::ref_action_wait_evidence::attach_scroll_recovery_failure(
+                             error,
+                             &scroll_error,
+                         )
+                         .into(),
+                     );
+-                }
+-            };
+-            handle = match recovered {
+-                Some(handle) => handle,
+-                None => target
+-                    .adapter
+-                    .resolve_element_strict(target.entry, target.deadline)
+-                    .map_err(after_scroll)?,
+-            };
+-            let scrolled_target = ResolvedRefAction::new(target, &handle);
+-            stable_preflight(&scrolled_target, &request)
+-                .map_err(|error| after_scroll(into_adapter_error(error)))?
++                        }
++                    };
++                handle = match recovered {
++                    Some(handle) => handle,
++                    None => target
++                        .adapter
++                        .resolve_element_strict(target.entry, target.deadline)?,
++                };
++                let scrolled_target = ResolvedRefAction::new(target, &handle);
++                stable_preflight(&scrolled_target, &request)?
++            }
++        };
++        if matches!(
++            preflight.pointer_delivery,
++            actionability::PointerDelivery::Semantic
++        ) {
++            request.policy = crate::InteractionPolicy::headless();
+         }
+-    };
+-    if matches!(
+-        preflight.pointer_delivery,
+-        actionability::PointerDelivery::Semantic
+-    ) {
+-        request.policy = crate::InteractionPolicy::headless();
+-    }
+-    request = request
+-        .with_verified_point(preflight.verified_point.clone())
+-        .with_expected_process(expected_process.clone());
+-    let final_target = ResolvedRefAction::new(target, &handle);
+-    final_target.context.trace_lazy(
+-        "action.dispatch.start",
+-        || json!({ "ref": final_target.ref_id, "action": request.action.name() }),
+-    )?;
+-    let action_name = request.action.name();
+-    let raises_surface = request.action.may_raise_surface();
+-    let presentation_action = request.action.clone();
+-    let ripples = presentation::effect_ripples(&final_target, &presentation_action);
+-    presentation::before_dispatch(&final_target, &preflight, &presentation_action, lease);
+-    let dispatch_result =
+-        crate::execute_verified_action(final_target.adapter, final_target.handle, request, lease);
+-    let mut preflight = preflight;
+-    if presentation::after_text_entry(&final_target, &presentation_action, &dispatch_result) {
+-        preflight.presentation_bounds = None;
+-    }
+-    presentation::after_dispatch(
+-        final_target.adapter,
+-        final_target.context,
+-        &preflight,
+-        ripples,
+-        &dispatch_result,
+-    );
+-    let mut result = dispatch_result?;
+-    if raises_surface {
+-        result.surfaces = settled_surfaces(&final_target, expected_process);
+-    }
+-    final_target
+-        .context
+-        .trace_lazy(
+-            "action.dispatch.ok",
+-            || json!({ "ref": final_target.ref_id, "action": action_name, "result": &result }),
+-        )
+-        .map_err(trace_error_after_delivery)?;
+-    Ok(result)
++        request = request
++            .with_verified_point(preflight.verified_point.clone())
++            .with_expected_process(expected_process.clone());
++        let final_target = ResolvedRefAction::new(target, &handle);
++        if crate::commands::clovy_safety::supervised() {
++            crate::commands::clovy_safety::guard_ref_target(
++                final_target.adapter,
++                final_target.entry,
++                final_target.handle,
++                lease.deadline(),
++            )?;
++        }
++        final_target.context.trace_lazy(
++            "action.dispatch.start",
++            || json!({ "ref": final_target.ref_id, "action": request.action.name() }),
 +        )?;
-+    }
-     final_target.context.trace_lazy(
-         "action.dispatch.start",
-         || json!({ "ref": final_target.ref_id, "action": request.action.name() }),
++        let action_name = request.action.name();
++        let raises_surface = request.action.may_raise_surface();
++        let presentation_action = request.action.clone();
++        let ripples = presentation::effect_ripples(&final_target, &presentation_action);
++        presentation::before_dispatch(&final_target, &preflight, &presentation_action, lease);
++        let dispatch_result = crate::execute_verified_action(
++            final_target.adapter,
++            final_target.handle,
++            request,
++            lease,
++        );
++        let mut preflight = preflight;
++        if presentation::after_text_entry(&final_target, &presentation_action, &dispatch_result) {
++            preflight.presentation_bounds = None;
++        }
++        presentation::after_dispatch(
++            final_target.adapter,
++            final_target.context,
++            &preflight,
++            ripples,
++            &dispatch_result,
++        );
++        let mut result = dispatch_result?;
++        if raises_surface {
++            result.surfaces = settled_surfaces(&final_target, expected_process);
++        }
++        final_target
++            .context
++            .trace_lazy(
++                "action.dispatch.ok",
++                || json!({ "ref": final_target.ref_id, "action": action_name, "result": &result }),
++            )
++            .map_err(trace_error_after_delivery)?;
++        Ok(result)
++    })();
++    result.map_err(|error| {
++        if scroll_may_have_changed_view {
++            after_scroll(into_adapter_error(error)).into()
++        } else {
++            error
++        }
++    })
+ }
+
+ /// An action that opens a sheet, menu, or alert leaves the caller staring at a
 diff --git a/crates/core/src/ref_action/ref_action_cursor_overlay_tests.rs b/crates/core/src/ref_action/ref_action_cursor_overlay_tests.rs
 index 24495b4..ad890aa 100644
 --- a/crates/core/src/ref_action/ref_action_cursor_overlay_tests.rs
@@ -2264,7 +2519,7 @@ index 24495b4..ad890aa 100644
              source_window_id: Some("w-42".into()),
              source_window_title: Some("Fixture".into()),
 diff --git a/crates/core/src/ref_action/ref_action_exactly_once_tests.rs b/crates/core/src/ref_action/ref_action_exactly_once_tests.rs
-index 42974ef..3175e8f 100644
+index 42974ef..753d987 100644
 --- a/crates/core/src/ref_action/ref_action_exactly_once_tests.rs
 +++ b/crates/core/src/ref_action/ref_action_exactly_once_tests.rs
 @@ -217,6 +217,7 @@ fn entry() -> RefEntry {
@@ -2275,6 +2530,133 @@ index 42974ef..3175e8f 100644
              source_app: None,
              source_window_id: None,
              source_window_title: None,
+@@ -245,10 +246,18 @@ fn execute(adapter: &DispatchGuardAdapter, timeout_ms: u64) -> Result<ActionResu
+ }
+
+ #[test]
+-fn failed_preflight_after_scroll_reports_nothing_delivered_and_the_moved_view() {
++fn failed_preflight_after_scroll_preserves_the_moved_view_and_refusal() {
+     let adapter = DispatchGuardAdapter::new("hidden_after_scroll", 0);
+     let error = execute(&adapter, 500).unwrap_err();
+-    assert_eq!(error.disposition, crate::DeliverySemantics::not_delivered());
++    assert_eq!(error.disposition.retry(), crate::RetryDisposition::Unsafe);
++    assert!(
++        error
++            .details
++            .as_ref()
++            .unwrap()
++            .get("native_disposition")
++            .is_some()
++    );
+     assert_eq!(
+         error.details.unwrap()["preparatory_scroll"],
+         "may_have_changed_view"
+diff --git a/crates/core/src/ref_action/ref_action_focus_order_tests.rs b/crates/core/src/ref_action/ref_action_focus_order_tests.rs
+index bf9d4d0..909cfc0 100644
+--- a/crates/core/src/ref_action/ref_action_focus_order_tests.rs
++++ b/crates/core/src/ref_action/ref_action_focus_order_tests.rs
+@@ -127,6 +127,15 @@ fn execute_within(
+     adapter: &FocusAdapter,
+     headed: bool,
+     timeout_ms: u64,
++) -> Result<ActionResult, AdapterError> {
++    execute_action(adapter, headed, timeout_ms, Action::Click)
++}
++
++fn execute_action(
++    adapter: &FocusAdapter,
++    headed: bool,
++    timeout_ms: u64,
++    action: Action,
+ ) -> Result<ActionResult, AdapterError> {
+     let _clock = crate::wait::deadline::VirtualClock::freeze();
+     let entry: RefEntry = serde_json::from_value(serde_json::json!({
+@@ -135,13 +144,83 @@ fn execute_within(
+         "bounds": bounds(), "bounds_hash": bounds().bounds_hash(), "available_actions": ["Click"], "states": []
+     })).unwrap();
+     let request = if headed {
+-        ActionRequest::headed(Action::Click)
++        ActionRequest::headed(action)
+     } else {
+-        ActionRequest::headless(Action::Click)
++        ActionRequest::headless(action)
+     };
+     crate::ref_action::execute_entry(adapter, &entry, request.with_timeout_ms(Some(timeout_ms)))
+ }
+
++#[test]
++fn supervised_ref_guard_retains_preparatory_focus() {
++    let root = std::env::temp_dir().join(format!("clovy-f17-{}", std::process::id()));
++    std::fs::create_dir(&root).unwrap();
++    let output = std::process::Command::new(std::env::current_exe().unwrap())
++        .args([
++            "--ignored",
++            "--exact",
++            "ref_action::ref_action_wait::focus_order_tests::supervised_ref_guard_child",
++        ])
++        .env("CLOVY_AGENT_DESKTOP_SUPERVISED", "1")
++        .env("CLOVY_AGENT_DESKTOP_CANCEL_FILE", root.join("cancel"))
++        .env(
++            "CLOVY_AGENT_DESKTOP_CANCEL_ACK_FILE",
++            root.join("cancel-ack"),
++        )
++        .output()
++        .unwrap();
++    std::fs::remove_dir(root).unwrap();
++    assert!(
++        output.status.success(),
++        "{}\n{}",
++        String::from_utf8_lossy(&output.stdout),
++        String::from_utf8_lossy(&output.stderr)
++    );
++}
++
++#[test]
++#[ignore = "runs only in an isolated supervised subprocess"]
++fn supervised_ref_guard_child() {
++    let focused = adapter(false, true);
++    let error = execute_action(&focused, true, 2_000, Action::DoubleClick).unwrap_err();
++    assert!(focused.focused.load(Ordering::SeqCst));
++    assert_eq!(focused.dispatched.load(Ordering::SeqCst), 0);
++    assert_eq!(error.code, crate::ErrorCode::PolicyDenied, "{error:?}");
++    assert_eq!(error.disposition.retry(), crate::RetryDisposition::Unsafe);
++    let details = error.details.unwrap();
++    assert_eq!(details["preparatory_effects"]["focus"]["confirmed"], true);
++    assert_eq!(
++        details["native_disposition"],
++        serde_json::json!(crate::DeliverySemantics::not_delivered())
++    );
++
++    let untouched = adapter(false, true);
++    untouched.focused.store(true, Ordering::SeqCst);
++    let error = execute_action(&untouched, false, 2_000, Action::Click).unwrap_err();
++    assert_eq!(error.code, crate::ErrorCode::PolicyDenied, "{error:?}");
++    assert_eq!(error.disposition.retry(), crate::RetryDisposition::Safe);
++    assert_eq!(untouched.dispatched.load(Ordering::SeqCst), 0);
++    assert!(
++        error
++            .details
++            .as_ref()
++            .and_then(|v| v.get("preparatory_effects"))
++            .is_none()
++    );
++
++    let adapter = adapter(false, false);
++    let error = execute_action(&adapter, true, 150, Action::DoubleClick).unwrap_err();
++    assert!(!adapter.focused.load(Ordering::SeqCst));
++    assert_eq!(adapter.dispatched.load(Ordering::SeqCst), 0);
++    assert!(
++        error
++            .details
++            .as_ref()
++            .and_then(|v| v.get("preparatory_effects"))
++            .is_none()
++    );
++}
++
+ fn adapter(persistent_occlusion: bool, enabled: bool) -> FocusAdapter {
+     FocusAdapter {
+         focused: AtomicBool::new(false),
 diff --git a/crates/core/src/ref_action/ref_action_scroll_recovery_tests.rs b/crates/core/src/ref_action/ref_action_scroll_recovery_tests.rs
 index dd22a71..f6bb813 100644
 --- a/crates/core/src/ref_action/ref_action_scroll_recovery_tests.rs
@@ -2287,6 +2669,69 @@ index dd22a71..f6bb813 100644
          source_app: Some("Notepad".into()),
          source_window_id: Some("w-1".into()),
          source_window_title: Some("Notepad".into()),
+diff --git a/crates/core/src/ref_action/ref_action_single.rs b/crates/core/src/ref_action/ref_action_single.rs
+index 3e988ff..a370e5f 100644
+--- a/crates/core/src/ref_action/ref_action_single.rs
++++ b/crates/core/src/ref_action/ref_action_single.rs
+@@ -17,14 +17,48 @@ pub(crate) fn execute_single_shot(
+ ) -> Result<ActionResult, AdapterError> {
+     let keyboard_is_aimed_at_the_element = request.action.delivered_by_keyboard()
+         && !context.adapter.keyboard_needs_window_activation();
+-    if request.headed_requirement().requires_focus() && !keyboard_is_aimed_at_the_element {
+-        crate::actions::headed_focus::focus_entry_window(
+-            context.entry,
+-            context.adapter,
+-            context.context,
+-            lease,
+-        )
+-        .map_err(crate::ref_action::into_adapter_error)?;
+-    }
+-    dispatch(RefActionContext::new(context, deadline), request, lease).map_err(into_adapter_error)
++    let focused =
++        if request.headed_requirement().requires_focus() && !keyboard_is_aimed_at_the_element {
++            Some(
++                crate::actions::headed_focus::focus_entry_window(
++                    context.entry,
++                    context.adapter,
++                    context.context,
++                    lease,
++                )
++                .map_err(crate::ref_action::into_adapter_error)?,
++            )
++        } else {
++            None
++        };
++    dispatch(RefActionContext::new(context, deadline), request, lease)
++        .map_err(into_adapter_error)
++        .map_err(|mut error| {
++            if let Some(window) = focused {
++                let mut details = error
++                    .details
++                    .take()
++                    .unwrap_or_else(|| serde_json::json!({}));
++                if !details.is_object() {
++                    details = serde_json::json!({"native_details": details});
++                }
++                let fields = details.as_object_mut().expect("object constructed above");
++                fields
++                    .entry("native_disposition")
++                    .or_insert_with(|| serde_json::json!(error.disposition));
++                let focus = serde_json::json!({"attempted": true, "confirmed": true,
++                    "window_id": window.id, "pid": window.pid,
++                    "process_instance": window.process_instance});
++                let effects = match fields.remove("preparatory_effects") {
++                    Some(previous) => serde_json::json!({"previous": previous, "focus": focus}),
++                    None => serde_json::json!({"focus": focus}),
++                };
++                fields.insert("preparatory_effects".into(), effects);
++                error.details = Some(details);
++                if error.disposition.retry() != crate::RetryDisposition::Unsafe {
++                    error.disposition = crate::DeliverySemantics::uncertain();
++                }
++            }
++            error
++        })
+ }
 diff --git a/crates/core/src/ref_action/ref_action_tests.rs b/crates/core/src/ref_action/ref_action_tests.rs
 index ead906f..fbc3435 100644
 --- a/crates/core/src/ref_action/ref_action_tests.rs
@@ -2335,6 +2780,34 @@ index 53f3029..f55a668 100644
              source_app: Some("Original".into()),
              source_window_id: None,
              source_window_title: None,
+diff --git a/crates/core/src/ref_action/ref_action_wait_support.rs b/crates/core/src/ref_action/ref_action_wait_support.rs
+index 08fd417..9fff69c 100644
+--- a/crates/core/src/ref_action/ref_action_wait_support.rs
++++ b/crates/core/src/ref_action/ref_action_wait_support.rs
+@@ -144,12 +144,18 @@ pub(crate) fn trace_resolve_error(context: &CommandContext, ref_id: &str, err: &
+ /// refusal after it writes nothing: the disposition says so, and the
+ /// `preparatory_scroll` detail records that the view may have changed.
+ pub(crate) fn after_scroll(mut error: AdapterError) -> AdapterError {
+-    if error.disposition == crate::DeliverySemantics::Unknown {
+-        error.disposition = crate::DeliverySemantics::not_delivered();
++    let mut details = error.details.take().unwrap_or_else(|| json!({}));
++    if !details.is_object() {
++        details = json!({"native_details": details});
+     }
+-    let details = error.details.get_or_insert_with(|| json!({}));
+-    if let Some(details) = details.as_object_mut() {
+-        details.insert("preparatory_scroll".into(), "may_have_changed_view".into());
++    let fields = details.as_object_mut().expect("object constructed above");
++    fields
++        .entry("native_disposition")
++        .or_insert_with(|| json!(error.disposition));
++    fields.insert("preparatory_scroll".into(), "may_have_changed_view".into());
++    error.details = Some(details);
++    if error.disposition.retry() != crate::RetryDisposition::Unsafe {
++        error.disposition = crate::DeliverySemantics::uncertain();
+     }
+     error
+ }
 diff --git a/crates/core/src/ref_action/ref_action_wait_tests.rs b/crates/core/src/ref_action/ref_action_wait_tests.rs
 index ef95b9b..9388968 100644
 --- a/crates/core/src/ref_action/ref_action_wait_tests.rs
@@ -2886,22 +3359,29 @@ index aafc54c..890a357 100644
      pub bounds: Option<Rect>,
      #[serde(flatten)]
 diff --git a/crates/core/src/system/window_info_tests.rs b/crates/core/src/system/window_info_tests.rs
-index e87f55c..2d40ea6 100644
+index e87f55c..2febad9 100644
 --- a/crates/core/src/system/window_info_tests.rs
 +++ b/crates/core/src/system/window_info_tests.rs
-@@ -15,11 +15,19 @@ fn legacy_window_json_defaults_optional_state() {
-     assert!(window.state.accessible);
-     assert_eq!(window.state.minimized, None);
-     assert_eq!(window.state.visible, None);
-+    assert_eq!(window.native_owner, None);
-+    assert!(
-+        serde_json::to_value(&window)
-+            .unwrap()
-+            .get("native_owner")
-+            .is_none()
-+    );
- }
+@@ -1,25 +1,9 @@
+ use super::*;
 
+-#[test]
+-fn legacy_window_json_defaults_optional_state() {
+-    let window: WindowInfo = serde_json::from_value(serde_json::json!({
+-        "id": "w-1",
+-        "title": "Document",
+-        "app_name": "Editor",
+-        "pid": 42,
+-        "is_focused": true
+-    }))
+-    .expect("legacy window");
+-
+-    assert!(window.state.is_focused);
+-    assert!(window.state.accessible);
+-    assert_eq!(window.state.minimized, None);
+-    assert_eq!(window.state.visible, None);
+-}
+-
  #[test]
  fn optional_window_state_serializes_flat() {
      let window = WindowInfo {
@@ -2909,7 +3389,7 @@ index e87f55c..2d40ea6 100644
          id: "w-1".into(),
          title: "Document".into(),
          app: "Editor".into(),
-@@ -39,5 +47,7 @@ fn optional_window_state_serializes_flat() {
+@@ -39,5 +23,7 @@ fn optional_window_state_serializes_flat() {
      assert_eq!(value["accessible"], true);
      assert_eq!(value["minimized"], true);
      assert_eq!(value["visible"], false);
@@ -7677,10 +8157,10 @@ index 0000000..11fccf5
 +}
 diff --git a/crates/windows/src/input/native_owner.rs b/crates/windows/src/input/native_owner.rs
 new file mode 100644
-index 0000000..21a5e17
+index 0000000..af64e29
 --- /dev/null
 +++ b/crates/windows/src/input/native_owner.rs
-@@ -0,0 +1,711 @@
+@@ -0,0 +1,713 @@
 +//! Scoped supervised native-input ownership. All touched keys/buttons must be
 +//! initially up, on the active input desktop. Only this owner can acknowledge
 +//! after its inner release guards have returned and OS state is observed clear.
@@ -7783,8 +8263,10 @@ index 0000000..21a5e17
 +    deadline.ensure_remaining()?;
 +    agent_desktop_core::commands::clovy_cancel::ensure()?;
 +    let handle = crate::system::window::window_ops::parse_handle(&window.id);
-+    if crate::system::window::window_identity::live_window_owner(handle)
-+        != Some(expected.owner_pid())
++    let owner = expected.owner_pid();
++    let hosted = crate::system::window::frame_identity::hosted_application_pid(handle);
++    if hosted.unwrap_or(owner) != window.pid
++        || crate::system::window::window_identity::live_window_owner(handle) != Some(owner)
 +    {
 +        return Err(AdapterError::new(
 +            ErrorCode::StaleRef,

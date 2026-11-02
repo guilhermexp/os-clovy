@@ -183,6 +183,10 @@ Scoped input checks Stop before its final native receiver and focus observations
 those observations and the effect have no intervening filesystem check.
 This records the source-level boundary, not a native Windows acceptance.
 
+Ref actions preserve preparatory focus and scroll evidence when a later target
+guard or dispatch fails. The target refusal keeps its own disposition in the
+error details, while the aggregate is unsafe to retry after a possible effect.
+
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:
 local Git signature verification was unavailable. It does not establish
