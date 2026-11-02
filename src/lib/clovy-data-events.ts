@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { getCurrentDataPartitionName } from "./data-partition";
 
 export type ClovyDataChange = {
@@ -18,7 +18,9 @@ export function useClovyDataChanged(
   installation = false,
 ) {
   const refreshRef = useRef(refresh);
-  refreshRef.current = refresh;
+  useLayoutEffect(() => {
+    refreshRef.current = refresh;
+  }, [refresh]);
   useEffect(() => {
     let disposed = false;
     let sequence = 0;

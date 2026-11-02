@@ -318,7 +318,9 @@ function validateBundle() {
 function validateWindowsBundle() {
   verifyEngineSbom(path.join(bundleDir, "agent-desktop.spdx.json"), pin);
   const stamp = readJson(stampPath);
-  const target = process.arch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc";
+  const target =
+    options.target ||
+    (process.arch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc");
   const engineManifest = verifyEngineArtifact(bundleDir, pin, target);
   if (
     stamp.sourceCommit !== pin.sourceCommit ||
