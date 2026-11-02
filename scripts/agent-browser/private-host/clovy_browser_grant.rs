@@ -247,17 +247,17 @@ pub(crate) struct Grant {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Owned {
-    version: u32,
-    nonce: String,
-    root_identity: [u64; 2],
-    profile_identity: [u64; 2],
-    parent_pid: u32,
-    parent_birth: u64,
+    pub(crate) version: u32,
+    pub(crate) nonce: String,
+    pub(crate) root_identity: [u64; 2],
+    pub(crate) profile_identity: [u64; 2],
+    pub(crate) parent_pid: u32,
+    pub(crate) parent_birth: u64,
     pub(crate) host_pid: u32,
     pub(crate) host_birth: u64,
-    group: Option<u32>,
-    job: Option<String>,
-    boot: Option<String>,
+    pub(crate) group: Option<u32>,
+    pub(crate) job: Option<String>,
+    pub(crate) boot: Option<String>,
 }
 
 pub(crate) struct OwnedLease {
@@ -455,7 +455,7 @@ impl Drop for OwnedJob {
     }
 }
 
-fn boot_identity() -> io::Result<Option<String>> {
+pub(crate) fn boot_identity() -> io::Result<Option<String>> {
     #[cfg(target_os = "linux")]
     {
         let value = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;

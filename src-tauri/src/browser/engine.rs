@@ -5,15 +5,17 @@
 mod clovy_browser_grant;
 #[path = "../../../scripts/agent-browser/private-host/clovy_browser_process_identity.rs"]
 mod clovy_browser_process_identity;
+#[path = "../../../scripts/agent-browser/private-host/clovy_browser_recovery.rs"]
+mod clovy_browser_recovery;
 use super::{
     policy::{validate_final_public_url, PolicyConfig, Resolver, SystemResolver},
     proxy::PinningProxy,
 };
 use clovy_browser_grant::{
-    create_receipt_file, lock_profile, open_existing_plain, plain_metadata,
-    profile_object_identity, publish_receipt_file, same_open_file, sync_profile_directory, Grant,
+    lock_profile, open_existing_plain, plain_metadata, profile_object_identity, same_open_file, Grant,
     Owned,
 };
+use clovy_browser_recovery::{RecoveryProfile, RecoveryRoot};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -212,6 +214,7 @@ struct Slot {
     sender: Mutex<Option<mpsc::UnboundedSender<Request>>>,
     proxy: Mutex<Option<PinningProxy>>,
     lease: Mutex<Option<File>>,
+    recovery: Mutex<Option<RecoveryProfile>>,
     profile: PathBuf,
     persistent: bool,
     last_used: Mutex<Instant>,
@@ -232,21 +235,24 @@ impl Slot {
         }
         let process = self.process.lock().unwrap().take();
         let lease = self.lease.lock().unwrap().take();
+        let recovery = self.recovery.lock().unwrap().take();
+        let nonce = self
+            .profile
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(str::to_owned);
         if let Some(mut process) = process {
             process.stop(grace);
             if !process.tree_exited() {
                 // Tree termination can be asynchronous. The reaper owns the
                 // group/Job and lease until every descendant has exited, without
                 // holding a mutex needed by Stop or another browser call.
-                let profile = self.profile.clone();
-                let persistent = self.persistent;
                 std::thread::spawn(move || {
                     while !process.tree_exited() {
                         std::thread::sleep(Duration::from_millis(10));
                     }
-                    drop(lease);
-                    if !persistent {
-                        let _ = fs::remove_dir_all(profile);
+                    if let (Some(recovery), Some(nonce)) = (recovery, nonce) {
+                        delete_stopped_profile(recovery, lease, &nonce);
                     }
                 });
                 if let Some(proxy) = self.proxy.lock().unwrap().take() {
@@ -261,9 +267,8 @@ impl Slot {
             proxy.shutdown();
         }
         // The lease is released only after the entire owned process group/job exits.
-        drop(lease);
-        if !self.persistent {
-            let _ = fs::remove_dir_all(&self.profile);
+        if let (Some(recovery), Some(nonce)) = (recovery, nonce) {
+            delete_stopped_profile(recovery, lease, &nonce);
         }
     }
 }
@@ -331,52 +336,56 @@ impl AgentBrowserTransport {
                 .temporary_root
                 .join(uuid::Uuid::new_v4().to_string())
         };
-        if self.config.persistent {
+        let recovery = if self.config.persistent {
             fs::create_dir_all(&profile).map_err(|_| failed())?;
+            None
         } else {
             if !self.config.temporary_root.is_absolute() || roots_overlap(&self.config) {
                 return Err(failed());
             }
-            for ancestor in self.config.temporary_root.ancestors() {
-                match plain_metadata(ancestor) {
-                    Ok(metadata) if metadata.is_dir() => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    _ => return Err(failed()),
-                }
-            }
-            fs::create_dir_all(&self.config.temporary_root).map_err(|_| failed())?;
-            if roots_overlap(&self.config)
-                || self
-                    .config
-                    .temporary_root
-                    .ancestors()
-                    .any(|path| !plain_metadata(path).is_ok_and(|metadata| metadata.is_dir()))
-            {
+            let root =
+                RecoveryRoot::open_or_create(&self.config.temporary_root).map_err(|_| failed())?;
+            if roots_overlap(&self.config) {
                 return Err(failed());
             }
-            fs::create_dir(&profile).map_err(|_| failed())?;
-        }
+            Some(
+                root.create_profile(profile.file_name().ok_or_else(failed)?)
+                    .map_err(|_| failed())?,
+            )
+        };
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&profile, fs::Permissions::from_mode(0o700))
-                .map_err(|_| failed())?;
+            if recovery.is_none() {
+                fs::set_permissions(&profile, fs::Permissions::from_mode(0o700))
+                    .map_err(|_| failed())?;
+            }
         }
-        let lease = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(profile.join(".clovy-lease"))
-            .map_err(|_| failed())?;
+        let lease = match &recovery {
+            Some(recovery) => recovery.create_file(".clovy-lease").map_err(|_| failed())?,
+            None => OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(profile.join(".clovy-lease"))
+                .map_err(|_| failed())?,
+        };
         lock_profile(&lease).map_err(|_| {
             EngineError::new(
                 "browser_profile_busy",
                 "Clovy's browser profile is in use by another task.",
             )
         })?;
-        if !self.config.persistent {
-            publish_reserved(&profile).map_err(|_| failed())?;
+        if let Some(recovery) = &recovery {
+            publish_reserved(
+                recovery,
+                profile
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .ok_or_else(failed)?,
+            )
+            .map_err(|_| failed())?;
         }
         slots.insert(
             id.into(),
@@ -390,6 +399,7 @@ impl AgentBrowserTransport {
                 sender: Mutex::new(None),
                 proxy: Mutex::new(None),
                 lease: Mutex::new(Some(lease)),
+                recovery: Mutex::new(recovery),
                 profile,
                 persistent: self.config.persistent,
                 last_used: Mutex::new(Instant::now()),
@@ -499,7 +509,15 @@ impl AgentBrowserTransport {
                 return Err(closed());
             }
             if !slot.persistent {
-                mark_starting(&slot.profile).map_err(|_| failed())?;
+                let recovery = slot.recovery.lock().unwrap();
+                mark_starting(
+                    recovery.as_ref().ok_or_else(failed)?,
+                    slot.profile
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .ok_or_else(failed)?,
+                )
+                .map_err(|_| failed())?;
             }
             let grant = Grant::new(&slot.profile, slot.persistent).map_err(|_| failed())?;
             #[cfg(windows)]
@@ -911,6 +929,10 @@ fn verify_bundle(config: &EngineConfig) -> Result<()> {
             include_bytes!("../../../scripts/agent-browser/private-host/clovy_browser_grant.rs"),
         ),
         (
+            "private-host/clovy_browser_recovery.rs",
+            include_bytes!("../../../scripts/agent-browser/private-host/clovy_browser_recovery.rs"),
+        ),
+        (
             "private-host/clovy_private_guard.js",
             include_bytes!("../../../scripts/agent-browser/private-host/clovy_private_guard.js"),
         ),
@@ -954,73 +976,138 @@ fn marker_absent(profile: &std::path::Path) -> bool {
     matches!(fs::symlink_metadata(profile.join(STARTING_MARKER)), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
 
-fn publish_reserved(profile: &std::path::Path) -> std::io::Result<()> {
-    let name = profile
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| std::io::Error::other("invalid profile nonce"))?;
+fn read_recovery_receipt(profile: &RecoveryProfile, nonce: &str) -> std::io::Result<(Value, File)> {
+    if !uuid::Uuid::parse_str(nonce).is_ok_and(|id| {
+        let mut buffer = uuid::Uuid::encode_buffer();
+        &*id.hyphenated().encode_lower(&mut buffer) == nonce
+    }) {
+        return Err(std::io::Error::other("invalid nonce"));
+    }
+    let mut file = profile.open_file(RESERVED_RECEIPT, false)?;
+    let mut bytes = Vec::new();
+    (&mut file).take(4097).read_to_end(&mut bytes)?;
+    if bytes.len() > 4096 || !profile.same_file(RESERVED_RECEIPT, &file) {
+        return Err(std::io::Error::other("receipt changed"));
+    }
+    let value: Value = serde_json::from_slice(&bytes)?;
+    let phase = value["phase"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("invalid phase"))?;
+    if value["version"] != 1
+        || value["nonce"] != nonce
+        || value["rootIdentity"] != json!(profile.root_identity())
+        || value["profileIdentity"] != json!(profile.identity())
+        || value["ownerProcessId"]
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| *v > 0)
+            .is_none()
+        || value["ownerBirth"].as_u64().is_none()
+        || !matches!(phase, "Reserved" | "Starting" | "Cancelled" | "Owned")
+    {
+        return Err(std::io::Error::other("invalid receipt"));
+    }
+    if phase == "Owned" {
+        let owned: Owned = serde_json::from_value(
+            value
+                .get("owned")
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("missing owner"))?,
+        )?;
+        if owned.version != 1
+            || owned.nonce != nonce
+            || owned.root_identity != profile.root_identity()
+            || owned.profile_identity != profile.identity()
+            || Some(u64::from(owned.parent_pid)) != value["ownerProcessId"].as_u64()
+            || Some(owned.parent_birth) != value["ownerBirth"].as_u64()
+            || owned.host_pid == 0
+            || owned.host_birth == 0
+        {
+            return Err(std::io::Error::other("invalid owner"));
+        }
+    } else if value.get("owned").is_some() {
+        return Err(std::io::Error::other("unexpected owner"));
+    }
+    if phase != "Reserved" {
+        let mut marker = profile.open_file(STARTING_MARKER, false)?;
+        let mut content = Vec::new();
+        (&mut marker).take(32).read_to_end(&mut content)?;
+        if content != b"Starting\n" || !profile.same_file(STARTING_MARKER, &marker) {
+            return Err(std::io::Error::other("invalid marker"));
+        }
+    }
+    Ok((value, file))
+}
+
+fn delete_stopped_profile(profile: RecoveryProfile, held: Option<File>, nonce: &str) {
+    let (lease, already_locked) = match held {
+        Some(lease) => (lease, true),
+        None => match profile.open_file(".clovy-lease", true) {
+            Ok(lease) => (lease, false),
+            Err(_) => return,
+        },
+    };
+    // A root-held lock is already exclusive; after handoff the tree has ended
+    // and this new handle must acquire the same physical lease itself.
+    if !profile.same_file(".clovy-lease", &lease) {
+        return;
+    }
+    if !already_locked && lock_profile(&lease).is_err() {
+        return;
+    }
+    let Ok((_receipt, file)) = read_recovery_receipt(&profile, nonce) else {
+        return;
+    };
+    if !profile.same_file(RESERVED_RECEIPT, &file) || !profile.same_file(".clovy-lease", &lease) {
+        return;
+    }
+    let _ = profile.delete();
+    drop(lease);
+}
+
+fn publish_reserved(profile: &RecoveryProfile, name: &str) -> std::io::Result<()> {
     if uuid::Uuid::parse_str(name).ok().map(|id| id.to_string()) != Some(name.to_owned()) {
         return Err(std::io::Error::other("invalid profile nonce"));
     }
-    let temporary = profile.join(format!(".clovy-reserved-{}.tmp", uuid::Uuid::new_v4()));
-    let mut file = create_receipt_file(&temporary)?;
-    let root = profile
-        .parent()
-        .ok_or_else(|| std::io::Error::other("missing profile root"))?;
+    let mut file = profile.create_file(RESERVED_RECEIPT)?;
     serde_json::to_writer(
         &mut file,
-        &json!({"version":1,"nonce":name,"ownerProcessId":std::process::id(),"ownerBirth":clovy_browser_process_identity::process_birth(std::process::id())?,"phase":"Reserved", "rootIdentity":profile_object_identity(root)?, "profileIdentity":profile_object_identity(profile)?}),
+        &json!({"version":1,"nonce":name,"ownerProcessId":std::process::id(),"ownerBirth":clovy_browser_process_identity::process_birth(std::process::id())?,"phase":"Reserved", "rootIdentity":profile.root_identity(), "profileIdentity":profile.identity()}),
     )?;
     file.sync_all()?;
     drop(file);
-    publish_receipt_file(&temporary, &profile.join(RESERVED_RECEIPT), false)?;
-    sync_profile_directory(profile)?;
-    sync_profile_directory(root)
+    profile.sync()
 }
 
-fn mark_starting(profile: &std::path::Path) -> std::io::Result<()> {
-    let receipt_path = profile.join(RESERVED_RECEIPT);
-    let mut receipt_file = open_existing_plain(&receipt_path, false)?;
+fn mark_starting(profile: &RecoveryProfile, name: &str) -> std::io::Result<()> {
+    let mut receipt_file = profile.open_file(RESERVED_RECEIPT, false)?;
     let mut bytes = Vec::new();
     (&mut receipt_file).take(4097).read_to_end(&mut bytes)?;
     if bytes.len() > 4096 {
         return Err(std::io::Error::other("invalid reservation"));
     }
     let mut receipt: Value = serde_json::from_slice(&bytes)?;
-    let name = profile
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| std::io::Error::other("invalid profile nonce"))?;
-    let root = profile
-        .parent()
-        .ok_or_else(|| std::io::Error::other("missing profile root"))?;
     if receipt["version"] != 1
         || receipt["nonce"] != name
         || receipt["phase"] != "Reserved"
         || receipt["ownerProcessId"] != std::process::id()
         || receipt["ownerBirth"]
             != clovy_browser_process_identity::process_birth(std::process::id())?
-        || receipt["rootIdentity"] != json!(profile_object_identity(root)?)
-        || receipt["profileIdentity"] != json!(profile_object_identity(profile)?)
-        || !same_open_file(&receipt_file, &receipt_path)
+        || receipt["rootIdentity"] != json!(profile.root_identity())
+        || receipt["profileIdentity"] != json!(profile.identity())
+        || !profile.same_file(RESERVED_RECEIPT, &receipt_file)
     {
         return Err(std::io::Error::other("invalid reservation"));
     }
     // Existence itself is conservative: even a crash during this write prevents
     // Reserved recovery from treating a possibly spawned engine as unused.
-    let mut file = create_receipt_file(&profile.join(STARTING_MARKER))?;
+    let mut file = profile.create_file(STARTING_MARKER)?;
     file.write_all(b"Starting\n")?;
     file.sync_all()?;
-    sync_profile_directory(profile)?;
+    profile.sync()?;
     receipt["phase"] = json!("Starting");
-    let temporary = profile.join(format!(".clovy-starting-{}.tmp", uuid::Uuid::new_v4()));
-    let mut updated = create_receipt_file(&temporary)?;
-    serde_json::to_writer(&mut updated, &receipt)?;
-    updated.sync_all()?;
-    drop(updated);
     drop(receipt_file);
-    publish_receipt_file(&temporary, &receipt_path, true)?;
-    sync_profile_directory(profile)
+    profile.replace_receipt(&serde_json::to_vec(&receipt)?)
 }
 
 fn process_definitely_absent(pid: u32) -> bool {
@@ -1248,6 +1335,19 @@ extern "C" {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    fn test_profile(path: &std::path::Path) -> RecoveryProfile {
+        RecoveryRoot::open(path.parent().unwrap())
+            .unwrap()
+            .profile(path.file_name().unwrap())
+            .unwrap()
+    }
+
+    fn test_mark_starting(path: &std::path::Path) -> std::io::Result<()> {
+        mark_starting(
+            &test_profile(path),
+            path.file_name().unwrap().to_str().unwrap(),
+        )
+    }
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires a separately built real private host"]
@@ -1266,7 +1366,7 @@ mod lifecycle_tests {
             let transport = AgentBrowserTransport::new(config);
             transport.reserve("crash-owner").unwrap();
             let slot = transport.slot("crash-owner").unwrap();
-            mark_starting(&slot.profile).unwrap();
+            test_mark_starting(&slot.profile).unwrap();
             let grant = Grant::new(&slot.profile, false).unwrap();
             let mut host =
                 Command::new(std::env::var_os("CLOVY_BROWSER_HOST_TEST_BINARY").unwrap())
@@ -1463,7 +1563,7 @@ mod lifecycle_tests {
         let transport = AgentBrowserTransport::new(config);
         transport.reserve("owned-fixture").unwrap();
         let slot = transport.slot("owned-fixture").unwrap();
-        mark_starting(&slot.profile).unwrap();
+        test_mark_starting(&slot.profile).unwrap();
         let grant_value = Grant::new(&slot.profile, false).unwrap();
         let grant = serde_json::to_value(&grant_value).unwrap();
         let token = "a".repeat(64);
@@ -1486,7 +1586,7 @@ mod lifecycle_tests {
         }
         transport.reserve("missing-fixture").unwrap();
         let missing = transport.slot("missing-fixture").unwrap();
-        mark_starting(&missing.profile).unwrap();
+        test_mark_starting(&missing.profile).unwrap();
         let missing_grant =
             serde_json::to_value(Grant::new(&missing.profile, false).unwrap()).unwrap();
         fs::remove_dir_all(&missing.profile).unwrap();
@@ -1494,7 +1594,7 @@ mod lifecycle_tests {
         transport.terminate("missing-fixture");
         transport.reserve("link-fixture").unwrap();
         let linked = transport.slot("link-fixture").unwrap();
-        mark_starting(&linked.profile).unwrap();
+        test_mark_starting(&linked.profile).unwrap();
         let linked_grant =
             serde_json::to_value(Grant::new(&linked.profile, false).unwrap()).unwrap();
         let moved = linked.profile.with_extension("moved");
@@ -1626,7 +1726,7 @@ mod lifecycle_tests {
         transport.terminate("owned-fixture");
         transport.reserve("eof-fixture").unwrap();
         let eof_slot = transport.slot("eof-fixture").unwrap();
-        mark_starting(&eof_slot.profile).unwrap();
+        test_mark_starting(&eof_slot.profile).unwrap();
         let eof_grant = Grant::new(&eof_slot.profile, false).unwrap();
         let (mut eof_child, mut eof_output) = host();
         let eof_pid = eof_child.id();
@@ -1758,7 +1858,7 @@ mod lifecycle_tests {
         let birth = receipt["ownerBirth"].as_u64().unwrap();
         receipt["ownerBirth"] = json!(birth ^ 1);
         fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
-        assert!(mark_starting(&profile).is_err());
+        assert!(test_mark_starting(&profile).is_err());
         assert!(marker_absent(&profile));
         transport.shutdown();
     }
@@ -1789,7 +1889,11 @@ mod lifecycle_tests {
             let profile = config.temporary_root.join(uuid::Uuid::new_v4().to_string());
             fs::create_dir(&profile).unwrap();
             File::create(profile.join(".clovy-lease")).unwrap();
-            publish_reserved(&profile).unwrap();
+            publish_reserved(
+                &test_profile(&profile),
+                profile.file_name().unwrap().to_str().unwrap(),
+            )
+            .unwrap();
             if dead_owner {
                 let path = profile.join(RESERVED_RECEIPT);
                 let mut receipt: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -1804,7 +1908,7 @@ mod lifecycle_tests {
         let busy_lease = open_existing_plain(&busy.join(".clovy-lease"), true).unwrap();
         lock_profile(&busy_lease).unwrap();
         let starting = make(false);
-        mark_starting(&starting).unwrap();
+        test_mark_starting(&starting).unwrap();
         let starting_receipt = starting.join(RESERVED_RECEIPT);
         let mut starting_value: Value =
             serde_json::from_slice(&fs::read(&starting_receipt).unwrap()).unwrap();
