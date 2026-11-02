@@ -569,7 +569,7 @@ fn empty_payload(directory: &File, top: bool) -> io::Result<()> {
         if top && CONTROLS.iter().any(|c| entry.name == OsStr::new(c)) {
             continue;
         }
-        let file = native::entry(directory, &entry)?;
+        let file = native::entry(directory, &entry, true)?;
         if entry.directory && !entry.link {
             empty_payload(&file, false)?;
         }
@@ -625,7 +625,7 @@ fn verify_controls(directory: &File, terminal: &Terminal, missing: bool) -> io::
         {
             return Err(invalid());
         }
-        let file = native::entry(directory, &entry)?;
+        let file = native::entry(directory, &entry, false)?;
         if entry.name == OsStr::new(RECEIPT)
             && read_json_bounded(&mut file.try_clone()?, 4096)? != terminal.receipt
         {
@@ -1045,6 +1045,52 @@ mod tests {
         assert_eq!(original["phase"], "Owned");
         owner.stdin.take().unwrap().write_all(b"x").unwrap();
         assert!(owner.wait().unwrap().success());
+    }
+    #[test]
+    fn crash_after_durable_owned_before_admission_returns_is_recoverable() {
+        let test = format!(
+            "{}::process_fixture",
+            module_path!().split_once("::").unwrap().1
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let mut owner = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test, "--nocapture"])
+            .env("CLOVY_GC_CHILD", temp.path())
+            .env("CLOVY_GC_ROLE", "owner")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut owner_output = BufReader::new(owner.stdout.take().unwrap());
+        let grant = barrier(&mut owner_output, "GRANT=");
+        let nonce = serde_json::from_str::<Value>(&grant).unwrap()["nonce"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut host = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test, "--nocapture"])
+            .env("CLOVY_GC_CHILD", temp.path())
+            .env("CLOVY_GC_ROLE", "host")
+            .env("CLOVY_GC_CRASH_AT", "grant-owned-published")
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(host.stdin.take().unwrap(), "{grant}").unwrap();
+        let output = host.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(77));
+        let receipt: Value =
+            serde_json::from_slice(&std::fs::read(temp.path().join(&nonce).join(RECEIPT)).unwrap())
+                .unwrap();
+        assert_eq!(receipt["phase"], "Owned");
+        let root = RecoveryRoot::open(temp.path()).unwrap();
+        assert!(!root.recover().unwrap().is_empty());
+        assert!(temp.path().join(&nonce).exists());
+        owner.stdin.take().unwrap().write_all(b"x").unwrap();
+        assert!(owner.wait().unwrap().success());
+        assert!(root.recover().unwrap().is_empty());
+        assert!(!temp.path().join(nonce).exists());
     }
     #[test]
     fn crash_each_durable_boundary_resumes_in_another_process() {
@@ -1588,7 +1634,7 @@ mod native {
         }
         result
     }
-    pub(super) fn entry(parent: &File, e: &Entry) -> io::Result<File> {
+    pub(super) fn entry(parent: &File, e: &Entry, _payload: bool) -> io::Result<File> {
         // Linux O_PATH opens the symlink itself; Darwin O_SYMLINK does likewise.
         #[cfg(target_os = "linux")]
         let flags = if e.link {
@@ -1827,6 +1873,17 @@ mod native {
         access: u32,
         reparse: bool,
     ) -> io::Result<File> {
+        open_shared(parent, name, directory, create, access, reparse, 7)
+    }
+    fn open_shared(
+        parent: &File,
+        name: &OsStr,
+        directory: Option<bool>,
+        create: bool,
+        access: u32,
+        reparse: bool,
+        share: u32,
+    ) -> io::Result<File> {
         let mut wide = component(name)?;
         let length = u16::try_from(wide.len() * 2).map_err(io::Error::other)?;
         let mut name = UnicodeString {
@@ -1854,8 +1911,8 @@ mod native {
                 Some(false) => 0x40,
                 None => 0,
             };
-        // DELETE sharing is required for the independently retained lease and
-        // control handles. Every delete still uses its own identified handle.
+        // Controls require DELETE sharing for their independently retained
+        // handles. Payload entries deny it and are deleted through this handle.
         let code = unsafe {
             NtCreateFile(
                 &mut handle,
@@ -1864,7 +1921,7 @@ mod native {
                 &mut status,
                 ptr::null(),
                 0,
-                7,
+                share,
                 if create { 2 } else { 1 },
                 options,
                 ptr::null_mut(),
@@ -2039,8 +2096,8 @@ mod native {
             }
         }
     }
-    pub(super) fn entry(parent: &File, e: &Entry) -> io::Result<File> {
-        let file = open(
+    pub(super) fn entry(parent: &File, e: &Entry, payload: bool) -> io::Result<File> {
+        let file = open_shared(
             parent,
             &e.name,
             None,
@@ -2051,6 +2108,7 @@ mod native {
                 0x00110083
             },
             true,
+            if payload { 3 } else { 7 },
         )?;
         if identity(&file)? != e.id {
             return Err(invalid());

@@ -187,7 +187,9 @@ the last in-profile receipt is removed. Unix operations use directory FDs,
 atomic inode-conditioned unlink against an arbitrary hostile filesystem owner
 with the same UID. Windows retains enumerated file IDs, deletes through the
 same identified handle, and requests write/append rights only on directories
-that need mutation or synchronization. Flush uses
+that need mutation or synchronization. Payload handles deny delete sharing;
+retained control handles permit it to allow retirement through their identified
+objects. Flush uses
 [NtFlushBuffersFileEx with flags zero](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntflushbuffersfileex),
 propagating failures. Type checks are not native filesystem, crash-power-loss,
 sharing-mode or signed application acceptance.

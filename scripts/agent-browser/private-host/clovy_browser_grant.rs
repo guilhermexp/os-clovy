@@ -690,6 +690,8 @@ impl Grant {
         super::clovy_browser_recovery::checkpoint("grant-before-owned");
         drop(source);
         profile.replace_receipt(&serde_json::to_vec(&receipt)?)?;
+        #[cfg(test)]
+        super::clovy_browser_recovery::checkpoint("grant-owned-published");
         self.validate_phase(Some(&owned))?;
         Ok(OwnedLease {
             identity: owned,
