@@ -350,6 +350,30 @@ async fn gateway_elicitation_uses_clarification_and_resumes_without_resubmitting
 }
 
 #[tokio::test]
+async fn denied_clarification_preserves_post_dispatch_uncertainty() {
+    let http = HttpFixture::with_elicitation(true).await;
+    let broker = TestBroker::new([Scripted::Approve, Scripted::Deny]).await;
+    let binding = broker.turn(CliKind::Claude, true).await;
+    let data = data(&broker);
+    let ctx = ToolCtx {
+        data: &data,
+        app: None,
+        binding: Some(&binding),
+        broker: Some(broker.broker()),
+    };
+    let group = group(&broker, &http).await;
+    let error = group
+        .call(&ctx, "mcp_private_send", &json!({"text":"synthetic"}))
+        .await
+        .unwrap_err();
+    let details = error.details.unwrap();
+    assert_eq!(details["action"], "inspect_server_before_retry");
+    assert_eq!(details["delivery"], "unknown");
+    assert_eq!(details["retrySafe"], false);
+    assert_eq!(http.tool_calls(), 1);
+}
+
+#[tokio::test]
 async fn gateway_failed_credentials_and_namespace_collision_do_not_hide_healthy_tools() {
     let http = HttpFixture::new().await;
     let broker = TestBroker::new([]).await;

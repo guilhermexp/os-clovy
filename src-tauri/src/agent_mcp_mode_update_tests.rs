@@ -84,6 +84,41 @@ fn header_bundle() -> McpSecretBundle {
 }
 
 #[tokio::test]
+async fn oauth_settings_refuse_manual_authorization_without_changing_active_credentials() {
+    let repository = repository().await;
+    let store = FixtureStore::default();
+    let mut server = disconnected_oauth(&repository).await;
+    server.secret_ref = Some("oauth-fixture".into());
+    server.metadata["oauthConnected"] = json!(true);
+    repository.replace(&server).await.unwrap();
+    let mut original = McpSecretBundle::default();
+    original
+        .oauth
+        .insert("access_token".into(), "synthetic-account-b".into());
+    original
+        .headers
+        .insert("x-fixture".into(), "retained".into());
+    store.put("oauth-fixture", &original).unwrap();
+    for header in ["Authorization", "aUtHoRiZaTiOn"] {
+        let mut input = settings_input(&server, json!({"auth":"oauth"}), false);
+        let mut replacement = original.clone();
+        replacement.oauth.clear();
+        replacement
+            .headers
+            .insert(header.into(), "Bearer synthetic-account-a".into());
+        input.secrets = Some(replacement);
+        assert!(update_mcp_definition(&repository, &store, input)
+            .await
+            .is_err());
+        assert_eq!(store.get("oauth-fixture").unwrap(), Some(original.clone()));
+        assert_eq!(
+            repository.get(&server.id).await.unwrap().metadata,
+            server.metadata
+        );
+    }
+}
+
+#[tokio::test]
 async fn settings_can_remove_oauth_after_complete_teardown_and_enable_custom_headers() {
     let repository = repository().await;
     let store = FixtureStore::default();

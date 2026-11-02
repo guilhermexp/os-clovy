@@ -47,7 +47,7 @@ pub enum CaptureStartState {
 pub type CaptureStartHandshake = Mutex<CaptureStartState>;
 
 /// Host-owned admission, checked after preparation and final publication locks.
-pub(crate) type CaptureStartAuthorization = Arc<dyn Fn() -> Result<(), AppError> + Send + Sync>;
+pub(crate) use super::control_admission::CaptureStartAuthorization;
 
 fn check_capture_authorization(
     authorization: Option<&CaptureStartAuthorization>,
@@ -761,34 +761,42 @@ pub fn set_mic_ducked(ducked: bool) {
     }
 }
 
-pub fn pause_capture(session_id: &str) -> Result<CaptureRecoverySnapshot, AppError> {
-    let mut active = lock_active()?;
-    let recording = active_for_session(active.as_mut(), session_id)?;
-    if !recording.paused {
-        if let Some(active_since) = recording.active_since.take() {
-            recording.accumulated_active += active_since.elapsed();
+pub(crate) fn pause_capture(
+    session_id: &str,
+    authorization: Option<&CaptureStartAuthorization>,
+) -> Result<CaptureRecoverySnapshot, AppError> {
+    super::control_admission::with_control_admission(&ACTIVE_RECORDING, authorization, |active| {
+        let recording = active_for_session(active.as_mut(), session_id)?;
+        if !recording.paused {
+            if let Some(active_since) = recording.active_since.take() {
+                recording.accumulated_active += active_since.elapsed();
+            }
+            recording.paused = true;
+            recording.paused_flag.store(true, Ordering::Release);
+            if let Some(system) = recording.system_capture.as_mut() {
+                system.pause();
+            }
         }
-        recording.paused = true;
-        recording.paused_flag.store(true, Ordering::Release);
-        if let Some(system) = recording.system_capture.as_mut() {
-            system.pause();
-        }
-    }
-    Ok(recording.recovery_snapshot(RecoverySnapshotMode::Force))
+        Ok(recording.recovery_snapshot(RecoverySnapshotMode::Force))
+    })
 }
 
-pub fn resume_capture(session_id: &str) -> Result<CaptureRecoverySnapshot, AppError> {
-    let mut active = lock_active()?;
-    let recording = active_for_session(active.as_mut(), session_id)?;
-    if recording.paused {
-        recording.active_since = Some(Instant::now());
-        recording.paused = false;
-        recording.paused_flag.store(false, Ordering::Release);
-        if let Some(system) = recording.system_capture.as_mut() {
-            system.resume();
+pub(crate) fn resume_capture(
+    session_id: &str,
+    authorization: Option<&CaptureStartAuthorization>,
+) -> Result<CaptureRecoverySnapshot, AppError> {
+    super::control_admission::with_control_admission(&ACTIVE_RECORDING, authorization, |active| {
+        let recording = active_for_session(active.as_mut(), session_id)?;
+        if recording.paused {
+            recording.active_since = Some(Instant::now());
+            recording.paused = false;
+            recording.paused_flag.store(false, Ordering::Release);
+            if let Some(system) = recording.system_capture.as_mut() {
+                system.resume();
+            }
         }
-    }
-    Ok(recording.recovery_snapshot(RecoverySnapshotMode::Force))
+        Ok(recording.recovery_snapshot(RecoverySnapshotMode::Force))
+    })
 }
 
 pub fn capture_status(session_id: &str) -> Result<RecordingStatusDto, AppError> {
@@ -844,27 +852,35 @@ pub fn current_status() -> Option<RecordingStatusDto> {
 
 /// Takes and finalizes the recording for `session_id`; see
 /// [`finish_active_capture`] for why it blocks and what it does not block.
-pub fn finish_capture(session_id: &str) -> Result<FinishedRecording, AppError> {
+pub(crate) fn finish_capture(
+    session_id: &str,
+    authorization: Option<&CaptureStartAuthorization>,
+) -> Result<FinishedRecording, AppError> {
     let _finalization = lock_finalization()?;
-    let mut active = lock_active()?;
-    let Some(recording) = active.take() else {
-        return Err(AppError::new(
-            "recording_not_found",
-            "Recording session was not found.",
-        ));
-    };
-    if recording.session_id != session_id {
-        let status = recording.status();
-        *active = Some(recording);
-        return Err(AppError::new(
-            "recording_not_found",
-            format!(
-                "Active recording is {}, not {}",
-                status.session_id, session_id
-            ),
-        ));
-    }
-    drop(active);
+    let recording = super::control_admission::with_control_admission(
+        &ACTIVE_RECORDING,
+        authorization,
+        |active| {
+            let Some(recording) = active.take() else {
+                return Err(AppError::new(
+                    "recording_not_found",
+                    "Recording session was not found.",
+                ));
+            };
+            if recording.session_id != session_id {
+                let status = recording.status();
+                *active = Some(recording);
+                return Err(AppError::new(
+                    "recording_not_found",
+                    format!(
+                        "Active recording is {}, not {}",
+                        status.session_id, session_id
+                    ),
+                ));
+            }
+            Ok(recording)
+        },
+    )?;
     finalize_recording(recording)
 }
 

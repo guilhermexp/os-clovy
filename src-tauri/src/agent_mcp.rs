@@ -50,6 +50,8 @@ use oauth_history::*;
 #[path = "agent_mcp_diagnostics.rs"]
 mod diagnostics;
 pub use diagnostics::AgentMcpDiagnostic;
+#[path = "agent_mcp_http_credentials.rs"]
+mod http_credentials;
 
 // Last observed health is process-local. A stored OAuth grant is not a health
 // probe, and external CLI connections never enter this host-owned inventory.
@@ -735,6 +737,7 @@ async fn authorize_oauth_server_with<F: FnOnce(&str) -> Result<(), AgentMcpError
     )
     .await?;
     let mut bundle = existing.clone();
+    http_credentials::remove_authorization(&mut bundle.headers);
     for key in ["access_token", "refresh_token"] {
         if let Some(mut previous) = bundle.oauth.remove(key) {
             previous.zeroize();
@@ -3249,29 +3252,6 @@ pub(crate) async fn retire_server_sessions(server_id: &str) {
     }
 }
 
-fn apply_http_credentials(
-    mut request: reqwest::RequestBuilder,
-    secrets: &McpSecretBundle,
-) -> reqwest::RequestBuilder {
-    for (key, value) in &secrets.headers {
-        request = request.header(key, value);
-    }
-    if !secrets
-        .headers
-        .keys()
-        .any(|key| key.eq_ignore_ascii_case("authorization"))
-    {
-        if let Some(token) = secrets
-            .oauth
-            .get("access_token")
-            .filter(|value| !value.trim().is_empty())
-        {
-            request = request.bearer_auth(token);
-        }
-    }
-    request
-}
-
 async fn http_notify(
     client: &reqwest::Client,
     server: &McpServerDefinition,
@@ -3281,13 +3261,15 @@ async fn http_notify(
     params: Value,
 ) -> Result<(), AgentMcpError> {
     let url = server.url.as_deref().ok_or(AgentMcpError::Transport)?;
-    let mut request = apply_http_credentials(
+    let mut request = http_credentials::apply(
         client
             .post(url)
             .header("accept", "application/json, text/event-stream")
             .header("content-type", "application/json")
             .header("mcp-protocol-version", MCP_PROTOCOL_VERSION),
-        secrets,
+        &secrets.headers,
+        &secrets.oauth,
+        oauth_mode(&server.metadata),
     );
     if let Some(session_id) = session_id {
         request = request.header("mcp-session-id", session_id);
@@ -3346,13 +3328,15 @@ async fn begin_http_request(
     params: Value,
 ) -> Result<(reqwest::Response, Option<String>), AgentMcpError> {
     let url = server.url.as_deref().ok_or(AgentMcpError::Transport)?;
-    let mut request = apply_http_credentials(
+    let mut request = http_credentials::apply(
         client
             .post(url)
             .header("accept", "application/json, text/event-stream")
             .header("content-type", "application/json")
             .header("mcp-protocol-version", MCP_PROTOCOL_VERSION),
-        secrets,
+        &secrets.headers,
+        &secrets.oauth,
+        oauth_mode(&server.metadata),
     );
     if let Some(session_id) = session_id {
         request = request.header("mcp-session-id", session_id);
@@ -3444,13 +3428,15 @@ async fn http_respond_elicitation(
     answer: &str,
 ) -> Result<(), AgentMcpError> {
     let url = server.url.as_deref().ok_or(AgentMcpError::Transport)?;
-    let mut request = apply_http_credentials(
+    let mut request = http_credentials::apply(
         client
             .post(url)
             .header("accept", "application/json, text/event-stream")
             .header("content-type", "application/json")
             .header("mcp-protocol-version", MCP_PROTOCOL_VERSION),
-        secrets,
+        &secrets.headers,
+        &secrets.oauth,
+        oauth_mode(&server.metadata),
     );
     if let Some(session_id) = session_id {
         request = request.header("mcp-session-id", session_id);
@@ -3765,6 +3751,18 @@ pub async fn create_agent_mcp_server(
     input: AgentMcpServerInput,
 ) -> Result<McpServerDefinition, crate::domain::types::AppError> {
     let secrets = input.secrets.clone();
+    if oauth_mode(&input.metadata)
+        && secrets.as_ref().is_some_and(|bundle| {
+            bundle
+                .headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("authorization"))
+        })
+    {
+        return Err(app_error(AgentMcpError::InvalidDefinition(
+            "Authorization headers cannot be used with OAuth.".into(),
+        )));
+    }
     if secrets
         .as_ref()
         .is_some_and(|bundle| !bundle.oauth.is_empty())
@@ -4000,6 +3998,22 @@ async fn update_mcp_definition<S: McpSecretStore>(
         ));
     }
     let mut replacement_secrets = input.secrets.clone();
+    if (requested_oauth || (oauth_mode(&existing.metadata) && !removes_oauth))
+        && replacement_secrets.as_ref().is_some_and(|bundle| {
+            bundle
+                .headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("authorization"))
+        })
+    {
+        return Err(command_mcp_error(
+            &existing,
+            "connect",
+            AgentMcpError::InvalidDefinition(
+                "Authorization headers cannot be used with OAuth.".into(),
+            ),
+        ));
+    }
     if replacement_secrets
         .as_ref()
         .is_some_and(|bundle| !bundle.oauth.is_empty())

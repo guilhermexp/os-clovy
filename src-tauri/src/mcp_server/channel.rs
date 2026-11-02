@@ -410,14 +410,23 @@ mod unix {
                             Ok(message) => {
                                 let id = crate::mcp_server::protocol::request_id(&message);
                                 let is_tool = crate::mcp_server::protocol::method(&message) == Some("tools/call");
+                                let operation = handler(message, binding);
+                                tokio::pin!(operation);
                                 tokio::select! {
                                     biased;
-                                    _ = call_cancelled.changed() => id.map(|id| if is_tool {
-                                        crate::mcp_server::protocol::result_response(id, crate::mcp_server::protocol::tool_error("The run was cancelled. (run_cancelled)"))
-                                    } else {
-                                        crate::mcp_server::protocol::error_response(id, crate::mcp_server::protocol::SERVER_UNAVAILABLE, "The run was cancelled. (run_cancelled)")
-                                    }),
-                                    response = handler(message, binding) => response,
+                                    response = &mut operation => response,
+                                    _ = call_cancelled.changed() => {
+                                        match tokio::time::timeout(REVOKE_GRACE / 2, &mut operation).await {
+                                            Ok(response) => response,
+                                            Err(_) => id.map(|id| if is_tool {
+                                                let mut error = crate::domain::types::AppError::new("run_cancelled", "The run was cancelled after the call was admitted. Inspect its target before retrying.");
+                                                error.details = Some(serde_json::json!({"delivery":"unknown","effect":"unknown","retrySafe":false,"callId":id.clone()}));
+                                                crate::mcp_server::protocol::result_response(id, crate::mcp_server::protocol::tool_error_for(&error))
+                                            } else {
+                                                crate::mcp_server::protocol::error_response(id, crate::mcp_server::protocol::SERVER_UNAVAILABLE, "The run was cancelled. (run_cancelled)")
+                                            }),
+                                        }
+                                    },
                                 }
                             },
                             Err(error) => Some(crate::mcp_server::protocol::error_response(

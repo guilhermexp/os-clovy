@@ -12,6 +12,9 @@ export type AgentMcpSafetyPolicy = {
 
 /** Last observed server result, never a claim based only on a stored grant. */
 export type AgentMcpDiagnostic = {
+  delivery?: "unknown" | null;
+  retrySafe?: boolean | null;
+  cause?: AgentMcpDiagnostic | null;
   origin: "clovy_managed";
   server: string;
   tool?: string | null;

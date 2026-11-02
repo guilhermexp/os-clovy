@@ -18,6 +18,12 @@ pub struct AgentMcpDiagnostic {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_code: Option<i64>,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_safe: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<Box<AgentMcpDiagnostic>>,
 }
 
 impl AgentMcpDiagnostic {
@@ -53,6 +59,8 @@ impl AgentMcpError {
         if let Self::AfterDelivery { cause } = self {
             let mut diagnostic = cause.diagnostic(server, tool, phase);
             diagnostic.action = "inspect_server_before_retry".into();
+            diagnostic.delivery = Some("unknown".into());
+            diagnostic.retry_safe = Some(false);
             diagnostic.message.push_str(
                 " The original MCP request may have been applied. Inspect the server before retrying.",
             );
@@ -110,6 +118,9 @@ impl AgentMcpError {
                 _ => None,
             },
             message,
+            delivery: matches!(self, Self::DeliveryUncertain(_)).then(|| "unknown".into()),
+            retry_safe: matches!(self, Self::DeliveryUncertain(_)).then_some(false),
+            cause: None,
         }
     }
 }
@@ -117,6 +128,21 @@ impl AgentMcpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn post_delivery_diagnostic_preserves_cause_and_forbids_retry() {
+        let error = AgentMcpError::AfterDelivery {
+            cause: Box::new(AgentMcpError::Remote(-32601)),
+        }
+        .diagnostic("synthetic-server", Some("send"), "call")
+        .into_app_error();
+        let details = error.details.unwrap();
+        assert_eq!(error.code, "agent_mcp_remote_error");
+        assert_eq!(details["remoteCode"], -32601);
+        assert_eq!(details["action"], "inspect_server_before_retry");
+        assert_eq!(details["delivery"], "unknown");
+        assert_eq!(details["retrySafe"], false);
+    }
 
     #[test]
     fn auth_transport_and_remote_failures_keep_distinct_recovery_actions() {

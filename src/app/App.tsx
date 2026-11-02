@@ -868,6 +868,7 @@ export function App() {
   useSessionMetadata({
     appBlocked,
     bootstrapped,
+    sessionFolders,
     sessionCompletionTouchedRef,
     setCompletedSessions,
     setError,

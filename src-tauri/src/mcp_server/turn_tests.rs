@@ -317,3 +317,151 @@ async fn revoking_a_turn_closes_its_open_connections_only() {
     assert!(still_open.is_err(), "the unbound connection was closed");
     listener.stop();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revocation_drains_the_delivered_call_receipt_before_closing() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = channel::channel_dir(root.path());
+    let turns = TurnRegistry::default();
+    let delivered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let handler: channel::TurnHandler = {
+        let delivered = delivered.clone();
+        let release = release.clone();
+        Arc::new(move |message, _| {
+            let delivered = delivered.clone();
+            let release = release.clone();
+            Box::pin(async move {
+                delivered.notify_one();
+                release.notified().await;
+                Some(protocol::result_response(
+                    message["id"].clone(),
+                    json!({"isError":true,"structuredContent":{"error":{"code":"fixture_effect_uncertain","details":{"retrySafe":false}}}}),
+                ))
+            })
+        })
+    };
+    let listener = channel::Listener::start_with_turns(&dir, handler, turns.clone())
+        .await
+        .unwrap();
+    let secret = channel::read_secret(&dir).unwrap();
+    let token = turns.issue(binding("run-receipt"));
+    let (_, mut reader, mut writer) =
+        handshake(&dir, channel::turn_handshake(&secret, Some(&token))).await;
+    writer
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"tools/call\",\"params\":{}}\n")
+        .await
+        .unwrap();
+    delivered.notified().await;
+    assert!(turns.revoke(&token));
+    release.notify_one();
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["id"], 41);
+    assert_eq!(
+        response["result"]["structuredContent"]["error"]["code"],
+        "fixture_effect_uncertain"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["error"]["details"]["retrySafe"],
+        false
+    );
+    listener.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoked_call_without_a_receipt_gets_correlated_uncertain_result() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = channel::channel_dir(root.path());
+    let turns = TurnRegistry::default();
+    let admitted = Arc::new(tokio::sync::Notify::new());
+    let handler: channel::TurnHandler = {
+        let admitted = admitted.clone();
+        Arc::new(move |_message, _| {
+            let admitted = admitted.clone();
+            Box::pin(async move {
+                admitted.notify_one();
+                std::future::pending::<Option<Value>>().await
+            })
+        })
+    };
+    let listener = channel::Listener::start_with_turns(&dir, handler, turns.clone())
+        .await
+        .unwrap();
+    let secret = channel::read_secret(&dir).unwrap();
+    let token = turns.issue(binding("run-unknown"));
+    let (_, mut reader, mut writer) =
+        handshake(&dir, channel::turn_handshake(&secret, Some(&token))).await;
+    writer
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\",\"params\":{}}\n")
+        .await
+        .unwrap();
+    admitted.notified().await;
+    assert!(turns.revoke(&token));
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["id"], 42);
+    let details = &response["result"]["structuredContent"]["error"]["details"];
+    assert_eq!(details["callId"], 42);
+    assert_eq!(details["delivery"], "unknown");
+    assert_eq!(details["retrySafe"], false);
+    listener.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revocation_retains_a_definitive_pre_dispatch_refusal() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = channel::channel_dir(root.path());
+    let turns = TurnRegistry::default();
+    let admitted = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let handler: channel::TurnHandler = {
+        let admitted = admitted.clone();
+        let release = release.clone();
+        Arc::new(move |message, _| {
+            let admitted = admitted.clone();
+            let release = release.clone();
+            Box::pin(async move {
+                admitted.notify_one();
+                release.notified().await;
+                Some(protocol::result_response(
+                    message["id"].clone(),
+                    json!({"isError":true,"structuredContent":{"error":{"code":"turn_expired","details":{"delivery":"not_delivered","retrySafe":true}}}}),
+                ))
+            })
+        })
+    };
+    let listener = channel::Listener::start_with_turns(&dir, handler, turns.clone())
+        .await
+        .unwrap();
+    let secret = channel::read_secret(&dir).unwrap();
+    let token = turns.issue(binding("run-safe"));
+    let (_, mut reader, mut writer) =
+        handshake(&dir, channel::turn_handshake(&secret, Some(&token))).await;
+    writer
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":43,\"method\":\"tools/call\",\"params\":{}}\n")
+        .await
+        .unwrap();
+    admitted.notified().await;
+    assert!(turns.revoke(&token));
+    release.notify_one();
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["id"], 43);
+    let details = &response["result"]["structuredContent"]["error"]["details"];
+    assert_eq!(details["delivery"], "not_delivered");
+    assert_eq!(details["retrySafe"], true);
+    listener.stop();
+}

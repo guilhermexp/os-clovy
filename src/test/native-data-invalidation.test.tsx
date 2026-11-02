@@ -1,10 +1,11 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { useReducer, useRef, useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NoteSaveController } from "../app/note-save-controller";
 import { createInitialState, notesReducer } from "../app/state/app-state";
 import { useNoteProcessingEvents } from "../app/use-note-processing-events";
 import { useSessionMetadata } from "../app/use-session-metadata";
+import { NoteEditor } from "../components/note-editor/NoteEditor";
 import type { ClovyDataChange } from "../lib/clovy-data-events";
 import { resetCurrentDataPartitionForTests } from "../lib/data-partition";
 import {
@@ -101,6 +102,123 @@ beforeEach(() => {
 });
 
 describe("native mutation invalidation", () => {
+  it("updates the open editor project chip on generic assignment and removal", async () => {
+    function Surface() {
+      const { state } = useNotes();
+      const noop = () => {};
+      return (
+        state.selectedNote && (
+          <NoteEditor
+            note={state.selectedNote}
+            folders={[
+              {
+                id: "project",
+                name: "Synthetic project",
+                memoryDisabled: false,
+                createdAt: stamp,
+                updatedAt: stamp,
+              },
+            ]}
+            sourceMode="microphoneOnly"
+            microphoneBlocked={false}
+            onTitleChange={noop}
+            onContentChange={noop}
+            onFlushNote={noop}
+            onSourceModeChange={noop}
+            onEnableSystemAudio={noop}
+            onEnableMicrophone={noop}
+            onStartRecording={noop}
+            onPauseRecording={noop}
+            onResumeRecording={noop}
+            onFinishRecording={noop}
+            onRetry={noop}
+            onRecoverRecording={noop}
+            onDiscardRecording={noop}
+            onAssignFolder={noop}
+            onRemoveFolder={noop}
+            onCreateAndAssignFolder={noop}
+            onTabChange={noop}
+          />
+        )
+      );
+    }
+    render(<Surface />);
+    mocks.getNote.mockResolvedValueOnce({ ...note("original"), folderIds: ["project"] });
+    await emit({ profile: "default", kind: "notes" });
+    await screen.findByRole("button", { name: "Synthetic project" });
+    mocks.getNote.mockResolvedValueOnce({ ...note("original"), folderIds: [] });
+    await emit({ profile: "default", kind: "notes" });
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Synthetic project" })).not.toBeInTheDocument(),
+    );
+  });
+  it("reconciles the open note after generic project association changes without overwriting a concurrent edit", async () => {
+    const { result } = renderHook(useNotes);
+    mocks.getNote.mockResolvedValueOnce({ ...note("original"), folderIds: ["project"] });
+    await emit({ profile: "default", kind: "notes" });
+    await waitFor(() => expect(result.current.state.selectedNote?.folderIds).toEqual(["project"]));
+    const pending = deferred<NoteDto>();
+    mocks.getNote.mockReturnValueOnce(pending.promise);
+    await emit({ profile: "default", kind: "notes" });
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledTimes(2));
+    act(() => {
+      result.current.controller.queue("note", { title: "local", editedContent: "local" });
+      result.current.dispatch({
+        type: "noteUpdated",
+        note: { ...note("local"), folderIds: ["project"] },
+      });
+    });
+    await act(async () => pending.resolve({ ...note("old"), folderIds: [] }));
+    expect(result.current.state.selectedNote?.editedContent).toBe("local");
+    result.current.controller.discard("note");
+    mocks.getNote.mockResolvedValueOnce({ ...note("local"), folderIds: [] });
+    await emit({ profile: "default", kind: "notes" });
+    await waitFor(() => expect(result.current.state.selectedNote?.folderIds).toEqual([]));
+  });
+
+  it("keeps native completion and assignment refreshes when initial snapshots resolve late", async () => {
+    const completions = deferred<Array<{ sessionId: string; completedAt: string }>>();
+    const assignments = deferred<Array<{ sessionId: string; folderId: string }>>();
+    const nativeAssignments = deferred<Array<{ sessionId: string; folderId: string }>>();
+    mocks.listCompletedSessions
+      .mockReturnValueOnce(completions.promise)
+      .mockResolvedValue([{ sessionId: "a", completedAt: stamp }]);
+    mocks.listSessionFolders
+      .mockReturnValueOnce(assignments.promise)
+      .mockReturnValueOnce(nativeAssignments.promise);
+    const { result } = renderHook(() => {
+      const [completed, setCompletedSessions] = useState<Record<string, string>>({});
+      const [folders, setSessionFolders] = useState<Record<string, string[]>>({});
+      const [, setError] = useState<string | null>(null);
+      const touched = useRef(new Set<string>());
+      useSessionMetadata({
+        appBlocked: false,
+        bootstrapped: true,
+        sessionFolders: folders,
+        sessionCompletionTouchedRef: touched,
+        setCompletedSessions,
+        setSessionFolders,
+        setError,
+      });
+      return { completed, folders, setCompletedSessions, setSessionFolders, touched };
+    });
+    await waitFor(() => expect(mocks.listCompletedSessions).toHaveBeenCalledTimes(1));
+    await emit({ profile: "default", kind: "conversations", id: "a" });
+    act(() => {
+      result.current.touched.current.add("local");
+      result.current.setCompletedSessions({ local: stamp });
+      result.current.setSessionFolders({ local: ["local-project"] });
+    });
+    await act(async () => nativeAssignments.resolve([{ sessionId: "a", folderId: "project" }]));
+    await waitFor(() => expect(result.current.completed).toEqual({ a: stamp, local: stamp }));
+    expect(result.current.folders).toEqual({ a: ["project"], local: ["local-project"] });
+    await act(async () => {
+      completions.resolve([]);
+      assignments.resolve([]);
+    });
+    expect(result.current.completed).toEqual({ a: stamp, local: stamp });
+    expect(result.current.folders).toEqual({ a: ["project"], local: ["local-project"] });
+  });
   it("does not resurrect deleted notes from a delayed terminal hydration or its retry", async () => {
     const old = deferred<NoteDto>();
     mocks.getNote.mockReturnValueOnce(old.promise);
@@ -195,12 +313,13 @@ describe("native mutation invalidation", () => {
     ]);
     const { result } = renderHook(() => {
       const [completed, setCompletedSessions] = useState<Record<string, string>>({});
-      const [, setSessionFolders] = useState<Record<string, string[]>>({});
+      const [folders, setSessionFolders] = useState<Record<string, string[]>>({});
       const [, setError] = useState<string | null>(null);
       const touched = useRef(new Set<string>());
       useSessionMetadata({
         appBlocked: false,
         bootstrapped: false,
+        sessionFolders: folders,
         sessionCompletionTouchedRef: touched,
         setCompletedSessions,
         setSessionFolders,

@@ -185,6 +185,7 @@ beforeEach(() => {
     return () => listeners.delete(callback);
   });
   mocks.listNotes.mockResolvedValue({ items: [], hasMore: false });
+  mocks.getNote.mockResolvedValue(note);
   mocks.listFolders.mockResolvedValue([folder]);
   mocks.listAgentSessions.mockResolvedValue([a]);
 });

@@ -105,7 +105,7 @@ impl CaptureStartupGuard {
     }
 
     fn rollback(&mut self) {
-        self.rollback_with(|session_id| finish_capture(session_id).map(|_| ()));
+        self.rollback_with(|session_id| finish_capture(session_id, None).map(|_| ()));
     }
 
     fn rollback_with<F>(&mut self, stop_capture: F)
@@ -1686,7 +1686,7 @@ where
     start_capture_with_timeout_and_cleanup(
         start_capture,
         |started| {
-            if let Err(error) = finish_capture(&started.session_id) {
+            if let Err(error) = finish_capture(&started.session_id, None) {
                 eprintln!(
                     "failed to tear down abandoned recording {} after start timeout: {}",
                     started.session_id, error.message
@@ -1772,10 +1772,14 @@ async fn revalidate_active_recorder_request(
     app: &AppHandle,
     request: &SessionRequest,
     action: crate::agent_recorder::AgentRecorderAction,
-) -> Result<(), AppError> {
+) -> Result<Option<crate::audio::capture::CaptureStartAuthorization>, AppError> {
     if request.agent_request_id.is_none() {
-        return Ok(());
+        return Ok(None);
     }
+    let request_id = request.agent_request_id.clone().expect("checked above");
+    let (original_binding, _) = app
+        .state::<crate::agent_recorder::AgentRecorderBroker>()
+        .request_authorization(&request_id)?;
     let status = capture_status(&request.session_id)?;
     let note_id = status.note_id.ok_or_else(|| {
         AppError::new(
@@ -1794,7 +1798,38 @@ async fn revalidate_active_recorder_request(
         action,
         None,
     )
-    .await
+    .await?;
+    let profile = request.expected_profile.clone().ok_or_else(|| {
+        AppError::new(
+            "agent_recorder_target_invalid",
+            "A bound data partition is required.",
+        )
+    })?;
+    let session_id = request.session_id.clone();
+    let binding = app
+        .state::<crate::agent_recorder::AgentRecorderBroker>()
+        .saved_authorization(&request_id, &profile, &note_id, &session_id, action, None)?;
+    if binding.authority != original_binding.authority {
+        return Err(AppError::new(
+            "turn_expired",
+            "The recorder authority changed.",
+        ));
+    }
+    let authority = original_binding.authority;
+    let app = app.clone();
+    Ok(Some(Arc::new(move || {
+        authority.check_live()?;
+        let current = app
+            .state::<crate::agent_recorder::AgentRecorderBroker>()
+            .saved_authorization(&request_id, &profile, &note_id, &session_id, action, None)?;
+        if current.authority != authority {
+            return Err(AppError::new(
+                "turn_expired",
+                "The recorder authority changed.",
+            ));
+        }
+        authority.check_live()
+    })))
 }
 
 #[tauri::command]
@@ -1802,13 +1837,13 @@ pub async fn pause_recording(
     app: AppHandle,
     request: SessionRequest,
 ) -> Result<RecordingStatusDto, AppError> {
-    revalidate_active_recorder_request(
+    let authorization = revalidate_active_recorder_request(
         &app,
         &request,
         crate::agent_recorder::AgentRecorderAction::Pause,
     )
     .await?;
-    let snapshot = pause_capture(&request.session_id)?;
+    let snapshot = pause_capture(&request.session_id, authorization.as_ref())?;
     checkpoint_recording_recovery_snapshot(&app, &snapshot).await;
     Ok(snapshot.status)
 }
@@ -1818,13 +1853,13 @@ pub async fn resume_recording(
     app: AppHandle,
     request: SessionRequest,
 ) -> Result<RecordingStatusDto, AppError> {
-    revalidate_active_recorder_request(
+    let authorization = revalidate_active_recorder_request(
         &app,
         &request,
         crate::agent_recorder::AgentRecorderAction::Resume,
     )
     .await?;
-    let snapshot = resume_capture(&request.session_id)?;
+    let snapshot = resume_capture(&request.session_id, authorization.as_ref())?;
     checkpoint_recording_recovery_snapshot(&app, &snapshot).await;
     Ok(snapshot.status)
 }
@@ -2090,24 +2125,14 @@ pub async fn finish_recording(
     let repos = repositories(&app).await?;
     let finalization_started = Instant::now();
     let session_id = request.session_id.clone();
-    revalidate_active_recorder_request(
+    let authorization = revalidate_active_recorder_request(
         &app,
         &request,
         crate::agent_recorder::AgentRecorderAction::Stop,
     )
     .await?;
-    let control_app = app.clone();
-    let finished = run_blocking_capture(move || {
-        if request.agent_request_id.is_some() {
-            tauri::async_runtime::block_on(revalidate_active_recorder_request(
-                &control_app,
-                &request,
-                crate::agent_recorder::AgentRecorderAction::Stop,
-            ))?;
-        }
-        finish_capture(&session_id)
-    })
-    .await?;
+    let finished =
+        run_blocking_capture(move || finish_capture(&session_id, authorization.as_ref())).await?;
     let response = finish_recording_session_with_timing(
         &repos,
         finished,

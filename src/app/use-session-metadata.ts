@@ -2,29 +2,59 @@ import { useEffect, useRef } from "react";
 import { listCompletedSessions, listSessionFolders } from "../lib/tauri";
 import { messageFromError } from "../lib/errors";
 import { useClovyDataChanged } from "../lib/clovy-data-events";
+import { getCurrentDataPartitionName } from "../lib/data-partition";
 import type { UseSessionMetadataDependencies } from "./use-session-metadata-types";
 
 export function useSessionMetadata(dependencies: UseSessionMetadataDependencies) {
   const {
     appBlocked,
     bootstrapped,
+    sessionFolders,
     sessionCompletionTouchedRef,
     setCompletedSessions,
     setError,
     setSessionFolders,
   } = dependencies;
   const invalidatedCompletions = useRef(new Set<string>());
+  const assignmentGeneration = useRef(0);
+  const completionGeneration = useRef(0);
+  const foldersRef = useRef(sessionFolders);
+  foldersRef.current = sessionFolders;
+
+  function applyAssignments(
+    assignments: Awaited<ReturnType<typeof listSessionFolders>>,
+    baseline: Record<string, string[]>,
+    isCurrent: () => boolean,
+  ) {
+    const next: Record<string, string[]> = {};
+    for (const assignment of assignments) {
+      next[assignment.sessionId] ??= [];
+      next[assignment.sessionId].push(assignment.folderId);
+    }
+    setSessionFolders((previous) => {
+      if (!isCurrent()) return previous;
+      const merged = { ...next };
+      for (const id of new Set([...Object.keys(baseline), ...Object.keys(previous)])) {
+        if (JSON.stringify(baseline[id]) !== JSON.stringify(previous[id])) {
+          if (previous[id]) merged[id] = previous[id];
+          else delete merged[id];
+        }
+      }
+      return merged;
+    });
+  }
 
   async function refreshAssignments(isCurrent: () => boolean) {
+    const generation = ++assignmentGeneration.current;
+    const baseline = foldersRef.current;
     try {
       const assignments = await listSessionFolders();
-      if (!isCurrent()) return;
-      const next: Record<string, string[]> = {};
-      for (const assignment of assignments) {
-        next[assignment.sessionId] ??= [];
-        next[assignment.sessionId].push(assignment.folderId);
-      }
-      setSessionFolders(next);
+      if (!isCurrent() || generation !== assignmentGeneration.current) return;
+      applyAssignments(
+        assignments,
+        baseline,
+        () => isCurrent() && generation === assignmentGeneration.current,
+      );
     } catch (error) {
       if (isCurrent()) setError(messageFromError(error));
     }
@@ -32,6 +62,7 @@ export function useSessionMetadata(dependencies: UseSessionMetadataDependencies)
 
   useClovyDataChanged("projects", (_change, isCurrent) => refreshAssignments(isCurrent));
   useClovyDataChanged("conversations", async (change, isCurrent) => {
+    const generation = ++completionGeneration.current;
     if (change.id) {
       invalidatedCompletions.current.add(change.id);
       // This persisted event supersedes an earlier local toggle. A toggle
@@ -41,16 +72,18 @@ export function useSessionMetadata(dependencies: UseSessionMetadataDependencies)
     await refreshAssignments(isCurrent);
     try {
       const rows = await listCompletedSessions();
-      if (!isCurrent()) return;
+      if (!isCurrent() || generation !== completionGeneration.current) return;
       // The latest reload reconciles every pending target, including those
       // whose earlier reads were superseded by a second native event.
       const invalidated = new Set(invalidatedCompletions.current);
       setCompletedSessions((previous) => {
-        if (!isCurrent()) return previous;
+        if (!isCurrent() || generation !== completionGeneration.current) return previous;
         const next = { ...previous };
-        const targets = change.id
-          ? invalidated
-          : new Set([...Object.keys(previous), ...rows.map((row) => row.sessionId)]);
+        const targets = new Set([
+          ...invalidated,
+          ...Object.keys(previous),
+          ...rows.map((row) => row.sessionId),
+        ]);
         for (const id of targets) {
           if (!sessionCompletionTouchedRef.current.has(id)) {
             const row = rows.find((row) => row.sessionId === id);
@@ -69,22 +102,43 @@ export function useSessionMetadata(dependencies: UseSessionMetadataDependencies)
   useEffect(() => {
     if (appBlocked || !bootstrapped) return;
     let cancelled = false;
+    const profile = getCurrentDataPartitionName();
+    const assignmentSnapshot = assignmentGeneration.current;
+    const completionSnapshot = completionGeneration.current;
+    const foldersSnapshot = foldersRef.current;
     void listSessionFolders()
       .then((assignments) => {
-        if (cancelled) return;
-        const next: Record<string, string[]> = {};
-        for (const assignment of assignments) {
-          next[assignment.sessionId] ??= [];
-          next[assignment.sessionId].push(assignment.folderId);
-        }
-        setSessionFolders(next);
+        if (
+          cancelled ||
+          profile !== getCurrentDataPartitionName() ||
+          assignmentSnapshot !== assignmentGeneration.current
+        )
+          return;
+        applyAssignments(
+          assignments,
+          foldersSnapshot,
+          () =>
+            !cancelled &&
+            profile === getCurrentDataPartitionName() &&
+            assignmentSnapshot === assignmentGeneration.current,
+        );
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(messageFromError(err));
+        if (
+          !cancelled &&
+          profile === getCurrentDataPartitionName() &&
+          assignmentSnapshot === assignmentGeneration.current
+        )
+          setError(messageFromError(err));
       });
     void listCompletedSessions()
       .then((rows) => {
-        if (cancelled) return;
+        if (
+          cancelled ||
+          profile !== getCurrentDataPartitionName() ||
+          completionSnapshot !== completionGeneration.current
+        )
+          return;
         // The session list can be interactive before this settles on a cold
         // launch. Merge rather than replace: this snapshot predates any toggle
         // the user already made, so locally toggled ids keep their local value
@@ -93,6 +147,12 @@ export function useSessionMetadata(dependencies: UseSessionMetadataDependencies)
         // other row still applies, so the rest of the persisted completed
         // sessions are not lost (JUN-203 review).
         setCompletedSessions((prev) => {
+          if (
+            cancelled ||
+            profile !== getCurrentDataPartitionName() ||
+            completionSnapshot !== completionGeneration.current
+          )
+            return prev;
           const next: Record<string, string> = {};
           for (const row of rows) next[row.sessionId] = row.completedAt;
           for (const touchedId of sessionCompletionTouchedRef.current) {
@@ -107,7 +167,12 @@ export function useSessionMetadata(dependencies: UseSessionMetadataDependencies)
         // Surface it like the sibling loads: a silent failure would present
         // previously completed sessions as active with no indication their
         // persisted state was unavailable (JUN-203 review).
-        if (!cancelled) setError(messageFromError(err));
+        if (
+          !cancelled &&
+          profile === getCurrentDataPartitionName() &&
+          completionSnapshot === completionGeneration.current
+        )
+          setError(messageFromError(err));
       });
     return () => {
       cancelled = true;

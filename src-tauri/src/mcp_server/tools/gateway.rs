@@ -182,8 +182,15 @@ impl<D: GatewayDriver> GatewayTools<D> {
             .map_err(|error| mcp_call_error(error, "gateway", name))?
             .ok_or_else(|| mcp_call_error(AgentMcpError::ToolUnavailable, "gateway", name))?;
         let mut answer = None::<String>;
+        let mut dispatched = false;
         for _ in 0..16 {
-            self.check(ctx, catalog, name).await?;
+            if let Err(error) = self.check(ctx, catalog, name).await {
+                if dispatched {
+                    agent_mcp::retire_server_sessions(&policy.server_id).await;
+                    return Err(after_dispatch(error, &server_name, name));
+                }
+                return Err(error);
+            }
             let operation = async {
                 match ctx.app {
                     Some(app) => {
@@ -213,18 +220,25 @@ impl<D: GatewayDriver> GatewayTools<D> {
                     }
                 }
             };
+            dispatched = true;
             let result = tokio::select! {
                 result=operation=>result,
                 _=wait_cancelled(ctx)=> {
                     agent_mcp::retire_server_sessions(&policy.server_id).await;
-                    return Err(AppError::new("run_cancelled","This turn was cancelled."));
+                    return Err(after_dispatch(AppError::new("run_cancelled","This turn was cancelled."), &server_name, name));
                 }
             };
             match result {
                 Ok(value) => return Ok(value),
                 Err(AgentMcpError::ElicitationRequired(message)) => {
-                    let clarified = ctx
-                        .broker()?
+                    let broker = match ctx.broker() {
+                        Ok(broker) => broker,
+                        Err(error) => {
+                            agent_mcp::retire_server_sessions(&policy.server_id).await;
+                            return Err(after_dispatch(error, &server_name, name));
+                        }
+                    };
+                    let clarified = broker
                         .request(
                             &ApprovalTurn::from(binding),
                             ApprovalRequest {
@@ -241,13 +255,17 @@ impl<D: GatewayDriver> GatewayTools<D> {
                         Ok(ApprovalOutcome::Answered(value)) => answer = Some(value),
                         other => {
                             agent_mcp::retire_server_sessions(&policy.server_id).await;
-                            return Err(match other {
-                                Err(denial) => AppError::new(denial.code(), denial.message()),
-                                _ => AppError::new(
-                                    "approval_unavailable",
-                                    "The clarification was not answered.",
-                                ),
-                            });
+                            return Err(after_dispatch(
+                                match other {
+                                    Err(denial) => AppError::new(denial.code(), denial.message()),
+                                    _ => AppError::new(
+                                        "approval_unavailable",
+                                        "The clarification was not answered.",
+                                    ),
+                                },
+                                &server_name,
+                                name,
+                            ));
                         }
                     }
                     // Same subsystem, arguments and parked session. Its
@@ -258,11 +276,32 @@ impl<D: GatewayDriver> GatewayTools<D> {
             }
         }
         agent_mcp::retire_server_sessions(&policy.server_id).await;
-        Err(AppError::new(
-            "agent_mcp_tool_failed",
-            "The MCP server asked too many clarification questions.",
+        Err(after_dispatch(
+            AppError::new(
+                "agent_mcp_tool_failed",
+                "The MCP server asked too many clarification questions.",
+            ),
+            &server_name,
+            name,
         ))
     }
+}
+fn after_dispatch(error: AppError, server: &str, tool: &str) -> AppError {
+    let mut diagnostic =
+        AgentMcpError::DeliveryUncertain(None).diagnostic(server, Some(tool), "call");
+    diagnostic.cause = error
+        .details
+        .as_ref()
+        .and_then(|details| {
+            serde_json::from_value::<agent_mcp::AgentMcpDiagnostic>(details.clone()).ok()
+        })
+        .map(Box::new);
+    diagnostic.code = error.code;
+    diagnostic.message = format!(
+        "{} The original MCP request may have been applied. Inspect the server before retrying.",
+        error.message
+    );
+    diagnostic.into_app_error()
 }
 async fn wait_cancelled(ctx: &ToolCtx<'_>) {
     loop {

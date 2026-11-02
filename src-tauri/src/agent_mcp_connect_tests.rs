@@ -441,6 +441,78 @@ async fn connect_persists_only_after_valid_catalog_and_reloads_gateway_tools() {
 }
 
 #[tokio::test]
+async fn oauth_candidate_uses_the_new_grant_and_keeps_unrelated_headers() {
+    for header in ["Authorization", "aUtHoRiZaTiOn"] {
+        let fixture = HttpFixture::start(true).await;
+        let (repository, store, mut definition) = setup_connect(&fixture).await;
+        definition.secret_ref = Some("old-manual-fixture".into());
+        repository.replace(&definition).await.unwrap();
+        let mut old = McpSecretBundle::default();
+        old.headers
+            .insert(header.into(), "Bearer synthetic-account-a".into());
+        old.headers.insert("x-fixture".into(), "kept".into());
+        store.put("old-manual-fixture", &old).unwrap();
+        let connected = connect_fixture(
+            &repository,
+            &store,
+            &definition,
+            &fixture,
+            Callback::Success,
+            Duration::from_secs(10),
+            Arc::default(),
+        )
+        .await
+        .unwrap();
+        let bundle = store
+            .get(connected.secret_ref.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(bundle.oauth["access_token"], "connect-fixture-access");
+        assert!(!bundle
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("authorization")));
+        assert_eq!(bundle.headers["x-fixture"], "kept");
+        assert!(fixture
+            .observed
+            .lock()
+            .unwrap()
+            .methods
+            .iter()
+            .any(|method| method == "tools/list"));
+        retire_server_sessions(&definition.id).await;
+    }
+}
+
+#[tokio::test]
+async fn failed_oauth_candidate_keeps_the_previous_manual_bundle() {
+    let fixture = HttpFixture::start(false).await;
+    let (repository, store, mut definition) = setup_connect(&fixture).await;
+    definition.secret_ref = Some("old-manual-fixture".into());
+    repository.replace(&definition).await.unwrap();
+    let mut original = McpSecretBundle::default();
+    original
+        .headers
+        .insert("aUtHoRiZaTiOn".into(), "Bearer synthetic-account-a".into());
+    original.headers.insert("x-fixture".into(), "kept".into());
+    store.put("old-manual-fixture", &original).unwrap();
+    assert!(connect_fixture(
+        &repository,
+        &store,
+        &definition,
+        &fixture,
+        Callback::Success,
+        Duration::from_secs(10),
+        Arc::default()
+    )
+    .await
+    .is_err());
+    let persisted = repository.get(&definition.id).await.unwrap();
+    assert_eq!(persisted.secret_ref.as_deref(), Some("old-manual-fixture"));
+    assert_eq!(store.get("old-manual-fixture").unwrap(), Some(original));
+}
+
+#[tokio::test]
 async fn denied_consent_never_exchanges_code_or_persists_grant() {
     let fixture = HttpFixture::start(true).await;
     let (repository, store, definition) = setup_connect(&fixture).await;

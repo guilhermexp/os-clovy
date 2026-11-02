@@ -2,6 +2,7 @@
 mod active_silence;
 pub mod capture;
 mod capture_buffer;
+mod control_admission;
 pub mod echo;
 pub mod live_preview;
 #[cfg(target_os = "windows")]

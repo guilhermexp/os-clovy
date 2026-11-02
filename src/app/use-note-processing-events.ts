@@ -79,11 +79,13 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
           payload.profile !== getCurrentDataPartitionName()
         )
           return;
-        const noteId = payload.kind === "notes" ? payload.id : undefined;
+        const noteId =
+          (payload.kind === "notes" ? payload.id : undefined) ?? selectedNoteRef.current?.id;
+        const deleted = payload.kind === "notes" && !!payload.id && !!payload.deleted;
         const request = ++latestRequest;
         if (noteId) noteRequests.set(noteId, request);
         const isCurrent = () => !disposed && payload.profile === getCurrentDataPartitionName();
-        if (noteId && payload.deleted) {
+        if (noteId && deleted) {
           deletedNoteIdsRef.current.add(noteId);
           pendingTerminalHydrationsRef.current.delete(noteId);
           activeNotesRef.current.delete(noteId);
@@ -95,13 +97,15 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
         }
         void (async () => {
           try {
-            if (noteId && !payload.deleted && !deletedNoteIdsRef.current.has(noteId)) {
+            if (noteId && !deleted && !deletedNoteIdsRef.current.has(noteId)) {
               await noteSaveController.flush(noteId);
               if (!isCurrent() || noteRequests.get(noteId) !== request) return;
               const editVersion = noteSaveController.getEditVersion(noteId);
               const note = await getNote(noteId);
               if (
                 isCurrent() &&
+                ((payload.kind === "notes" && !!payload.id) ||
+                  selectedNoteRef.current?.id === noteId) &&
                 noteRequests.get(noteId) === request &&
                 !deletedNoteIdsRef.current.has(noteId) &&
                 editVersion === noteSaveController.getEditVersion(noteId) &&
@@ -134,7 +138,7 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
                         noteSaveController.getEditVersion(note.id),
                   )
                   .map((note) => note.id),
-                deletedId: payload.deleted ? noteId : undefined,
+                deletedId: deleted ? noteId : undefined,
               });
             }
           } catch (error) {
