@@ -13,6 +13,7 @@ import shlex
 import subprocess
 import sys
 import time
+from process_survivors import descendants, same_image, snapshot, survivors
 
 root = pathlib.Path(__file__).resolve().parents[2]
 def require_space():
@@ -21,12 +22,12 @@ def require_space():
 require_space()
 evidence = pathlib.Path(sys.argv[1]).resolve()
 evidence.mkdir(parents=True, exist_ok=True)
-source = root / '.tmp/agent-browser-upstream'
+source = root / '.tauri-agent-browser/upstream.git'
 cargo = evidence / 'adapter-cargo'
 (cargo / 'src').mkdir(parents=True, exist_ok=True)
 pin = '5868f7c05020e047c00e68e4abf9253cce864f41'
 for filename in ['Cargo.toml', 'Cargo.lock']:
-    content = subprocess.check_output(['git', '-C', str(source), 'show', f'{pin}:cli/{filename}'])
+    content = subprocess.check_output(['git', '--git-dir', str(source), 'show', f'{pin}:cli/{filename}'])
     (cargo / filename).write_bytes(content)
 def module(name, path):
     return f'#[path={__import__("json").dumps(str(root / path))}] pub mod {name};\n'
@@ -89,21 +90,28 @@ try:
         env['DISPLAY'] = display_name
         time.sleep(.4)
     require_space()
-    subprocess.run(['cargo', 'run', '--manifest-path', str(cargo / 'Cargo.toml'), '--locked'], env=env, check=True)
-    survivors = []
-    for entry in pathlib.Path('/proc').iterdir():
-        if not entry.name.isdigit() or int(entry.name) == os.getpid():
-            continue
-        try:
-            arguments = (entry / 'cmdline').read_bytes()
-            # The run owns both the engine path and Chrome's profile paths.
-            if str(evidence).encode() in arguments and b'clovy-agent-browser' in arguments or str(evidence / 'profile-').encode() in arguments:
-                survivors.append(int(entry.name))
-        except (FileNotFoundError, ProcessLookupError, PermissionError):
-            pass
-    (evidence / 'process-survivors.json').write_text(json.dumps(survivors))
-    if survivors:
-        raise RuntimeError(f'The run left browser processes alive: {survivors}')
+    engine_stat = (resources / 'linux64/clovy-agent-browser').stat()
+    engine_image = (engine_stat.st_dev, engine_stat.st_ino)
+    known, groups = {}, {}
+    adapter = subprocess.Popen(['cargo', 'run', '--manifest-path', str(cargo / 'Cargo.toml'), '--locked'], env=env, start_new_session=True)
+    while adapter.poll() is None:
+        processes = snapshot()
+        for pid in descendants(processes, adapter.pid, known):
+            info = processes.get(pid)
+            if info is None:
+                continue
+            known[pid] = info['birth']
+            if same_image(pid, engine_image):
+                groups[info['group']] = min(groups.get(info['group'], info['birth']), info['birth'])
+        time.sleep(.05)
+    if adapter.returncode != 0:
+        raise subprocess.CalledProcessError(adapter.returncode, adapter.args)
+    if not groups:
+        raise RuntimeError('The proof did not observe an engine process identity.')
+    remaining = survivors(snapshot(), known, groups)
+    (evidence / 'process-survivors.json').write_text(json.dumps({'identities': known, 'groups': groups, 'survivors': remaining}))
+    if remaining:
+        raise RuntimeError(f'The run left browser processes alive: {remaining}')
     # Also execute the actual policy/proxy tests on this portable source set.
     require_space()
     subprocess.run(['cargo', 'test', '--manifest-path', str(cargo / 'Cargo.toml'), '--locked', '--', '--test-threads=1'], env=env, check=True)

@@ -106,20 +106,53 @@ function _clovyGuard(
           token.includes("password") || token === "one-time-code" || token.startsWith("cc-"),
       ) ||
     sensitiveTerms.some((term) => sensitiveText.includes(term));
+  const secrets = [...new Set((redactedValues || []).filter((value) => value))].sort(
+    (a, b) => b.length - a.length,
+  );
+  const buckets = new Map();
+  for (const secret of secrets) {
+    const first = secret[0];
+    if (!buckets.has(first)) buckets.set(first, []);
+    buckets.get(first).push(secret);
+  }
+  let budget = 16 * 1024 * 1024;
+  let outputBudget = 1024 * 1024;
   const redact = (value) => {
-    let safe = value;
-    for (const secret of redactedValues || []) {
-      if (secret) safe = safe.split(secret).join("[redacted]");
+    if (value.length > 1024 * 1024) return null;
+    const safe = [];
+    for (let i = 0; i < value.length; ) {
+      let matched = null;
+      for (const secret of buckets.get(value[i]) || []) {
+        budget -= secret.length;
+        if (budget < 0) return null;
+        if (value.startsWith(secret, i)) {
+          matched = secret;
+          break;
+        }
+      }
+      const chunk = matched ? "[redacted]" : value[i];
+      if (!matched && --budget < 0) return null;
+      outputBudget -= chunk.length;
+      if (outputBudget < 0) return null;
+      safe.push(chunk);
+      i += matched ? matched.length : 1;
     }
-    return safe;
+    return safe.join("");
   };
+  const safeName = redact(rawElement.name);
+  const safeId = redact(rawElement.id);
+  const safeLabel = redact(rawElement.label);
+  const safeRole = redact(rawElement.role);
+  const safeAutocomplete = redact(rawElement.autocomplete);
+  if ([safeName, safeId, safeLabel, safeRole, safeAutocomplete].some((v) => v === null))
+    return { error: "redaction_failed" };
   const element = {
     ...rawElement,
-    name: redact(rawElement.name),
-    id: redact(rawElement.id),
-    label: redact(rawElement.label).slice(0, 1000),
-    role: redact(rawElement.role),
-    autocomplete: redact(rawElement.autocomplete),
+    name: safeName,
+    id: safeId,
+    label: safeLabel.slice(0, 1000),
+    role: safeRole,
+    autocomplete: safeAutocomplete,
   };
   const inspection = {
     url: location.href,
@@ -195,7 +228,14 @@ function _clovyGuard(
   if (operation === "press") {
     if (!["Enter", "Space", "Escape", "Backspace", "Delete"].includes(key))
       return { error: "unsupported_key" };
-    const editing = key === "Backspace" || key === "Delete";
+    const textControl =
+      tag === "textarea" ||
+      (tag === "input" &&
+        ["text", "search", "tel", "url", "email", "password"].includes(inputType));
+    const editing =
+      key === "Backspace" ||
+      key === "Delete" ||
+      (key === "Space" && (textControl || this.isContentEditable));
     if (editing && (this.readOnly || this.disabled)) return { error: "unsupported_operation" };
     this.focus();
     if (!verify() || this.getRootNode().activeElement !== this) return { error: "effect_unknown" };
@@ -208,31 +248,89 @@ function _clovyGuard(
     if (editing && (this.readOnly || this.disabled)) return { error: "effect_unknown" };
     if (proceed && key === "Enter") {
       if (tag === "button" || tag === "a" || ["submit", "button"].includes(inputType)) this.click();
-      else if (this.form && tag !== "textarea")
-        HTMLFormElement.prototype.requestSubmit.call(this.form);
+      else if (this.form && tag !== "textarea") {
+        const submitter = Array.from(this.form.elements).find(
+          (control) =>
+            control.form === this.form &&
+            ((control.tagName === "BUTTON" && control.type === "submit") ||
+              (control.tagName === "INPUT" && ["submit", "image"].includes(control.type))),
+        );
+        if (submitter) {
+          if (!submitter.disabled) submitter.click();
+        } else {
+          const blocking = Array.from(this.form.elements).filter(
+            (control) =>
+              control.tagName === "INPUT" &&
+              [
+                "text",
+                "search",
+                "tel",
+                "url",
+                "email",
+                "password",
+                "date",
+                "month",
+                "week",
+                "time",
+                "datetime-local",
+                "number",
+              ].includes(control.type),
+          );
+          if (blocking.length <= 1) HTMLFormElement.prototype.requestSubmit.call(this.form);
+        }
+      }
     } else if (
       proceed &&
       key === "Space" &&
       (tag === "button" || ["checkbox", "radio", "button", "submit"].includes(inputType))
     )
       this.click();
-    else if (
-      proceed &&
-      ["Backspace", "Delete"].includes(key) &&
-      ["input", "textarea"].includes(tag)
-    ) {
-      const start = this.selectionStart,
-        end = this.selectionEnd;
-      if (start === null || end === null) return { error: "effect_unknown" };
-      const from = start === end && key === "Backspace" ? Math.max(0, start - 1) : start;
-      const to = start === end && key === "Delete" ? end + 1 : end;
-      this.setRangeText("", from, to, "end");
-      this.dispatchEvent(
-        new InputEvent("input", {
+    else if (proceed && editing && (textControl || this.isContentEditable)) {
+      if (this.isContentEditable) {
+        const selection = doc.getSelection();
+        if (
+          !selection?.rangeCount ||
+          !this.contains(selection.anchorNode) ||
+          !this.contains(selection.focusNode)
+        )
+          return { error: "effect_unknown" };
+      } else if (this.selectionStart === null || this.selectionEnd === null) {
+        return { error: "effect_unknown" };
+      }
+      const inputType =
+        key === "Space"
+          ? "insertText"
+          : key === "Delete"
+            ? "deleteContentForward"
+            : "deleteContentBackward";
+      const before = this.dispatchEvent(
+        new InputEvent("beforeinput", {
           bubbles: true,
-          inputType: key === "Delete" ? "deleteContentForward" : "deleteContentBackward",
+          cancelable: true,
+          inputType,
+          data: key === "Space" ? " " : null,
         }),
       );
+      if (!verify() || this.getRootNode().activeElement !== this || this.readOnly || this.disabled)
+        return { error: "effect_unknown" };
+      if (this.isContentEditable) {
+        const selection = doc.getSelection();
+        if (
+          !selection?.rangeCount ||
+          !this.contains(selection.anchorNode) ||
+          !this.contains(selection.focusNode)
+        )
+          return { error: "effect_unknown" };
+      }
+      if (
+        before &&
+        !doc.execCommand(
+          key === "Space" ? "insertText" : key === "Delete" ? "forwardDelete" : "delete",
+          false,
+          key === "Space" ? " " : undefined,
+        )
+      )
+        return { error: "effect_unknown" };
     }
     this.dispatchEvent(new KeyboardEvent("keyup", { key: actual, bubbles: true }));
     return { inspection };

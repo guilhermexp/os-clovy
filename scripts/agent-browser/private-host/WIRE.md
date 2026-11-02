@@ -94,7 +94,7 @@ Screenshots use the same owned task barrier and temporarily pause native animati
 restoring the observed finite playback rate on every path. Virtual time is never
 enabled: its advance policy would retain a synthetic clock. Native DOM
 layout and text-fragment bounds cover controls, inherited editable descendants,
-closed shadow content, pseudo elements and iframes. Overflow outside an editable
+closed shadow content, pseudo elements, iframes and frames. Overflow outside an editable
 ancestor's own box is covered independently. Native geometry and the viewport
 are reread before emission. Unsupported text shadows, filters, reflections,
 transforms, strokes or emphasis that cannot be bounded fail closed rather than

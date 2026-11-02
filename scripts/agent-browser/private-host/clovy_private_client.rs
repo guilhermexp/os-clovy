@@ -4,12 +4,113 @@ use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
-    io::{BufRead, BufReader, Write},
+    io::{Read, Write},
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::{Arc, Mutex as StdMutex},
 };
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot};
 const LIMIT: usize = 16 * 1024 * 1024;
+
+fn nonblocking(file: &File, for_write: bool) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let _ = for_write;
+        use std::os::fd::AsRawFd;
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0
+            || unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    #[cfg(windows)]
+    {
+        // CreatePipe's read handle lacks FILE_WRITE_ATTRIBUTES, so it cannot
+        // change mode. The sole reader uses PeekNamedPipe before ReadFile.
+        if !for_write {
+            return Ok(());
+        }
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Pipes::{
+            SetNamedPipeHandleState, PIPE_NOWAIT, PIPE_READMODE_BYTE,
+        };
+        let mode = PIPE_NOWAIT | PIPE_READMODE_BYTE;
+        if unsafe {
+            SetNamedPipeHandleState(
+                file.as_raw_handle() as _,
+                &mode,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+fn retryable(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+    ) || cfg!(windows) && error.raw_os_error() == Some(232)
+}
+
+fn read_frame(reader: &mut File, buffered: &mut Vec<u8>, closed: &AtomicBool) -> Option<Vec<u8>> {
+    let mut scanned = 0;
+    loop {
+        if closed.load(Ordering::SeqCst) {
+            return None;
+        }
+        if let Some(relative) = buffered[scanned..].iter().position(|byte| *byte == 0) {
+            let end = scanned + relative;
+            if end > LIMIT {
+                return None;
+            }
+            let frame = buffered.drain(..=end).collect::<Vec<_>>();
+            return Some(frame[..end].to_vec());
+        }
+        scanned = buffered.len();
+        if buffered.len() > LIMIT {
+            return None;
+        }
+        let mut chunk = [0u8; 8192];
+        #[cfg(windows)]
+        let read_limit = {
+            use std::os::windows::io::AsRawHandle;
+            let mut available = 0u32;
+            let ok = unsafe {
+                windows_sys::Win32::System::Pipes::PeekNamedPipe(
+                    reader.as_raw_handle() as _,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut available,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                return None;
+            }
+            if available == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            }
+            (available as usize).min(chunk.len())
+        };
+        #[cfg(not(windows))]
+        let read_limit = chunk.len();
+        match reader.read(&mut chunk[..read_limit]) {
+            Ok(0) => return None,
+            Ok(n) => buffered.extend_from_slice(&chunk[..n]),
+            Err(error) if retryable(&error) => {
+                std::thread::sleep(std::time::Duration::from_millis(5))
+            }
+            Err(_) => return None,
+        }
+    }
+}
 fn valid_observation_breakpoint(id: &str, marker: &str) -> bool {
     let Some(nonce) = marker.strip_prefix("clovy-private-observation:") else {
         return false;
@@ -41,7 +142,18 @@ fn observation_event(method: &str, params: &Value, owned: &HashSet<String>) -> V
     json!({"ownHits":own_hits,"foreignPaused":foreign})
 }
 
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpMessage>>>>;
+type Pending = Arc<StdMutex<HashMap<u64, oneshot::Sender<CdpMessage>>>>;
+struct PendingCommand {
+    id: u64,
+    pending: Pending,
+    cancelled: Arc<AtomicBool>,
+}
+impl Drop for PendingCommand {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.pending.lock().unwrap().remove(&self.id);
+    }
+}
 type Taps = Arc<StdMutex<Vec<(&'static [&'static str], mpsc::UnboundedSender<CdpEvent>)>>>;
 #[derive(Debug, Clone)]
 pub struct RawCdpMessage {
@@ -59,6 +171,14 @@ pub struct CdpClient {
     next_id: AtomicU64,
     taps: Taps,
     sessions: Arc<StdMutex<HashMap<String, mpsc::Sender<CdpEvent>>>>,
+}
+impl Drop for CdpClient {
+    fn drop(&mut self) {
+        self.closed.store(true, Ordering::SeqCst);
+        if let Ok(mut writer) = self.writer.try_lock() {
+            writer.take();
+        }
+    }
 }
 impl CdpClient {
     pub fn register_observation_breakpoint(&self, id: &str, marker: &str) -> Result<(), String> {
@@ -79,10 +199,12 @@ impl CdpClient {
         *self.redacted_values.lock().unwrap() = values;
         *self.redacted_nodes.lock().unwrap() = nodes;
     }
-    pub fn from_pipe(read: File, write: File) -> Self {
+    pub fn from_pipe(read: File, write: File) -> Result<Self, String> {
+        nonblocking(&read, false).map_err(|_| "Cannot configure private CDP pipe")?;
+        nonblocking(&write, true).map_err(|_| "Cannot configure private CDP pipe")?;
         let observation_breakpoints = Arc::new(StdMutex::new(HashSet::new()));
         let reader_breakpoints = observation_breakpoints.clone();
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Pending = Arc::new(StdMutex::new(HashMap::new()));
         let (events, _) = broadcast::channel(128);
         let closed = Arc::new(AtomicBool::new(false));
         let taps: Taps = Arc::new(StdMutex::new(Vec::new()));
@@ -96,24 +218,17 @@ impl CdpClient {
             sessions.clone(),
         );
         std::thread::spawn(move || {
-            let mut reader = BufReader::new(read);
+            let mut reader = read;
+            let mut buffered = Vec::new();
             loop {
-                // take() bounds allocation before the delimiter, including a malicious renderer.
-                let mut bytes = Vec::new();
-                let count =
-                    std::io::Read::take(&mut reader, (LIMIT + 1) as u64).read_until(0, &mut bytes);
-                if !matches!(count, Ok(n) if n > 0)
-                    || bytes.len() > LIMIT
-                    || bytes.last() != Some(&0)
-                {
+                let Some(bytes) = read_frame(&mut reader, &mut buffered, &c) else {
                     break;
-                }
-                bytes.pop();
+                };
                 let Ok(msg) = serde_json::from_slice::<CdpMessage>(&bytes) else {
                     break;
                 };
                 if let Some(id) = msg.id {
-                    if let Some(tx) = p.blocking_lock().remove(&id) {
+                    if let Some(tx) = p.lock().unwrap().remove(&id) {
                         let _ = tx.send(msg);
                     }
                 } else if let Some(method) = msg.method {
@@ -155,9 +270,9 @@ impl CdpClient {
                 }
             }
             c.store(true, Ordering::SeqCst);
-            p.blocking_lock().clear();
+            p.lock().unwrap().clear();
         });
-        Self {
+        Ok(Self {
             writer: Arc::new(StdMutex::new(Some(write))),
             observation_breakpoints,
             redacted_nodes: StdMutex::new(HashSet::new()),
@@ -168,7 +283,7 @@ impl CdpClient {
             next_id: AtomicU64::new(1),
             taps,
             sessions,
-        }
+        })
     }
     pub async fn connect(_: &str) -> Result<Self, String> {
         Err("Private host forbids CDP endpoints".into())
@@ -181,8 +296,10 @@ impl CdpClient {
     }
     pub async fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
-        self.writer.lock().unwrap().take();
-        self.pending.lock().await.clear();
+        if let Ok(mut writer) = self.writer.try_lock() {
+            writer.take();
+        }
+        self.pending.lock().unwrap().clear();
     }
     pub async fn send_command(
         &self,
@@ -207,12 +324,61 @@ impl CdpClient {
         }
         bytes.push(0);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
+        {
+            let mut pending = self.pending.lock().unwrap();
+            if self.closed.load(Ordering::SeqCst) {
+                return Err("CDP pipe closed".into());
+            }
+            pending.insert(id, tx);
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let _pending = PendingCommand {
+            id,
+            pending: self.pending.clone(),
+            cancelled: cancelled.clone(),
+        };
         let writer = self.writer.clone();
+        let closed = self.closed.clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         let write = tokio::task::spawn_blocking(move || {
             let mut w = writer.lock().unwrap();
-            let w = w.as_mut().ok_or("CDP pipe closed")?;
-            w.write_all(&bytes).map_err(|_| "CDP pipe write failed")
+            let mut offset = 0;
+            while offset < bytes.len() {
+                if closed.load(Ordering::SeqCst)
+                    || cancelled.load(Ordering::SeqCst)
+                    || std::time::Instant::now() >= deadline
+                {
+                    if offset > 0
+                        || closed.load(Ordering::SeqCst)
+                        || std::time::Instant::now() >= deadline
+                    {
+                        closed.store(true, Ordering::SeqCst);
+                        w.take();
+                    }
+                    return Err("CDP pipe closed");
+                }
+                let pipe = w.as_mut().ok_or("CDP pipe closed")?;
+                match pipe.write(&bytes[offset..]) {
+                    Ok(0) if cfg!(windows) => {
+                        std::thread::sleep(std::time::Duration::from_millis(5))
+                    }
+                    Ok(0) => {
+                        closed.store(true, Ordering::SeqCst);
+                        w.take();
+                        return Err("CDP pipe write failed");
+                    }
+                    Ok(n) => offset += n,
+                    Err(error) if retryable(&error) => {
+                        std::thread::sleep(std::time::Duration::from_millis(5))
+                    }
+                    Err(_) => {
+                        closed.store(true, Ordering::SeqCst);
+                        w.take();
+                        return Err("CDP pipe write failed");
+                    }
+                }
+            }
+            Ok(())
         });
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(15), async {
             write.await.map_err(|_| "CDP writer lost")??;
@@ -229,7 +395,6 @@ impl CdpClient {
             }
         })
         .await;
-        self.pending.lock().await.remove(&id);
         outcome
             .map_err(|_| "CDP command timed out".to_string())?
             .map_err(String::from)
@@ -266,7 +431,7 @@ impl CdpClient {
     /// Count the actual in-flight command map for upstream cancellation tests.
     #[cfg(test)]
     pub(crate) async fn pending_len(&self) -> usize {
-        self.pending.lock().await.len()
+        self.pending.lock().unwrap().len()
     }
     pub fn subscribe_methods(
         &self,
@@ -359,32 +524,48 @@ fn redact_response(
             }
         }
     }
-    values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    values.retain(|value| !value.is_empty());
+    values.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     values.dedup();
     if values.len() > 4000 || values.iter().map(String::len).sum::<usize>() > 8 * 1024 * 1024 {
         return Err("redaction_failed");
     }
-    loop {
-        let count = private_children.len();
-        for node in nodes.iter() {
-            if node["nodeId"]
-                .as_str()
-                .is_some_and(|id| private_children.contains(id))
-            {
-                for child in node["childIds"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                {
-                    private_children.insert(child.to_owned());
+    let mut descendants: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut edges = 0usize;
+    for node in nodes.iter() {
+        let Some(id) = node["nodeId"].as_str() else {
+            continue;
+        };
+        for child in node["childIds"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            edges = edges
+                .checked_add(1)
+                .filter(|n| *n <= LIMIT)
+                .ok_or("redaction_failed")?;
+            descendants.entry(id).or_default().push(child);
+        }
+    }
+    let mut pending: Vec<String> = private_children.iter().cloned().collect();
+    while let Some(id) = pending.pop() {
+        if let Some(children) = descendants.get(id.as_str()) {
+            for child in children {
+                if private_children.insert((*child).to_owned()) {
+                    pending.push((*child).to_owned());
                 }
             }
         }
-        if count == private_children.len() {
-            break;
-        }
     }
+    drop(descendants);
+    let mut buckets: [Vec<&str>; 256] = std::array::from_fn(|_| Vec::new());
+    for value in &values {
+        buckets[value.as_bytes()[0] as usize].push(value);
+    }
+    let mut budget = LIMIT;
+    let mut output_budget = LIMIT;
     for node in nodes {
         let private = node["backendDOMNodeId"]
             .as_i64()
@@ -394,14 +575,12 @@ fn redact_response(
                 .is_some_and(|id| private_children.contains(id));
         for key in ["name", "description"] {
             if let Some(text) = node[key]["value"].as_str() {
-                let mut safe = if private {
+                let safe = if private {
+                    output_budget = output_budget.checked_sub(10).ok_or("redaction_failed")?;
                     "[redacted]".to_owned()
                 } else {
-                    text.to_owned()
+                    redact_original(text, &buckets, &mut budget, &mut output_budget)?
                 };
-                for value in &values {
-                    safe = safe.replace(value, "[redacted]");
-                }
                 // Drop AX computed-name sources too: they can retain raw field content.
                 node[key] = json!({"type":"computedString", "value":safe});
             } else if let Some(object) = node.as_object_mut() {
@@ -415,9 +594,154 @@ fn redact_response(
     Ok(v)
 }
 
+fn redact_original(
+    text: &str,
+    buckets: &[Vec<&str>; 256],
+    budget: &mut usize,
+    output_budget: &mut usize,
+) -> Result<String, &'static str> {
+    let mut safe = String::new();
+    let mut offset = 0;
+    while offset < text.len() {
+        let remaining = &text[offset..];
+        let mut found = None;
+        for value in &buckets[remaining.as_bytes()[0] as usize] {
+            *budget = budget.checked_sub(value.len()).ok_or("redaction_failed")?;
+            if remaining.starts_with(value) {
+                found = Some(*value);
+                break;
+            }
+        }
+        let (chunk, advance) = match found {
+            Some(value) => ("[redacted]", value.len()),
+            None => {
+                let len = remaining
+                    .chars()
+                    .next()
+                    .ok_or("redaction_failed")?
+                    .len_utf8();
+                *budget = budget.checked_sub(len).ok_or("redaction_failed")?;
+                (&remaining[..len], len)
+            }
+        };
+        *output_budget = output_budget
+            .checked_sub(chunk.len())
+            .ok_or("redaction_failed")?;
+        safe.push_str(chunk);
+        offset += advance;
+    }
+    Ok(safe)
+}
+
 #[cfg(test)]
 mod private_redaction_tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_does_not_wait_for_a_blocked_pipe_writer() {
+        use std::os::fd::FromRawFd;
+        fn pipe() -> (File, File) {
+            let mut fds = [0; 2];
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) }
+        }
+        let (host_read, peer_write) = pipe();
+        let (peer_read, host_write) = pipe();
+        let client = Arc::new(CdpClient::from_pipe(host_read, host_write).unwrap());
+        let writer = client.clone();
+        let request = tokio::spawn(async move {
+            writer
+                .send_command(
+                    "fixture",
+                    Some(json!({"payload":"x".repeat(1024 * 1024)})),
+                    None,
+                )
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let close_client = client.clone();
+        let close = tokio::spawn(async move { close_client.close().await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(500), close)
+                .await
+                .is_ok()
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), request)
+                .await
+                .is_ok()
+        );
+        drop(peer_read);
+        drop(peer_write);
+    }
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_command_releases_pending_entry() {
+        use std::os::fd::FromRawFd;
+        fn pipe() -> (File, File) {
+            let mut fds = [0; 2];
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) }
+        }
+        let (host_read, _peer_write) = pipe();
+        let (_peer_read, host_write) = pipe();
+        let client = Arc::new(CdpClient::from_pipe(host_read, host_write).unwrap());
+        let worker = client.clone();
+        let request = tokio::spawn(async move {
+            worker
+                .send_command(
+                    "fixture",
+                    Some(json!({"payload":"x".repeat(1024 * 1024)})),
+                    None,
+                )
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(client.pending_len().await, 1);
+        request.abort();
+        let _ = request.await;
+        assert_eq!(client.pending_len().await, 0);
+        client.close().await;
+    }
+    #[cfg(unix)]
+    #[test]
+    fn nonblocking_reader_keeps_split_and_coalesced_frames() {
+        use std::os::fd::FromRawFd;
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (mut read, mut write) =
+            unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) };
+        nonblocking(&read, false).unwrap();
+        let sender = std::thread::spawn(move || {
+            write.write_all(b"first").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            write.write_all(b"-part\0second\0").unwrap();
+        });
+        let mut buffered = Vec::new();
+        let closed = AtomicBool::new(false);
+        assert_eq!(
+            read_frame(&mut read, &mut buffered, &closed).unwrap(),
+            b"first-part"
+        );
+        assert_eq!(
+            read_frame(&mut read, &mut buffered, &closed).unwrap(),
+            b"second"
+        );
+        sender.join().unwrap();
+    }
+    #[test]
+    fn repeated_short_values_redact_original_text_without_expanding_markers() {
+        let raw =
+            json!({"nodes":[{"nodeId":"1","role":{"value":"button"},"name":{"value":"a e"}}]});
+        let values = vec!["a".into(), "e".into(), "a".into(), "e".into()];
+        let safe =
+            redact_response("Accessibility.getFullAXTree", raw, &HashSet::new(), &values).unwrap();
+        assert_eq!(safe["nodes"][0]["name"]["value"], "[redacted] [redacted]");
+        let raw = json!({"nodes":[{"nodeId":"1","name":{"value":"a".repeat(2_000_000)}}]});
+        assert!(
+            redact_response("Accessibility.getFullAXTree", raw, &HashSet::new(), &values).is_err()
+        );
+    }
     #[test]
     fn debugger_notifications_never_retain_foreign_urls_or_stack_values() {
         let marker = "clovy-private-observation:aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa";

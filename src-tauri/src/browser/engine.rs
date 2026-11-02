@@ -789,6 +789,14 @@ fn verify_bundle(config: &EngineConfig) -> Result<()> {
             "private-host/clovy_private_guard.js",
             include_bytes!("../../../scripts/agent-browser/private-host/clovy_private_guard.js"),
         ),
+        (
+            "preparation-lock.mjs",
+            include_bytes!("../../../scripts/agent-browser/preparation-lock.mjs"),
+        ),
+        (
+            "windows-signing.mjs",
+            include_bytes!("../../../scripts/agent-browser/windows-signing.mjs"),
+        ),
     ];
     for (name, bytes) in inputs {
         if metadata["source"]["inputSha256"][name].as_str()

@@ -6,6 +6,7 @@
     "commit": "5868f7c05020e047c00e68e4abf9253cce864f41",
     "license": "Apache-2.0",
     "patches": ["0001-no-reference-recovery.patch", "0002-private-host.patch"],
+    "preparationFiles": ["preparation-lock.mjs", "windows-signing.mjs"],
     "reviewException": "The owner explicitly selected this source commit for the private authenticated host. The downstream patches remove public command listeners and unsafe reference recovery; the stock release does not satisfy the required authority boundary. This is an exact-source review exception, not a registry cooldown exclusion.",
     "hostFiles": [
       "private-host/clovy_private_main.rs",

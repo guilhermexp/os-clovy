@@ -116,6 +116,23 @@ struct GuardTarget {
     session: String,
     object: String,
     root: String,
+    object_group: String,
+}
+impl GuardTarget {
+    async fn release(&self) {
+        release_guard_objects(&self.client, &self.session, &self.object_group).await;
+    }
+}
+async fn release_guard_objects(client: &CdpClient, session: &str, group: &str) {
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        client.send_command(
+            "Runtime.releaseObjectGroup",
+            Some(json!({"objectGroup":group})),
+            Some(session),
+        ),
+    )
+    .await;
 }
 struct ObservationBarrier {
     client: std::sync::Arc<CdpClient>,
@@ -411,7 +428,7 @@ impl Host {
         let (c, p, port, persistent, headed) = self.launch.clone().ok_or("not_started")?;
         let (chrome, r, w) = clovy_private_launch::launch(&c, &p, port, persistent, headed)?;
         self.chrome = Some(chrome);
-        self.browser = Some(BrowserManager::from_private_pipe(CdpClient::from_pipe(r, w)).await?);
+        self.browser = Some(BrowserManager::from_private_pipe(CdpClient::from_pipe(r, w)?).await?);
         self.register()
     }
     async fn document(&mut self) -> Result<(i64, String), String> {
@@ -446,11 +463,13 @@ impl Host {
         let context = world["executionContextId"]
             .as_i64()
             .ok_or("document_unavailable")?;
+        let group = format!("clovy-guard-{}", uuid::Uuid::new_v4().simple());
+        let result = async {
         let obj = b
             .client
             .send_command(
                 "DOM.resolveNode",
-                Some(json!({"backendNodeId":node,"executionContextId":context})),
+                Some(json!({"backendNodeId":node,"executionContextId":context,"objectGroup":group})),
                 Some(sid),
             )
             .await
@@ -459,7 +478,7 @@ impl Host {
             .client
             .send_command(
                 "DOM.resolveNode",
-                Some(json!({"backendNodeId":doc,"executionContextId":context})),
+                Some(json!({"backendNodeId":doc,"executionContextId":context,"objectGroup":group})),
                 Some(sid),
             )
             .await?;
@@ -479,7 +498,13 @@ impl Host {
             session: sid.to_owned(),
             object: object.to_owned(),
             root: root.to_owned(),
+            object_group: group.clone(),
         })
+        }.await;
+        if result.is_err() {
+            release_guard_objects(&b.client, sid, &group).await;
+        }
+        result
     }
     async fn inspect_guard(
         &mut self,
@@ -515,6 +540,7 @@ impl Host {
         // Restore ordinary page/network scheduling before the one atomic guard+effect.
         // No metadata is emitted from the effect; exact raw metadata stays privately bound.
         let target = self.guard_target(tab, reference).await?;
+        let result = async {
         let (saved, saved_raw) = target.entry.metadata.as_ref().ok_or("stale_reference")?;
         if expected.as_ref() != Some(saved) {
             return Err("stale_reference".into());
@@ -528,6 +554,9 @@ impl Host {
             return Err(error.into());
         }
         Ok(value["inspection"].clone())
+        }.await;
+        target.release().await;
+        result
     }
     async fn inspect_observed(
         &mut self,
@@ -537,6 +566,7 @@ impl Host {
         remember: bool,
     ) -> Result<(Value, Vec<String>), String> {
         let target = self.guard_target(tab, reference).await?;
+        let result = async {
         let values = privacy_inventory(&target.client, &target.session, false)
             .await?
             .values;
@@ -587,6 +617,9 @@ impl Host {
             }
         }
         Ok((inspection, values))
+        }.await;
+        target.release().await;
+        result
     }
     async fn execute(&mut self, op: Operation, attempted: &mut bool) -> Result<Value, String> {
         match op {
@@ -1159,7 +1192,7 @@ fn parse_privacy_snapshot(
             let tag = string(&names[i])?.to_ascii_lowercase();
             control_root[i] = matches!(tag.as_str(), "input" | "textarea" | "select");
             control[i] = control_root[i];
-            iframe[i] = tag == "iframe";
+            iframe[i] = matches!(tag.as_str(), "iframe" | "frame");
             let attributes = attrs[i].as_array().ok_or("redaction_failed")?;
             if attributes.len() % 2 != 0 {
                 return Err("redaction_failed".into());
@@ -1405,7 +1438,7 @@ fn parse_privacy_snapshot(
         return Err("redaction_failed".into());
     }
     drop(add_value);
-    values.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    values.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     values.dedup();
     if boxes.len() > 20_000 {
         return Err("redaction_failed".into());

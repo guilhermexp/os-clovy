@@ -595,7 +595,19 @@ async fn main() {
     .await;
     engine.terminate("task-a");
     assert!(data.join("browser-profile").is_dir());
-    engine.reserve("task-new-run").unwrap();
+    let reservation_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match engine.reserve("task-new-run") {
+            Ok(()) => break,
+            Err(error)
+                if error.code == "browser_profile_busy"
+                    && tokio::time::Instant::now() < reservation_deadline =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("profile reservation failed: {error:?}"),
+        }
+    }
     let reopened = call(&engine, "task-new-run", "start_session", json!({})).await["tabId"]
         .as_i64()
         .unwrap();

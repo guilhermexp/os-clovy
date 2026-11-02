@@ -25,6 +25,8 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
+import { acquirePreparationLock } from "./agent-browser/preparation-lock.mjs";
+import { windowsSigningIdentity } from "./agent-browser/windows-signing.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const definition = path.join(root, "scripts/agent-browser");
@@ -82,12 +84,6 @@ if (option("--resource-root") && !check)
 const output = option("--resource-root")
   ? path.resolve(option("--resource-root"))
   : path.join(root, "resources/agent-browser");
-if (check && existsSync(output)) {
-  for (const entry of readdirSync(output, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !manifest.chrome.platforms[entry.name])
-      throw new Error(`Unexpected browser resource root entry: ${entry.name}`);
-  }
-}
 const buildTarget = process.env.CLOVY_AGENT_BROWSER_TARGET_DIR || path.join(cache, "target");
 const profile = release ? "release" : "debug";
 const hashBytes = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -107,7 +103,11 @@ const run = (command, argv, options = {}) => {
   if (result.status !== 0) throw new Error(`${command} failed (${result.status})`);
   return result.stdout?.trim();
 };
-const inputFiles = [...manifest.source.patches, ...manifest.source.hostFiles];
+const inputFiles = [
+  ...manifest.source.patches,
+  ...manifest.source.hostFiles,
+  ...manifest.source.preparationFiles,
+];
 const inputBytes = new Map(
   inputFiles.map((file) => [file, readFileSync(path.join(definition, file))]),
 );
@@ -135,173 +135,188 @@ if (!check && process.platform === "linux" && !process.env.CLOVY_BROWSER_BUILD_L
   process.exit(0);
 }
 
-for (const platform of platforms) {
-  const pin = manifest.chrome.platforms[platform];
-  const destination = path.join(output, platform);
-  const provenanceFile = path.join(destination, "provenance.json");
-  let previous;
-  try {
-    previous = JSON.parse(readFileSync(provenanceFile, "utf8"));
-  } catch {
-    /* unprepared */
+const releasePreparationLock = await acquirePreparationLock(cache);
+try {
+  if (check && existsSync(output)) {
+    for (const entry of readdirSync(output, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !manifest.chrome.platforms[entry.name])
+        throw new Error(`Unexpected browser resource root entry: ${entry.name}`);
+    }
   }
-  const filesMatch =
-    previous?.preparationId === preparationId &&
-    previous.platform === platform &&
-    previous.profile === profile &&
-    previous.protocol === manifest.protocol &&
-    previous.source?.commit === manifest.source.commit &&
-    previous.chrome?.version === manifest.chrome.version &&
-    previous.chrome?.sha256 === pin.sha256 &&
-    previous.files?.[pin.engine] &&
-    previous.files?.[pin.executable] &&
-    (await verifyInventory(destination, previous.files));
-  if (check) {
-    if (!filesMatch)
+  for (const platform of platforms) {
+    const pin = manifest.chrome.platforms[platform];
+    const destination = path.join(output, platform);
+    const provenanceFile = path.join(destination, "provenance.json");
+    let previous;
+    try {
+      previous = JSON.parse(readFileSync(provenanceFile, "utf8"));
+    } catch {
+      /* unprepared */
+    }
+    const filesMatch =
+      previous?.preparationId === preparationId &&
+      previous.platform === platform &&
+      previous.profile === profile &&
+      previous.protocol === manifest.protocol &&
+      previous.source?.commit === manifest.source.commit &&
+      previous.chrome?.version === manifest.chrome.version &&
+      previous.chrome?.sha256 === pin.sha256 &&
+      previous.files?.[pin.engine] &&
+      previous.files?.[pin.executable] &&
+      (await verifyInventory(destination, previous.files));
+    if (check) {
+      if (!filesMatch)
+        throw new Error(
+          `Pinned browser resources are missing or modified for ${platform}. Run pnpm browser:prepare.`,
+        );
+      console.error(`Verified pinned browser resources: ${platform}`);
+      continue;
+    }
+    const identity = signingIdentity();
+    if (filesMatch && previous.signingIdentity === identity) {
+      if (process.platform === "win32" && identity !== null)
+        verifyWindowsSignature(path.join(destination, pin.engine), identity);
+      console.error(`Reusing pinned browser resources: ${platform}`);
+      continue;
+    }
+    if (Number(statfsSync(root).bavail) * Number(statfsSync(root).bsize) < 20 * 1024 ** 3)
+      throw new Error("Browser preparation needs at least 20 GiB free disk space.");
+    const nativeOS = platform.startsWith("mac-")
+      ? "darwin"
+      : platform === "win64"
+        ? "win32"
+        : "linux";
+    if (process.platform !== nativeOS)
       throw new Error(
-        `Pinned browser resources are missing or modified for ${platform}. Run pnpm browser:prepare.`,
+        `Prepare ${platform} on its native OS; cross-OS helper builds are unsupported.`,
       );
-    console.error(`Verified pinned browser resources: ${platform}`);
-    continue;
-  }
-  if (filesMatch && previous.signingIdentity === signingIdentity()) {
-    console.error(`Reusing pinned browser resources: ${platform}`);
-    continue;
-  }
-  if (Number(statfsSync(root).bavail) * Number(statfsSync(root).bsize) < 20 * 1024 ** 3)
-    throw new Error("Browser preparation needs at least 20 GiB free disk space.");
-  const nativeOS = platform.startsWith("mac-")
-    ? "darwin"
-    : platform === "win64"
-      ? "win32"
-      : "linux";
-  if (process.platform !== nativeOS)
-    throw new Error(
-      `Prepare ${platform} on its native OS; cross-OS helper builds are unsupported.`,
-    );
-  mkdirSync(cache, { recursive: true });
-  const archive = path.join(cache, `chrome-${manifest.chrome.version}-${platform}.zip`);
-  if (!existsSync(archive) || (await hashFile(archive)) !== pin.sha256) {
-    rmSync(archive, { force: true });
-    const response = await fetch(pin.url, { redirect: "error" });
-    if (!response.ok || !response.body)
-      throw new Error(`Chrome archive download failed: ${response.status}`);
-    rmSync(`${archive}.partial`, { force: true });
-    await pipeline(
-      Readable.fromWeb(response.body),
-      createWriteStream(`${archive}.partial`, { flags: "wx" }),
-    );
-    if ((await hashFile(`${archive}.partial`)) !== pin.sha256)
-      throw new Error("Chrome archive digest mismatch; refusing preparation.");
-    renameSync(`${archive}.partial`, archive);
-  }
-  const source = await prepareSource();
-  const cargoManifest = path.join(source, "cli/Cargo.toml");
-  const rustcDetails = run("rustc", ["--version", "--verbose"], {
-    stdio: ["ignore", "pipe", "inherit"],
-  });
-  const rustHost = rustcDetails.match(/^host: (.+)$/m)?.[1];
-  if (process.env.CARGO_BUILD_TARGET && process.env.CARGO_BUILD_TARGET !== pin.target)
-    throw new Error("CARGO_BUILD_TARGET conflicts with the pinned browser target.");
-  const nativeTarget = pin.target === rustHost && !process.env.CARGO_BUILD_TARGET;
-  if (Number(statfsSync(root).bavail) * Number(statfsSync(root).bsize) < 20 * 1024 ** 3)
-    throw new Error("Browser compilation needs at least 20 GiB free disk space.");
-  run(
-    process.env.CARGO || "cargo",
-    [
-      "build",
-      "--manifest-path",
-      cargoManifest,
-      "--locked",
-      "--features",
-      "clovy-private",
-      "--bin",
-      "clovy-agent-browser",
-      ...(nativeTarget ? [] : ["--target", pin.target]),
-      ...(release ? ["--release"] : []),
-    ],
-    {
-      env: {
-        ...process.env,
-        CARGO_TARGET_DIR: buildTarget,
-        CARGO_INCREMENTAL: "0",
-        CARGO_PROFILE_DEV_DEBUG: "0",
-        CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP: "none",
-        CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none",
-      },
-    },
-  );
-  const metadata = JSON.parse(
+    mkdirSync(cache, { recursive: true });
+    const archive = path.join(cache, `chrome-${manifest.chrome.version}-${platform}.zip`);
+    if (!existsSync(archive) || (await hashFile(archive)) !== pin.sha256) {
+      rmSync(archive, { force: true });
+      const response = await fetch(pin.url, { redirect: "error" });
+      if (!response.ok || !response.body)
+        throw new Error(`Chrome archive download failed: ${response.status}`);
+      rmSync(`${archive}.partial`, { force: true });
+      await pipeline(
+        Readable.fromWeb(response.body),
+        createWriteStream(`${archive}.partial`, { flags: "wx" }),
+      );
+      if ((await hashFile(`${archive}.partial`)) !== pin.sha256)
+        throw new Error("Chrome archive digest mismatch; refusing preparation.");
+      renameSync(`${archive}.partial`, archive);
+    }
+    const source = await prepareSource();
+    const cargoManifest = path.join(source, "cli/Cargo.toml");
+    const rustcDetails = run("rustc", ["--version", "--verbose"], {
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    const rustHost = rustcDetails.match(/^host: (.+)$/m)?.[1];
+    if (process.env.CARGO_BUILD_TARGET && process.env.CARGO_BUILD_TARGET !== pin.target)
+      throw new Error("CARGO_BUILD_TARGET conflicts with the pinned browser target.");
+    const nativeTarget = pin.target === rustHost && !process.env.CARGO_BUILD_TARGET;
+    if (Number(statfsSync(root).bavail) * Number(statfsSync(root).bsize) < 20 * 1024 ** 3)
+      throw new Error("Browser compilation needs at least 20 GiB free disk space.");
     run(
       process.env.CARGO || "cargo",
       [
-        "metadata",
+        "build",
         "--manifest-path",
         cargoManifest,
         "--locked",
-        "--format-version",
-        "1",
-        "--filter-platform",
-        pin.target,
+        "--features",
+        "clovy-private",
+        "--bin",
+        "clovy-agent-browser",
+        ...(nativeTarget ? [] : ["--target", pin.target]),
+        ...(release ? ["--release"] : []),
       ],
-      { stdio: ["ignore", "pipe", "inherit"], maxBuffer: 32 * 1024 * 1024 },
-    ),
-  );
-  const stage = `${destination}.preparing`;
-  if (Number(statfsSync(root).bavail) * Number(statfsSync(root).bsize) < 20 * 1024 ** 3)
-    throw new Error("Chrome extraction needs at least 20 GiB free disk space.");
-  rmSync(stage, { recursive: true, force: true });
-  mkdirSync(path.join(stage, "chrome"), { recursive: true });
-  extract(archive, path.join(stage, "chrome"), pin.archiveRoot);
-  if (!existsSync(path.join(stage, pin.executable)))
-    throw new Error("Chrome archive lacks the pinned executable.");
-  cpSync(
-    path.join(buildTarget, ...(nativeTarget ? [] : [pin.target]), profile, pin.engine),
-    path.join(stage, pin.engine),
-  );
-  mkdirSync(path.join(stage, "licenses"), { recursive: true });
-  cpSync(path.join(source, "LICENSE"), path.join(stage, "licenses/agent-browser-LICENSE"));
-  cpSync(
-    path.join(stage, "chrome", pin.archiveRoot, "ABOUT"),
-    path.join(stage, "licenses/chrome-ABOUT"),
-  );
-  writeFileSync(
-    path.join(stage, "sbom.spdx.json"),
-    `${JSON.stringify(sbom(metadata, platform, pin), null, 2)}\n`,
-  );
-  if (process.platform === "darwin") signMac(stage);
-  if (process.platform === "win32" && process.env.WINDOWS_CERTIFICATE_PATH) {
-    run("powershell.exe", [
-      "-NoProfile",
-      "-File",
-      path.join(root, "scripts/windows-sign.ps1"),
+      {
+        env: {
+          ...process.env,
+          CARGO_TARGET_DIR: buildTarget,
+          CARGO_INCREMENTAL: "0",
+          CARGO_PROFILE_DEV_DEBUG: "0",
+          CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP: "none",
+          CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none",
+        },
+      },
+    );
+    const metadata = JSON.parse(
+      run(
+        process.env.CARGO || "cargo",
+        [
+          "metadata",
+          "--manifest-path",
+          cargoManifest,
+          "--locked",
+          "--format-version",
+          "1",
+          "--filter-platform",
+          pin.target,
+        ],
+        { stdio: ["ignore", "pipe", "inherit"], maxBuffer: 32 * 1024 * 1024 },
+      ),
+    );
+    const stage = `${destination}.preparing`;
+    if (Number(statfsSync(root).bavail) * Number(statfsSync(root).bsize) < 20 * 1024 ** 3)
+      throw new Error("Chrome extraction needs at least 20 GiB free disk space.");
+    rmSync(stage, { recursive: true, force: true });
+    mkdirSync(path.join(stage, "chrome"), { recursive: true });
+    extract(archive, path.join(stage, "chrome"), pin.archiveRoot);
+    if (!existsSync(path.join(stage, pin.executable)))
+      throw new Error("Chrome archive lacks the pinned executable.");
+    cpSync(
+      path.join(buildTarget, ...(nativeTarget ? [] : [pin.target]), profile, pin.engine),
       path.join(stage, pin.engine),
-    ]);
+    );
+    mkdirSync(path.join(stage, "licenses"), { recursive: true });
+    cpSync(path.join(source, "LICENSE"), path.join(stage, "licenses/agent-browser-LICENSE"));
+    cpSync(
+      path.join(stage, "chrome", pin.archiveRoot, "ABOUT"),
+      path.join(stage, "licenses/chrome-ABOUT"),
+    );
+    writeFileSync(
+      path.join(stage, "sbom.spdx.json"),
+      `${JSON.stringify(sbom(metadata, platform, pin), null, 2)}\n`,
+    );
+    if (process.platform === "darwin") signMac(stage);
+    if (process.platform === "win32" && identity !== null) {
+      run("powershell.exe", [
+        "-NoProfile",
+        "-File",
+        path.join(root, "scripts/windows-sign.ps1"),
+        path.join(stage, pin.engine),
+      ]);
+      verifyWindowsSignature(path.join(stage, pin.engine), identity);
+    }
+    const provenance = {
+      schemaVersion: 1,
+      protocol: manifest.protocol,
+      preparationId,
+      preparerSha256,
+      source: {
+        ...manifest.source,
+        inputSha256: inputs,
+        cargoLockSha256: await hashFile(path.join(source, "cli/Cargo.lock")),
+      },
+      chrome: { version: manifest.chrome.version, revision: manifest.chrome.revision, ...pin },
+      platform,
+      profile,
+      rustc: rustcDetails,
+      signingIdentity: identity,
+      files: await inventory(stage),
+    };
+    writeFileSync(path.join(stage, "provenance.json"), `${JSON.stringify(provenance, null, 2)}\n`);
+    mkdirSync(output, { recursive: true });
+    rmSync(destination, { recursive: true, force: true });
+    renameSync(stage, destination);
+    console.error(
+      `Prepared private browser ${platform}: ${manifest.source.commit}, Chrome ${manifest.chrome.version}`,
+    );
   }
-  const provenance = {
-    schemaVersion: 1,
-    protocol: manifest.protocol,
-    preparationId,
-    preparerSha256,
-    source: {
-      ...manifest.source,
-      inputSha256: inputs,
-      cargoLockSha256: await hashFile(path.join(source, "cli/Cargo.lock")),
-    },
-    chrome: { version: manifest.chrome.version, revision: manifest.chrome.revision, ...pin },
-    platform,
-    profile,
-    rustc: rustcDetails,
-    signingIdentity: signingIdentity(),
-    files: await inventory(stage),
-  };
-  writeFileSync(path.join(stage, "provenance.json"), `${JSON.stringify(provenance, null, 2)}\n`);
-  mkdirSync(output, { recursive: true });
-  rmSync(destination, { recursive: true, force: true });
-  renameSync(stage, destination);
-  console.error(
-    `Prepared private browser ${platform}: ${manifest.source.commit}, Chrome ${manifest.chrome.version}`,
-  );
+} finally {
+  releasePreparationLock();
 }
 
 async function prepareSource() {
@@ -376,16 +391,32 @@ function extract(archive, destination, archiveRoot) {
 }
 
 function signingIdentity() {
-  if (process.platform === "win32")
-    return process.env.WINDOWS_CERTIFICATE_PATH
-      ? `pfx-sha256:${hashBytes(readFileSync(process.env.WINDOWS_CERTIFICATE_PATH))}`
-      : null;
+  if (process.platform === "win32") return windowsSigningIdentity(process.env);
   if (process.platform !== "darwin") return null;
   return (
     (release
       ? process.env.APPLE_SIGNING_IDENTITY
       : process.env.CLOVY_DEV_SIGNING_IDENTITY
     )?.trim() || "-"
+  );
+}
+function verifyWindowsSignature(file, identity) {
+  const thumbprint = identity.startsWith("store-sha1:") ? identity.slice("store-sha1:".length) : "";
+  run(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      '$s = Get-AuthenticodeSignature -LiteralPath $env:CLOVY_BROWSER_SIGNATURE_FILE; if ($s.Status -ne "Valid" -or ($env:CLOVY_BROWSER_SIGNATURE_THUMBPRINT -and $s.SignerCertificate.Thumbprint -ne $env:CLOVY_BROWSER_SIGNATURE_THUMBPRINT)) { throw "Browser signature verification failed" }',
+    ],
+    {
+      env: {
+        ...process.env,
+        CLOVY_BROWSER_SIGNATURE_FILE: file,
+        CLOVY_BROWSER_SIGNATURE_THUMBPRINT: thumbprint,
+      },
+    },
   );
 }
 function signMac(directory) {
