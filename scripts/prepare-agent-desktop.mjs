@@ -15,8 +15,12 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { sha256, verifyEngineArtifact } from "./agent-desktop-artifact.mjs";
-import { signatureSatisfies } from "./dev-signing-identity.mjs";
+import {
+  allocateEngineBuildSource,
+  sha256,
+  verifyEngineArtifact,
+} from "./agent-desktop-artifact.mjs";
+import { resolveDevSigningIdentity, signatureSatisfies } from "./dev-signing-identity.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pin = JSON.parse(readFileSync(join(root, "src-tauri", "agent-desktop-pin.json"), "utf8"));
@@ -74,15 +78,23 @@ if (digest(patchBytes) !== pin.patchSha256) throw new Error("Audited engine patc
 const buildTargets =
   target === "universal-apple-darwin" ? ["aarch64-apple-darwin", "x86_64-apple-darwin"] : [target];
 const output = join(root, ".tauri-helper", "agent-desktop", target);
+let resolvedSigningIdentity;
+function signingIdentity() {
+  if (!resolvedSigningIdentity) {
+    const configured =
+      process.env.APPLE_SIGNING_IDENTITY || process.env.CLOVY_DEV_SIGNING_IDENTITY || "-";
+    resolvedSigningIdentity = resolveDevSigningIdentity({
+      env: { CLOVY_DEV_SIGNING_IDENTITY: configured },
+    }).identity;
+  }
+  return resolvedSigningIdentity;
+}
 try {
   const manifest = verifyEngineArtifact(output, pin, target);
   const cachedExecutable = join(output, manifest.executable);
   verifySignature(cachedExecutable);
   if (target.includes("apple-darwin")) {
-    const needsSigning = !signatureSatisfies(
-      cachedExecutable,
-      process.env.APPLE_SIGNING_IDENTITY || process.env.CLOVY_DEV_SIGNING_IDENTITY || "-",
-    );
+    const needsSigning = !signatureSatisfies(cachedExecutable, signingIdentity());
     const hashes = needsSigning ? undefined : signedCodeDirectoryHashes(cachedExecutable);
     if (needsSigning || JSON.stringify(manifest.codeDirectoryHashes) !== JSON.stringify(hashes)) {
       const resigned = mkdtempSync(join(dirname(output), `.${target}-resign-`));
@@ -124,21 +136,12 @@ if (sha256(join(root, "src-tauri", "agent-desktop", "Cargo.lock")) !== pin.cargo
   throw new Error("Vendored engine lock digest mismatch");
 // Build from a fresh archive with only this reviewed patch. Do not reuse a
 // writable checkout: a clean Git status does not authenticate ignored files.
-const buildSource = join(
-  root,
-  ".tauri-helper",
-  "agent-desktop-build",
+const buildRoot = join(root, ".tauri-helper", "agent-desktop-build");
+const actualSource = allocateEngineBuildSource(
+  buildRoot,
   `${commit}-${pin.patchSha256}`,
+  process.env.AGENT_DESKTOP_BUILD_DIR,
 );
-if (!process.env.AGENT_DESKTOP_BUILD_DIR && existsSync(buildSource)) {
-  throw new Error(
-    `Previous engine build checkout exists; preserve it and set AGENT_DESKTOP_BUILD_DIR to a fresh run-owned path: ${buildSource}`,
-  );
-}
-const actualSource = resolve(process.env.AGENT_DESKTOP_BUILD_DIR || buildSource);
-if (existsSync(actualSource))
-  throw new Error(`Refusing to overwrite engine build checkout: ${actualSource}`);
-mkdirSync(actualSource, { recursive: true });
 const archive = spawnSync("git", ["archive", "--format=tar", commit], {
   cwd: source,
   maxBuffer: 64 * 1024 * 1024,
@@ -274,14 +277,7 @@ function signExecutable(executable) {
   if (target.includes("apple-darwin")) {
     run(
       "/usr/bin/codesign",
-      [
-        "--force",
-        "--sign",
-        process.env.APPLE_SIGNING_IDENTITY || process.env.CLOVY_DEV_SIGNING_IDENTITY || "-",
-        "--options",
-        "runtime",
-        executable,
-      ],
+      ["--force", "--sign", signingIdentity(), "--options", "runtime", executable],
       root,
     );
   } else if (target.includes("windows")) {

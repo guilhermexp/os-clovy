@@ -4,9 +4,11 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  allocateEngineBuildSource,
   helperBuildInputsMatch,
   sha256,
   verifyEngineArtifact,
+  verifyEngineSbom,
 } from "../../scripts/agent-desktop-artifact.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -44,6 +46,35 @@ function artifact() {
 }
 
 describe("bundled desktop engine artifact verification", () => {
+  it("rejects a packaged SBOM whose patch provenance differs from the pin", () => {
+    const dir = mkdtempSync(join(tmpdir(), "clovy-sbom-proof-"));
+    directories.push(dir);
+    const sbom = JSON.parse(
+      readFileSync(join(root, "src-tauri/agent-desktop/sbom.spdx.json"), "utf8"),
+    );
+    const file = join(dir, "agent-desktop.spdx.json");
+    writeFileSync(file, JSON.stringify(sbom));
+    expect(verifyEngineSbom(file, pin).packages[0].versionInfo).toBe(pin.version);
+    sbom.packages[0].sourceInfo = "another patch";
+    writeFileSync(file, JSON.stringify(sbom));
+    expect(() => verifyEngineSbom(file, pin)).toThrow(/provenance mismatch/);
+    sbom.packages[0].sourceInfo = `reviewed patch SHA-256 ${pin.patchSha256}.`;
+    sbom.documentNamespace += "-different";
+    writeFileSync(file, JSON.stringify(sbom));
+    expect(() => verifyEngineSbom(file, pin)).toThrow(/provenance mismatch/);
+  });
+  it("preserves earlier checkout generations and refuses an occupied explicit directory", () => {
+    const root = mkdtempSync(join(tmpdir(), "clovy-build-generations-"));
+    directories.push(root);
+    const first = allocateEngineBuildSource(root, "source", undefined);
+    writeFileSync(join(first, "evidence"), "preserve");
+    const second = allocateEngineBuildSource(root, "source", undefined);
+    const third = allocateEngineBuildSource(root, "source", undefined);
+    expect(new Set([first, second, third]).size).toBe(3);
+    expect(readFileSync(join(first, "evidence"), "utf8")).toBe("preserve");
+    expect(() => allocateEngineBuildSource(root, "source", first)).toThrow(/Refusing to overwrite/);
+    expect(readFileSync(join(first, "evidence"), "utf8")).toBe("preserve");
+  });
   it("accepts byte-identical executable and license with the reviewed source contract", () => {
     const { directory, target, manifest } = artifact();
     expect(verifyEngineArtifact(directory, pin, target).executableSha256).toBe(

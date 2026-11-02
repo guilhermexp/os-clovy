@@ -16,7 +16,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { computerUseBundleIdentifier } from "./computer-use-dev.mjs";
-import { sha256, verifyEngineArtifact } from "./agent-desktop-artifact.mjs";
+import { sha256, verifyEngineArtifact, verifyEngineSbom } from "./agent-desktop-artifact.mjs";
+import { resolveComputerUseHost } from "./computer-use-host-path.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pin = readJson(path.join(rootDir, "src-tauri", "agent-desktop-pin.json"));
@@ -112,6 +113,7 @@ function parseArguments(args) {
   const parsed = {
     bundle: undefined,
     host: undefined,
+    target: undefined,
     live: false,
     permissionsOnly: false,
     promptPermissions: false,
@@ -128,6 +130,12 @@ function parseArguments(args) {
       case "--host":
         parsed.host = args[index + 1];
         if (!parsed.host) throw new Error("--host requires a path");
+        index += 1;
+        break;
+      case "--target":
+        parsed.target = args[index + 1];
+        if (!parsed.target || !/^(aarch64|x86_64)-pc-windows-msvc$/.test(parsed.target))
+          throw new Error("--target requires an explicit Windows MSVC target");
         index += 1;
         break;
       case "--live":
@@ -262,18 +270,7 @@ function validateBundle() {
   ) {
     throw new Error("A Computer use release must contain a release-profile helper.");
   }
-  const sbom = readJson(path.join(bundleDir, "Contents", "Resources", "agent-desktop.spdx.json"));
-  const sbomPackage = sbom.packages?.find((entry) => entry.name === "agent-desktop");
-  const sbomSource = sbomPackage?.externalRefs?.find(
-    (reference) => reference.referenceType === "purl",
-  )?.referenceLocator;
-  if (
-    sbomPackage?.versionInfo !== pin.version ||
-    sbomPackage?.licenseDeclared !== "Apache-2.0" ||
-    !sbomSource?.endsWith(`@${pin.sourceCommit}`)
-  ) {
-    throw new Error("Bundled Computer use SBOM does not match the pinned source commit.");
-  }
+  verifyEngineSbom(path.join(bundleDir, "Contents", "Resources", "agent-desktop.spdx.json"), pin);
   const bundledLicense = path.join(bundleDir, "Contents", "Resources", "agent-desktop-LICENSE");
   if (
     readFileSync(bundledLicense, "utf8") !==
@@ -319,6 +316,7 @@ function validateBundle() {
 }
 
 function validateWindowsBundle() {
+  verifyEngineSbom(path.join(bundleDir, "agent-desktop.spdx.json"), pin);
   const stamp = readJson(stampPath);
   const target = process.arch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc";
   const engineManifest = verifyEngineArtifact(bundleDir, pin, target);
@@ -379,27 +377,16 @@ function validateDirectLaunchRefusal() {
 }
 
 function resolveSelfTestHost() {
-  if (options.host) {
-    const host = path.resolve(options.host);
-    if (!existsSync(host)) throw new Error(`Computer use self-test host is missing: ${host}`);
-    return host;
-  }
+  if (options.host) return resolveComputerUseHost({ host: options.host });
   const stamp = readJson(stampPath);
   const profile = stamp.clovyBuild?.profile === "release" ? "release" : "debug";
-  const host = path.join(
-    process.env.CARGO_TARGET_DIR || path.join(rootDir, "src-tauri", "target"),
-    ...(process.platform === "win32"
-      ? [process.arch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc"]
-      : []),
+  return resolveComputerUseHost({
+    host: options.host,
+    targetDir: process.env.CARGO_TARGET_DIR || path.join(rootDir, "src-tauri", "target"),
     profile,
-    process.platform === "win32" ? "clovy.exe" : "clovy",
-  );
-  if (!existsSync(host)) {
-    throw new Error(
-      `Computer use self-test host is missing: ${host}. Build Clovy first or pass --host.`,
-    );
-  }
-  return host;
+    platform: process.platform,
+    targetTriple: options.target,
+  });
 }
 
 async function startMcp(command, args = [], env = driverEnvironment()) {

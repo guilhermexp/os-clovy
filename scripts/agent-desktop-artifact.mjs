@@ -1,9 +1,46 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+
+export function allocateEngineBuildSource(buildRoot, prefix, override) {
+  if (override) {
+    const destination = resolve(override);
+    mkdirSync(dirname(destination), { recursive: true });
+    try {
+      mkdirSync(destination);
+    } catch (error) {
+      if (error.code === "EEXIST")
+        throw new Error(`Refusing to overwrite engine build checkout: ${destination}`);
+      throw error;
+    }
+    return destination;
+  }
+  mkdirSync(buildRoot, { recursive: true });
+  return mkdtempSync(join(buildRoot, `${prefix}-`));
+}
 
 export function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+export function verifyEngineSbom(file, pin) {
+  const sbom = JSON.parse(
+    Buffer.isBuffer(file) ? file.toString("utf8") : readFileSync(file, "utf8"),
+  );
+  const entry = sbom.packages?.find((item) => item.name === "agent-desktop");
+  const source = entry?.externalRefs?.find(
+    (item) => item.referenceType === "purl",
+  )?.referenceLocator;
+  if (
+    sbom.documentNamespace !==
+      `https://github.com/guilhermexp/os-clovy/sbom/agent-desktop/${pin.sourceCommit}/${pin.patchSha256}` ||
+    entry?.versionInfo !== pin.version ||
+    entry?.licenseDeclared !== "Apache-2.0" ||
+    source !== `pkg:github/vercel-labs/agent-desktop@${pin.sourceCommit}` ||
+    !entry?.sourceInfo?.includes(`reviewed patch SHA-256 ${pin.patchSha256}.`)
+  )
+    throw new Error("Engine SBOM provenance mismatch");
+  return sbom;
 }
 
 // Verify bytes, not a successful --version invocation from an untrusted file.

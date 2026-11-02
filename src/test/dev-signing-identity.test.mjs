@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   DevSigningIdentityError,
   resolveDevSigningIdentity,
+  signatureSatisfies,
 } from "../../scripts/dev-signing-identity.mjs";
 
 const DEVELOPMENT = "1111111111111111111111111111111111111111";
@@ -15,6 +16,33 @@ function keychain(...identities) {
 }
 
 describe("development signing identity", () => {
+  it("reuses the same signature for an exact name or its hash and rejects another certificate", () => {
+    const selectedName = "Apple Development: Fixture Person (TEAM000001)";
+    const run = (command, args) => {
+      if (command === "/usr/bin/security")
+        return {
+          status: 0,
+          stdout: `  1) ${DEVELOPMENT} "${selectedName}"\n  2) ${SECOND_DEVELOPMENT} "Other"\n`,
+        };
+      if (command === "/usr/bin/codesign")
+        return {
+          status: args.includes(`-R=certificate leaf = H"${DEVELOPMENT}"`) ? 0 : 1,
+        };
+      throw new Error("unexpected command");
+    };
+    for (const configured of [selectedName, DEVELOPMENT.toLowerCase()]) {
+      const identity = resolveDevSigningIdentity({
+        env: { CLOVY_DEV_SIGNING_IDENTITY: configured },
+        run,
+      }).identity;
+      expect(signatureSatisfies("fixture", identity, run)).toBe(true);
+    }
+    const other = resolveDevSigningIdentity({
+      env: { CLOVY_DEV_SIGNING_IDENTITY: SECOND_DEVELOPMENT },
+      run,
+    }).identity;
+    expect(signatureSatisfies("fixture", other, run)).toBe(false);
+  });
   it("discovers the single valid Apple Development identity", () => {
     const run = keychain(
       [LOCAL, "Local Dev Signing"],

@@ -221,6 +221,11 @@ node scripts/computer-use-self-test.mjs --bundle <computer-use-resource-director
 node scripts/computer-use-self-test.mjs --live --bundle <computer-use-resource-directory> --host <signed-clovy.exe>
 ```
 
+Without `--host`, discovery uses the native Cargo output under `CARGO_TARGET_DIR`
+or `src-tauri/target`. For a build made with an explicit Cargo target, pass the
+same target to the self-test, for example `--target x86_64-pc-windows-msvc`.
+The self-test does not select a different architecture if that host is missing.
+
 The live mode compiles the checked-in WinForms fixture through the installed
 .NET Framework C# compiler, signs it with the same certificate, and stages it
 at the fixed QA-only `native/fixtures/clovy-computer-use-fixture.exe` beside

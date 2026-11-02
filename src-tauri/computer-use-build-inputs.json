@@ -17,6 +17,7 @@
   "src-tauri/src/computer_use_macos.rs",
   "src-tauri/agent-desktop-pin.json",
   "src-tauri/agent-desktop/source-review.md",
+  "src-tauri/agent-desktop/sbom.spdx.json",
   "src-tauri/computer-use-contract.json",
   "src-tauri/Cargo.toml",
   "src-tauri/Cargo.lock",

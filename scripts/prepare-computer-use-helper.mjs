@@ -6,7 +6,11 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } fr
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { computerUseBundleIdentifier } from "./computer-use-dev.mjs";
-import { helperBuildInputsMatch, verifyEngineArtifact } from "./agent-desktop-artifact.mjs";
+import {
+  helperBuildInputsMatch,
+  verifyEngineArtifact,
+  verifyEngineSbom,
+} from "./agent-desktop-artifact.mjs";
 import {
   AD_HOC_IDENTITY,
   DEV_SIGNING_IDENTITY_ENV,
@@ -17,6 +21,8 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const pinPath = path.join(rootDir, "src-tauri", "agent-desktop-pin.json");
 const pin = JSON.parse(readFileSync(pinPath, "utf8"));
 const sbomSource = path.join(rootDir, "src-tauri", "agent-desktop", "sbom.spdx.json");
+const sbomBytes = readFileSync(sbomSource);
+verifyEngineSbom(sbomBytes, pin);
 const licenseSource = path.join(rootDir, "src-tauri", "agent-desktop", "LICENSE");
 const iconSource = path.join(rootDir, "src-tauri", "icons", "icon.icns");
 const iconFileName = "Clovy.icns";
@@ -209,7 +215,7 @@ writeFileSync(
   )}\n`,
 );
 stageEngine(executableDir, resourcesDir, target);
-cpSync(sbomSource, path.join(resourcesDir, "agent-desktop.spdx.json"));
+writeFileSync(path.join(resourcesDir, "agent-desktop.spdx.json"), sbomBytes);
 cpSync(licenseSource, path.join(resourcesDir, "agent-desktop-LICENSE"));
 cpSync(iconSource, iconDestination);
 signBundle();
@@ -467,7 +473,7 @@ function prepareWindowsHelper(triple, isRelease) {
   );
   stageEngine(destination, destination, triple);
   cpSync(licenseSource, path.join(destination, "LICENSE"));
-  cpSync(sbomSource, path.join(destination, "agent-desktop.spdx.json"));
+  writeFileSync(path.join(destination, "agent-desktop.spdx.json"), sbomBytes);
   run(process.env.WINDOWS_SIGNTOOL_PATH || "signtool", [
     "sign",
     "/sha1",
