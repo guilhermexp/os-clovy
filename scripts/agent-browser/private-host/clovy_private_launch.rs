@@ -88,7 +88,6 @@ pub fn launch(
         "--disable-sync",
         "--disable-default-apps",
         "--disable-breakpad",
-        "--disable-crashpad-for-testing",
         "--disable-updater-scheduler",
         "--disable-features=WebMCP,MediaRouter,OptimizationHints",
         "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
