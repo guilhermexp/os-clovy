@@ -35,7 +35,7 @@ impl PauseState {
         self.snapshot_with(Instant::now, || {})
     }
     #[cfg(test)]
-    fn snapshot_at(&self, now: Instant) -> PauseSnapshot {
+    pub(super) fn snapshot_at(&self, now: Instant) -> PauseSnapshot {
         self.snapshot_with(|| now, || {})
     }
     fn snapshot_with(
