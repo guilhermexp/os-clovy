@@ -130,6 +130,36 @@ mod tests {
         );
     }
     #[test]
+    fn capture_clock_started_during_pause_keeps_post_resume_tail() {
+        let start = Instant::now();
+        let state = PauseState::default();
+        state.pause(start + Duration::from_secs(1));
+        let mut silence = super::super::active_silence::ActiveSilence::new(
+            state
+                .snapshot_at(start + Duration::from_secs(50))
+                .active_time,
+        );
+        assert_eq!(
+            silence.pause(
+                state
+                    .snapshot_at(start + Duration::from_secs(50))
+                    .active_time,
+                100
+            ),
+            0
+        );
+        state.resume(start + Duration::from_secs(101));
+        assert_eq!(
+            silence.finish(
+                state
+                    .snapshot_at(start + Duration::from_secs(103))
+                    .active_time,
+                100
+            ),
+            200
+        );
+    }
+    #[test]
     fn resume_during_capture_pause_cannot_change_the_observed_pause_time() {
         let state = Arc::new(PauseState::default());
         let paused_at = Instant::now() - Duration::from_secs(90);

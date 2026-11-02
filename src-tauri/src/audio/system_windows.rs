@@ -255,7 +255,7 @@ fn run_capture_loop(
         }
     };
     let _ = startup_sender.send(Ok(()));
-    let mut silence = ActiveSilence::new(Instant::now());
+    let mut silence = ActiveSilence::new(pause_state.snapshot().active_time);
     let mut was_paused = false;
     while !stop_requested.load(Ordering::Acquire) {
         let pause = pause_state.snapshot();
