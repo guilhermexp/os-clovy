@@ -4472,6 +4472,66 @@
              let context = CommandContext::new(session_id, cli.trace, cli.trace_strict)
                  .map_err(pre_dispatch_error)?
                  .with_headed(cli.interaction.headed)
+diff --git a/crates/core/examples/locator_benchmark/scenarios.rs b/crates/core/examples/locator_benchmark/scenarios.rs
+index 23a590f..cc52b17 100644
+--- a/crates/core/examples/locator_benchmark/scenarios.rs
++++ b/crates/core/examples/locator_benchmark/scenarios.rs
+@@ -225,6 +225,7 @@ fn push(nodes: &mut Vec<FixtureNode>, node: FixtureNode) -> u32 {
+
+ fn window() -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-electron-benchmark".into(),
+         title: "Electron Benchmark".into(),
+         app: "SyntheticElectron".into(),
+diff --git a/crates/core/src/actionability/actionability_live_tests.rs b/crates/core/src/actionability/actionability_live_tests.rs
+index 7e0a267..6077073 100644
+--- a/crates/core/src/actionability/actionability_live_tests.rs
++++ b/crates/core/src/actionability/actionability_live_tests.rs
+@@ -244,6 +244,7 @@ fn entry() -> RefEntry {
+             available_actions: vec![capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+diff --git a/crates/core/src/actionability/actionability_tests.rs b/crates/core/src/actionability/actionability_tests.rs
+index 30c7275..2d91956 100644
+--- a/crates/core/src/actionability/actionability_tests.rs
++++ b/crates/core/src/actionability/actionability_tests.rs
+@@ -35,6 +35,7 @@ fn entry() -> RefEntry {
+             available_actions: vec![capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+diff --git a/crates/core/src/actions/headed_focus.rs b/crates/core/src/actions/headed_focus.rs
+index 3279848..1b3fe19 100644
+--- a/crates/core/src/actions/headed_focus.rs
++++ b/crates/core/src/actions/headed_focus.rs
+@@ -17,6 +17,7 @@ pub(crate) fn focus_entry_window(
+         "Headed input requires an exact source window id",
+     )?;
+     let expected = WindowInfo {
++        native_owner: entry.source.native_owner.clone(),
+         id: window_id.to_string(),
+         title: entry.source.source_window_title.clone().unwrap_or_default(),
+         app: entry.source.source_app.clone().unwrap_or_default(),
+diff --git a/crates/core/src/adapter/hit_test_tests.rs b/crates/core/src/adapter/hit_test_tests.rs
+index 8c84c24..e1bc28f 100644
+--- a/crates/core/src/adapter/hit_test_tests.rs
++++ b/crates/core/src/adapter/hit_test_tests.rs
+@@ -141,6 +141,7 @@ fn clickable_entry() -> RefEntry {
+             available_actions: vec!["Click".into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
 diff --git a/crates/core/src/adapter/input.rs b/crates/core/src/adapter/input.rs
 index 25f80d1..b1fa8fd 100644
 --- a/crates/core/src/adapter/input.rs
@@ -4516,11 +4576,55 @@ index 25f80d1..b1fa8fd 100644
      fn clear_clipboard(&self, _lease: &InteractionLease) -> Result<OperationReport, AdapterError> {
          Err(AdapterError::not_supported("clear_clipboard"))
      }
+diff --git a/crates/core/src/adapter/observation_tests.rs b/crates/core/src/adapter/observation_tests.rs
+index 822cad3..141cb9b 100644
+--- a/crates/core/src/adapter/observation_tests.rs
++++ b/crates/core/src/adapter/observation_tests.rs
+@@ -56,6 +56,7 @@ fn entry() -> RefEntry {
+             available_actions: Vec::new(),
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+diff --git a/crates/core/src/adapter/test_support.rs b/crates/core/src/adapter/test_support.rs
+index feed06e..7f498c9 100644
+--- a/crates/core/src/adapter/test_support.rs
++++ b/crates/core/src/adapter/test_support.rs
+@@ -160,6 +160,7 @@ pub(crate) fn minimal_ref_entry(role: &str, name: Option<&str>) -> crate::RefEnt
+             available_actions: Vec::new(),
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+diff --git a/crates/core/src/commands/clovy_safety.rs b/crates/core/src/commands/clovy_safety.rs
+index e8084cf..de43171 100644
+--- a/crates/core/src/commands/clovy_safety.rs
++++ b/crates/core/src/commands/clovy_safety.rs
+@@ -160,6 +160,7 @@ pub(crate) fn guard_ref_target(
+         .as_deref()
+         .ok_or_else(|| blocked("The live field has no exact window security scope"))?;
+     let expected = WindowInfo {
++        native_owner: entry.source.native_owner.clone(),
+         id: id.to_owned(),
+         title: entry.source.source_window_title.clone().unwrap_or_default(),
+         app: entry.source.source_app.clone().unwrap_or_default(),
 diff --git a/crates/core/src/commands/clovy_targeted.rs b/crates/core/src/commands/clovy_targeted.rs
-index 0a6e103..b840a48 100644
+index 0a6e103..fc1b54e 100644
 --- a/crates/core/src/commands/clovy_targeted.rs
 +++ b/crates/core/src/commands/clovy_targeted.rs
-@@ -187,7 +187,7 @@ pub fn mouse(
+@@ -19,6 +19,7 @@ fn checked_window(expected: &WindowInfo, live: WindowInfo) -> Result<WindowInfo,
+             .as_deref()
+             .is_none_or(str::is_empty)
+         || expected.process_instance != live.process_instance
++        || expected.native_owner != live.native_owner
+         || expected.title != live.title
+         || expected.bounds.is_none()
+         || expected.bounds != live.bounds
+@@ -187,7 +188,7 @@ pub fn mouse(
          focused(&live)?;
          super::clovy_cancel::ensure()?;
          effects.input_attempted = true;
@@ -4529,7 +4633,7 @@ index 0a6e103..b840a48 100644
          if crate::cursor_overlay::input_was_delivered(&report) {
              crate::cursor_overlay::submit(
                  adapter,
-@@ -255,7 +255,7 @@ pub fn drag(
+@@ -255,7 +256,7 @@ pub fn drag(
          focused(&live)?;
          super::clovy_cancel::ensure()?;
          effects.input_attempted = true;
@@ -4538,7 +4642,7 @@ index 0a6e103..b840a48 100644
          effects.input_receipt = Some(serde_json::to_value(&report)?);
          if crate::cursor_overlay::confirms_delivery(report.disposition()) {
              crate::cursor_overlay::submit_drag_effect(adapter, context, from, to);
-@@ -384,8 +384,9 @@ mod tests {
+@@ -384,8 +385,9 @@ mod tests {
          }
      }
      impl crate::adapter::InputOps for MovesDuringSecurityRead {
@@ -4549,7 +4653,7 @@ index 0a6e103..b840a48 100644
              _event: MouseEvent,
              _lease: &InteractionLease,
          ) -> Result<crate::OperationReport, AdapterError> {
-@@ -393,8 +394,9 @@ mod tests {
+@@ -393,8 +395,9 @@ mod tests {
                  .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
              Ok(crate::adapter::test_report())
          }
@@ -4594,6 +4698,1775 @@ index 4cee29f..63f24dd 100644
  fn assert_after_focus(change: Change, dragging: bool) {
      let world = World::new(change);
      let error = gesture(&world, dragging).unwrap_err();
+diff --git a/crates/core/src/commands/drag_tests.rs b/crates/core/src/commands/drag_tests.rs
+index ce2b0d2..3c8a57f 100644
+--- a/crates/core/src/commands/drag_tests.rs
++++ b/crates/core/src/commands/drag_tests.rs
+@@ -284,6 +284,7 @@ fn ref_entry(pid: u32) -> RefEntry {
+             available_actions: vec![capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some(format!("App {pid}")),
+             source_window_id: Some(format!("w-{pid}")),
+             source_window_title: Some(format!("Window {pid}")),
+diff --git a/crates/core/src/commands/drag_wait_scope_tests.rs b/crates/core/src/commands/drag_wait_scope_tests.rs
+index d7fc72b..7d56186 100644
+--- a/crates/core/src/commands/drag_wait_scope_tests.rs
++++ b/crates/core/src/commands/drag_wait_scope_tests.rs
+@@ -34,6 +34,7 @@ impl CrossAppWaitAdapter {
+     fn windows() -> Vec<WindowInfo> {
+         vec![
+             WindowInfo {
++                native_owner: None,
+                 id: "w-1".into(),
+                 title: "Source".into(),
+                 app: "App 1".into(),
+@@ -46,6 +47,7 @@ impl CrossAppWaitAdapter {
+                 },
+             },
+             WindowInfo {
++                native_owner: None,
+                 id: "w-2".into(),
+                 title: "Destination".into(),
+                 app: "App 2".into(),
+diff --git a/crates/core/src/commands/execute_by_ref_tests.rs b/crates/core/src/commands/execute_by_ref_tests.rs
+index ddac972..8ceb2a9 100644
+--- a/crates/core/src/commands/execute_by_ref_tests.rs
++++ b/crates/core/src/commands/execute_by_ref_tests.rs
+@@ -43,6 +43,7 @@ fn snapshot_with_ref(role: &str, available_actions: &[&str]) -> String {
+             available_actions: available_actions.iter().map(|a| (*a).to_string()).collect(),
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some("Fixture".into()),
+             source_window_id: Some("w-1".into()),
+             source_window_title: Some("Fixture".into()),
+diff --git a/crates/core/src/commands/find_live_test_support.rs b/crates/core/src/commands/find_live_test_support.rs
+index 074b055..77f576b 100644
+--- a/crates/core/src/commands/find_live_test_support.rs
++++ b/crates/core/src/commands/find_live_test_support.rs
+@@ -127,6 +127,7 @@ impl ObservationOps for LiveFindAdapter {
+     ) -> Result<Vec<WindowInfo>, AdapterError> {
+         Ok(vec![
+             WindowInfo {
++                native_owner: None,
+                 id: "w-1".into(),
+                 title: "First".into(),
+                 app: "FixtureApp".into(),
+@@ -139,6 +140,7 @@ impl ObservationOps for LiveFindAdapter {
+                 },
+             },
+             WindowInfo {
++                native_owner: None,
+                 id: "w-2".into(),
+                 title: "Second".into(),
+                 app: "FixtureApp".into(),
+diff --git a/crates/core/src/commands/focus_window_tests.rs b/crates/core/src/commands/focus_window_tests.rs
+index 8097618..82e8a8b 100644
+--- a/crates/core/src/commands/focus_window_tests.rs
++++ b/crates/core/src/commands/focus_window_tests.rs
+@@ -59,6 +59,7 @@ impl SystemOps for FocusAdapter {
+
+ fn window(id: &str, focused: bool) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: id.into(),
+         title: "Main".into(),
+         app: "TextEdit".into(),
+diff --git a/crates/core/src/commands/helpers_ref_action_wait_tests.rs b/crates/core/src/commands/helpers_ref_action_wait_tests.rs
+index 578bc1c..38c8154 100644
+--- a/crates/core/src/commands/helpers_ref_action_wait_tests.rs
++++ b/crates/core/src/commands/helpers_ref_action_wait_tests.rs
+@@ -83,6 +83,7 @@ impl ObservationOps for ScopedWaitAdapter {
+     ) -> Result<Vec<WindowInfo>, AdapterError> {
+         *self.polled_app.lock().unwrap() = filter.app.clone();
+         Ok(vec![WindowInfo {
++            native_owner: None,
+             id: "w-1".into(),
+             title: "Doc".into(),
+             app: filter.app.clone().unwrap_or_else(|| "TargetApp".into()),
+@@ -244,6 +245,7 @@ impl ObservationOps for MultiWindowAdapter {
+     ) -> Result<Vec<WindowInfo>, AdapterError> {
+         Ok(vec![
+             WindowInfo {
++                native_owner: None,
+                 id: "w-other".into(),
+                 title: "Other".into(),
+                 app: "App".into(),
+@@ -256,6 +258,7 @@ impl ObservationOps for MultiWindowAdapter {
+                 },
+             },
+             WindowInfo {
++                native_owner: None,
+                 id: "w-target".into(),
+                 title: "Target".into(),
+                 app: "App".into(),
+diff --git a/crates/core/src/commands/helpers_tests.rs b/crates/core/src/commands/helpers_tests.rs
+index 1b2829c..58b5afe 100644
+--- a/crates/core/src/commands/helpers_tests.rs
++++ b/crates/core/src/commands/helpers_tests.rs
+@@ -90,6 +90,7 @@ impl SystemOps for TargetedWindowAdapter {
+
+ fn targeted_window(id: &str, visible: bool) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: id.into(),
+         title: "Fixture".into(),
+         app: "Fixture".into(),
+diff --git a/crates/core/src/commands/hover_tests.rs b/crates/core/src/commands/hover_tests.rs
+index d7c552f..b3487d3 100644
+--- a/crates/core/src/commands/hover_tests.rs
++++ b/crates/core/src/commands/hover_tests.rs
+@@ -160,6 +160,7 @@ fn ref_snapshot(pid: u32) -> String {
+             available_actions: vec![capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some(format!("App {pid}")),
+             source_window_id: Some(format!("w-{pid}")),
+             source_window_title: Some(format!("Window {pid}")),
+diff --git a/crates/core/src/commands/is_check_applicability_tests.rs b/crates/core/src/commands/is_check_applicability_tests.rs
+index 09fc50b..8e3535c 100644
+--- a/crates/core/src/commands/is_check_applicability_tests.rs
++++ b/crates/core/src/commands/is_check_applicability_tests.rs
+@@ -26,6 +26,7 @@ fn action_availability_makes_toggle_and_expand_applicable() {
+             available_actions: vec!["Check".into(), "Expand".into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+diff --git a/crates/core/src/commands/is_check_tests.rs b/crates/core/src/commands/is_check_tests.rs
+index 982efbd..f37df6b 100644
+--- a/crates/core/src/commands/is_check_tests.rs
++++ b/crates/core/src/commands/is_check_tests.rs
+@@ -108,6 +108,7 @@ fn entry(states: Vec<String>, value: Option<&str>, actions: Vec<&str>) -> RefEnt
+             available_actions: actions.into_iter().map(str::to_string).collect(),
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+diff --git a/crates/core/src/commands/launch_tests.rs b/crates/core/src/commands/launch_tests.rs
+index 5ef87b8..40412b8 100644
+--- a/crates/core/src/commands/launch_tests.rs
++++ b/crates/core/src/commands/launch_tests.rs
+@@ -40,6 +40,7 @@ impl SystemOps for LaunchAdapter {
+             pid: ProcessId::new(42),
+             process_instance: Some("42:1".into()),
+             window: Some(WindowInfo {
++                native_owner: None,
+                 id: "w-1".into(),
+                 title: "Fixture".into(),
+                 app: "Fixture".into(),
+diff --git a/crates/core/src/commands/open_system_surface_tests.rs b/crates/core/src/commands/open_system_surface_tests.rs
+index a5a4ae8..b457bd4 100644
+--- a/crates/core/src/commands/open_system_surface_tests.rs
++++ b/crates/core/src/commands/open_system_surface_tests.rs
+@@ -56,6 +56,7 @@ impl SystemOps for LeaseOnlyAdapter {
+
+ fn shell_window() -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-4242".into(),
+         title: "Action center".into(),
+         app: "ShellExperienceHost.exe".into(),
+diff --git a/crates/core/src/commands/operation_passthrough_tests.rs b/crates/core/src/commands/operation_passthrough_tests.rs
+index 9815dec..44ebef4 100644
+--- a/crates/core/src/commands/operation_passthrough_tests.rs
++++ b/crates/core/src/commands/operation_passthrough_tests.rs
+@@ -16,6 +16,7 @@ struct ReportingAdapter {
+
+ fn window() -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: "Notes".into(),
+         app: "Notes".into(),
+diff --git a/crates/core/src/commands/point_resolve_tests.rs b/crates/core/src/commands/point_resolve_tests.rs
+index 282cc86..ea86583 100644
+--- a/crates/core/src/commands/point_resolve_tests.rs
++++ b/crates/core/src/commands/point_resolve_tests.rs
+@@ -102,6 +102,7 @@ fn ref_snapshot(pid: u32) -> String {
+             available_actions: vec![capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+@@ -264,6 +265,7 @@ fn focus_ref_entry() -> RefEntry {
+             available_actions: vec![capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some("Fixture".into()),
+             source_window_id: Some("w-42".into()),
+             source_window_title: Some("Fixture".into()),
+diff --git a/crates/core/src/commands/pointer_action_tests.rs b/crates/core/src/commands/pointer_action_tests.rs
+index 89ffd11..0a52c33 100644
+--- a/crates/core/src/commands/pointer_action_tests.rs
++++ b/crates/core/src/commands/pointer_action_tests.rs
+@@ -69,6 +69,7 @@ fn point_ref_snapshot() -> String {
+             available_actions: vec![capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some("Fixture".into()),
+             source_window_id: Some("w-42".into()),
+             source_window_title: Some("Window".into()),
+diff --git a/crates/core/src/commands/pointer_single_shot_tests.rs b/crates/core/src/commands/pointer_single_shot_tests.rs
+index c384f12..938e341 100644
+--- a/crates/core/src/commands/pointer_single_shot_tests.rs
++++ b/crates/core/src/commands/pointer_single_shot_tests.rs
+@@ -190,6 +190,7 @@ fn ref_entry(pid: u32) -> RefEntry {
+             available_actions: vec![crate::actions::capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some(format!("App {pid}")),
+             source_window_id: Some(format!("w-{pid}")),
+             source_window_title: Some(format!("Window {pid}")),
+diff --git a/crates/core/src/commands/press_tests.rs b/crates/core/src/commands/press_tests.rs
+index cda9811..2d603a9 100644
+--- a/crates/core/src/commands/press_tests.rs
++++ b/crates/core/src/commands/press_tests.rs
+@@ -99,6 +99,7 @@ impl ObservationOps for CapturingAdapter {
+             assert_eq!(filter.app.as_deref(), Some("Editor"));
+         }
+         Ok(vec![crate::WindowInfo {
++            native_owner: None,
+             id: "w-42".into(),
+             title: "Editor".into(),
+             app: "Editor".into(),
+diff --git a/crates/core/src/commands/press_window_tests.rs b/crates/core/src/commands/press_window_tests.rs
+index 53d6a9a..b9d26b6 100644
+--- a/crates/core/src/commands/press_window_tests.rs
++++ b/crates/core/src/commands/press_window_tests.rs
+@@ -26,6 +26,7 @@ fn instance(pid: u32) -> crate::AppInfo {
+
+ fn window(pid: u32) -> crate::WindowInfo {
+     crate::WindowInfo {
++        native_owner: None,
+         id: format!("w-{pid}"),
+         title: format!("Instance {pid}"),
+         app: "Electron".into(),
+diff --git a/crates/core/src/commands/ref_policy_tests.rs b/crates/core/src/commands/ref_policy_tests.rs
+index fa9463e..ac52147 100644
+--- a/crates/core/src/commands/ref_policy_tests.rs
++++ b/crates/core/src/commands/ref_policy_tests.rs
+@@ -165,6 +165,7 @@ fn snapshot_id() -> String {
+             ],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some("Fixture".into()),
+             source_window_id: Some("w-1".into()),
+             source_window_title: Some("Fixture".into()),
+diff --git a/crates/core/src/commands/right_click_tests.rs b/crates/core/src/commands/right_click_tests.rs
+index 4c09602..3a75171 100644
+--- a/crates/core/src/commands/right_click_tests.rs
++++ b/crates/core/src/commands/right_click_tests.rs
+@@ -42,6 +42,7 @@ impl ObservationOps for ProbeFailingAdapter {
+             ));
+         }
+         Ok(vec![WindowInfo {
++            native_owner: None,
+             id: "w1".into(),
+             title: "Main".into(),
+             app: "TargetApp".into(),
+@@ -130,6 +131,7 @@ fn save_refmap(source_app: Option<String>) -> String {
+             available_actions: vec!["RightClick".into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app,
+             source_window_id: None,
+             source_window_title: None,
+diff --git a/crates/core/src/commands/screenshot_tests.rs b/crates/core/src/commands/screenshot_tests.rs
+index a4c71c6..043d904 100644
+--- a/crates/core/src/commands/screenshot_tests.rs
++++ b/crates/core/src/commands/screenshot_tests.rs
+@@ -102,6 +102,7 @@ fn display(id: &str, is_primary: bool, scale: f64) -> DisplayInfo {
+
+ fn window(id: &str, pid: u32) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: id.into(),
+         title: format!("Window {id}"),
+         app: "Example".into(),
+diff --git a/crates/core/src/commands/snapshot_tests.rs b/crates/core/src/commands/snapshot_tests.rs
+index bee9671..715be53 100644
+--- a/crates/core/src/commands/snapshot_tests.rs
++++ b/crates/core/src/commands/snapshot_tests.rs
+@@ -85,6 +85,7 @@ impl ObservationOps for WaitSnapshotAdapter {
+         _deadline: crate::Deadline,
+     ) -> Result<Vec<WindowInfo>, AdapterError> {
+         Ok(vec![WindowInfo {
++            native_owner: None,
+             id: "w-1".into(),
+             title: "Doc".into(),
+             app: "FixtureApp".into(),
+diff --git a/crates/core/src/commands/type_text_interval_wait_tests.rs b/crates/core/src/commands/type_text_interval_wait_tests.rs
+index b5de2c2..144b30a 100644
+--- a/crates/core/src/commands/type_text_interval_wait_tests.rs
++++ b/crates/core/src/commands/type_text_interval_wait_tests.rs
+@@ -56,6 +56,7 @@ impl ObservationOps for TitledField {
+         _deadline: crate::Deadline,
+     ) -> Result<Vec<WindowInfo>, AdapterError> {
+         Ok(vec![WindowInfo {
++            native_owner: None,
+             id: "w-1".into(),
+             title: "Doc".into(),
+             app: "Fixture".into(),
+diff --git a/crates/core/src/commands/wait_event_stopped_tests.rs b/crates/core/src/commands/wait_event_stopped_tests.rs
+index db44517..cbcb088 100644
+--- a/crates/core/src/commands/wait_event_stopped_tests.rs
++++ b/crates/core/src/commands/wait_event_stopped_tests.rs
+@@ -40,6 +40,7 @@ fn a_window_id_wait_pins_the_windows_process_and_answers_unresponsive_at_once()
+             _deadline: crate::Deadline,
+         ) -> Result<Vec<crate::WindowInfo>, AdapterError> {
+             Ok(vec![crate::WindowInfo {
++                native_owner: None,
+                 id: "w-1".into(),
+                 title: "Calculator".into(),
+                 app: "Calc".into(),
+diff --git a/crates/core/src/commands/wait_event_tests.rs b/crates/core/src/commands/wait_event_tests.rs
+index 774802f..052fb5f 100644
+--- a/crates/core/src/commands/wait_event_tests.rs
++++ b/crates/core/src/commands/wait_event_tests.rs
+@@ -132,6 +132,7 @@ fn baseline_with_apps(apps: Vec<AppInfo>) -> SignalBaseline {
+
+ fn window(id: &str, title: &str) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: id.into(),
+         title: title.into(),
+         app: "TextEdit".into(),
+diff --git a/crates/core/src/commands/wait_resolution_tests.rs b/crates/core/src/commands/wait_resolution_tests.rs
+index d1f37a0..b33d867 100644
+--- a/crates/core/src/commands/wait_resolution_tests.rs
++++ b/crates/core/src/commands/wait_resolution_tests.rs
+@@ -123,6 +123,7 @@ fn snapshot_with_one_ref() -> String {
+             available_actions: vec![capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+diff --git a/crates/core/src/commands/wait_scenario_count_tests.rs b/crates/core/src/commands/wait_scenario_count_tests.rs
+index b4c6653..e154333 100644
+--- a/crates/core/src/commands/wait_scenario_count_tests.rs
++++ b/crates/core/src/commands/wait_scenario_count_tests.rs
+@@ -21,6 +21,7 @@ fn doc_window(children: Vec<crate::AccessibilityNode>) -> crate::AccessibilityNo
+
+ fn test_app_window() -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: "Doc".into(),
+         app: "TestApp".into(),
+diff --git a/crates/core/src/commands/wait_scenario_tests.rs b/crates/core/src/commands/wait_scenario_tests.rs
+index f8e5ee5..320327f 100644
+--- a/crates/core/src/commands/wait_scenario_tests.rs
++++ b/crates/core/src/commands/wait_scenario_tests.rs
+@@ -35,6 +35,7 @@ impl ObservationOps for TextlessTreeAdapter {
+         _deadline: crate::Deadline,
+     ) -> Result<Vec<WindowInfo>, AdapterError> {
+         Ok(vec![WindowInfo {
++            native_owner: None,
+             id: "w-1".into(),
+             title: "Doc".into(),
+             app: "TestApp".into(),
+diff --git a/crates/core/src/commands/wait_selector_tests.rs b/crates/core/src/commands/wait_selector_tests.rs
+index ee50337..e0693ed 100644
+--- a/crates/core/src/commands/wait_selector_tests.rs
++++ b/crates/core/src/commands/wait_selector_tests.rs
+@@ -57,6 +57,7 @@ impl ObservationOps for StaticTreeAdapter {
+         _deadline: crate::Deadline,
+     ) -> Result<Vec<WindowInfo>, AdapterError> {
+         Ok(vec![WindowInfo {
++            native_owner: None,
+             id: "w-1".into(),
+             title: "Doc".into(),
+             app: "TestApp".into(),
+@@ -113,6 +114,7 @@ impl ObservationOps for FlippingTreeAdapter {
+         _deadline: crate::Deadline,
+     ) -> Result<Vec<WindowInfo>, AdapterError> {
+         Ok(vec![WindowInfo {
++            native_owner: None,
+             id: "w-1".into(),
+             title: "Doc".into(),
+             app: "TestApp".into(),
+diff --git a/crates/core/src/commands/wait_test_support.rs b/crates/core/src/commands/wait_test_support.rs
+index cb78bce..93139e5 100644
+--- a/crates/core/src/commands/wait_test_support.rs
++++ b/crates/core/src/commands/wait_test_support.rs
+@@ -181,6 +181,7 @@ fn save_ref_in_store(store: RefStore, states: Vec<String>) -> String {
+             available_actions: vec!["Click".into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+diff --git a/crates/core/src/commands/wait_wakeup_tests.rs b/crates/core/src/commands/wait_wakeup_tests.rs
+index d4986ef..7a91188 100644
+--- a/crates/core/src/commands/wait_wakeup_tests.rs
++++ b/crates/core/src/commands/wait_wakeup_tests.rs
+@@ -46,6 +46,7 @@ impl ObservationOps for WakeAdapter {
+         _deadline: Deadline,
+     ) -> Result<Vec<crate::WindowInfo>, AdapterError> {
+         Ok(vec![crate::WindowInfo {
++            native_owner: None,
+             id: "w-42".into(),
+             title: "Doc".into(),
+             app: "Editor".into(),
+diff --git a/crates/core/src/locator/live_locator/materialize.rs b/crates/core/src/locator/live_locator/materialize.rs
+index 9be165a..0cee4cc 100644
+--- a/crates/core/src/locator/live_locator/materialize.rs
++++ b/crates/core/src/locator/live_locator/materialize.rs
+@@ -104,6 +104,7 @@ pub(crate) fn ref_entry(
+             available_actions: available_actions(&node.evidence),
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+@@ -126,6 +127,7 @@ fn apply_source(entry: &mut RefEntry, source: &ObservationSource, node_path: &Re
+             entry.process.pid = window.pid;
+             entry.source.source_app = Some(window.app.clone());
+             entry.source.source_window_id = Some(window.id.clone());
++            entry.source.native_owner = window.native_owner.clone();
+             entry.source.source_window_title = Some(window.title.clone());
+             entry.source.source_window_bounds_hash =
+                 window.bounds.as_ref().and_then(crate::Rect::bounds_hash);
+diff --git a/crates/core/src/locator/live_locator/materialize_tests.rs b/crates/core/src/locator/live_locator/materialize_tests.rs
+index baee8b9..6202b26 100644
+--- a/crates/core/src/locator/live_locator/materialize_tests.rs
++++ b/crates/core/src/locator/live_locator/materialize_tests.rs
+@@ -324,6 +324,7 @@ fn source_entry() -> RefEntry {
+             available_actions: Vec::new(),
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some("FixtureApp".into()),
+             source_window_id: Some("w-1".into()),
+             source_window_title: Some("Fixture".into()),
+diff --git a/crates/core/src/locator/live_locator/observed_tree_tests.rs b/crates/core/src/locator/live_locator/observed_tree_tests.rs
+index 3a69a61..ebb4f84 100644
+--- a/crates/core/src/locator/live_locator/observed_tree_tests.rs
++++ b/crates/core/src/locator/live_locator/observed_tree_tests.rs
+@@ -13,6 +13,7 @@ fn source() -> ObservationSource {
+     ObservationSource::Window {
+         surface: crate::SnapshotSurface::Window,
+         window: WindowInfo {
++            native_owner: None,
+             id: "w-1".into(),
+             title: "Fixture".into(),
+             app: "FixtureApp".into(),
+diff --git a/crates/core/src/locator/live_locator/retained_identity_tests.rs b/crates/core/src/locator/live_locator/retained_identity_tests.rs
+index 1418047..a1dab1a 100644
+--- a/crates/core/src/locator/live_locator/retained_identity_tests.rs
++++ b/crates/core/src/locator/live_locator/retained_identity_tests.rs
+@@ -65,6 +65,7 @@ fn snapshot_and_find_preserve_identical_private_identity_evidence() {
+     let from_snapshot = crate::refs::ref_alloc::ref_entry_from_node(
+         &projected,
+         &crate::refs::ref_alloc_source::RefAllocSource {
++            native_owner: None,
+             pid: crate::ProcessId::new(42),
+             app: Some("FixtureApp"),
+             window_id: Some("w-1"),
+diff --git a/crates/core/src/locator/live_locator/test_support.rs b/crates/core/src/locator/live_locator/test_support.rs
+index 0b19015..290d637 100644
+--- a/crates/core/src/locator/live_locator/test_support.rs
++++ b/crates/core/src/locator/live_locator/test_support.rs
+@@ -6,6 +6,7 @@ use crate::{WindowInfo, refs::RefPath};
+
+ pub(super) fn window() -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: "Fixture".into(),
+         app: "FixtureApp".into(),
+diff --git a/crates/core/src/locator/live_locator/validation_tests.rs b/crates/core/src/locator/live_locator/validation_tests.rs
+index 25a4e4f..d7145c0 100644
+--- a/crates/core/src/locator/live_locator/validation_tests.rs
++++ b/crates/core/src/locator/live_locator/validation_tests.rs
+@@ -105,6 +105,7 @@ fn raw_depth_must_fit_native_safety_cap() {
+ fn tree_builder_default_is_not_supported() {
+     let adapter = UnsupportedAdapter;
+     let window = WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: "Fixture".into(),
+         app: "FixtureApp".into(),
+@@ -155,6 +156,7 @@ fn element_root_derives_surface_with_relative_depth_budgets() {
+             available_actions: Vec::new(),
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some("Fixture".into()),
+             source_window_id: Some("w-1".into()),
+             source_window_title: Some("Fixture".into()),
+diff --git a/crates/core/src/ref_action/ref_action_cursor_overlay_tests.rs b/crates/core/src/ref_action/ref_action_cursor_overlay_tests.rs
+index 24495b4..ad890aa 100644
+--- a/crates/core/src/ref_action/ref_action_cursor_overlay_tests.rs
++++ b/crates/core/src/ref_action/ref_action_cursor_overlay_tests.rs
+@@ -125,6 +125,7 @@ fn entry() -> RefEntry {
+             available_actions: vec![capability::CLICK.into(), capability::SET_VALUE.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some("Fixture".into()),
+             source_window_id: Some("w-42".into()),
+             source_window_title: Some("Fixture".into()),
+diff --git a/crates/core/src/ref_action/ref_action_exactly_once_tests.rs b/crates/core/src/ref_action/ref_action_exactly_once_tests.rs
+index 42974ef..3175e8f 100644
+--- a/crates/core/src/ref_action/ref_action_exactly_once_tests.rs
++++ b/crates/core/src/ref_action/ref_action_exactly_once_tests.rs
+@@ -217,6 +217,7 @@ fn entry() -> RefEntry {
+             available_actions: vec![capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+diff --git a/crates/core/src/ref_action/ref_action_scroll_recovery_tests.rs b/crates/core/src/ref_action/ref_action_scroll_recovery_tests.rs
+index dd22a71..f6bb813 100644
+--- a/crates/core/src/ref_action/ref_action_scroll_recovery_tests.rs
++++ b/crates/core/src/ref_action/ref_action_scroll_recovery_tests.rs
+@@ -116,6 +116,7 @@ fn entry() -> RefEntry {
+     };
+     entry.capabilities.available_actions = vec![capability::EXPAND.into()];
+     entry.source = crate::RefSource {
++        native_owner: None,
+         source_app: Some("Notepad".into()),
+         source_window_id: Some("w-1".into()),
+         source_window_title: Some("Notepad".into()),
+diff --git a/crates/core/src/ref_action/ref_action_tests.rs b/crates/core/src/ref_action/ref_action_tests.rs
+index ead906f..fbc3435 100644
+--- a/crates/core/src/ref_action/ref_action_tests.rs
++++ b/crates/core/src/ref_action/ref_action_tests.rs
+@@ -215,6 +215,7 @@ fn entry() -> RefEntry {
+             available_actions: vec![capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some("Fixture".into()),
+             source_window_id: Some("w-42".into()),
+             source_window_title: Some("Fixture".into()),
+diff --git a/crates/core/src/ref_action/ref_action_wait_app_not_found_tests.rs b/crates/core/src/ref_action/ref_action_wait_app_not_found_tests.rs
+index d161b94..5fbc925 100644
+--- a/crates/core/src/ref_action/ref_action_wait_app_not_found_tests.rs
++++ b/crates/core/src/ref_action/ref_action_wait_app_not_found_tests.rs
+@@ -39,6 +39,7 @@ fn entry() -> RefEntry {
+             available_actions: vec![capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some("Original".into()),
+             source_window_id: None,
+             source_window_title: None,
+diff --git a/crates/core/src/ref_action/ref_action_wait_process_state_tests.rs b/crates/core/src/ref_action/ref_action_wait_process_state_tests.rs
+index 1ce22a8..ead57f3 100644
+--- a/crates/core/src/ref_action/ref_action_wait_process_state_tests.rs
++++ b/crates/core/src/ref_action/ref_action_wait_process_state_tests.rs
+@@ -37,6 +37,7 @@ fn entry() -> RefEntry {
+             available_actions: vec![capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some("Original".into()),
+             source_window_id: None,
+             source_window_title: None,
+diff --git a/crates/core/src/ref_action/ref_action_wait_success_tests.rs b/crates/core/src/ref_action/ref_action_wait_success_tests.rs
+index 53f3029..f55a668 100644
+--- a/crates/core/src/ref_action/ref_action_wait_success_tests.rs
++++ b/crates/core/src/ref_action/ref_action_wait_success_tests.rs
+@@ -38,6 +38,7 @@ fn entry() -> RefEntry {
+             available_actions: vec![capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some("Original".into()),
+             source_window_id: None,
+             source_window_title: None,
+diff --git a/crates/core/src/ref_action/ref_action_wait_tests.rs b/crates/core/src/ref_action/ref_action_wait_tests.rs
+index ef95b9b..9388968 100644
+--- a/crates/core/src/ref_action/ref_action_wait_tests.rs
++++ b/crates/core/src/ref_action/ref_action_wait_tests.rs
+@@ -143,6 +143,7 @@ fn entry() -> RefEntry {
+             available_actions: vec![capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some("Fixture".into()),
+             source_window_id: Some("w-1".into()),
+             source_window_title: Some("Fixture".into()),
+diff --git a/crates/core/src/refs/ref_alloc.rs b/crates/core/src/refs/ref_alloc.rs
+index 19515b7..491e38a 100644
+--- a/crates/core/src/refs/ref_alloc.rs
++++ b/crates/core/src/refs/ref_alloc.rs
+@@ -46,6 +46,7 @@ pub(crate) fn ref_entry_from_node(
+         source: crate::RefSource {
+             source_app: source.app.map(str::to_string),
+             source_window_id: source.window_id.map(str::to_string),
++            native_owner: source.native_owner.cloned(),
+             source_window_title: source.window_title.map(str::to_string),
+             source_window_bounds_hash: source.window_bounds_hash,
+             source_surface: source.surface,
+diff --git a/crates/core/src/refs/ref_alloc_bounds_tests.rs b/crates/core/src/refs/ref_alloc_bounds_tests.rs
+index bd5ac7f..60f8363 100644
+--- a/crates/core/src/refs/ref_alloc_bounds_tests.rs
++++ b/crates/core/src/refs/ref_alloc_bounds_tests.rs
+@@ -16,6 +16,7 @@ fn a_nameless_positive_area_ref_allocated_with_bounds_hidden_keeps_its_only_iden
+             compact: false,
+         },
+         source: crate::refs::ref_alloc_source::RefAllocSource {
++            native_owner: None,
+             pid: crate::ProcessId::new(7),
+             app: Some("Finder"),
+             window_id: Some("w-42"),
+@@ -62,6 +63,7 @@ fn a_ref_with_its_own_identity_still_has_its_rect_stripped() {
+             compact: false,
+         },
+         source: crate::refs::ref_alloc_source::RefAllocSource {
++            native_owner: None,
+             pid: crate::ProcessId::new(7),
+             app: Some("Finder"),
+             window_id: Some("w-42"),
+diff --git a/crates/core/src/refs/ref_alloc_ordering_tests.rs b/crates/core/src/refs/ref_alloc_ordering_tests.rs
+index 7c40713..a3b272a 100644
+--- a/crates/core/src/refs/ref_alloc_ordering_tests.rs
++++ b/crates/core/src/refs/ref_alloc_ordering_tests.rs
+@@ -23,6 +23,7 @@ fn allocate_refs_assigns_refs_in_depth_first_order() {
+             compact: false,
+         },
+         source: crate::refs::ref_alloc_source::RefAllocSource {
++            native_owner: None,
+             pid: crate::ProcessId::new(1),
+             app: None,
+             window_id: None,
+@@ -103,6 +104,7 @@ fn allocate_refs_keeps_bounds_in_refmap_when_snapshot_includes_bounds() {
+             compact: false,
+         },
+         source: crate::refs::ref_alloc_source::RefAllocSource {
++            native_owner: None,
+             pid: crate::ProcessId::new(7),
+             app: Some("Finder"),
+             window_id: Some("w-42"),
+@@ -199,6 +201,7 @@ fn allocation_config(include_bounds: bool) -> RefAllocConfig<'static> {
+             compact: false,
+         },
+         source: crate::refs::ref_alloc_source::RefAllocSource {
++            native_owner: None,
+             pid: crate::ProcessId::new(7),
+             app: Some("Finder"),
+             window_id: Some("w-42"),
+diff --git a/crates/core/src/refs/ref_alloc_source.rs b/crates/core/src/refs/ref_alloc_source.rs
+index 597752b..7b9be25 100644
+--- a/crates/core/src/refs/ref_alloc_source.rs
++++ b/crates/core/src/refs/ref_alloc_source.rs
+@@ -5,6 +5,7 @@ pub(crate) struct RefAllocSource<'a> {
+     pub(crate) pid: ProcessId,
+     pub(crate) app: Option<&'a str>,
+     pub(crate) window_id: Option<&'a str>,
++    pub(crate) native_owner: Option<&'a crate::ProcessIdentity>,
+     pub(crate) window_title: Option<&'a str>,
+     pub(crate) window_bounds_hash: Option<u64>,
+     pub(crate) process_instance: Option<&'a str>,
+diff --git a/crates/core/src/refs/ref_alloc_tests.rs b/crates/core/src/refs/ref_alloc_tests.rs
+index dda36cf..5d783a1 100644
+--- a/crates/core/src/refs/ref_alloc_tests.rs
++++ b/crates/core/src/refs/ref_alloc_tests.rs
+@@ -27,6 +27,7 @@ fn node(role: &str, name: Option<&str>) -> AccessibilityNode {
+
+ fn source(pid: u32) -> crate::refs::ref_alloc_source::RefAllocSource<'static> {
+     crate::refs::ref_alloc_source::RefAllocSource {
++        native_owner: None,
+         pid: crate::ProcessId::new(pid),
+         app: None,
+         window_id: None,
+@@ -296,6 +297,7 @@ fn allocate_refs_records_structural_paths() {
+     group.children = vec![node("button", Some("Open"))];
+     root.children = vec![node("button", Some("Save")), group];
+
++    let owner = crate::ProcessIdentity::new(77, "owner-generation");
+     let mut refmap = RefMap::new();
+     let config = RefAllocConfig {
+         options: crate::refs::ref_alloc_options::RefAllocOptions {
+@@ -304,6 +306,7 @@ fn allocate_refs_records_structural_paths() {
+             compact: false,
+         },
+         source: crate::refs::ref_alloc_source::RefAllocSource {
++            native_owner: Some(&owner),
+             pid: crate::ProcessId::new(7),
+             app: Some("Finder"),
+             window_id: Some("w-42"),
+@@ -321,6 +324,9 @@ fn allocate_refs_records_structural_paths() {
+
+     let save_ref = out.children[0].ref_id.as_deref().unwrap();
+     let open_ref = out.children[1].children[0].ref_id.as_deref().unwrap();
++    let encoded = serde_json::to_vec(refmap.get(open_ref).unwrap()).unwrap();
++    let restored: crate::RefEntry = serde_json::from_slice(&encoded).unwrap();
++    assert_eq!(restored.source.native_owner, Some(owner));
+     assert_eq!(refmap.get(save_ref).unwrap().scope.path.as_slice(), [0]);
+     assert_eq!(refmap.get(open_ref).unwrap().scope.path.as_slice(), [1, 0]);
+     assert_eq!(
+@@ -346,6 +352,7 @@ fn allocate_refs_keeps_bounds_hash_when_snapshot_hides_bounds() {
+             compact: false,
+         },
+         source: crate::refs::ref_alloc_source::RefAllocSource {
++            native_owner: None,
+             pid: crate::ProcessId::new(7),
+             app: Some("Finder"),
+             window_id: Some("w-42"),
+diff --git a/crates/core/src/refs/ref_identity_tests.rs b/crates/core/src/refs/ref_identity_tests.rs
+index b9c4636..9eb7c3e 100644
+--- a/crates/core/src/refs/ref_identity_tests.rs
++++ b/crates/core/src/refs/ref_identity_tests.rs
+@@ -43,6 +43,7 @@ fn entry() -> RefEntry {
+             available_actions: vec![],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+diff --git a/crates/core/src/refs/ref_source.rs b/crates/core/src/refs/ref_source.rs
+index e3ce1a0..bbc8d34 100644
+--- a/crates/core/src/refs/ref_source.rs
++++ b/crates/core/src/refs/ref_source.rs
+@@ -6,6 +6,8 @@ pub struct RefSource {
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub source_window_id: Option<String>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub native_owner: Option<crate::ProcessIdentity>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub source_window_title: Option<String>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub source_window_bounds_hash: Option<u64>,
+diff --git a/crates/core/src/refs/refs_serde_tests.rs b/crates/core/src/refs/refs_serde_tests.rs
+index 2f1dca8..d0a8c2d 100644
+--- a/crates/core/src/refs/refs_serde_tests.rs
++++ b/crates/core/src/refs/refs_serde_tests.rs
+@@ -25,6 +25,7 @@ fn minimal_entry(role: &str) -> RefEntry {
+             available_actions: vec![],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+@@ -201,6 +202,7 @@ fn ref_entry_full_roundtrip_preserves_all_fields() {
+             available_actions: vec!["SetValue".into(), "Click".into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some("Mail".into()),
+             source_window_id: Some("w-7".into()),
+             source_window_title: Some("Compose".into()),
+diff --git a/crates/core/src/refs/refs_store_retained_tests.rs b/crates/core/src/refs/refs_store_retained_tests.rs
+index 4cf8a71..1289bb5 100644
+--- a/crates/core/src/refs/refs_store_retained_tests.rs
++++ b/crates/core/src/refs/refs_store_retained_tests.rs
+@@ -5,6 +5,7 @@ use std::collections::HashSet;
+ fn map(token: &str) -> RefMap {
+     let node = serde_json::from_str(r#"{"role":"button","name":"Target"}"#).unwrap();
+     let source = crate::refs::ref_alloc_source::RefAllocSource {
++        native_owner: None,
+         pid: crate::ProcessId::new(42),
+         app: Some("App"),
+         window_id: Some("w-42"),
+diff --git a/crates/core/src/refs/refs_store_tests.rs b/crates/core/src/refs/refs_store_tests.rs
+index cc0f7fd..cfa811c 100644
+--- a/crates/core/src/refs/refs_store_tests.rs
++++ b/crates/core/src/refs/refs_store_tests.rs
+@@ -35,6 +35,7 @@ fn entry(name: &str) -> RefEntry {
+             available_actions: vec![crate::actions::capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some("TestApp".into()),
+             source_window_id: None,
+             source_window_title: Some("Test Window".into()),
+diff --git a/crates/core/src/refs/refs_store_transaction_tests.rs b/crates/core/src/refs/refs_store_transaction_tests.rs
+index 8e352e0..5c5f8b6 100644
+--- a/crates/core/src/refs/refs_store_transaction_tests.rs
++++ b/crates/core/src/refs/refs_store_transaction_tests.rs
+@@ -25,6 +25,7 @@ fn entry(name: &str, root_ref: Option<&str>) -> crate::RefEntry {
+             available_actions: vec![crate::actions::capability::CLICK.into()],
+         },
+         source: RefSource {
++            native_owner: None,
+             source_app: Some("Fixture".into()),
+             source_window_id: Some("w-1".into()),
+             source_window_title: Some("Fixture".into()),
+diff --git a/crates/core/src/refs/refs_tests.rs b/crates/core/src/refs/refs_tests.rs
+index eb7980e..e875c9a 100644
+--- a/crates/core/src/refs/refs_tests.rs
++++ b/crates/core/src/refs/refs_tests.rs
+@@ -24,6 +24,7 @@ pub(super) fn entry(role: &str, name: Option<&str>) -> RefEntry {
+             available_actions: vec!["Click".into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+@@ -203,6 +204,7 @@ fn test_save_load_roundtrip_with_home_override() {
+             available_actions: vec!["Click".into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some("TestApp".into()),
+             source_window_id: None,
+             source_window_title: Some("Test Window".into()),
+diff --git a/crates/core/src/refs/refs_validate.rs b/crates/core/src/refs/refs_validate.rs
+index 8ad82b7..d5ecaa0 100644
+--- a/crates/core/src/refs/refs_validate.rs
++++ b/crates/core/src/refs/refs_validate.rs
+@@ -14,6 +14,13 @@ pub(crate) fn validate_ref_entry(entry: &RefEntry) -> Result<(), AppError> {
+             "RefEntry requires a positive pid and process instance",
+         ));
+     }
++    if entry.source.native_owner.as_ref().is_some_and(|owner| {
++        owner.pid.get() == 0 || owner.instance.is_empty() || owner.instance.len() > MAX_FIELD_BYTES
++    }) {
++        return Err(AppError::invalid_input(
++            "RefEntry contains an invalid native owner identity",
++        ));
++    }
+     if !crate::Role::is_canonical(&entry.identity.role) || entry.identity.role == "unknown" {
+         return Err(AppError::invalid_input("RefEntry contains an invalid role"));
+     }
+diff --git a/crates/core/src/snapshot/mod.rs b/crates/core/src/snapshot/mod.rs
+index 96cd822..517291a 100644
+--- a/crates/core/src/snapshot/mod.rs
++++ b/crates/core/src/snapshot/mod.rs
+@@ -60,6 +60,7 @@ pub fn build(
+             pid: window.pid,
+             app: Some(window.app.as_str()),
+             window_id: Some(window.id.as_str()),
++            native_owner: window.native_owner.as_ref(),
+             window_title: Some(window.title.as_str()),
+             window_bounds_hash: window.bounds.as_ref().and_then(crate::Rect::bounds_hash),
+             process_instance: window.process_instance.as_deref(),
+diff --git a/crates/core/src/snapshot/snapshot_ref.rs b/crates/core/src/snapshot/snapshot_ref.rs
+index 3c7e157..8e713dc 100644
+--- a/crates/core/src/snapshot/snapshot_ref.rs
++++ b/crates/core/src/snapshot/snapshot_ref.rs
+@@ -83,6 +83,7 @@ pub fn run_from_ref_with_context(
+             pid: entry.process.pid,
+             app: source_app,
+             window_id: source_window_id,
++            native_owner: entry.source.native_owner.as_ref(),
+             window_title: source_window_title,
+             window_bounds_hash: entry.source.source_window_bounds_hash,
+             process_instance: entry.process.process_instance.as_deref(),
+@@ -159,7 +160,21 @@ fn resolve_result_window(
+             deadline,
+         )?
+         .into_iter()
+-        .filter(|window| window.id == window_id && window.pid == entry.process.pid)
++        .filter(|window| {
++            window.id == window_id
++                && window.pid == entry.process.pid
++                && window.process_instance == entry.process.process_instance
++                && match (&entry.source.native_owner, &window.native_owner) {
++                    (Some(expected), Some(actual)) => expected == actual,
++                    (None, None) => true,
++                    (None, Some(actual)) => {
++                        actual.pid == entry.process.pid
++                            && Some(actual.instance.as_str())
++                                == entry.process.process_instance.as_deref()
++                    }
++                    (Some(_), None) => false,
++                }
++        })
+         .collect();
+     crate::system::window_lookup::select_window(
+         candidates,
+diff --git a/crates/core/src/snapshot/snapshot_ref_alloc_tests.rs b/crates/core/src/snapshot/snapshot_ref_alloc_tests.rs
+index 6188c66..ec82358 100644
+--- a/crates/core/src/snapshot/snapshot_ref_alloc_tests.rs
++++ b/crates/core/src/snapshot/snapshot_ref_alloc_tests.rs
+@@ -28,6 +28,7 @@ fn drill_config<'a>(
+             compact,
+         },
+         source: crate::refs::ref_alloc_source::RefAllocSource {
++            native_owner: None,
+             pid: crate::ProcessId::new(pid),
+             app: source_app,
+             window_id: None,
+diff --git a/crates/core/src/snapshot/snapshot_ref_tests.rs b/crates/core/src/snapshot/snapshot_ref_tests.rs
+index 027650e..5222cdb 100644
+--- a/crates/core/src/snapshot/snapshot_ref_tests.rs
++++ b/crates/core/src/snapshot/snapshot_ref_tests.rs
+@@ -39,6 +39,7 @@ fn named(role: &str, name: &str) -> AccessibilityNode {
+
+ fn source(app: &'static str) -> crate::refs::ref_alloc_source::RefAllocSource<'static> {
+     crate::refs::ref_alloc_source::RefAllocSource {
++        native_owner: None,
+         pid: crate::ProcessId::new(42),
+         app: Some(app),
+         window_id: None,
+@@ -95,6 +96,7 @@ impl StubAdapter {
+
+ fn window_info(id: &str, focused: bool) -> crate::WindowInfo {
+     crate::WindowInfo {
++        native_owner: None,
+         id: id.into(),
+         title: "Test".into(),
+         app: "TestApp".into(),
+diff --git a/crates/core/src/snapshot/snapshot_surface_window_tests.rs b/crates/core/src/snapshot/snapshot_surface_window_tests.rs
+index 39c0428..20948c4 100644
+--- a/crates/core/src/snapshot/snapshot_surface_window_tests.rs
++++ b/crates/core/src/snapshot/snapshot_surface_window_tests.rs
+@@ -65,6 +65,7 @@ impl SystemOps for SurfaceAdapter {
+
+ fn app_window(id: &str, focused: bool) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: id.into(),
+         state: crate::WindowState {
+             is_focused: focused,
+diff --git a/crates/core/src/snapshot/snapshot_tests.rs b/crates/core/src/snapshot/snapshot_tests.rs
+index 9176590..9ef0f83 100644
+--- a/crates/core/src/snapshot/snapshot_tests.rs
++++ b/crates/core/src/snapshot/snapshot_tests.rs
+@@ -21,6 +21,7 @@ fn run_config(compact: bool, interactive_only: bool) -> RefAllocConfig<'static>
+             compact,
+         },
+         source: crate::refs::ref_alloc_source::RefAllocSource {
++            native_owner: None,
+             pid: crate::ProcessId::new(1),
+             app: Some("Test"),
+             window_id: None,
+@@ -218,6 +219,7 @@ fn test_skeleton_anchor_suppressed_in_drilldown() {
+             compact: false,
+         },
+         source: crate::refs::ref_alloc_source::RefAllocSource {
++            native_owner: None,
+             pid: crate::ProcessId::new(1),
+             app: Some("Test"),
+             window_id: None,
+@@ -303,6 +305,7 @@ fn test_skeleton_fixture_matches_golden() {
+             compact: false,
+         },
+         source: crate::refs::ref_alloc_source::RefAllocSource {
++            native_owner: None,
+             pid: crate::ProcessId::new(42),
+             app: Some("Fixture"),
+             window_id: None,
+diff --git a/crates/core/src/snapshot/snapshot_window_tests.rs b/crates/core/src/snapshot/snapshot_window_tests.rs
+index 196a421..860e4cb 100644
+--- a/crates/core/src/snapshot/snapshot_window_tests.rs
++++ b/crates/core/src/snapshot/snapshot_window_tests.rs
+@@ -51,6 +51,7 @@ impl SystemOps for ShellSurfaceAdapter {}
+
+ fn window(app: &str) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: "WhatsApp".into(),
+         app: app.into(),
+@@ -63,6 +64,7 @@ fn window(app: &str) -> WindowInfo {
+
+ fn shell_window() -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-shell".into(),
+         title: "Action center".into(),
+         app: "shell".into(),
+diff --git a/crates/core/src/system/operation_report_build_tests.rs b/crates/core/src/system/operation_report_build_tests.rs
+index c8a15dd..0da94a6 100644
+--- a/crates/core/src/system/operation_report_build_tests.rs
++++ b/crates/core/src/system/operation_report_build_tests.rs
+@@ -12,6 +12,7 @@ fn event(kind: MouseEventKind) -> MouseEvent {
+
+ fn window(instance: Option<&str>) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: "Doc".into(),
+         app: "Notes".into(),
+diff --git a/crates/core/src/system/operation_report_dispatch_tests.rs b/crates/core/src/system/operation_report_dispatch_tests.rs
+index a2adaf7..e44da11 100644
+--- a/crates/core/src/system/operation_report_dispatch_tests.rs
++++ b/crates/core/src/system/operation_report_dispatch_tests.rs
+@@ -4,6 +4,7 @@ use serde_json::json;
+
+ fn window(instance: Option<&str>) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: "Doc".into(),
+         app: "Notes".into(),
+diff --git a/crates/core/src/system/window_info.rs b/crates/core/src/system/window_info.rs
+index aafc54c..890a357 100644
+--- a/crates/core/src/system/window_info.rs
++++ b/crates/core/src/system/window_info.rs
+@@ -1,6 +1,6 @@
+ use serde::{Deserialize, Serialize};
+
+-use crate::{ProcessId, Rect, WindowState};
++use crate::{ProcessId, ProcessIdentity, Rect, WindowState};
+
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct WindowInfo {
+@@ -11,6 +11,8 @@ pub struct WindowInfo {
+     pub pid: ProcessId,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub process_instance: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub native_owner: Option<ProcessIdentity>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub bounds: Option<Rect>,
+     #[serde(flatten)]
+diff --git a/crates/core/src/system/window_info_tests.rs b/crates/core/src/system/window_info_tests.rs
+index e87f55c..2d40ea6 100644
+--- a/crates/core/src/system/window_info_tests.rs
++++ b/crates/core/src/system/window_info_tests.rs
+@@ -15,11 +15,19 @@ fn legacy_window_json_defaults_optional_state() {
+     assert!(window.state.accessible);
+     assert_eq!(window.state.minimized, None);
+     assert_eq!(window.state.visible, None);
++    assert_eq!(window.native_owner, None);
++    assert!(
++        serde_json::to_value(&window)
++            .unwrap()
++            .get("native_owner")
++            .is_none()
++    );
+ }
+
+ #[test]
+ fn optional_window_state_serializes_flat() {
+     let window = WindowInfo {
++        native_owner: Some(crate::ProcessIdentity::new(77, "owner-generation")),
+         id: "w-1".into(),
+         title: "Document".into(),
+         app: "Editor".into(),
+@@ -39,5 +47,7 @@ fn optional_window_state_serializes_flat() {
+     assert_eq!(value["accessible"], true);
+     assert_eq!(value["minimized"], true);
+     assert_eq!(value["visible"], false);
++    assert_eq!(value["native_owner"]["pid"], 77);
++    assert_eq!(value["native_owner"]["instance"], "owner-generation");
+     assert!(value.get("state").is_none());
+ }
+diff --git a/crates/core/src/system/window_lookup_tests.rs b/crates/core/src/system/window_lookup_tests.rs
+index e905bf7..9dbc09c 100644
+--- a/crates/core/src/system/window_lookup_tests.rs
++++ b/crates/core/src/system/window_lookup_tests.rs
+@@ -19,6 +19,7 @@ impl SystemOps for WindowInventory {}
+
+ fn window(instance: Option<&str>) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: "Example".into(),
+         app: "Example".into(),
+diff --git a/crates/core/src/trace/trace_artifacts.rs b/crates/core/src/trace/trace_artifacts.rs
+index 05ea36c..a8c1f78 100644
+--- a/crates/core/src/trace/trace_artifacts.rs
++++ b/crates/core/src/trace/trace_artifacts.rs
+@@ -99,6 +99,7 @@ pub(crate) fn capture_action_screenshot(
+     }
+
+     let target = crate::WindowInfo {
++        native_owner: entry.source.native_owner.clone(),
+         id: window_id.into(),
+         title: entry.source.source_window_title.clone().unwrap_or_default(),
+         app: entry.source.source_app.clone().unwrap_or_default(),
+diff --git a/crates/core/src/trace/trace_artifacts_tests.rs b/crates/core/src/trace/trace_artifacts_tests.rs
+index b12de29..2825fcb 100644
+--- a/crates/core/src/trace/trace_artifacts_tests.rs
++++ b/crates/core/src/trace/trace_artifacts_tests.rs
+@@ -54,6 +54,7 @@ pub(super) fn entry(pid: u32) -> RefEntry {
+             available_actions: vec![capability::CLICK.into()],
+         },
+         source: crate::RefSource {
++            native_owner: None,
+             source_app: Some("FixtureApp".into()),
+             source_window_id: Some(format!("w-{pid}")),
+             source_window_title: Some("Fixture".into()),
+diff --git a/crates/core/src/tree/renderer_accessibility_tests.rs b/crates/core/src/tree/renderer_accessibility_tests.rs
+index 5248b59..42ac667 100644
+--- a/crates/core/src/tree/renderer_accessibility_tests.rs
++++ b/crates/core/src/tree/renderer_accessibility_tests.rs
+@@ -81,6 +81,7 @@ fn activation_lease_is_dropped_before_observation_retry() {
+         activations: AtomicU32::new(0),
+     };
+     let window = crate::WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: "Fixture".into(),
+         app: "Fixture".into(),
+@@ -146,6 +147,7 @@ fn a_renderer_that_never_activates_is_not_re_walked_continuously() {
+         observations: AtomicU32::new(0),
+     };
+     let window = crate::WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: "Renderer".into(),
+         app: "Renderer".into(),
+@@ -262,6 +264,7 @@ fn switch(needs_ms: u64, takes_ms: u64) -> SwitchAdapter {
+
+ fn renderer_window() -> crate::WindowInfo {
+     crate::WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: "Renderer".into(),
+         app: "Renderer".into(),
+diff --git a/crates/core/src/wait/signals_tests.rs b/crates/core/src/wait/signals_tests.rs
+index d51b996..8c8fdca 100644
+--- a/crates/core/src/wait/signals_tests.rs
++++ b/crates/core/src/wait/signals_tests.rs
+@@ -2,6 +2,7 @@ use super::*;
+
+ fn window(id: &str, title: &str, app: &str, pid: u32, focused: bool) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: id.into(),
+         title: title.into(),
+         app: app.into(),
+diff --git a/crates/ffi/src/actions/resolve.rs b/crates/ffi/src/actions/resolve.rs
+index fd5b135..ffee4f8 100644
+--- a/crates/ffi/src/actions/resolve.rs
++++ b/crates/ffi/src/actions/resolve.rs
+@@ -280,6 +280,7 @@ unsafe fn decode_core_ref_entry(
+             available_actions,
+         },
+         source: RefSource {
++            native_owner: None,
+             source_app,
+             source_window_id,
+             source_window_title,
+diff --git a/crates/ffi/src/apps/launch.rs b/crates/ffi/src/apps/launch.rs
+index d876c1e..977dfa7 100644
+--- a/crates/ffi/src/apps/launch.rs
++++ b/crates/ffi/src/apps/launch.rs
+@@ -156,6 +156,7 @@ mod tests {
+                 pid: ProcessId::new(42),
+                 process_instance: Some("fixture-42".into()),
+                 window: Some(WindowInfo {
++                    native_owner: None,
+                     id: "w-launch".into(),
+                     title: "Launched".into(),
+                     app: "Fixture".into(),
+diff --git a/crates/ffi/src/convert/window.rs b/crates/ffi/src/convert/window.rs
+index 645d951..af56062 100644
+--- a/crates/ffi/src/convert/window.rs
++++ b/crates/ffi/src/convert/window.rs
+@@ -105,6 +105,7 @@ mod tests {
+     #[test]
+     fn test_window_info_roundtrip() {
+         let w = WindowInfo {
++            native_owner: None,
+             id: "w-123".into(),
+             title: "Documents".into(),
+             app: "Finder".into(),
+@@ -144,6 +145,7 @@ mod tests {
+     #[test]
+     fn window_info_to_c_bounds_none_sets_false_flag_and_zeroed_rect() {
+         let w = WindowInfo {
++            native_owner: None,
+             id: "w-7".into(),
+             title: "Untitled".into(),
+             app: "TextEdit".into(),
+@@ -169,6 +171,7 @@ mod tests {
+     #[test]
+     fn exact_window_info_carries_owned_process_generation() {
+         let window = WindowInfo {
++            native_owner: None,
+             id: "w-9".into(),
+             title: "Main".into(),
+             app: "Fixture".into(),
+@@ -191,6 +194,7 @@ mod tests {
+     #[test]
+     fn exact_window_validation_rejects_missing_process_generation() {
+         let window = WindowInfo {
++            native_owner: None,
+             id: "w-9".into(),
+             title: "Main".into(),
+             app: "Fixture".into(),
+diff --git a/crates/ffi/src/windows/to_core.rs b/crates/ffi/src/windows/to_core.rs
+index e88cf90..fab5e08 100644
+--- a/crates/ffi/src/windows/to_core.rs
++++ b/crates/ffi/src/windows/to_core.rs
+@@ -56,6 +56,7 @@ fn decode_window(
+         None
+     };
+     Ok(WindowInfo {
++        native_owner: None,
+         id,
+         title,
+         app,
+diff --git a/crates/linux/src/adapter_tests.rs b/crates/linux/src/adapter_tests.rs
+index 4dc036f..8a984fe 100644
+--- a/crates/linux/src/adapter_tests.rs
++++ b/crates/linux/src/adapter_tests.rs
+@@ -151,6 +151,7 @@ fn the_lifecycle_overrides_are_wired_to_the_adapter() {
+     assert_eq!(error.code, ErrorCode::InvalidArgs);
+
+     let window = agent_desktop_core::WindowInfo {
++        native_owner: None,
+         id: "w-1.2-a".to_owned(),
+         title: String::new(),
+         app: "app".to_owned(),
+diff --git a/crates/linux/src/notifications/fake.rs b/crates/linux/src/notifications/fake.rs
+index 85b9469..a8481d6 100644
+--- a/crates/linux/src/notifications/fake.rs
++++ b/crates/linux/src/notifications/fake.rs
+@@ -314,6 +314,7 @@ impl ShellWorld for FakeWorld {
+         }
+         self.showing.set(true);
+         let window = WindowInfo {
++            native_owner: None,
+             id: "w".to_owned(),
+             title: String::new(),
+             app: String::new(),
+diff --git a/crates/linux/src/system/capture/window_fakes_tests.rs b/crates/linux/src/system/capture/window_fakes_tests.rs
+index 1e7b3c2..273faf0 100644
+--- a/crates/linux/src/system/capture/window_fakes_tests.rs
++++ b/crates/linux/src/system/capture/window_fakes_tests.rs
+@@ -206,6 +206,7 @@ pub(crate) fn encode(
+
+ pub(crate) fn window_info(bounds: Option<Rect>) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w1".to_owned(),
+         title: "Editor".to_owned(),
+         app: "editor".to_owned(),
+diff --git a/crates/linux/src/system/capture/window_xid_tests.rs b/crates/linux/src/system/capture/window_xid_tests.rs
+index be4b087..5c47660 100644
+--- a/crates/linux/src/system/capture/window_xid_tests.rs
++++ b/crates/linux/src/system/capture/window_xid_tests.rs
+@@ -74,6 +74,7 @@ fn listed(id: &str, title: &str, active: bool) -> ListedWindow {
+     ListedWindow {
+         app: 0,
+         info: WindowInfo {
++            native_owner: None,
+             id: id.to_owned(),
+             title: title.to_owned(),
+             app: "editor".to_owned(),
+diff --git a/crates/linux/src/system/focus/focus_world_fake.rs b/crates/linux/src/system/focus/focus_world_fake.rs
+index 262f42f..d28f26a 100644
+--- a/crates/linux/src/system/focus/focus_world_fake.rs
++++ b/crates/linux/src/system/focus/focus_world_fake.rs
+@@ -277,6 +277,7 @@ impl FocusWorld for World {
+
+ pub(super) fn window() -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: window_id::encode(":1.7", "/org/a11y/atspi/accessible/5").expect("an id"),
+         title: "Doc".to_owned(),
+         app: "app".to_owned(),
+diff --git a/crates/linux/src/system/focus/key_dispatch_tests.rs b/crates/linux/src/system/focus/key_dispatch_tests.rs
+index 9fdf0a9..88aceb9 100644
+--- a/crates/linux/src/system/focus/key_dispatch_tests.rs
++++ b/crates/linux/src/system/focus/key_dispatch_tests.rs
+@@ -95,6 +95,7 @@ impl KeyWorld for Keys<'_> {
+
+ fn window(pid: u32, id: &str) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: id.into(),
+         title: id.into(),
+         app: "app".into(),
+diff --git a/crates/linux/src/system/launch/launch_baseline_tests.rs b/crates/linux/src/system/launch/launch_baseline_tests.rs
+index 873aa47..fc2046d 100644
+--- a/crates/linux/src/system/launch/launch_baseline_tests.rs
++++ b/crates/linux/src/system/launch/launch_baseline_tests.rs
+@@ -68,6 +68,7 @@ fn an_old_frame_omitted_by_an_incomplete_baseline_cannot_be_a_launch_window() {
+         &X11State::Unavailable,
+     );
+     let old = agent_desktop_core::WindowInfo {
++        native_owner: None,
+         id: "w-old".to_owned(),
+         title: "old".to_owned(),
+         app: owner.name.clone(),
+diff --git a/crates/linux/src/system/launch/launch_tests.rs b/crates/linux/src/system/launch/launch_tests.rs
+index 6006585..66b7d9f 100644
+--- a/crates/linux/src/system/launch/launch_tests.rs
++++ b/crates/linux/src/system/launch/launch_tests.rs
+@@ -21,6 +21,7 @@ fn owner() -> Running {
+
+ fn window() -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-1".to_owned(),
+         title: "Tool".to_owned(),
+         app: "tool".to_owned(),
+@@ -275,6 +276,7 @@ fn a_reused_instance_says_the_environment_and_directory_were_dropped() {
+
+ fn listed(id: &str) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: id.to_owned(),
+         title: String::new(),
+         app: "app".to_owned(),
+diff --git a/crates/linux/src/system/launch/launch_window_tests.rs b/crates/linux/src/system/launch/launch_window_tests.rs
+index 4b63b9d..5b1cc25 100644
+--- a/crates/linux/src/system/launch/launch_window_tests.rs
++++ b/crates/linux/src/system/launch/launch_window_tests.rs
+@@ -18,6 +18,7 @@ fn this_process() -> Running {
+
+ fn window_of_owner(owner: &Running) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-proven".to_owned(),
+         title: String::new(),
+         app: owner.name.clone(),
+diff --git a/crates/linux/src/system/menu/inventory_tests.rs b/crates/linux/src/system/menu/inventory_tests.rs
+index 5c2f717..af79442 100644
+--- a/crates/linux/src/system/menu/inventory_tests.rs
++++ b/crates/linux/src/system/menu/inventory_tests.rs
+@@ -13,6 +13,7 @@ fn window(id: &str, sheet: bool) -> ListedWindow {
+     ListedWindow {
+         app: 0,
+         info: WindowInfo {
++            native_owner: None,
+             id: id.to_owned(),
+             title: "App".to_owned(),
+             app: "app".to_owned(),
+diff --git a/crates/linux/src/system/menu/menu_surface_tests.rs b/crates/linux/src/system/menu/menu_surface_tests.rs
+index 6e4f071..6e15927 100644
+--- a/crates/linux/src/system/menu/menu_surface_tests.rs
++++ b/crates/linux/src/system/menu/menu_surface_tests.rs
+@@ -78,6 +78,7 @@ fn an_unread_menu_inventory_marks_the_window_unclassified() {
+
+ fn owner() -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-1-2".to_owned(),
+         title: "App".to_owned(),
+         app: "app".to_owned(),
+diff --git a/crates/linux/src/system/menu/surfaces_tests.rs b/crates/linux/src/system/menu/surfaces_tests.rs
+index be880d8..fcdc69e 100644
+--- a/crates/linux/src/system/menu/surfaces_tests.rs
++++ b/crates/linux/src/system/menu/surfaces_tests.rs
+@@ -9,6 +9,7 @@ fn window(id: &str, title: &str, sheet: bool) -> ListedWindow {
+     ListedWindow {
+         app: 0,
+         info: WindowInfo {
++            native_owner: None,
+             id: id.to_owned(),
+             title: title.to_owned(),
+             app: "a".to_owned(),
+diff --git a/crates/linux/src/system/process/protected_tests.rs b/crates/linux/src/system/process/protected_tests.rs
+index d0019c9..3a880f5 100644
+--- a/crates/linux/src/system/process/protected_tests.rs
++++ b/crates/linux/src/system/process/protected_tests.rs
+@@ -94,6 +94,7 @@ fn window(unshown: bool) -> ListedWindow {
+     ListedWindow {
+         app: 0,
+         info: WindowInfo {
++            native_owner: None,
+             id: "w-1".to_owned(),
+             title: "Doc".to_owned(),
+             app: "app".to_owned(),
+diff --git a/crates/linux/src/system/shell/open.rs b/crates/linux/src/system/shell/open.rs
+index ac9dd42..a3c020b 100644
+--- a/crates/linux/src/system/shell/open.rs
++++ b/crates/linux/src/system/shell/open.rs
+@@ -156,6 +156,7 @@ pub(crate) fn window_info(
+     let id = window_id::encode(container.element.bus_name(), container.element.path())
+         .ok_or_else(|| AdapterError::internal("The shell container has no window id"))?;
+     Ok(WindowInfo {
++        native_owner: None,
+         id,
+         title: title_of(kind).to_owned(),
+         app: super::identity::SHELL_BUS_NAME.to_owned(),
+diff --git a/crates/linux/src/system/shell/open_tests.rs b/crates/linux/src/system/shell/open_tests.rs
+index cdaed07..47c3930 100644
+--- a/crates/linux/src/system/shell/open_tests.rs
++++ b/crates/linux/src/system/shell/open_tests.rs
+@@ -81,6 +81,7 @@ impl Surface for World {
+             return Err(AdapterError::timeout("window info could not be read"));
+         }
+         Ok(WindowInfo {
++            native_owner: None,
+             id: "w-1-2-3".to_owned(),
+             title: "t".to_owned(),
+             app: "gnome-shell".to_owned(),
+diff --git a/crates/linux/src/system/signal/signal_capture_tests.rs b/crates/linux/src/system/signal/signal_capture_tests.rs
+index 79c9f6a..f57ced9 100644
+--- a/crates/linux/src/system/signal/signal_capture_tests.rs
++++ b/crates/linux/src/system/signal/signal_capture_tests.rs
+@@ -47,6 +47,7 @@ fn listed(app: &RegistryApp, scripted: &Scripted) -> ListedWindow {
+     ListedWindow {
+         app: scripted.owner,
+         info: WindowInfo {
++            native_owner: None,
+             id: scripted.id.to_owned(),
+             title: scripted.id.to_owned(),
+             app: app.name.clone(),
+diff --git a/crates/linux/src/system/signal/signal_population_tests.rs b/crates/linux/src/system/signal/signal_population_tests.rs
+index eb647db..653f479 100644
+--- a/crates/linux/src/system/signal/signal_population_tests.rs
++++ b/crates/linux/src/system/signal/signal_population_tests.rs
+@@ -26,6 +26,7 @@ fn window(owner: usize, id: &str, visible: bool) -> ListedWindow {
+     ListedWindow {
+         app: owner,
+         info: WindowInfo {
++            native_owner: None,
+             id: id.to_owned(),
+             title: String::new(),
+             app: String::new(),
+diff --git a/crates/linux/src/system/signal/signal_surfaces_tests.rs b/crates/linux/src/system/signal/signal_surfaces_tests.rs
+index b9830a6..0de8a15 100644
+--- a/crates/linux/src/system/signal/signal_surfaces_tests.rs
++++ b/crates/linux/src/system/signal/signal_surfaces_tests.rs
+@@ -26,6 +26,7 @@ fn window(id: &str, title: &str, sheet: bool) -> ListedWindow {
+     ListedWindow {
+         app: 0,
+         info: WindowInfo {
++            native_owner: None,
+             id: id.to_owned(),
+             title: title.to_owned(),
+             app: "calc".to_owned(),
+diff --git a/crates/linux/src/system/tray/fit_tests.rs b/crates/linux/src/system/tray/fit_tests.rs
+index 0b4d710..13e8e88 100644
+--- a/crates/linux/src/system/tray/fit_tests.rs
++++ b/crates/linux/src/system/tray/fit_tests.rs
+@@ -55,6 +55,7 @@ fn projected() -> AccessibilityNode {
+     let view = TrayView { items: vec![item] };
+     let root = view.subtrees().pop().expect("one watcher item");
+     let window = WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: "Tray".into(),
+         app: "shell".into(),
+diff --git a/crates/linux/src/system/window/ghost_window_tests.rs b/crates/linux/src/system/window/ghost_window_tests.rs
+index a08a274..135de5b 100644
+--- a/crates/linux/src/system/window/ghost_window_tests.rs
++++ b/crates/linux/src/system/window/ghost_window_tests.rs
+@@ -8,6 +8,7 @@ fn window(id: &str, title: &str, unshown: bool) -> ListedWindow {
+     ListedWindow {
+         app: 0,
+         info: WindowInfo {
++            native_owner: None,
+             id: id.to_owned(),
+             title: title.to_owned(),
+             app: "qt".to_owned(),
+diff --git a/crates/linux/src/system/window/listed_twins_tests.rs b/crates/linux/src/system/window/listed_twins_tests.rs
+index f28b9cd..847acb2 100644
+--- a/crates/linux/src/system/window/listed_twins_tests.rs
++++ b/crates/linux/src/system/window/listed_twins_tests.rs
+@@ -7,6 +7,7 @@ fn listed(pid: u32, title: &str, active: bool) -> ListedWindow {
+     ListedWindow {
+         app: 0,
+         info: WindowInfo {
++            native_owner: None,
+             id: format!("w-{pid}-{title}-{active}"),
+             title: title.to_owned(),
+             app: "editor".to_owned(),
+diff --git a/crates/linux/src/system/window/stopped_windows.rs b/crates/linux/src/system/window/stopped_windows.rs
+index 164d309..ff949da 100644
+--- a/crates/linux/src/system/window/stopped_windows.rs
++++ b/crates/linux/src/system/window/stopped_windows.rs
+@@ -44,6 +44,7 @@ pub(crate) fn of_stopped_apps(
+             found.push(ListedWindow {
+                 app: index,
+                 info: WindowInfo {
++                    native_owner: None,
+                     id,
+                     title: client.title.clone(),
+                     app: app.name.clone(),
+diff --git a/crates/linux/src/system/window/window_filter_deadline_tests.rs b/crates/linux/src/system/window/window_filter_deadline_tests.rs
+index b88336c..e2473b5 100644
+--- a/crates/linux/src/system/window/window_filter_deadline_tests.rs
++++ b/crates/linux/src/system/window/window_filter_deadline_tests.rs
+@@ -9,6 +9,7 @@ fn an_expired_window_read_is_timeout_instead_of_an_unsupported_surface() {
+     let window = ListedWindow {
+         app: 0,
+         info: WindowInfo {
++            native_owner: None,
+             id: "window".to_owned(),
+             title: "Document".to_owned(),
+             app: "App".to_owned(),
+diff --git a/crates/linux/src/system/window/window_filter_helper_tests.rs b/crates/linux/src/system/window/window_filter_helper_tests.rs
+index 6afcea9..7949957 100644
+--- a/crates/linux/src/system/window/window_filter_helper_tests.rs
++++ b/crates/linux/src/system/window/window_filter_helper_tests.rs
+@@ -22,6 +22,7 @@ fn window(pid: u32, x: i32) -> ListedWindow {
+     ListedWindow {
+         app: 0,
+         info: WindowInfo {
++            native_owner: None,
+             id: format!("window-{pid}"),
+             title: format!("window {pid}"),
+             app: "app".to_owned(),
+diff --git a/crates/linux/src/system/window/window_filter_tests.rs b/crates/linux/src/system/window/window_filter_tests.rs
+index 6a8d446..9287fe6 100644
+--- a/crates/linux/src/system/window/window_filter_tests.rs
++++ b/crates/linux/src/system/window/window_filter_tests.rs
+@@ -192,6 +192,7 @@ fn listed(
+     crate::system::registry::listed_window::ListedWindow {
+         app: 0,
+         info: WindowInfo {
++            native_owner: None,
+             id: format!("{:?}", frame.extents),
+             title: frame.title.clone(),
+             app: "app".into(),
+diff --git a/crates/linux/src/system/window/window_listing.rs b/crates/linux/src/system/window/window_listing.rs
+index 29b6317..0991ec5 100644
+--- a/crates/linux/src/system/window/window_listing.rs
++++ b/crates/linux/src/system/window/window_listing.rs
+@@ -33,6 +33,7 @@ fn listed(
+     Some(ListedWindow {
+         app: index,
+         info: WindowInfo {
++            native_owner: None,
+             id,
+             title: title.clone(),
+             app: app.name.clone(),
+diff --git a/crates/linux/src/system/window/window_op/window_op_tests.rs b/crates/linux/src/system/window/window_op/window_op_tests.rs
+index 4052a53..dfab162 100644
+--- a/crates/linux/src/system/window/window_op/window_op_tests.rs
++++ b/crates/linux/src/system/window/window_op/window_op_tests.rs
+@@ -211,6 +211,7 @@ impl OpWorld for World {
+
+ pub(super) fn window() -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: window_id::encode(":1.7", "/org/a11y/atspi/accessible/5").expect("an id"),
+         title: "Doc".to_owned(),
+         app: "app".to_owned(),
+diff --git a/crates/linux/src/system/window/window_ops_tests.rs b/crates/linux/src/system/window/window_ops_tests.rs
+index 13ee252..96439e1 100644
+--- a/crates/linux/src/system/window/window_ops_tests.rs
++++ b/crates/linux/src/system/window/window_ops_tests.rs
+@@ -11,6 +11,7 @@ fn window(title: &str, active: bool, modal: bool) -> ListedWindow {
+     ListedWindow {
+         app: 0,
+         info: WindowInfo {
++            native_owner: None,
+             id: format!("w-1.1-{title}"),
+             title: title.to_owned(),
+             app: "a".to_owned(),
+diff --git a/crates/linux/src/system/window/window_order_tests.rs b/crates/linux/src/system/window/window_order_tests.rs
+index 4bbce73..dcf5850 100644
+--- a/crates/linux/src/system/window/window_order_tests.rs
++++ b/crates/linux/src/system/window/window_order_tests.rs
+@@ -8,6 +8,7 @@ fn window(title: &str, focused: bool) -> ListedWindow {
+     ListedWindow {
+         app: 0,
+         info: WindowInfo {
++            native_owner: None,
+             id: format!("w-{title}"),
+             title: title.to_owned(),
+             app: "editor".to_owned(),
+diff --git a/crates/linux/src/system/window/window_resolve_tests.rs b/crates/linux/src/system/window/window_resolve_tests.rs
+index 0e03b8b..98e46ab 100644
+--- a/crates/linux/src/system/window/window_resolve_tests.rs
++++ b/crates/linux/src/system/window/window_resolve_tests.rs
+@@ -4,6 +4,7 @@ use super::{Liveness, verify};
+
+ fn window(id: &str, pid: u32, instance: Option<&str>, title: &str) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: id.to_owned(),
+         title: title.to_owned(),
+         app: "a".to_owned(),
+diff --git a/crates/linux/src/tree/live/observe_live_tests.rs b/crates/linux/src/tree/live/observe_live_tests.rs
+index 432d0c6..9f24ef4 100644
+--- a/crates/linux/src/tree/live/observe_live_tests.rs
++++ b/crates/linux/src/tree/live/observe_live_tests.rs
+@@ -32,6 +32,7 @@ fn observe_live_calculator_returns_a_complete_reffed_tree() {
+     let id = window_id::encode(settled.frame.bus_name(), settled.frame.path())
+         .expect("a registry frame has an encodable address");
+     let window = WindowInfo {
++        native_owner: None,
+         id,
+         title: String::new(),
+         app: "calculator".to_owned(),
+diff --git a/crates/linux/src/tree/live/test_support.rs b/crates/linux/src/tree/live/test_support.rs
+index 0e4a1d0..16a5721 100644
+--- a/crates/linux/src/tree/live/test_support.rs
++++ b/crates/linux/src/tree/live/test_support.rs
+@@ -125,6 +125,7 @@ pub(crate) fn ref_entry(role: &str) -> RefEntry {
+             available_actions: Vec::new(),
+         },
+         source: agent_desktop_core::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+diff --git a/crates/linux/src/tree/observe/decorate_tests.rs b/crates/linux/src/tree/observe/decorate_tests.rs
+index 286049d..13d440d 100644
+--- a/crates/linux/src/tree/observe/decorate_tests.rs
++++ b/crates/linux/src/tree/observe/decorate_tests.rs
+@@ -38,6 +38,7 @@ fn walk() -> Walk<ObservedRead> {
+
+ fn tree(subtree: ObservedSubtree, stats: agent_desktop_core::LocatorStats) -> AccessibilityNode {
+     let window = WindowInfo {
++        native_owner: None,
+         id: "w-1.1-p".to_owned(),
+         title: "t".to_owned(),
+         app: "a".to_owned(),
+diff --git a/crates/linux/src/tree/observe/observe_settle_tests.rs b/crates/linux/src/tree/observe/observe_settle_tests.rs
+index e62e2ad..1d7bd1b 100644
+--- a/crates/linux/src/tree/observe/observe_settle_tests.rs
++++ b/crates/linux/src/tree/observe/observe_settle_tests.rs
+@@ -16,6 +16,7 @@ use crate::tree::{AtspiElement, Expansion, ObservedRead, Walk, WalkLimits};
+
+ pub(super) fn window() -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: window_id::encode(":1.7", "/org/a11y/atspi/accessible/1").expect("encodes"),
+         title: "t".to_owned(),
+         app: "a".to_owned(),
+diff --git a/crates/linux/src/tree/observe/observe_tests.rs b/crates/linux/src/tree/observe/observe_tests.rs
+index a7e47ec..1396944 100644
+--- a/crates/linux/src/tree/observe/observe_tests.rs
++++ b/crates/linux/src/tree/observe/observe_tests.rs
+@@ -35,6 +35,7 @@ pub(super) fn observe_plain(
+
+ pub(super) fn window(id: String) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id,
+         title: "t".to_owned(),
+         app: "a".to_owned(),
+diff --git a/crates/linux/src/tree/observe/projection_tests.rs b/crates/linux/src/tree/observe/projection_tests.rs
+index f25376d..55f2f21 100644
+--- a/crates/linux/src/tree/observe/projection_tests.rs
++++ b/crates/linux/src/tree/observe/projection_tests.rs
+@@ -63,6 +63,7 @@ fn walk(
+
+ fn window() -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-1.1-p".to_owned(),
+         title: "t".to_owned(),
+         app: "a".to_owned(),
+diff --git a/crates/linux/src/tree/observe/projection_visibility_tests.rs b/crates/linux/src/tree/observe/projection_visibility_tests.rs
+index 2066fbc..37bb426 100644
+--- a/crates/linux/src/tree/observe/projection_visibility_tests.rs
++++ b/crates/linux/src/tree/observe/projection_visibility_tests.rs
+@@ -231,6 +231,7 @@ fn snapshot_and_live_agree_when_a_shown_node_is_beyond_every_display() {
+             displays,
+         );
+         let window = agent_desktop_core::WindowInfo {
++            native_owner: None,
+             id: "w-1.1-p".into(),
+             title: "frame".into(),
+             app: "fixture".into(),
+diff --git a/crates/macos/src/system/window/cg_window.rs b/crates/macos/src/system/window/cg_window.rs
+index d321848..0035a72 100644
+--- a/crates/macos/src/system/window/cg_window.rs
++++ b/crates/macos/src/system/window/cg_window.rs
+@@ -28,6 +28,7 @@ impl WindowRecord {
+     ) -> Result<WindowInfo, AdapterError> {
+         let title = self.title.unwrap_or_else(|| self.app_name.clone());
+         Ok(WindowInfo {
++            native_owner: None,
+             id: format!("w-{}", self.window_number),
+             title,
+             app: self.app_name,
+diff --git a/crates/macos/src/system/window/window_ax_state.rs b/crates/macos/src/system/window/window_ax_state.rs
+index 64970a4..b1879a8 100644
+--- a/crates/macos/src/system/window/window_ax_state.rs
++++ b/crates/macos/src/system/window/window_ax_state.rs
+@@ -217,6 +217,7 @@ mod tests {
+
+     fn window(pid: u32, id: &str) -> WindowInfo {
+         WindowInfo {
++            native_owner: None,
+             id: id.into(),
+             title: "Main".into(),
+             app: "Fixture".into(),
+diff --git a/crates/macos/src/system/window/window_inventory_tests.rs b/crates/macos/src/system/window/window_inventory_tests.rs
+index cf81f76..0ef6631 100644
+--- a/crates/macos/src/system/window/window_inventory_tests.rs
++++ b/crates/macos/src/system/window/window_inventory_tests.rs
+@@ -330,6 +330,7 @@ fn record(app_name: &str, pid: i32, title: &str, window_number: i64) -> WindowRe
+
+ fn window_with_state(id: &str, visible: Option<bool>, minimized: Option<bool>) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: id.to_owned(),
+         title: "w".into(),
+         app: "Fixture".into(),
+diff --git a/crates/macos/src/system/window/window_resolve.rs b/crates/macos/src/system/window/window_resolve.rs
+index 5523577..a27f2d8 100644
+--- a/crates/macos/src/system/window/window_resolve.rs
++++ b/crates/macos/src/system/window/window_resolve.rs
+@@ -176,6 +176,7 @@ fn window_info_from_record(
+     record: &WindowRecord,
+ ) -> Result<WindowInfo, AdapterError> {
+     Ok(WindowInfo {
++        native_owner: win.native_owner.clone(),
+         id: win.id.clone(),
+         title: record
+             .title
+diff --git a/crates/macos/src/system/window/window_resolve_tests.rs b/crates/macos/src/system/window/window_resolve_tests.rs
+index c8c2cf7..917288e 100644
+--- a/crates/macos/src/system/window/window_resolve_tests.rs
++++ b/crates/macos/src/system/window/window_resolve_tests.rs
+@@ -20,6 +20,7 @@ fn record(app_name: &str, pid: i32, title: &str, window_number: i64) -> WindowRe
+
+ fn win(id: &str, pid: i32, title: &str) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: id.into(),
+         title: title.into(),
+         app: "TextEdit".into(),
+@@ -184,6 +185,7 @@ fn source_identity_rejects_missing_or_changed_process_generation() {
+ fn verify_skips_title_when_request_title_empty() {
+     let pid = current_pid();
+     let requested = WindowInfo {
++        native_owner: None,
+         id: "w-100".into(),
+         title: String::new(),
+         app: "TextEdit".into(),
+diff --git a/crates/macos/src/tree/query/mod.rs b/crates/macos/src/tree/query/mod.rs
+index ecc4e7c..6ec3b35 100644
+--- a/crates/macos/src/tree/query/mod.rs
++++ b/crates/macos/src/tree/query/mod.rs
+@@ -275,6 +275,7 @@ mod tests {
+                 available_actions: Vec::new(),
+             },
+             source: RefSource {
++                native_owner: None,
+                 source_app: Some("Fixture".into()),
+                 source_window_id: None,
+                 source_window_title: None,
+diff --git a/crates/macos/src/tree/resolve/resolve_tests.rs b/crates/macos/src/tree/resolve/resolve_tests.rs
+index 34c968e..be1ff8f 100644
+--- a/crates/macos/src/tree/resolve/resolve_tests.rs
++++ b/crates/macos/src/tree/resolve/resolve_tests.rs
+@@ -43,6 +43,7 @@ pub(super) fn entry(
+             available_actions: vec![],
+         },
+         source: RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: source_window_id.map(String::from),
+             source_window_title: source_window_title.map(String::from),
+diff --git a/crates/macos/src/tree/resolve/retained_tests.rs b/crates/macos/src/tree/resolve/retained_tests.rs
+index 628db89..0598c99 100644
+--- a/crates/macos/src/tree/resolve/retained_tests.rs
++++ b/crates/macos/src/tree/resolve/retained_tests.rs
+@@ -29,6 +29,7 @@ fn entry(token: Option<String>) -> RefEntry {
+             available_actions: Vec::new(),
+         },
+         source: agent_desktop_core::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
 diff --git a/crates/windows/Cargo.toml b/crates/windows/Cargo.toml
 index 82d6d61..c253888 100644
 --- a/crates/windows/Cargo.toml
@@ -4606,6 +6479,18 @@ index 82d6d61..c253888 100644
    "Win32_System_Com",
    "Win32_System_Com_StructuredStorage",
    "Win32_System_WinRT_Direct3D11",
+diff --git a/crates/windows/examples/uia_tree_dump/render.rs b/crates/windows/examples/uia_tree_dump/render.rs
+index 34eb0ce..3b66c63 100644
+--- a/crates/windows/examples/uia_tree_dump/render.rs
++++ b/crates/windows/examples/uia_tree_dump/render.rs
+@@ -325,6 +325,7 @@ fn os_build() -> String {
+ /// it rather than the verdict alone.
+ fn walk_verdict(root: &UIAElement, deadline: Deadline) -> Value {
+     let window = WindowInfo {
++        native_owner: None,
+         id: String::from("<hwnd>"),
+         title: String::new(),
+         app: String::new(),
 diff --git a/crates/windows/src/actions/chain.rs b/crates/windows/src/actions/chain.rs
 index 6ef6241..6d7e8d1 100644
 --- a/crates/windows/src/actions/chain.rs
@@ -4835,7 +6720,7 @@ index 1433017..9a39ad8 100644
      assert_eq!(error_wire(&error)["disposition"]["retry"], "unsafe");
      assert_no_forbidden_detail_keys(&error);
 diff --git a/crates/windows/src/actions/physical_click.rs b/crates/windows/src/actions/physical_click.rs
-index 6562052..31b6529 100644
+index 6562052..c1dcd21 100644
 --- a/crates/windows/src/actions/physical_click.rs
 +++ b/crates/windows/src/actions/physical_click.rs
 @@ -11,6 +11,7 @@ use crate::actions::physical_target::{
@@ -4854,7 +6739,7 @@ index 6562052..31b6529 100644
  pub(crate) struct ClickGate {
      pub(crate) bounds: agent_desktop_core::Rect,
      pub(crate) foreground_ready: bool,
-@@ -95,19 +97,46 @@ pub(crate) fn physical_click_steps(
+@@ -95,19 +97,47 @@ pub(crate) fn physical_click_steps(
      ensure_headed_click_policy(policy)?;
      deadline.ensure_remaining()?;
      let foreground_ready = ensure_click_delivery_ready(element, deadline)?;
@@ -4875,6 +6760,7 @@ index 6562052..31b6529 100644
 +        .clone()
 +        .ok_or_else(|| AdapterError::stale_ref_because("The original ref window is unavailable"))?;
 +    let window = agent_desktop_core::WindowInfo {
++        native_owner: payload.native_owner.clone(),
 +        id,
 +        title: String::new(),
 +        app: String::new(),
@@ -6816,10 +8702,10 @@ index f41fc40..66f402d 100644
          .as_u64()
 diff --git a/crates/windows/src/input/mouse/window_scope.rs b/crates/windows/src/input/mouse/window_scope.rs
 new file mode 100644
-index 0000000..ca843f3
+index 0000000..09eb42d
 --- /dev/null
 +++ b/crates/windows/src/input/mouse/window_scope.rs
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,303 @@
 +use super::mouse_send::{MouseInputEvent, post_mouse_inputs};
 +use crate::private_browser_guard::QualifiedWindowProcesses;
 +use agent_desktop_core::{AdapterError, Deadline, ErrorCode, Point, ProcessId, WindowInfo};
@@ -6998,14 +8884,16 @@ index 0000000..ca843f3
 +        (
 +            ScopeAuthority,
 +            ScopeAuthority,
-+            Vec<crate::private_browser_guard::QualifiedProcess>,
++            [Option<crate::private_browser_guard::QualifiedProcess>; 3],
 +        ),
 +        AdapterError,
 +    > {
 +        let window = self.qualify()?;
 +        let target = crate::system::window::window_ops::parse_handle(&self.window.id);
 +        let before = native_receivers(point, target)?;
-+        let mut qualified = Vec::new();
++        let mut qualified: [Option<crate::private_browser_guard::QualifiedProcess>; 3] =
++            [None, None, None];
++        let mut count = 0;
 +        for pid in [
 +            Some(before.hit_pid),
 +            before.foreground_capture_pid,
@@ -7016,9 +8904,8 @@ index 0000000..ca843f3
 +        {
 +            if qualified
 +                .iter()
-+                .any(|process: &crate::private_browser_guard::QualifiedProcess| {
-+                    process.pid() == pid
-+                })
++                .flatten()
++                .any(|process| process.pid() == pid)
 +            {
 +                continue;
 +            }
@@ -7030,7 +8917,8 @@ index 0000000..ca843f3
 +                return Err(refused());
 +            };
 +            self.deadline.ensure_remaining()?;
-+            qualified.push(crate::private_browser_guard::qualify_expected(pid, token)?);
++            qualified[count] = Some(crate::private_browser_guard::qualify_expected(pid, token)?);
++            count += 1;
 +        }
 +        self.deadline.ensure_remaining()?;
 +        let last = self.qualify()?;
@@ -7076,7 +8964,7 @@ index 0000000..ca843f3
 +        (
 +            ScopeAuthority,
 +            ScopeAuthority,
-+            Vec<crate::private_browser_guard::QualifiedProcess>,
++            [Option<crate::private_browser_guard::QualifiedProcess>; 3],
 +        ),
 +        AdapterError,
 +    > {
@@ -7462,6 +9350,18 @@ index 3b55002..8b48be2 100644
      /// The core default blocks nothing; Windows ships its own dangerous-combo
      /// list so the skill-documented guard actually enforces on this
      /// platform. `--force` is honored entirely in core.
+diff --git a/crates/windows/src/system/adapter_tests.rs b/crates/windows/src/system/adapter_tests.rs
+index 1d31009..248ef05 100644
+--- a/crates/windows/src/system/adapter_tests.rs
++++ b/crates/windows/src/system/adapter_tests.rs
+@@ -115,6 +115,7 @@ fn screenshot_window_frame_is_wired_through_system_ops_to_the_exact_window_captu
+     use agent_desktop_core::{ErrorCode, ProcessId, WindowState};
+
+     let window = WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: String::new(),
+         app: String::new(),
 diff --git a/crates/windows/src/system/capture/capture_backend.rs b/crates/windows/src/system/capture/capture_backend.rs
 index f33a96f..1803025 100644
 --- a/crates/windows/src/system/capture/capture_backend.rs
@@ -7622,6 +9522,18 @@ index f33a96f..1803025 100644
              Ok(image) => return Ok(image),
              Err(error) => {
                  tracing::debug!(
+diff --git a/crates/windows/src/system/capture/capture_envelope_parity_tests.rs b/crates/windows/src/system/capture/capture_envelope_parity_tests.rs
+index 63799f7..851805b 100644
+--- a/crates/windows/src/system/capture/capture_envelope_parity_tests.rs
++++ b/crates/windows/src/system/capture/capture_envelope_parity_tests.rs
+@@ -56,6 +56,7 @@ fn screenshot_failure_disposition_serializes_not_delivered() {
+     let adapter = WindowsAdapter::new();
+     let fixture = LocalPatternFixture::create().expect("pattern fixture");
+     let info = WindowInfo {
++        native_owner: None,
+         id: format!("w-{}", fixture.handle() as usize),
+         title: String::new(),
+         app: String::new(),
 diff --git a/crates/windows/src/system/capture/capture_live_breadth_tests.rs b/crates/windows/src/system/capture/capture_live_breadth_tests.rs
 index 01ba760..4978d30 100644
 --- a/crates/windows/src/system/capture/capture_live_breadth_tests.rs
@@ -7880,10 +9792,10 @@ index 450c140..56c4138 100644
      assert_eq!(forced.code, ErrorCode::ActionFailed);
      assert_eq!(
 diff --git a/crates/windows/src/system/capture/capture_test_support.rs b/crates/windows/src/system/capture/capture_test_support.rs
-index 1a390e7..8535e93 100644
+index 1a390e7..f5207a0 100644
 --- a/crates/windows/src/system/capture/capture_test_support.rs
 +++ b/crates/windows/src/system/capture/capture_test_support.rs
-@@ -143,3 +143,27 @@ pub(crate) fn with_restored_clipboard(body: impl FnOnce()) {
+@@ -143,3 +143,28 @@ pub(crate) fn with_restored_clipboard(body: impl FnOnce()) {
          std::panic::resume_unwind(panic);
      }
  }
@@ -7899,6 +9811,7 @@ index 1a390e7..8535e93 100644
 +        .expect("fixture process is live");
 +    super::capture_backend::WindowCaptureTarget {
 +        window: WindowInfo {
++            native_owner: None,
 +            id: format!("w-{handle}"),
 +            title: String::new(),
 +            app: String::new(),
@@ -8139,6 +10052,30 @@ index 75b4c76..b091e04 100644
              scale_factor: scale,
          },
          deadline,
+diff --git a/crates/windows/src/system/capture/screenshot_tests.rs b/crates/windows/src/system/capture/screenshot_tests.rs
+index 1eaf644..bb23787 100644
+--- a/crates/windows/src/system/capture/screenshot_tests.rs
++++ b/crates/windows/src/system/capture/screenshot_tests.rs
+@@ -14,6 +14,7 @@ fn window_info_for(handle: isize, process_instance: Option<String>) -> WindowInf
+     let pid = ProcessId::from(std::process::id());
+     let app = crate::system::process_identity::process_image_name(pid).unwrap_or_default();
+     WindowInfo {
++        native_owner: None,
+         id: format!("w-{}", handle as usize),
+         title: String::new(),
+         app,
+diff --git a/crates/windows/src/system/fixture/live_identity.rs b/crates/windows/src/system/fixture/live_identity.rs
+index b75251d..ddcf27e 100644
+--- a/crates/windows/src/system/fixture/live_identity.rs
++++ b/crates/windows/src/system/fixture/live_identity.rs
+@@ -35,6 +35,7 @@ pub(crate) fn window_info_for_current_process(handle: isize) -> WindowInfo {
+         .expect("live token");
+     let app = crate::system::process_identity::process_image_name(pid).unwrap_or_default();
+     WindowInfo {
++        native_owner: None,
+         id: format!("w-{}", handle as usize),
+         title: String::new(),
+         app,
 diff --git a/crates/windows/src/system/key_dispatch.rs b/crates/windows/src/system/key_dispatch.rs
 index 4281d59..4beb301 100644
 --- a/crates/windows/src/system/key_dispatch.rs
@@ -8249,6 +10186,54 @@ index 4281d59..4beb301 100644
  }
 
  fn focus_verify_failed(pid: ProcessId) -> AdapterError {
+diff --git a/crates/windows/src/system/key_dispatch_tests.rs b/crates/windows/src/system/key_dispatch_tests.rs
+index 6242e2d..bbe3b13 100644
+--- a/crates/windows/src/system/key_dispatch_tests.rs
++++ b/crates/windows/src/system/key_dispatch_tests.rs
+@@ -45,6 +45,7 @@ fn window_info_for_hosted(fixture: &crate::tree::fixture::HostedFixture) -> Wind
+         .expect("live token");
+     let app = process_identity::process_image_name(pid).unwrap_or_default();
+     WindowInfo {
++        native_owner: None,
+         id: format!("w-{}", fixture.handle() as usize),
+         title: String::new(),
+         app,
+diff --git a/crates/windows/src/system/launch_renderer_tests.rs b/crates/windows/src/system/launch_renderer_tests.rs
+index 342da8b..c963de3 100644
+--- a/crates/windows/src/system/launch_renderer_tests.rs
++++ b/crates/windows/src/system/launch_renderer_tests.rs
+@@ -73,6 +73,7 @@ impl Drop for ChromiumClassWindow {
+
+ fn window_info_for_id(id: &str) -> agent_desktop_core::WindowInfo {
+     agent_desktop_core::WindowInfo {
++        native_owner: None,
+         id: id.to_string(),
+         title: String::new(),
+         app: String::new(),
+diff --git a/crates/windows/src/system/lifecycle_envelope_parity_shared_tests.rs b/crates/windows/src/system/lifecycle_envelope_parity_shared_tests.rs
+index 8e7d0d6..4d169c9 100644
+--- a/crates/windows/src/system/lifecycle_envelope_parity_shared_tests.rs
++++ b/crates/windows/src/system/lifecycle_envelope_parity_shared_tests.rs
+@@ -115,6 +115,7 @@ fn adapter_window_op_without_a_process_instance_keeps_the_stale_ref_envelope() {
+     use agent_desktop_core::{InteractionLease, SystemOps};
+
+     let win = WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: String::new(),
+         app: "fixture".into(),
+diff --git a/crates/windows/src/system/lifecycle_envelope_parity_tests.rs b/crates/windows/src/system/lifecycle_envelope_parity_tests.rs
+index 9e93d6a..ba05375 100644
+--- a/crates/windows/src/system/lifecycle_envelope_parity_tests.rs
++++ b/crates/windows/src/system/lifecycle_envelope_parity_tests.rs
+@@ -101,6 +101,7 @@ fn fail_closed_equal_integrity_budget_exhaustion_is_action_failed_not_started()
+ #[test]
+ fn stale_focus_token_is_shared_stale_ref_not_delivered() {
+     let win = WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: String::new(),
+         app: "fixture".into(),
 diff --git a/crates/windows/src/system/runtime/hresult.rs b/crates/windows/src/system/runtime/hresult.rs
 index d176588..3d558cd 100644
 --- a/crates/windows/src/system/runtime/hresult.rs
@@ -8261,6 +10246,86 @@ index d176588..3d558cd 100644
  use agent_desktop_core::AdapterError;
  use agent_desktop_core::ErrorCode;
 
+diff --git a/crates/windows/src/system/shell/shell_surface.rs b/crates/windows/src/system/shell/shell_surface.rs
+index 7a865c8..94914d1 100644
+--- a/crates/windows/src/system/shell/shell_surface.rs
++++ b/crates/windows/src/system/shell/shell_surface.rs
+@@ -201,6 +201,7 @@ fn window_info_from_chain_window(handle: WindowHandle) -> Option<WindowInfo> {
+         .ok()
+         .flatten();
+     Some(WindowInfo {
++        native_owner: None,
+         id: crate::system::window::window_ops::window_id(handle),
+         title: crate::system::window::window_identity::live_window_title(handle)
+             .unwrap_or_default(),
+diff --git a/crates/windows/src/system/shell/shell_surface_immersive.rs b/crates/windows/src/system/shell/shell_surface_immersive.rs
+index 1f24781..7dbca24 100644
+--- a/crates/windows/src/system/shell/shell_surface_immersive.rs
++++ b/crates/windows/src/system/shell/shell_surface_immersive.rs
+@@ -333,6 +333,7 @@ fn window_info_from_surface(
+         .ok()
+         .flatten();
+     WindowInfo {
++        native_owner: None,
+         id: crate::system::window::window_ops::window_id(hwnd),
+         title: element.get_name().unwrap_or_default(),
+         app: image,
+diff --git a/crates/windows/src/system/signal/signal_filter_apply_tests.rs b/crates/windows/src/system/signal/signal_filter_apply_tests.rs
+index bef547b..27afab9 100644
+--- a/crates/windows/src/system/signal/signal_filter_apply_tests.rs
++++ b/crates/windows/src/system/signal/signal_filter_apply_tests.rs
+@@ -3,6 +3,7 @@ use agent_desktop_core::{AppInfo, ProcessIdentity, WindowInfo, WindowState};
+
+ fn window(id: &str, app: &str, pid: u32, instance: &str) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: id.to_string(),
+         title: String::new(),
+         app: app.to_string(),
+diff --git a/crates/windows/src/system/signal/signal_inventory.rs b/crates/windows/src/system/signal/signal_inventory.rs
+index 95c44fe..36279b4 100644
+--- a/crates/windows/src/system/signal/signal_inventory.rs
++++ b/crates/windows/src/system/signal/signal_inventory.rs
+@@ -196,6 +196,7 @@ fn assembly_phase(
+         let focused = !focused_seen && window_ops::is_foreground_window(entry.window.handle);
+         focused_seen |= focused;
+         windows.push(WindowInfo {
++            native_owner: None,
+             id: window_ops::window_id(entry.window.handle),
+             title: window_identity::live_window_title(entry.window.handle).unwrap_or_default(),
+             app: app_name.clone(),
+diff --git a/crates/windows/src/system/signal/signals_tests.rs b/crates/windows/src/system/signal/signals_tests.rs
+index a2f8768..8d9ce67 100644
+--- a/crates/windows/src/system/signal/signals_tests.rs
++++ b/crates/windows/src/system/signal/signals_tests.rs
+@@ -5,6 +5,7 @@ use crate::system::fixture::test_time::deadline;
+
+ fn window(id: &str, app: &str, pid: u32, instance: &str) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: id.to_string(),
+         title: String::new(),
+         app: app.to_string(),
+@@ -153,6 +154,7 @@ mod windows_only {
+             .expect("a live process's token is readable")
+             .expect("a live process has a readable generation token");
+         WindowInfo {
++            native_owner: None,
+             id: format!("w-{}", fixture.handle() as usize),
+             title: String::new(),
+             app: String::new(),
+diff --git a/crates/windows/src/system/signal/wait_event_live_tests.rs b/crates/windows/src/system/signal/wait_event_live_tests.rs
+index 5af6209..8b4908b 100644
+--- a/crates/windows/src/system/signal/wait_event_live_tests.rs
++++ b/crates/windows/src/system/signal/wait_event_live_tests.rs
+@@ -128,6 +128,7 @@ fn found_event(outcome: Result<Value, AppError>) -> Value {
+ fn window_info_for(fixture: &HostedFixture) -> WindowInfo {
+     let identity = process_identity_for(fixture.process_id());
+     WindowInfo {
++        native_owner: None,
+         id: format!("w-{}", fixture.handle() as usize),
+         title: String::new(),
+         app: String::new(),
 diff --git a/crates/windows/src/system/window/window_activate.rs b/crates/windows/src/system/window/window_activate.rs
 index 9d92805..45d8db3 100644
 --- a/crates/windows/src/system/window/window_activate.rs
@@ -8464,10 +10529,18 @@ index 9d92805..45d8db3 100644
  /// does not exist.
  fn recycled_before_foreground() -> AdapterError {
 diff --git a/crates/windows/src/system/window/window_activate_tests.rs b/crates/windows/src/system/window/window_activate_tests.rs
-index 1756264..d0489b7 100644
+index 1756264..014bc17 100644
 --- a/crates/windows/src/system/window/window_activate_tests.rs
 +++ b/crates/windows/src/system/window/window_activate_tests.rs
-@@ -119,10 +119,20 @@ fn restore_branch_fails_closed_on_recycled_ownership() {
+@@ -10,6 +10,7 @@ fn lease() -> InteractionLease {
+ #[cfg(target_os = "windows")]
+ fn destroyed_window(process_instance: Option<&str>) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: "gone".into(),
+         app: "none.exe".into(),
+@@ -119,10 +120,20 @@ fn restore_branch_fails_closed_on_recycled_ownership() {
      let _stage = crate::tree::fixture::fixture_window::on_screen_stage();
      let (target, _stealer, mut info) = staged_pair();
      target.minimize();
@@ -8489,7 +10562,7 @@ index 1756264..d0489b7 100644
      assert_eq!(error.code, ErrorCode::WindowNotFound);
      assert_eq!(
          error.disposition.delivery(),
-@@ -136,10 +146,20 @@ fn restore_branch_fails_closed_on_recycled_ownership() {
+@@ -136,10 +147,20 @@ fn restore_branch_fails_closed_on_recycled_ownership() {
  fn raise_branch_fails_closed_on_recycled_ownership() {
      let _stage = crate::tree::fixture::fixture_window::on_screen_stage();
      let (_target, _stealer, mut info) = staged_pair();
@@ -8511,7 +10584,7 @@ index 1756264..d0489b7 100644
      assert_eq!(error.code, ErrorCode::WindowNotFound);
      assert_eq!(
          error.disposition.delivery(),
-@@ -160,7 +180,7 @@ fn budget_retry_fails_closed_on_recycled_ownership() {
+@@ -160,7 +181,7 @@ fn budget_retry_fails_closed_on_recycled_ownership() {
      assert_eq!(error.code, ErrorCode::WindowNotFound);
      assert_eq!(
          error.disposition.delivery(),
@@ -8520,7 +10593,7 @@ index 1756264..d0489b7 100644
      );
      assert!(
          attempt_probe::count() >= 1,
-@@ -186,14 +206,14 @@ fn strictly_higher_integrity_budget_exhaustion_is_perm_denied_never_action_faile
+@@ -186,14 +207,14 @@ fn strictly_higher_integrity_budget_exhaustion_is_perm_denied_never_action_faile
      );
      assert_eq!(
          error.disposition.delivery(),
@@ -8537,7 +10610,7 @@ index 1756264..d0489b7 100644
      let _stage = crate::tree::fixture::fixture_window::on_screen_stage();
      let (target, stealer, info) = staged_pair();
      raise_handle(stealer.handle());
-@@ -209,7 +229,7 @@ fn focus_steal_budget_is_finite_and_fails_closed_not_delivered() {
+@@ -209,7 +230,7 @@ fn focus_steal_budget_is_finite_and_fails_closed_not_delivered() {
      );
      assert_eq!(
          error.disposition.delivery(),
@@ -8547,10 +10620,10 @@ index 1756264..d0489b7 100644
      assert_eq!(
          attempt_probe::count(),
 diff --git a/crates/windows/src/system/window/window_identity.rs b/crates/windows/src/system/window/window_identity.rs
-index 15125cc..a49c42f 100644
+index 15125cc..6580c5e 100644
 --- a/crates/windows/src/system/window/window_identity.rs
 +++ b/crates/windows/src/system/window/window_identity.rs
-@@ -2,6 +2,29 @@ use agent_desktop_core::{AdapterError, ErrorCode, ProcessId, WindowInfo};
+@@ -2,6 +2,49 @@ use agent_desktop_core::{AdapterError, ErrorCode, ProcessId, WindowInfo};
 
  use crate::system::process_identity;
 
@@ -8563,12 +10636,32 @@ index 15125cc..a49c42f 100644
 +    let evidence = WindowIdentityEvidence::from_info(handle, window)
 +        .ok_or_else(|| window_identity_mismatch(handle))?;
 +    let owner = live_window_owner(handle).ok_or_else(|| window_identity_mismatch(handle))?;
++    match window.native_owner.as_ref() {
++        Some(expected) if expected.pid == owner && !expected.instance.is_empty() => {}
++        None if owner == evidence.pid => {}
++        _ => {
++            return Err(AdapterError::new(
++                ErrorCode::StaleRef,
++                "Original window owner identity is unavailable or changed",
++            ));
++        }
++    }
 +    let authority = crate::private_browser_guard::qualify_window_processes(
 +        owner,
 +        evidence.pid,
 +        evidence.process_instance,
 +        deadline,
 +    )?;
++    if window
++        .native_owner
++        .as_ref()
++        .is_some_and(|expected| authority.owner_token() != expected.instance)
++    {
++        return Err(AdapterError::new(
++            ErrorCode::StaleRef,
++            "Original window owner generation changed",
++        ));
++    }
 +    deadline.ensure_remaining()?;
 +    if live_window_owner(handle) != Some(owner) || !evidence.owns_handle_now()? {
 +        return Err(window_identity_mismatch(handle));
@@ -8580,11 +10673,27 @@ index 15125cc..a49c42f 100644
  /// The immutable identity evidence a resolved window must match.
  ///
  /// Fresh-list verification is strict (title included), while stored-evidence
+@@ -212,6 +255,7 @@ mod tests {
+
+     fn fake_window(pid: ProcessId, instance: &str, title: &str) -> WindowInfo {
+         WindowInfo {
++            native_owner: None,
+             id: "w-1".into(),
+             title: title.into(),
+             app: "fixture".into(),
 diff --git a/crates/windows/src/system/window/window_ops.rs b/crates/windows/src/system/window/window_ops.rs
-index ca7efde..7bf92f9 100644
+index ca7efde..956210b 100644
 --- a/crates/windows/src/system/window/window_ops.rs
 +++ b/crates/windows/src/system/window/window_ops.rs
-@@ -138,6 +138,7 @@ fn list_windows_live_once(
+@@ -95,6 +95,7 @@ fn window_info_from(
+ ) -> WindowInfo {
+     let (pid, process_instance, app) = facts;
+     WindowInfo {
++        native_owner: None,
+         id: window_id(window.handle),
+         title: title.to_string(),
+         app,
+@@ -138,6 +139,7 @@ fn list_windows_live_once(
      filter: &WindowFilter,
      deadline: Deadline,
  ) -> Result<Vec<WindowInfo>, AdapterError> {
@@ -8592,7 +10701,7 @@ index ca7efde..7bf92f9 100644
      #[cfg(test)]
      enumeration_calls::record();
 
-@@ -161,11 +162,36 @@ fn list_windows_live_once(
+@@ -161,11 +163,36 @@ fn list_windows_live_once(
          let Some((pid, token, app)) = identity_facts(window.handle) else {
              return true;
          };
@@ -8630,22 +10739,17 @@ index ca7efde..7bf92f9 100644
          let focused = !focused_seen && is_foreground_window(window.handle);
          if filter.focused_only && !focused {
 diff --git a/crates/windows/src/system/window/window_resolve.rs b/crates/windows/src/system/window/window_resolve.rs
-index 6a629ce..e18f647 100644
+index 6a629ce..7d25c04 100644
 --- a/crates/windows/src/system/window/window_resolve.rs
 +++ b/crates/windows/src/system/window/window_resolve.rs
-@@ -30,13 +30,32 @@ pub(crate) fn resolve_window_strict(
+@@ -30,13 +30,27 @@ pub(crate) fn resolve_window_strict(
              "headed focus requires a process-instance token on the stored window",
          ));
      };
 +    let owner = super::window_identity::live_window_owner(handle).ok_or_else(|| {
 +        AdapterError::new(ErrorCode::WindowNotFound, "Window owner is unavailable")
 +    })?;
-+    let _authority = crate::private_browser_guard::qualify_window_processes(
-+        owner,
-+        evidence.pid,
-+        evidence.process_instance,
-+        deadline,
-+    )?;
++    let _authority = super::window_identity::qualify_window(expected, deadline)?;
 +    deadline.ensure_remaining()?;
 +    if super::window_identity::live_window_owner(handle) != Some(owner) {
 +        return Err(AdapterError::new(
@@ -8667,21 +10771,14 @@ index 6a629ce..e18f647 100644
  ) -> Result<WindowInfo, AdapterError> {
      let mut found = None;
      enumerate_top_level(|window| {
-@@ -58,6 +77,30 @@ fn live_window_info(
+@@ -58,8 +72,26 @@ fn live_window_info(
              "window is no longer an agent-visible top-level window",
          ));
      }
 +    let owner = super::window_identity::live_window_owner(handle).ok_or_else(|| {
 +        AdapterError::new(ErrorCode::WindowNotFound, "Window owner is unavailable")
 +    })?;
-+    let _authority = crate::private_browser_guard::qualify_window_processes(
-+        owner,
-+        expected.pid,
-+        expected.process_instance.as_deref().ok_or_else(|| {
-+            AdapterError::new(ErrorCode::StaleRef, "Window generation is unavailable")
-+        })?,
-+        deadline,
-+    )?;
++    let _authority = super::window_identity::qualify_window(expected, deadline)?;
 +    deadline.ensure_remaining()?;
 +    let evidence = WindowIdentityEvidence::from_info(handle, expected).ok_or_else(|| {
 +        AdapterError::new(ErrorCode::StaleRef, "Window generation is unavailable")
@@ -8697,22 +10794,58 @@ index 6a629ce..e18f647 100644
 +    deadline.ensure_remaining()?;
      let focused = is_foreground_window(handle);
      Ok(WindowInfo {
++        native_owner: expected.native_owner.clone(),
          id: expected.id.clone(),
+         title: live_window_title(handle).unwrap_or_else(|| expected.title.clone()),
+         app: expected.app.clone(),
+diff --git a/crates/windows/src/system/window/window_resolve_tests.rs b/crates/windows/src/system/window/window_resolve_tests.rs
+index 9c9cea7..9a4c535 100644
+--- a/crates/windows/src/system/window/window_resolve_tests.rs
++++ b/crates/windows/src/system/window/window_resolve_tests.rs
+@@ -9,6 +9,7 @@ use agent_desktop_core::{WindowFilter, WindowState};
+ #[cfg(target_os = "windows")]
+ fn destroyed_window(process_instance: Option<&str>) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: "gone".into(),
+         app: "none.exe".into(),
+diff --git a/crates/windows/src/tree/chromium.rs b/crates/windows/src/tree/chromium.rs
+index 6c5af64..0a6b02d 100644
+--- a/crates/windows/src/tree/chromium.rs
++++ b/crates/windows/src/tree/chromium.rs
+@@ -130,6 +130,7 @@ mod tests {
+
+     fn window_root() -> ObservationRoot<'static> {
+         let window: &'static WindowInfo = Box::leak(Box::new(WindowInfo {
++            native_owner: None,
+             id: "w-1".into(),
+             title: String::new(),
+             app: String::new(),
+@@ -221,6 +222,7 @@ mod tests {
+                     available_actions: Vec::new(),
+                 },
+                 source: agent_desktop_core::RefSource {
++                    native_owner: None,
+                     source_app: None,
+                     source_window_id: None,
+                     source_window_title: None,
 diff --git a/crates/windows/src/tree/element.rs b/crates/windows/src/tree/element.rs
-index 473e0cc..11d1a20 100644
+index 473e0cc..e05f16e 100644
 --- a/crates/windows/src/tree/element.rs
 +++ b/crates/windows/src/tree/element.rs
-@@ -9,6 +9,9 @@ use agent_desktop_core::{AdapterError, ErrorCode, NativeHandle};
+@@ -9,6 +9,10 @@ use agent_desktop_core::{AdapterError, ErrorCode, NativeHandle};
  pub(crate) struct ProcessPayload {
      pub(crate) pid: u32,
      pub(crate) token: String,
 +    pub(crate) root_pid: u32,
 +    pub(crate) root_token: String,
 +    pub(crate) root_window_id: Option<String>,
++    pub(crate) native_owner: Option<agent_desktop_core::ProcessIdentity>,
  }
 
  #[cfg(target_os = "windows")]
-@@ -72,8 +75,23 @@ impl UIAElement {
+@@ -72,8 +76,24 @@ impl UIAElement {
 
      /// Stamps the verified process identity onto the element so the live-read
      /// path can corroborate liveness against it before answering.
@@ -8733,12 +10866,13 @@ index 473e0cc..11d1a20 100644
 +                root_pid,
 +                root_token,
 +                root_window_id: None,
++                native_owner: None,
 +            }),
 +        )
      }
 
      /// The verified process identity, if this element resolved through the
-@@ -83,6 +101,123 @@ impl UIAElement {
+@@ -83,6 +103,123 @@ impl UIAElement {
              .as_ref()
              .map(|payload| (payload.pid, payload.token.as_str()))
      }
@@ -8862,6 +10996,18 @@ index 473e0cc..11d1a20 100644
  }
 
  /// Borrows the UI Automation element carried by a core `NativeHandle`.
+diff --git a/crates/windows/src/tree/hit_test/envelope_tests.rs b/crates/windows/src/tree/hit_test/envelope_tests.rs
+index 53361d6..a46187c 100644
+--- a/crates/windows/src/tree/hit_test/envelope_tests.rs
++++ b/crates/windows/src/tree/hit_test/envelope_tests.rs
+@@ -196,6 +196,7 @@ fn entry_for(live: &LiveElement) -> RefEntry {
+             available_actions: live.available_actions.clone(),
+         },
+         source: RefSource {
++            native_owner: None,
+             source_app: Some("Fixture".into()),
+             source_window_id: Some("w-1".into()),
+             source_window_title: Some("Fixture".into()),
 diff --git a/crates/windows/src/tree/hit_test/hit_test_corroborate.rs b/crates/windows/src/tree/hit_test/hit_test_corroborate.rs
 index 6435527..42fca78 100644
 --- a/crates/windows/src/tree/hit_test/hit_test_corroborate.rs
@@ -9266,7 +11412,7 @@ index 9f99715..dfa161f 100644
          live_label,
      )
 diff --git a/crates/windows/src/tree/live_read_tests.rs b/crates/windows/src/tree/live_read_tests.rs
-index 8492555..4f10b80 100644
+index 8492555..cd8cd64 100644
 --- a/crates/windows/src/tree/live_read_tests.rs
 +++ b/crates/windows/src/tree/live_read_tests.rs
 @@ -16,8 +16,8 @@ fn fixture_pid(fixture: &HostedFixture) -> u32 {
@@ -9341,7 +11487,15 @@ index 8492555..4f10b80 100644
      let prepared = source.prepare_root(&root).expect("a prepared root");
      let budget = crate::tree::walk::walker::WalkBudget::new(10, deadline);
      let mut prefix = Vec::new();
-@@ -291,7 +314,7 @@ fn find_secure(
+@@ -259,6 +282,7 @@ fn blank_secure_entry(fixture: &HostedFixture) -> RefEntry {
+             available_actions: Vec::new(),
+         },
+         source: agent_desktop_core::RefSource {
++            native_owner: None,
+             source_app: Some("fixture.exe".into()),
+             source_window_id: Some(format!("w-{}", fixture.handle())),
+             source_window_title: None,
+@@ -291,7 +315,7 @@ fn find_secure(
      if depth >= 10 {
          return Ok(None);
      }
@@ -9556,10 +11710,34 @@ index e4a6985..c41059e 100644
      }
  }
 diff --git a/crates/windows/src/tree/observe_tests.rs b/crates/windows/src/tree/observe_tests.rs
-index 67cfc47..19cf46f 100644
+index 67cfc47..38a0d82 100644
 --- a/crates/windows/src/tree/observe_tests.rs
 +++ b/crates/windows/src/tree/observe_tests.rs
-@@ -70,8 +70,11 @@ fn a_destroyed_hwnd_fails_reverification_as_window_not_found() {
+@@ -2,6 +2,7 @@ use super::*;
+
+ fn window_for(pid: u32, instance: &str) -> agent_desktop_core::WindowInfo {
+     agent_desktop_core::WindowInfo {
++        native_owner: None,
+         id: "w-1".into(),
+         title: "x".into(),
+         app: "x".into(),
+@@ -39,6 +40,7 @@ fn a_malformed_root_window_id_fails_before_walking() {
+         agent_desktop_core::Deadline::after(5_000).unwrap(),
+     );
+     let window = agent_desktop_core::WindowInfo {
++        native_owner: None,
+         id: "not-a-window-id".into(),
+         title: "x".into(),
+         app: "x".into(),
+@@ -61,6 +63,7 @@ fn a_malformed_root_window_id_fails_before_walking() {
+ #[test]
+ fn a_destroyed_hwnd_fails_reverification_as_window_not_found() {
+     let window = agent_desktop_core::WindowInfo {
++        native_owner: None,
+         id: format!("w-{}", 0x7fffffff),
+         title: "x".into(),
+         app: "x".into(),
+@@ -70,8 +73,11 @@ fn a_destroyed_hwnd_fails_reverification_as_window_not_found() {
          state: Default::default(),
      };
 
@@ -9573,7 +11751,15 @@ index 67cfc47..19cf46f 100644
      assert_eq!(error.code, ErrorCode::WindowNotFound);
  }
 
-@@ -98,7 +101,10 @@ fn a_freshly_created_fixture_window_passes_reverification() {
+@@ -83,6 +89,7 @@ fn a_freshly_created_fixture_window_passes_reverification() {
+     crate::tree::fixture::ensure_test_apartment();
+     let fixture = crate::tree::fixture::HostedFixture::spawn().expect("a fixture host starts");
+     let window = agent_desktop_core::WindowInfo {
++        native_owner: None,
+         id: crate::system::window::window_ops::window_id(fixture.handle() as _),
+         title: "agent-desktop fixture".into(),
+         app: "fixture.exe".into(),
+@@ -98,7 +105,10 @@ fn a_freshly_created_fixture_window_passes_reverification() {
          state: Default::default(),
      };
 
@@ -9586,7 +11772,7 @@ index 67cfc47..19cf46f 100644
          result.is_ok(),
          "a live fixture root must pass the liveness gate: {result:?}"
 diff --git a/crates/windows/src/tree/resolve/mod.rs b/crates/windows/src/tree/resolve/mod.rs
-index 123d6fd..0d546d5 100644
+index 123d6fd..e5f8b19 100644
 --- a/crates/windows/src/tree/resolve/mod.rs
 +++ b/crates/windows/src/tree/resolve/mod.rs
 @@ -77,7 +77,7 @@ fn resolve_attempt(entry: &RefEntry, deadline: Deadline) -> Result<NativeHandle,
@@ -9631,7 +11817,7 @@ index 123d6fd..0d546d5 100644
          }
          SearchVerdict::Ambiguous => Err(ambiguous_target_error(entry, searched.len())),
      }
-@@ -216,21 +219,29 @@ fn classify_search(
+@@ -216,21 +219,30 @@ fn classify_search(
      }
  }
 
@@ -9668,12 +11854,21 @@ index 123d6fd..0d546d5 100644
 +    deadline.ensure_remaining()?;
 +    if let Some(payload) = element.1.as_mut() {
 +        payload.root_window_id = entry.source.source_window_id.clone();
++        payload.native_owner = entry.source.native_owner.clone();
 +    }
 +    Ok(element.into_native_handle())
  }
 
  #[cfg(target_os = "windows")]
-@@ -332,6 +343,7 @@ pub(crate) fn resolve_window_root(
+@@ -324,6 +336,7 @@ pub(crate) fn resolve_window_root(
+         .as_deref()
+         .ok_or_else(|| stale_ref_error(entry))?;
+     let window = agent_desktop_core::WindowInfo {
++        native_owner: entry.source.native_owner.clone(),
+         id: window_id.to_string(),
+         title: entry.source.source_window_title.clone().unwrap_or_default(),
+         app: entry.source.source_app.clone().unwrap_or_default(),
+@@ -332,6 +345,7 @@ pub(crate) fn resolve_window_root(
          bounds: None,
          state: Default::default(),
      };
@@ -9681,7 +11876,7 @@ index 123d6fd..0d546d5 100644
      crate::system::window::window_identity::WindowIdentityEvidence::from_info(
          crate::system::window::window_ops::parse_handle(&window.id),
          &window,
-@@ -340,10 +352,23 @@ pub(crate) fn resolve_window_root(
+@@ -340,10 +354,23 @@ pub(crate) fn resolve_window_root(
      .verify_stored()
      .map_err(|_| verify_stored_failure_error(entry, deadline))?;
 
@@ -10393,6 +12588,42 @@ index c4b458d..304df81 100644
              if window_is_modal_sheet(&element) {
                  Ok(element)
              } else {
+diff --git a/crates/windows/src/tree/surfaces_advertising_tests.rs b/crates/windows/src/tree/surfaces_advertising_tests.rs
+index 3b7fac1..de18efe 100644
+--- a/crates/windows/src/tree/surfaces_advertising_tests.rs
++++ b/crates/windows/src/tree/surfaces_advertising_tests.rs
+@@ -107,6 +107,7 @@ fn quick_settings_is_a_kind_table_refusal_and_never_an_advertised_surface() {
+ /// fast instead of touching the desktop.
+ fn unrootable_window_info() -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-2147483647".to_string(),
+         title: String::new(),
+         app: String::new(),
+diff --git a/crates/windows/src/tree/surfaces_tests.rs b/crates/windows/src/tree/surfaces_tests.rs
+index a002a8d..00a4e34 100644
+--- a/crates/windows/src/tree/surfaces_tests.rs
++++ b/crates/windows/src/tree/surfaces_tests.rs
+@@ -94,6 +94,7 @@ mod shell_surfaces {
+     /// surface arms read the handle-shaped id and, for `Menu`, the pid.
+     fn window_info(handle: isize, pid: u32) -> WindowInfo {
+         WindowInfo {
++            native_owner: None,
+             id: format!("w-{handle}"),
+             title: String::new(),
+             app: String::new(),
+diff --git a/crates/windows/src/tree/test_support.rs b/crates/windows/src/tree/test_support.rs
+index b263194..6f5dc09 100644
+--- a/crates/windows/src/tree/test_support.rs
++++ b/crates/windows/src/tree/test_support.rs
+@@ -66,6 +66,7 @@ pub(crate) fn fixture_window(
+         .unwrap()
+         .expect("a live fixture process has a token");
+     agent_desktop_core::WindowInfo {
++        native_owner: None,
+         id: format!("w-{}", fixture.handle()),
+         title: "agent-desktop fixture".into(),
+         app: "fixture.exe".into(),
 diff --git a/crates/windows/src/tree/text_insertion.rs b/crates/windows/src/tree/text_insertion.rs
 index 0cd7b9b..98652d9 100644
 --- a/crates/windows/src/tree/text_insertion.rs
@@ -10968,7 +13199,7 @@ index 13ebc9a..bf804ae 100644
                  Some(subtree) => {
                      complete &= subtree.is_complete();
 diff --git a/crates/windows/src/tree/walk/walker_fake.rs b/crates/windows/src/tree/walk/walker_fake.rs
-index 10b8e07..d6b307c 100644
+index 10b8e07..f34379d 100644
 --- a/crates/windows/src/tree/walk/walker_fake.rs
 +++ b/crates/windows/src/tree/walk/walker_fake.rs
 @@ -19,6 +19,21 @@ use crate::tree::{
@@ -11026,7 +13257,23 @@ index 10b8e07..d6b307c 100644
      }
 
      fn is_web_wrapper(&self, node: &i32, _properties: &ElementProperties) -> bool {
-@@ -295,7 +317,7 @@ fn scan_at<T>(
+@@ -206,6 +228,7 @@ pub(crate) fn ref_entry(role: &str) -> RefEntry {
+             available_actions: Vec::new(),
+         },
+         source: agent_desktop_core::RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+@@ -226,6 +249,7 @@ pub(crate) fn budget(max_logical_depth: u8) -> WalkBudget {
+
+ pub(crate) fn window() -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: String::from("w-fake"),
+         title: String::new(),
+         app: String::new(),
+@@ -295,7 +319,7 @@ fn scan_at<T>(
      if prefix.len() >= limits.max_depth as usize {
          return Ok(None);
      }
@@ -11035,7 +13282,7 @@ index 10b8e07..d6b307c 100644
      if let ControlFlow::Break(value) = visit(prefix, properties, evidence, failed) {
          return Ok(Some(value));
      }
-@@ -326,14 +348,14 @@ pub(crate) fn walk_all(
+@@ -326,14 +350,14 @@ pub(crate) fn walk_all(
      budget: &WalkBudget,
      max_depth: u8,
      visit: &mut impl FnMut(&[usize], LocatorEvidence),
@@ -11052,7 +13299,7 @@ index 10b8e07..d6b307c 100644
  }
 
  #[cfg(target_os = "windows")]
-@@ -343,19 +365,21 @@ fn walk_all_at(
+@@ -343,19 +367,21 @@ fn walk_all_at(
      limits: ScanLimits<'_>,
      prefix: &mut Vec<usize>,
      visit: &mut impl FnMut(&[usize], LocatorEvidence),

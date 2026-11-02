@@ -36,6 +36,7 @@ impl Window {
         self.id() == other.id()
             && self.pid() == other.pid()
             && self.raw["process_instance"] == other.raw["process_instance"]
+            && self.raw["native_owner"] == other.raw["native_owner"]
             && self.raw["process_instance"]
                 .as_str()
                 .is_some_and(|s| !s.is_empty())

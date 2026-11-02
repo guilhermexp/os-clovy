@@ -173,6 +173,13 @@ identity into that scope. A capture held by another GUI thread has not been
 ruled out; native receiver and capture behavior remain unqualified. Scoped
 mouse and drag still fail unsupported on platforms without an override.
 
+Window and reference records now carry an optional typed native owner identity
+through allocation, persistence and ref payloads. A Windows hosted window
+without the original owner identity is refused at the qualified window boundary;
+a same-process owner may use the existing target generation. Windows inventory
+does not yet populate the new field, and remaining native consumers still
+require migration before hosted windows can be qualified end to end.
+
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:
 local Git signature verification was unavailable. It does not establish
