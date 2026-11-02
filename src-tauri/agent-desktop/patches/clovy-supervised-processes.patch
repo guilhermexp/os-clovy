@@ -4503,7 +4503,7 @@ index 44d3f2c..63dd5c2 100644
 
 diff --git a/crates/windows/src/private_browser_guard.rs b/crates/windows/src/private_browser_guard.rs
 new file mode 100644
-index 0000000..0fc6dcb
+index 0000000..4486444
 --- /dev/null
 +++ b/crates/windows/src/private_browser_guard.rs
 @@ -0,0 +1,158 @@
@@ -4586,11 +4586,11 @@ index 0000000..0fc6dcb
 +        QueryFullProcessImageNameW,
 +    };
 +    let runtime = runtime()?;
-+    let handle =
-+        ProcessHandle(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, u32::from(pid)) });
-+    if handle.0.is_null() {
++    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, u32::from(pid)) };
++    if raw.is_null() {
 +        return Err(denied());
 +    }
++    let handle = ProcessHandle(raw);
 +    let mut small = [0u16; 512];
 +    let mut len = small.len() as u32;
 +    let ok = unsafe {
@@ -5447,3 +5447,692 @@ index 6a629ce..9376d88 100644
      let focused = is_foreground_window(handle);
      Ok(WindowInfo {
          id: expected.id.clone(),
+diff --git a/crates/windows/src/tree/element.rs b/crates/windows/src/tree/element.rs
+index 473e0cc..17f027d 100644
+--- a/crates/windows/src/tree/element.rs
++++ b/crates/windows/src/tree/element.rs
+@@ -9,6 +9,8 @@ use agent_desktop_core::{AdapterError, ErrorCode, NativeHandle};
+ pub(crate) struct ProcessPayload {
+     pub(crate) pid: u32,
+     pub(crate) token: String,
++    pub(crate) root_pid: u32,
++    pub(crate) root_token: String,
+ }
+
+ #[cfg(target_os = "windows")]
+@@ -72,8 +74,22 @@ impl UIAElement {
+
+     /// Stamps the verified process identity onto the element so the live-read
+     /// path can corroborate liveness against it before answering.
+-    pub(crate) fn with_verified_process(self, pid: u32, token: String) -> Self {
+-        Self(self.0, Some(ProcessPayload { pid, token }))
++    pub(crate) fn with_verified_process(
++        self,
++        pid: u32,
++        token: String,
++        root_pid: u32,
++        root_token: String,
++    ) -> Self {
++        Self(
++            self.0,
++            Some(ProcessPayload {
++                pid,
++                token,
++                root_pid,
++                root_token,
++            }),
++        )
+     }
+
+     /// The verified process identity, if this element resolved through the
+@@ -85,6 +101,43 @@ impl UIAElement {
+     }
+ }
+
++#[cfg(target_os = "windows")]
++pub(crate) fn qualify_verified(element: &UIAElement) -> Result<ElementAuthority, AdapterError> {
++    use agent_desktop_core::ProcessId;
++    let stale = || {
++        AdapterError::new(
++            ErrorCode::StaleRef,
++            "Element identity is unavailable or changed",
++        )
++    };
++    let payload = element.1.as_ref().ok_or_else(stale)?;
++    let current = element.0.get_process_id().map_err(|_| stale())?;
++    if current == 0 || current != payload.pid {
++        return Err(stale());
++    }
++    let root = crate::private_browser_guard::qualify_expected(
++        ProcessId::new(payload.root_pid),
++        &payload.root_token,
++    )?;
++    let target = crate::private_browser_guard::qualify_expected(
++        ProcessId::new(payload.pid),
++        &payload.token,
++    )?;
++    if element.0.get_process_id().map_err(|_| stale())? != current {
++        return Err(stale());
++    }
++    Ok(ElementAuthority {
++        _root: root,
++        _target: target,
++    })
++}
++
++#[cfg(target_os = "windows")]
++pub(crate) struct ElementAuthority {
++    _root: crate::private_browser_guard::QualifiedProcess,
++    _target: crate::private_browser_guard::QualifiedProcess,
++}
++
+ /// Borrows the UI Automation element carried by a core `NativeHandle`.
+ ///
+ /// A handle built by another platform, or an empty one, is rejected rather
+diff --git a/crates/windows/src/tree/hit_test/hit_test_tests.rs b/crates/windows/src/tree/hit_test/hit_test_tests.rs
+index 8455283..2deecca 100644
+--- a/crates/windows/src/tree/hit_test/hit_test_tests.rs
++++ b/crates/windows/src/tree/hit_test/hit_test_tests.rs
+@@ -298,7 +298,12 @@ fn dead_token_preamble_escapes_as_stale_reader_err() {
+     let (left, top) = fixture.origin();
+     let root = root_from_hwnd(fixture.handle(), deadline()).expect("fixture root");
+     let handle = root
+-        .with_verified_process(std::process::id(), "dead-token-for-hit-test".into())
++        .with_verified_process(
++            std::process::id(),
++            "dead-token-for-hit-test".into(),
++            std::process::id(),
++            "dead-token-for-hit-test".into(),
++        )
+         .into_native_handle();
+     let error = hit_test_impl(
+         &handle,
+diff --git a/crates/windows/src/tree/live_read.rs b/crates/windows/src/tree/live_read.rs
+index 18a45b9..defd7d0 100644
+--- a/crates/windows/src/tree/live_read.rs
++++ b/crates/windows/src/tree/live_read.rs
+@@ -51,7 +51,7 @@ mod imp {
+     use crate::tree::name_evidence::{LabelOutcome, read_label};
+     use crate::tree::properties::{ElementProperties, read_live_bounded};
+     use crate::tree::walk::walker::walk_vocabulary;
+-    use agent_desktop_core::{AdapterError, Deadline, NativeHandle, ProcessId};
++    use agent_desktop_core::{AdapterError, Deadline, NativeHandle};
+
+     /// The shared single-element live read.
+     ///
+@@ -77,9 +77,16 @@ mod imp {
+         deadline: Deadline,
+     ) -> Result<LiveRead, AdapterError> {
+         let element = uia_element(handle)?;
++        deadline.ensure_remaining()?;
++        let _authority = crate::tree::element::qualify_verified(element)?;
++        let minimized =
++            crate::tree::minimized::owning_window_minimized(element, deadline).unwrap_or(false);
++        deadline.ensure_remaining()?;
++        let _after_minimized = crate::tree::element::qualify_verified(element)?;
+         let outside_visible_area =
+-            crate::tree::minimized::owning_window_minimized(element, deadline).unwrap_or(false)
+-                || crate::tree::minimized::outside_scroll_viewports(element, deadline)?;
++            minimized || crate::tree::minimized::outside_scroll_viewports(element, deadline)?;
++        deadline.ensure_remaining()?;
++        let _before_read = crate::tree::element::qualify_verified(element)?;
+         read_live_element_core(
+             element,
+             deadline,
+@@ -159,11 +166,7 @@ mod imp {
+     /// which is what lets the post-read call catch a process that died
+     /// during the read.
+     pub(crate) fn corroborate_verified_process(element: &UIAElement) -> Result<(), AdapterError> {
+-        if let Some((pid, token)) = element.verified_process() {
+-            if !crate::system::process_identity::matches_instance(ProcessId::new(pid), token)? {
+-                return Err(stale_reader_error());
+-            }
+-        }
++        let _authority = crate::tree::element::qualify_verified(element)?;
+         Ok(())
+     }
+ }
+diff --git a/crates/windows/src/tree/live_read_tests.rs b/crates/windows/src/tree/live_read_tests.rs
+index 8492555..f674609 100644
+--- a/crates/windows/src/tree/live_read_tests.rs
++++ b/crates/windows/src/tree/live_read_tests.rs
+@@ -28,7 +28,12 @@ pub(super) fn verified_handle(fixture: &HostedFixture) -> Result<NativeHandle, A
+             .expect("a live fixture process has a token")
+             .expect("a token reads for a live fixture");
+     Ok(root
+-        .with_verified_process(fixture_pid(fixture), token)
++        .with_verified_process(
++            fixture_pid(fixture),
++            token.clone(),
++            fixture_pid(fixture),
++            token,
++        )
+         .into_native_handle())
+ }
+
+@@ -142,7 +147,12 @@ fn a_dead_token_fails_stale_class_never_empty_success() {
+     let deadline = deadline();
+     let root = root_from_hwnd(fixture.handle(), deadline).expect("a fixture root");
+     let dead_handle = root
+-        .with_verified_process(fixture_pid(&fixture), "0000-dead-token".to_string())
++        .with_verified_process(
++            fixture_pid(&fixture),
++            "0000-dead-token".to_string(),
++            fixture_pid(&fixture),
++            "0000-dead-token".to_string(),
++        )
+         .into_native_handle();
+
+     let error = match read_live_element(&dead_handle, deadline) {
+@@ -199,7 +209,12 @@ fn the_payload_type_round_trips_through_a_native_handle() {
+     let fixture = HostedFixture::spawn().expect("a fixture host starts");
+     let root = root_from_hwnd(fixture.handle(), deadline()).expect("a fixture root");
+     let handle = root
+-        .with_verified_process(fixture_pid(&fixture), "token".to_string())
++        .with_verified_process(
++            fixture_pid(&fixture),
++            "token".to_string(),
++            fixture_pid(&fixture),
++            "token".to_string(),
++        )
+         .into_native_handle();
+     let downcast = handle
+         .downcast_ref::<UIAElement>()
+diff --git a/crates/windows/src/tree/resolve/mod.rs b/crates/windows/src/tree/resolve/mod.rs
+index 123d6fd..5530ce6 100644
+--- a/crates/windows/src/tree/resolve/mod.rs
++++ b/crates/windows/src/tree/resolve/mod.rs
+@@ -93,7 +93,7 @@ fn resolve_attempt(entry: &RefEntry, deadline: Deadline) -> Result<NativeHandle,
+         .and_then(|candidate| accept_path_landing(&source, candidate, entry))
+         .or_else(|| repair_past_leading_chrome(&source, &prepared, entry, &budget))
+     {
+-        return Ok(into_verified_handle(accepted, entry));
++        return into_verified_handle(accepted, entry);
+     }
+
+     let mut searched = Vec::new();
+@@ -122,7 +122,7 @@ fn resolve_attempt(entry: &RefEntry, deadline: Deadline) -> Result<NativeHandle,
+             let Some(candidate) = searched.into_iter().nth(index) else {
+                 return Err(stale_ref_error(entry));
+             };
+-            Ok(into_verified_handle(candidate.element, entry))
++            into_verified_handle(candidate.element, entry)
+         }
+         SearchVerdict::Ambiguous => Err(ambiguous_target_error(entry, searched.len())),
+     }
+@@ -216,21 +216,43 @@ fn classify_search(
+     }
+ }
+
+-/// Wraps the resolved element with the ref's verified process identity, so the
+-/// live-read path can corroborate that the provider is still the one
+-/// resolution verified. The token-less case cannot reach here:
+-/// `resolve_window_root` fails closed on it first.
++/// Bind the candidate's own process generation while preserving the ref's
++/// independently verified root generation for subsequent live reads.
+ #[cfg(target_os = "windows")]
+ pub(crate) fn into_verified_handle(
+     element: super::element::UIAElement,
+     entry: &RefEntry,
+-) -> NativeHandle {
+-    element
++) -> Result<NativeHandle, AdapterError> {
++    let root_token = entry
++        .process
++        .process_instance
++        .as_ref()
++        .ok_or_else(|| stale_ref_error(entry))?;
++    let _root = crate::private_browser_guard::qualify_expected(entry.process.pid, root_token)?;
++    let pid = element
++        .0
++        .get_process_id()
++        .map_err(|_| stale_ref_error(entry))?;
++    if pid == 0 {
++        return Err(stale_ref_error(entry));
++    }
++    let authority = crate::private_browser_guard::qualify(agent_desktop_core::ProcessId::new(pid))?;
++    if element
++        .0
++        .get_process_id()
++        .map_err(|_| stale_ref_error(entry))?
++        != pid
++    {
++        return Err(stale_ref_error(entry));
++    }
++    Ok(element
+         .with_verified_process(
++            pid,
++            authority.token().to_owned(),
+             entry.process.pid.get(),
+-            entry.process.process_instance.clone().unwrap_or_default(),
++            root_token.clone(),
+         )
+-        .into_native_handle()
++        .into_native_handle())
+ }
+
+ #[cfg(target_os = "windows")]
+diff --git a/crates/windows/src/tree/resolve/resolve_anchor.rs b/crates/windows/src/tree/resolve/resolve_anchor.rs
+index 3990eff..00657a9 100644
+--- a/crates/windows/src/tree/resolve/resolve_anchor.rs
++++ b/crates/windows/src/tree/resolve/resolve_anchor.rs
+@@ -96,7 +96,7 @@ fn resolve_locator_anchor_once(
+     anchor_role_verdict(entry, &evidence)?;
+     match anchor_geometry_verdict(entry, &evidence) {
+         AnchorGeometryVerdict::Promote => {
+-            Ok(crate::tree::resolve::into_verified_handle(candidate, entry))
++            crate::tree::resolve::into_verified_handle(candidate, entry)
+         }
+         AnchorGeometryVerdict::SettleStale => Err(stale_ref_error(entry)),
+         AnchorGeometryVerdict::Retry => Err(identity_unknown_error(entry)),
+diff --git a/crates/windows/src/tree/text_insertion.rs b/crates/windows/src/tree/text_insertion.rs
+index 0cd7b9b..8142dc4 100644
+--- a/crates/windows/src/tree/text_insertion.rs
++++ b/crates/windows/src/tree/text_insertion.rs
+@@ -38,7 +38,7 @@ fn count_line_breaks(text: &str) -> u32 {
+ #[cfg(target_os = "windows")]
+ mod imp {
+     use super::{caret_at, count_line_breaks, is_line_break};
+-    use crate::tree::element::uia_element;
++    use crate::tree::element::{UIAElement, uia_element};
+     use agent_desktop_core::{AdapterError, Deadline, NativeHandle, ProcessId, Rect};
+     use uiautomation::patterns::{UITextPattern, UITextRange};
+     use uiautomation::types::{TextPatternRangeEndpoint, TextUnit};
+@@ -51,10 +51,13 @@ mod imp {
+     ) -> Result<Option<Rect>, AdapterError> {
+         deadline.ensure_remaining()?;
+         let element = uia_element(handle)?;
++        let _authority = crate::tree::element::qualify_verified(element)?;
+         let Ok(pattern) = element.0.get_pattern::<UITextPattern>() else {
++            deadline.ensure_remaining()?;
++            let _authority = crate::tree::element::qualify_verified(element)?;
+             return Ok(None);
+         };
+-        Ok(caret(&pattern))
++        caret(&pattern, element, deadline)
+     }
+
+     /// The insertion caret of the element with keyboard focus, when it belongs
+@@ -68,114 +71,213 @@ mod imp {
+         let Ok(focused) = client.get_focused_element() else {
+             return Ok(None);
+         };
+-        if process.is_some_and(|process| {
+-            focused.get_process_id().ok().map(ProcessId::new) != Some(process)
+-        }) {
++        let pid = focused.get_process_id().map_err(|error| {
++            crate::tree::automation::uia_error(&error, "read focused element identity")
++        })?;
++        if pid == 0 || process.is_some_and(|process| ProcessId::new(pid) != process) {
+             return Ok(None);
+         }
+-        let Ok(pattern) = focused.get_pattern::<UITextPattern>() else {
++        let authority = crate::private_browser_guard::qualify(ProcessId::new(pid))?;
++        let token = authority.token().to_owned();
++        let focused =
++            UIAElement::from(focused).with_verified_process(pid, token.clone(), pid, token);
++        let _authority = crate::tree::element::qualify_verified(&focused)?;
++        let Ok(pattern) = focused.0.get_pattern::<UITextPattern>() else {
++            deadline.ensure_remaining()?;
++            let _authority = crate::tree::element::qualify_verified(&focused)?;
+             return Ok(None);
+         };
+-        Ok(caret(&pattern))
++        caret(&pattern, &focused, deadline)
+     }
+
+-    fn caret(pattern: &UITextPattern) -> Option<Rect> {
+-        let selection = pattern.get_selection().ok()?.into_iter().next()?;
+-        let previous = collapsed_at_end(pattern, &selection)?;
+-        let moved = previous
+-            .move_endpoint_by_unit(TextPatternRangeEndpoint::Start, TextUnit::Character, -1)
+-            .ok()?;
++    macro_rules! checked_some {
++        ($element:expr, $deadline:expr, $value:expr) => {{
++            $deadline.ensure_remaining()?;
++            let _authority = crate::tree::element::qualify_verified($element)?;
++            let value = $value;
++            $deadline.ensure_remaining()?;
++            let _authority_after = crate::tree::element::qualify_verified($element)?;
++            match value {
++                Some(value) => value,
++                None => return Ok(None),
++            }
++        }};
++    }
++
++    fn caret(
++        pattern: &UITextPattern,
++        element: &UIAElement,
++        deadline: Deadline,
++    ) -> Result<Option<Rect>, AdapterError> {
++        let selection = checked_some!(
++            element,
++            deadline,
++            pattern
++                .get_selection()
++                .ok()
++                .and_then(|values| values.into_iter().next())
++        );
++        let previous = match collapsed_at_end(pattern, &selection, element, deadline)? {
++            Some(value) => value,
++            None => return Ok(None),
++        };
++        let moved = checked_some!(
++            element,
++            deadline,
++            previous
++                .move_endpoint_by_unit(TextPatternRangeEndpoint::Start, TextUnit::Character, -1)
++                .ok()
++        );
+         if moved == 0 {
+-            let first = first_character(pattern)?;
+-            return Some(caret_at(first.x, &first));
++            let first = match first_character(pattern, element, deadline)? {
++                Some(value) => value,
++                None => return Ok(None),
++            };
++            return Ok(Some(caret_at(first.x, &first)));
+         }
+-        let text = previous.get_text(-1).ok()?;
+-        let line = bounds(&previous);
++        let text = checked_some!(element, deadline, previous.get_text(-1).ok());
++        let line = bounds(&previous, element, deadline)?;
+         if !is_line_break(&text) {
+-            let line = line?;
+-            return Some(caret_at(line.x + line.width, &line));
++            let Some(line) = line else {
++                return Ok(None);
++            };
++            return Ok(Some(caret_at(line.x + line.width, &line)));
+         }
+-        let first = first_character(pattern);
++        let first = first_character(pattern, element, deadline)?;
+         if let Some(line) = line {
+-            return Some(Rect {
++            return Ok(Some(Rect {
+                 x: first.map_or(line.x, |first| first.x),
+                 y: line.y + line.height,
+                 width: 2.0,
+                 height: line.height.max(10.0),
+-            });
++            }));
+         }
+-        let first = first?;
+-        let breaks = count_line_breaks(&text_before(pattern, &selection)?);
+-        Some(Rect {
++        let Some(first) = first else {
++            return Ok(None);
++        };
++        let Some(text) = text_before(pattern, &selection, element, deadline)? else {
++            return Ok(None);
++        };
++        let breaks = count_line_breaks(&text);
++        Ok(Some(Rect {
+             x: first.x,
+             y: first.y + f64::from(breaks) * first.height,
+             width: 2.0,
+             height: first.height.max(10.0),
+-        })
++        }))
+     }
+
+     /// The document's text up to the insertion point.
+-    fn text_before(pattern: &UITextPattern, selection: &UITextRange) -> Option<String> {
+-        let range = pattern.get_document_range().ok()?;
+-        range
+-            .move_endpoint_by_range(
+-                TextPatternRangeEndpoint::End,
+-                selection,
+-                TextPatternRangeEndpoint::End,
+-            )
+-            .ok()?;
+-        range.get_text(-1).ok()
++    fn text_before(
++        pattern: &UITextPattern,
++        selection: &UITextRange,
++        element: &UIAElement,
++        deadline: Deadline,
++    ) -> Result<Option<String>, AdapterError> {
++        let range = checked_some!(element, deadline, pattern.get_document_range().ok());
++        checked_some!(
++            element,
++            deadline,
++            range
++                .move_endpoint_by_range(
++                    TextPatternRangeEndpoint::End,
++                    selection,
++                    TextPatternRangeEndpoint::End,
++                )
++                .ok()
++        );
++        Ok(Some(checked_some!(
++            element,
++            deadline,
++            range.get_text(-1).ok()
++        )))
+     }
+
+-    fn collapsed_at_end(pattern: &UITextPattern, selection: &UITextRange) -> Option<UITextRange> {
+-        let range = pattern.get_document_range().ok()?;
+-        range
+-            .move_endpoint_by_range(
+-                TextPatternRangeEndpoint::Start,
+-                selection,
+-                TextPatternRangeEndpoint::End,
+-            )
+-            .ok()?;
+-        range
+-            .move_endpoint_by_range(
+-                TextPatternRangeEndpoint::End,
+-                selection,
+-                TextPatternRangeEndpoint::End,
+-            )
+-            .ok()?;
+-        Some(range)
++    fn collapsed_at_end(
++        pattern: &UITextPattern,
++        selection: &UITextRange,
++        element: &UIAElement,
++        deadline: Deadline,
++    ) -> Result<Option<UITextRange>, AdapterError> {
++        let range = checked_some!(element, deadline, pattern.get_document_range().ok());
++        checked_some!(
++            element,
++            deadline,
++            range
++                .move_endpoint_by_range(
++                    TextPatternRangeEndpoint::Start,
++                    selection,
++                    TextPatternRangeEndpoint::End,
++                )
++                .ok()
++        );
++        checked_some!(
++            element,
++            deadline,
++            range
++                .move_endpoint_by_range(
++                    TextPatternRangeEndpoint::End,
++                    selection,
++                    TextPatternRangeEndpoint::End,
++                )
++                .ok()
++        );
++        Ok(Some(range))
+     }
+
+-    fn first_character(pattern: &UITextPattern) -> Option<Rect> {
+-        let range = pattern.get_document_range().ok()?;
+-        let document_start = pattern.get_document_range().ok()?;
+-        range
+-            .move_endpoint_by_range(
+-                TextPatternRangeEndpoint::End,
+-                &document_start,
+-                TextPatternRangeEndpoint::Start,
+-            )
+-            .ok()?;
+-        range
+-            .move_endpoint_by_unit(TextPatternRangeEndpoint::End, TextUnit::Character, 1)
+-            .ok()?;
+-        bounds(&range)
++    fn first_character(
++        pattern: &UITextPattern,
++        element: &UIAElement,
++        deadline: Deadline,
++    ) -> Result<Option<Rect>, AdapterError> {
++        let range = checked_some!(element, deadline, pattern.get_document_range().ok());
++        let document_start = checked_some!(element, deadline, pattern.get_document_range().ok());
++        checked_some!(
++            element,
++            deadline,
++            range
++                .move_endpoint_by_range(
++                    TextPatternRangeEndpoint::End,
++                    &document_start,
++                    TextPatternRangeEndpoint::Start,
++                )
++                .ok()
++        );
++        checked_some!(
++            element,
++            deadline,
++            range
++                .move_endpoint_by_unit(TextPatternRangeEndpoint::End, TextUnit::Character, 1)
++                .ok()
++        );
++        bounds(&range, element, deadline)
+     }
+
+     /// The first line box of a range, from its bounding rectangles: x, y,
+     /// width and height quadruples in screen pixels.
+-    fn bounds(range: &UITextRange) -> Option<Rect> {
+-        let raw = unsafe { range.as_ref().GetBoundingRectangles() }.ok()?;
+-        let values: Vec<f64> = SafeArray::from(raw).into_vector(VT_R8).ok()?;
+-        let [x, y, width, height] = values.get(..4)? else {
+-            return None;
++    fn bounds(
++        range: &UITextRange,
++        element: &UIAElement,
++        deadline: Deadline,
++    ) -> Result<Option<Rect>, AdapterError> {
++        let raw = checked_some!(
++            element,
++            deadline,
++            unsafe { range.as_ref().GetBoundingRectangles() }.ok()
++        );
++        let values: Vec<f64> = match SafeArray::from(raw).into_vector(VT_R8).ok() {
++            Some(values) => values,
++            None => return Ok(None),
++        };
++        let Some([x, y, width, height]) = values.get(..4) else {
++            return Ok(None);
+         };
+-        (*height > 0.0).then_some(Rect {
++        Ok((*height > 0.0).then_some(Rect {
+             x: *x,
+             y: *y,
+             width: *width,
+             height: *height,
+-        })
++        }))
+     }
+ }
+
+diff --git a/crates/windows/src/tree/text_selection.rs b/crates/windows/src/tree/text_selection.rs
+index b1d96d0..37021df 100644
+--- a/crates/windows/src/tree/text_selection.rs
++++ b/crates/windows/src/tree/text_selection.rs
+@@ -35,10 +35,8 @@ mod imp {
+
+     /// Reads the element's current selection as UTF-16 code-unit offsets.
+     ///
+-    /// Answers `Ok(None)` when the element exposes no Text pattern, when it has
+-    /// no selection, or when any read along the way fails: each is absent
+-    /// evidence, which core degrades to an unverified delivery rather than a
+-    /// failure. The prefix range is the document range with its end moved to
++    /// Answers `Ok(None)` only for an absent Text pattern or selection; identity
++    /// and provider failures propagate. The prefix range is the document range with its end moved to
+     /// the selection start, read once and mutated in place; no clone of a
+     /// range whose provider may not implement one is needed.
+     pub(crate) fn get_text_selection(
+@@ -47,32 +45,62 @@ mod imp {
+     ) -> Result<Option<Range<usize>>, AdapterError> {
+         deadline.ensure_remaining()?;
+         let element = uia_element(handle)?;
+-        let Ok(pattern) = element.0.get_pattern::<UITextPattern>() else {
+-            return Ok(None);
+-        };
+-        let Ok(selections) = pattern.get_selection() else {
+-            return Ok(None);
++        let _authority = crate::tree::element::qualify_verified(element)?;
++        let pattern = match element.0.get_pattern::<UITextPattern>() {
++            Ok(pattern) => pattern,
++            Err(error) => {
++                deadline.ensure_remaining()?;
++                let _authority = crate::tree::element::qualify_verified(element)?;
++                use crate::tree::automation::{UiaFailure, failure_of};
++                let failure = failure_of(&error);
++                if failure.is_exhaustion()
++                    || failure
++                        == UiaFailure::Hresult(crate::system::runtime::hresult::UIA_E_NOTSUPPORTED)
++                {
++                    return Ok(None);
++                }
++                return Err(crate::tree::automation::uia_error(
++                    &error,
++                    "read text pattern",
++                ));
++            }
+         };
++        deadline.ensure_remaining()?;
++        let _authority = crate::tree::element::qualify_verified(element)?;
++        let selections = pattern
++            .get_selection()
++            .map_err(|error| crate::tree::automation::uia_error(&error, "read text selection"))?;
+         let Some(selection) = selections.into_iter().next() else {
++            deadline.ensure_remaining()?;
++            let _authority = crate::tree::element::qualify_verified(element)?;
+             return Ok(None);
+         };
+-        let Ok(prefix) = pattern.get_document_range() else {
+-            return Ok(None);
+-        };
+-        if prefix
++        deadline.ensure_remaining()?;
++        let _authority = crate::tree::element::qualify_verified(element)?;
++        let prefix = pattern
++            .get_document_range()
++            .map_err(|error| crate::tree::automation::uia_error(&error, "read document range"))?;
++        deadline.ensure_remaining()?;
++        let _authority = crate::tree::element::qualify_verified(element)?;
++        prefix
+             .move_endpoint_by_range(
+                 TextPatternRangeEndpoint::End,
+                 &selection,
+                 TextPatternRangeEndpoint::Start,
+             )
+-            .is_err()
+-        {
+-            return Ok(None);
+-        }
+-        let (Ok(prefix_text), Ok(selection_text)) = (prefix.get_text(-1), selection.get_text(-1))
+-        else {
+-            return Ok(None);
+-        };
++            .map_err(|error| crate::tree::automation::uia_error(&error, "read selection range"))?;
++        deadline.ensure_remaining()?;
++        let _authority = crate::tree::element::qualify_verified(element)?;
++        let prefix_text = prefix
++            .get_text(-1)
++            .map_err(|error| crate::tree::automation::uia_error(&error, "read selection prefix"))?;
++        deadline.ensure_remaining()?;
++        let _authority = crate::tree::element::qualify_verified(element)?;
++        let selection_text = selection
++            .get_text(-1)
++            .map_err(|error| crate::tree::automation::uia_error(&error, "read selected text"))?;
++        deadline.ensure_remaining()?;
++        let _authority = crate::tree::element::qualify_verified(element)?;
+         Ok(Some(utf16_range(&prefix_text, &selection_text)))
+     }
+ }

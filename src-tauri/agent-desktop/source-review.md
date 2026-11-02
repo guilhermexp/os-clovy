@@ -24,6 +24,12 @@ the PrintWindow worker requalifies after its responsiveness probe and retains
 the process handles through each pixel read. A failed WGC window attempt is
 terminal; the window path does not use the display BitBlt capture. These are
 source changes and cross-compilation evidence, not Windows runtime acceptance.
+Resolved Windows UIA handles now retain distinct root and element process
+generations. Live element reads, text selection and caret reads qualify the
+element's current native PID and those stored generations before provider
+reads and requalify around later calls. Missing identity fails closed. Tree
+traversal, batched cache and related-element reads still require their own
+guards; this increment does not establish native UIA acceptance.
 Windows UIA descendants, capture, input and other native guards, macOS guards,
 a newly prepared engine, and native acceptance remain pending. This partial
 change does not qualify an existing engine artifact.
