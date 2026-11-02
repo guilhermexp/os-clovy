@@ -33,7 +33,7 @@ Adicionar `AgentApprovalMode { Approvals, Bypass }` (snake_case) em `agent_sessi
 
 ### D3 — Escopo bound e gestão tipada
 
-`ToolCtx` deve conter partição resolvida pela conversa bound no host, não a seleção atual da UI de `app_data()`. Cliente externo preserva sua superfície de leitura já autorizada. Revalidar vínculo/objeto/origem/destino e run após toda espera; projeto é organização, não grant transversal por ID. Não autorizar cross-profile por campo do modelo. Atividade é da instalação. Recusar autoexclusão da conversa bound e autocancelamento do próprio run.
+`ToolCtx` deve conter a partição congelada pelo host no `dataPartition` de `run_config_json`, capturada no mesmo INSERT transacional do run e de `approvalMode` e transportada em `TurnContext`/`TurnBinding`, não a seleção atual da UI de `app_data()`. Reassociar a conversa invalida o acesso do vínculo antigo; somente um novo run captura a nova associação. Snapshot ausente/malformado ou associação divergente é recusa, inclusive após aprovação/lock e antes de publicar contexto ou despachar prompt. Sessão sem associação captura `default` explicitamente; rotina conserva a origem da própria sessão. Cliente externo preserva sua superfície de leitura já autorizada. Revalidar vínculo/objeto/origem/destino e run após toda espera; projeto é organização, não grant transversal por ID. Não autorizar cross-profile por campo do modelo. Atividade é da instalação. Recusar autoexclusão da conversa bound e autocancelamento do próprio run.
 
 Contrato de nomes desta expansão (manter existentes não substituídos; atualizar documento dono/catálogo junto):
 

@@ -290,6 +290,12 @@ pub async fn start_cli_turn(
     ticket: TurnTicket,
 ) -> Result<(), AppError> {
     check_policy(request.kind, request.attended)?;
+    let data_partition = crate::agent_sessions::run_partition::resolve(
+        &repository.pool,
+        &request.session_id,
+        &request.run_id,
+    )
+    .await?;
     let env = crate::llm::shell_env::login_env().await;
     let program = env
         .which(request.kind.id())
@@ -311,6 +317,7 @@ pub async fn start_cli_turn(
     let context = turn::TurnContext {
         session_id: request.session_id,
         run_id: request.run_id,
+        data_partition,
         previous_run_id: request.previous_run_id,
         kind: request.kind,
         program,

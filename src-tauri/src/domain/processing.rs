@@ -5754,6 +5754,7 @@ mod tests {
             authority: crate::domain::turn_authority::TurnAuthority::new(),
             session_id: "conversation".into(),
             run_id: "run".into(),
+            data_partition: "default".into(),
             cli: crate::llm::cli::CliKind::Claude,
             safety_mode: crate::agent_sessions::domain::AgentSafetyMode::Sandboxed,
             attended: true,

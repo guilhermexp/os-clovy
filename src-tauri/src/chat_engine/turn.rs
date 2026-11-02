@@ -39,6 +39,8 @@ const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(1);
 pub struct TurnContext {
     pub session_id: String,
     pub run_id: String,
+    /// The data partition snapshotted when the host created this run.
+    pub data_partition: String,
     /// A retried attempt whose conversation and messages must not be reused.
     pub previous_run_id: Option<String>,
     pub kind: CliKind,
@@ -78,6 +80,7 @@ impl TurnContext {
             authority: crate::domain::turn_authority::TurnAuthority::new(),
             session_id: self.session_id.clone(),
             run_id: self.run_id.clone(),
+            data_partition: self.data_partition.clone(),
             cli: self.kind,
             safety_mode: self.safety_mode,
             attended: self.attended,
@@ -297,6 +300,21 @@ pub async fn execute_turn<S: FrameSink>(
         if run_open || (*cancel.borrow() && run_status.as_deref() == Some("cancelled")) {
             frames.emit("run.cancelled", json!({})).await;
         }
+        return;
+    }
+
+    // Prompt/history preparation and CLI discovery can wait while the user
+    // moves the conversation. Never send the prepared context to that CLI
+    // under a different partition, even before its first MCP call.
+    if let Err(error) = crate::agent_sessions::run_partition::revalidate(
+        &repository.pool,
+        &context.session_id,
+        &context.run_id,
+        &context.data_partition,
+    )
+    .await
+    {
+        frames.emit("run.failed", failure(&error.message)).await;
         return;
     }
 

@@ -27,8 +27,18 @@ in [llm-providers.md](llm-providers.md#cli-chat-engine).
 
 The management expansion names are fixed by D3-D5 of
 [melhorias-agente-audio-automacao](../openspec/changes/melhorias-agente-audio-automacao/design.md).
-Bound access follows the conversation's persisted data partition, including
-after a UI partition switch. External reads retain the current-view scope.
+Bound access uses the host-owned `dataPartition` snapshot in the run's
+`run_config_json`, captured atomically with `approvalMode` when the run is
+created and carried by `TurnContext` and `TurnBinding`. A UI partition switch
+does not change it. Moving the conversation to another partition invalidates
+the old run's access; it does not redirect an issued token. A new run captures
+the new association. Missing or malformed snapshots, missing conversations or
+runs, and mismatched associations fail closed, including after approvals and
+writer waits. Metadata updates cannot fill or replace these authority fields.
+Unprofiled sessions explicitly snapshot `default`; routines use their own
+persisted session origin, never the visible app view or its bypass policy.
+Bound context resources and prompt dispatch revalidate the same snapshot.
+External reads retain the current-view scope.
 Projects organize data; IDs never grant access across partitions. Stop revokes
 the host binding; every bound dispatch and post-approval mutation checks it.
 

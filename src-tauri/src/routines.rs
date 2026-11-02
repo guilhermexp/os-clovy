@@ -3063,6 +3063,7 @@ mod tests {
             let context = crate::chat_engine::turn::TurnContext {
                 session_id: session_id.clone(),
                 run_id: run_id.clone(),
+                data_partition: "default".into(),
                 previous_run_id: None,
                 kind: CliKind::Claude,
                 program,

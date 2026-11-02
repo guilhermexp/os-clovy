@@ -131,6 +131,7 @@ fn binding(cli: CliKind, attended: bool) -> TurnBinding {
     TurnBinding {
         session_id: "session-doc".into(),
         run_id: "run-doc".into(),
+        data_partition: "default".into(),
         cli,
         safety_mode: AgentSafetyMode::Sandboxed,
         attended,

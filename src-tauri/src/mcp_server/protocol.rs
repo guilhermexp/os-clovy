@@ -381,7 +381,10 @@ async fn read_resource(
                             format!("{} ({})", e.message(), e.code()),
                         )
                     })?;
-                let row = sqlx::query::query("SELECT COALESCE(json_extract(r.run_config_json, '$.workspace'), s.workspace_path) AS workspace_path, s.safety_mode, s.approval_mode, COALESCE(p.profile, 'default') AS profile FROM agent_sessions s JOIN agent_runs r ON r.session_id = s.id LEFT JOIN session_profiles p ON p.session_id = s.id WHERE s.id = ? AND r.id = ?")
+                ctx.revalidate()
+                    .await
+                    .map_err(|e| (SERVER_UNAVAILABLE, e.message))?;
+                let row = sqlx::query::query("SELECT COALESCE(json_extract(r.run_config_json, '$.workspace'), s.workspace_path) AS workspace_path, s.safety_mode, s.approval_mode FROM agent_sessions s JOIN agent_runs r ON r.session_id = s.id WHERE s.id = ? AND r.id = ?")
                     .bind(&binding.session_id).bind(&binding.run_id).fetch_optional(&ctx.data.notes).await
                     .map_err(|_| (SERVER_UNAVAILABLE, "Session context unavailable".into()))?
                     .ok_or((SERVER_UNAVAILABLE, "Session context unavailable".into()))?;
@@ -395,7 +398,10 @@ async fn read_resource(
                 .into_iter()
                 .map(|r| r.get::<String, _>("folder_id"))
                 .collect::<Vec<_>>();
-                context["session"] = json!({"id": binding.session_id, "runId": binding.run_id, "engine": binding.cli.id(), "surface": binding.surface, "partition": row.get::<String, _>("profile"), "projectIds": folders, "workspace": row.get::<Option<String>, _>("workspace_path"), "executionPolicy": binding.safety_mode, "configuredExecutionPolicy": row.get::<String, _>("safety_mode"), "approvalMode": row.get::<String, _>("approval_mode"), "effectiveApprovalMode": policy.mode});
+                ctx.revalidate()
+                    .await
+                    .map_err(|e| (SERVER_UNAVAILABLE, e.message))?;
+                context["session"] = json!({"id": binding.session_id, "runId": binding.run_id, "engine": binding.cli.id(), "surface": binding.surface, "partition": binding.data_partition, "projectIds": folders, "workspace": row.get::<Option<String>, _>("workspace_path"), "executionPolicy": binding.safety_mode, "configuredExecutionPolicy": row.get::<String, _>("safety_mode"), "approvalMode": row.get::<String, _>("approval_mode"), "effectiveApprovalMode": policy.mode});
             }
             ("application/json", context.to_string())
         }

@@ -705,6 +705,7 @@ async fn chat_engine_revoked_turn_answers_its_pending_call_before_closing() {
         authority: crate::domain::turn_authority::TurnAuthority::new(),
         session_id: "session-1".into(),
         run_id: "run-1".into(),
+        data_partition: "default".into(),
         cli: CliKind::Claude,
         safety_mode: AgentSafetyMode::Sandboxed,
         attended: true,

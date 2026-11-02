@@ -11,6 +11,8 @@
 //! relays to this process, which answers with the same queries and filters
 //! the app uses.
 
+#[cfg(test)]
+mod bound_partition_tests;
 pub mod channel;
 pub mod protocol;
 #[cfg(all(test, unix))]
@@ -394,59 +396,14 @@ async fn bound_profile(
     pool: &sqlx_sqlite::SqlitePool,
     binding: &turns::TurnBinding,
 ) -> Result<String, AppError> {
-    sqlx::query_scalar::query_scalar::<_, String>(
-        "SELECT COALESCE(p.profile, 'default') FROM agent_sessions s
-         JOIN agent_runs r ON r.session_id = s.id AND r.id = ?
-         LEFT JOIN session_profiles p ON p.session_id = s.id WHERE s.id = ?",
+    binding.authority.check_live()?;
+    crate::agent_sessions::run_partition::revalidate(
+        pool,
+        &binding.session_id,
+        &binding.run_id,
+        &binding.data_partition,
     )
-    .bind(&binding.run_id)
-    .bind(&binding.session_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| {
-        AppError::new(
-            "turn_expired",
-            "The bound conversation or run no longer exists.",
-        )
-    })
-}
-
-#[cfg(test)]
-mod bound_profile_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn profile_follows_bound_session_and_rejects_mismatched_run() {
-        let pool = sqlx_sqlite::SqlitePool::connect("sqlite::memory:")
-            .await
-            .unwrap();
-        for sql in [
-            "CREATE TABLE agent_sessions (id TEXT PRIMARY KEY)",
-            "CREATE TABLE agent_runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL)",
-            "CREATE TABLE session_profiles (session_id TEXT PRIMARY KEY, profile TEXT NOT NULL)",
-            "INSERT INTO agent_sessions VALUES ('a'), ('b'), ('legacy')",
-            "INSERT INTO agent_runs VALUES ('ra', 'a'), ('rb', 'b'), ('rl', 'legacy')",
-            "INSERT INTO session_profiles VALUES ('a', 'one'), ('b', 'two')",
-        ] {
-            sqlx::query::query(sql).execute(&pool).await.unwrap();
-        }
-        let mut binding = turns::TurnBinding {
-            authority: crate::domain::turn_authority::TurnAuthority::new(),
-            session_id: "a".into(),
-            run_id: "ra".into(),
-            cli: crate::llm::cli::CliKind::Claude,
-            safety_mode: crate::agent_sessions::domain::AgentSafetyMode::Sandboxed,
-            attended: true,
-            surface: "chat".into(),
-        };
-        assert_eq!(bound_profile(&pool, &binding).await.unwrap(), "one");
-        binding.run_id = "rb".into();
-        assert_eq!(
-            bound_profile(&pool, &binding).await.unwrap_err().code,
-            "turn_expired"
-        );
-        binding.session_id = "legacy".into();
-        binding.run_id = "rl".into();
-        assert_eq!(bound_profile(&pool, &binding).await.unwrap(), "default");
-    }
+    .await?;
+    binding.authority.check_live()?;
+    Ok(binding.data_partition.clone())
 }

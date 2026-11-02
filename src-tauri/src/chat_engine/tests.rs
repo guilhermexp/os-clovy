@@ -111,6 +111,7 @@ impl Harness {
         TurnContext {
             session_id: self.session_id.clone(),
             run_id: run_id.to_string(),
+            data_partition: "default".into(),
             previous_run_id: None,
             kind,
             program: program.to_path_buf(),
@@ -2227,4 +2228,43 @@ exit 0
         .await
         .expect("post-exit terminal race and controls finish within their whole-scenario timeout");
     }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn reassignment_during_prompt_preparation_refuses_cli_launch() {
+    struct ReassigningSink(TestSink);
+    impl FrameSink for ReassigningSink {
+        async fn publish(&self, frame: RpcFrame) {
+            let started = frame.method.as_deref() == Some("run.started");
+            let session_id = frame.session_id.clone();
+            self.0.publish(frame).await;
+            if started {
+                crate::db::repositories::Repositories::new(self.0.repository.pool.clone())
+                    .assign_session_to_profile(&session_id, "B")
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+    let kind = CliKind::Claude;
+    let harness = Harness::new(kind).await;
+    let run_id = harness.new_run(kind, "Synthetic message").await;
+    let program = harness.fake_cli(kind, "echo must-not-launch");
+    let sink = ReassigningSink(TestSink {
+        repository: harness.repository.clone(),
+        emitted: StdMutex::new(Vec::new()),
+    });
+    let (_cancel, receiver) = watch::channel(false);
+    execute_turn(
+        &harness.repository,
+        &sink,
+        harness.context(kind, &program, &run_id, "Synthetic message", None),
+        receiver,
+    )
+    .await;
+    assert!(!harness.log.path().join("count").exists());
+    let events = sink.0.emitted.into_inner().unwrap();
+    assert!(events.iter().any(|(method, value)| method == "run.failed"
+        && value.to_string().contains("data partition changed")));
 }

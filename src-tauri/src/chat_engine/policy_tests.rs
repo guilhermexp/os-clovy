@@ -114,6 +114,7 @@ async fn policy_claude_interaction_tools_are_listed_to_claude_turns() {
         authority: crate::domain::turn_authority::TurnAuthority::new(),
         session_id: "session-1".into(),
         run_id: "run-1".into(),
+        data_partition: "default".into(),
         cli: CliKind::Claude,
         safety_mode: AgentSafetyMode::Sandboxed,
         attended: true,

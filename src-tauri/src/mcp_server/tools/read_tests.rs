@@ -12,7 +12,7 @@ async fn fixture() -> (McpData, TurnBinding) {
     let pool = notes_pool().await;
     query("INSERT INTO agent_sessions (id,title,model,status,created_at,updated_at) VALUES (?, 'Routine read fixture', 'test', 'running', 'now','now')")
         .bind(&binding.session_id).execute(&pool).await.unwrap();
-    query("INSERT INTO agent_runs (id,session_id,model,status,started_at,updated_at) VALUES (?,?,'test','running','now','now')")
+    query("INSERT INTO agent_runs (id,session_id,model,status,started_at,updated_at,run_config_json) VALUES (?,?,'test','running','now','now','{\"dataPartition\":\"default\"}')")
         .bind(&binding.run_id).bind(&binding.session_id).execute(&pool).await.unwrap();
     let now = "2026-10-28T00:00:00Z";
     query("INSERT INTO routines (id, name, prompt, schedule, created_at, updated_at, metadata_json, tool_catalog_version) VALUES ('read-routine', 'Daily', 'Summarise', 'every 1d', ?, ?, '{\"enabledToolsets\":[]}', 1)")

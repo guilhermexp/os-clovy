@@ -259,6 +259,7 @@ fn binding(run_id: &str, attended: bool) -> TurnBinding {
         authority: crate::domain::turn_authority::TurnAuthority::new(),
         session_id: "session-1".into(),
         run_id: run_id.into(),
+        data_partition: "default".into(),
         cli: CliKind::Claude,
         safety_mode: crate::agent_sessions::AgentSafetyMode::Sandboxed,
         attended,

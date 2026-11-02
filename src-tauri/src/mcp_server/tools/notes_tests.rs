@@ -8,7 +8,7 @@ use sqlx::query::query;
 async fn insert_bound_turn(pool: &sqlx_sqlite::SqlitePool, binding: &super::TurnBinding) {
     query("INSERT INTO agent_sessions (id,title,model,status,created_at,updated_at) VALUES (?, 'Bound fixture', 'test', 'running', 'now','now')")
         .bind(&binding.session_id).execute(pool).await.unwrap();
-    query("INSERT INTO agent_runs (id,session_id,model,status,started_at,updated_at) VALUES (?,?,'test','running','now','now')")
+    query("INSERT INTO agent_runs (id,session_id,model,status,started_at,updated_at,run_config_json) VALUES (?,?,'test','running','now','now','{\"dataPartition\":\"default\"}')")
         .bind(&binding.run_id).bind(&binding.session_id).execute(pool).await.unwrap();
 }
 

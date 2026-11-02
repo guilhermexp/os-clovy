@@ -249,8 +249,11 @@ impl AgentRepository {
         query(
             "INSERT INTO agent_runs
              (id, session_id, status, model, reasoning_effort, started_at, updated_at, run_config_json)
-             SELECT ?, id, 'running', ?, ?, ?, ?, json_object('approvalMode', approval_mode)
-             FROM agent_sessions WHERE id = ?",
+             SELECT ?, s.id, 'running', ?, ?, ?, ?,
+                    json_object('approvalMode', s.approval_mode,
+                                'dataPartition', COALESCE(p.profile, 'default'))
+             FROM agent_sessions s LEFT JOIN session_profiles p ON p.session_id = s.id
+             WHERE s.id = ?",
         )
         .bind(&id)
         .bind(model)
@@ -357,7 +360,7 @@ impl AgentRepository {
         config: &serde_json::Value,
     ) -> Result<(), sqlx::Error> {
         query(
-            "UPDATE agent_runs SET run_config_json = json_patch(?, COALESCE(run_config_json, '{}')), updated_at = ?
+            "UPDATE agent_runs SET run_config_json = json_patch(json_remove(?, '$.approvalMode', '$.dataPartition'), COALESCE(run_config_json, '{}')), updated_at = ?
              WHERE id = ?",
         )
         .bind(config.to_string())

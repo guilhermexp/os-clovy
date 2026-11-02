@@ -4717,13 +4717,13 @@ mod queued_audio_authority_tests {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         for statement in [
             "CREATE TABLE agent_sessions(id TEXT PRIMARY KEY)",
-            "CREATE TABLE agent_runs(id TEXT PRIMARY KEY,session_id TEXT,status TEXT)",
+            "CREATE TABLE agent_runs(id TEXT PRIMARY KEY,session_id TEXT,status TEXT,run_config_json TEXT)",
             "CREATE TABLE session_profiles(session_id TEXT,profile TEXT)",
             "CREATE TABLE notes(id TEXT PRIMARY KEY,profile TEXT,processing_status TEXT,content TEXT,revision INTEGER,updated_at TEXT)",
             "CREATE TABLE recording_sessions(id TEXT PRIMARY KEY,note_id TEXT)",
             "CREATE TABLE effects(id INTEGER)",
             "INSERT INTO agent_sessions VALUES('conversation')",
-            "INSERT INTO agent_runs VALUES('run','conversation','running')",
+            "INSERT INTO agent_runs VALUES('run','conversation','running','{\"dataPartition\":\"owner\"}')",
             "INSERT INTO session_profiles VALUES('conversation','owner')",
         ] { query(statement).execute(&pool).await.unwrap(); }
         let note = uuid::Uuid::new_v4().to_string();
@@ -4741,6 +4741,7 @@ mod queued_audio_authority_tests {
             authority: TurnAuthority::new(),
             session_id: "conversation".into(),
             run_id: "run".into(),
+            data_partition: "owner".into(),
             cli: crate::llm::cli::CliKind::Claude,
             safety_mode: crate::agent_sessions::domain::AgentSafetyMode::Sandboxed,
             attended: true,

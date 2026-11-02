@@ -164,12 +164,13 @@ async fn fixture() -> (
     crate::db::migrations::run_migrations(&pool).await.unwrap();
     for id in ["caller", "target"] {
         query("INSERT INTO agent_sessions(id,title,model,status,created_at,updated_at) VALUES (?,?,'test','running','now','now')").bind(id).bind(id).execute(&pool).await.unwrap();
-        query("INSERT INTO agent_runs(id,session_id,model,status,started_at,updated_at) VALUES (?,?,'test','running','now','now')").bind(format!("{id}-run")).bind(id).execute(&pool).await.unwrap();
+        query("INSERT INTO agent_runs(id,session_id,model,status,started_at,updated_at,run_config_json) VALUES (?,?,'test','running','now','now','{\"dataPartition\":\"default\"}')").bind(format!("{id}-run")).bind(id).execute(&pool).await.unwrap();
     }
     let binding = |id: &str| TurnBinding {
         authority: TurnAuthority::new(),
         session_id: id.into(),
         run_id: format!("{id}-run"),
+        data_partition: "default".into(),
         cli: crate::llm::cli::CliKind::Claude,
         safety_mode: crate::agent_sessions::domain::AgentSafetyMode::Sandboxed,
         attended: true,

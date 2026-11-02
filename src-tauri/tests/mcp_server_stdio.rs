@@ -519,6 +519,7 @@ async fn mcp_server_binary_binds_a_turn_until_it_is_revoked() {
     let token = turns.issue(TurnBinding {
         session_id: "session-1".into(),
         run_id: "run-1".into(),
+        data_partition: "default".into(),
         cli: CliKind::Codex,
         safety_mode: AgentSafetyMode::Sandboxed,
         attended: true,
@@ -622,6 +623,7 @@ async fn mcp_server_binary_carries_image_content_blocks_to_the_cli() {
     let token = turns.issue(TurnBinding {
         session_id: "session-1".into(),
         run_id: "run-1".into(),
+        data_partition: "default".into(),
         cli: CliKind::Claude,
         safety_mode: AgentSafetyMode::Sandboxed,
         attended: true,

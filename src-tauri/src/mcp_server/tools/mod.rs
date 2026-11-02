@@ -99,7 +99,7 @@ pub struct McpData {
     /// The main database (`notes.sqlite3`).
     pub notes: SqlitePool,
     /// The authorized data partition: bound requests use the conversation's
-    /// persisted mapping; external clients use the current app view. Notes,
+    /// frozen run snapshot; external clients use the current app view. Notes,
     /// dictations and memories are limited to it; activity is not partitioned.
     pub profile: String,
     /// Settings, Memory: `list_memories` refuses while memory is off.
@@ -201,9 +201,7 @@ pub(crate) async fn revalidate_binding(
     };
     check_registry()?;
     let actual_profile = super::bound_profile(pool, binding).await?;
-    let active: i64 = sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM agent_runs WHERE id = ? AND session_id = ? AND status IN ('queued', 'running', 'waiting_for_user')")
-        .bind(&binding.run_id).bind(&binding.session_id).fetch_one(pool).await?;
-    if actual_profile != profile || active != 1 {
+    if actual_profile != profile {
         return Err(AppError::new(
             "turn_expired",
             "The bound run or data partition changed.",

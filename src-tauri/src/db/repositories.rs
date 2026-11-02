@@ -5418,8 +5418,8 @@ pub(crate) async fn guard_bound_turn(
 ) -> Result<(), AppError> {
     // A write statement acquires SQLite's write lock before the effect. Stop,
     // partition reassignment, and this mutation therefore have a serial order.
-    let claimed = query("UPDATE agent_runs SET id = id WHERE id = ? AND session_id = ? AND status IN ('queued', 'running', 'waiting_for_user') AND EXISTS (SELECT 1 FROM agent_sessions s LEFT JOIN session_profiles p ON p.session_id = s.id WHERE s.id = ? AND COALESCE(p.profile, 'default') = ?)")
-        .bind(run_id).bind(session_id).bind(session_id).bind(profile).execute(&mut **tx).await?.rows_affected();
+    let claimed = query("UPDATE agent_runs SET id = id WHERE id = ? AND session_id = ? AND status IN ('queued', 'running', 'waiting_for_user') AND CASE WHEN json_valid(run_config_json) THEN json_type(run_config_json, '$.dataPartition') = 'text' AND json_extract(run_config_json, '$.dataPartition') = ? ELSE 0 END AND EXISTS (SELECT 1 FROM agent_sessions s LEFT JOIN session_profiles p ON p.session_id = s.id WHERE s.id = ? AND COALESCE(p.profile, 'default') = ?)")
+        .bind(run_id).bind(session_id).bind(profile).bind(session_id).bind(profile).execute(&mut **tx).await?.rows_affected();
     // The database may still say running while natural turn teardown has
     // already revoked its token. Check the live host capability only after
     // the writer wait, before any domain mutation is admitted.

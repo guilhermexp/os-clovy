@@ -467,6 +467,7 @@ mod lifecycle_tests {
                 authority: crate::domain::turn_authority::TurnAuthority::new(),
                 session_id: "conversation-a".into(),
                 run_id: "run-a".into(),
+                data_partition: "partition-a".into(),
                 cli: crate::llm::cli::CliKind::Claude,
                 safety_mode: crate::agent_sessions::domain::AgentSafetyMode::Sandboxed,
                 attended: true,

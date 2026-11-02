@@ -33,6 +33,8 @@ pub struct TurnBinding {
     pub authority: crate::domain::turn_authority::TurnAuthority,
     pub session_id: String,
     pub run_id: String,
+    /// Host-owned run snapshot, never the current view or a model argument.
+    pub data_partition: String,
     pub cli: CliKind,
     pub safety_mode: AgentSafetyMode,
     /// A person watches the turn and can answer an approval card (`false`
