@@ -37,6 +37,13 @@ fn main() {
     build_windows_dictation_helper();
     ensure_agent_browser_resources();
     ensure_mcp_relay_placeholder();
+    // Relay bootstrap builds need an existing resource directory. The wrapper
+    // stages a real signed Cargo artifact before bundling; no placeholder exe.
+    if std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() == Some("windows") {
+        let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+        std::fs::create_dir_all(root.parent().unwrap().join(".tauri-helper/mcp-windows"))
+            .expect("MCP relay resource directory should be created");
+    }
     export_app_identifier();
     tauri_build::build();
 }

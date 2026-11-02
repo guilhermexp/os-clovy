@@ -4,11 +4,11 @@
 //! claude reads (spike S1), end to end through the real socket and relay
 //! with the call claude sends.
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::path::Path;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::sync::{Arc, Mutex};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -16,14 +16,14 @@ use serde_json::{json, Value};
 use super::interaction::InteractionTools;
 use super::{ActivityAccess, McpData, ToolCtx, ToolGroup, TurnBinding};
 use crate::approval_broker::testing::{Scripted, TestBroker};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::approval_broker::ApprovalBroker;
 use crate::llm::cli::CliKind;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::mcp_server::tests::by_id;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::mcp_server::turns::TurnRegistry;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::mcp_server::{channel, protocol, stdio};
 
 fn data(broker: &TestBroker) -> McpData {
@@ -208,7 +208,7 @@ async fn interaction_unbound_clients_neither_see_nor_reach_the_tools() {
 }
 
 /// The app's handler shape, with the test broker as the app's broker.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn turn_handler(data: McpData, broker: ApprovalBroker) -> channel::TurnHandler {
     let data = Arc::new(data);
     Arc::new(move |message: Value, binding: Option<Arc<TurnBinding>>| {
@@ -228,7 +228,7 @@ fn turn_handler(data: McpData, broker: ApprovalBroker) -> channel::TurnHandler {
 /// A fake claude turn: the real relay with `--turn`, sending what claude
 /// sends for a permission prompt and for a question.
 #[tokio::test]
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn interaction_claude_permission_prompt_through_the_socket_and_relay() {
     let broker = TestBroker::new([
         Scripted::Approve,
@@ -304,13 +304,13 @@ async fn interaction_claude_permission_prompt_through_the_socket_and_relay() {
 
 /// Stdin of a CLI: the requests, then open until the test closes it (the
 /// relay drops answers still in flight when its input ends).
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct OpenInput {
     lines: std::io::Cursor<Vec<u8>>,
     gate: std::sync::mpsc::Receiver<()>,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl std::io::Read for OpenInput {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let read = self.lines.read(buf)?;
@@ -322,10 +322,10 @@ impl std::io::Read for OpenInput {
 }
 
 #[derive(Clone, Default)]
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct Output(Arc<Mutex<Vec<u8>>>);
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl std::io::Write for Output {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.lock().unwrap().extend_from_slice(buf);
@@ -336,7 +336,7 @@ impl std::io::Write for Output {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl Output {
     fn messages(&self) -> Vec<Value> {
         String::from_utf8_lossy(&self.0.lock().unwrap())
@@ -348,7 +348,7 @@ impl Output {
 
 /// Runs the real relay with the turn token on `requests`, keeping its input
 /// open until every request is answered.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn relay(dir: &Path, token: &str, requests: &[Value]) -> Vec<Value> {
     let input: String = requests.iter().map(|line| format!("{line}\n")).collect();
     let output = Output::default();

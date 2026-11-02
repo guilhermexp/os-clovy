@@ -1,22 +1,15 @@
 use std::{
-    ffi::OsStr,
     io::{Error, ErrorKind},
     path::{Component, Path, PathBuf},
 };
 use tauri::{AppHandle, Manager};
 
-const USE_PROD_DATA_DIR_ENV: &str = "OS_CLOVY_USE_PROD_DATA_DIR";
-
-/// The installed macOS app's data directory, used by debug helpers to avoid
-/// accessing the release profile when they do not have an AppHandle.
-pub(crate) fn production_app_data_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| {
-        PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-            .join(crate::app_identity::RELEASE_APP_IDENTIFIER)
-    })
-}
+#[path = "app_paths/profile.rs"]
+mod profile;
+#[cfg(test)]
+use profile::env_value_truthy;
+pub(crate) use profile::production_app_data_dir;
+pub use profile::use_prod_data_dir;
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -79,23 +72,6 @@ pub fn app_data_dir(app: &AppHandle) -> Result<PathBuf, tauri::Error> {
 pub fn app_config_dir(app: &AppHandle) -> Result<PathBuf, tauri::Error> {
     app.path().app_config_dir().map(|config_dir| {
         app_config_dir_for_build(config_dir, cfg!(debug_assertions), use_prod_data_dir())
-    })
-}
-
-/// Public because migration validation (`db::migrations`) relaxes its
-/// newer-schema guard only for dev builds on the isolated dev data dir, and
-/// must not relax it when a dev build is pointed at production data.
-pub fn use_prod_data_dir() -> bool {
-    let value = std::env::var_os(USE_PROD_DATA_DIR_ENV);
-    env_value_truthy(value.as_deref())
-}
-
-fn env_value_truthy(value: Option<&OsStr>) -> bool {
-    value.and_then(OsStr::to_str).is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
     })
 }
 

@@ -90,3 +90,20 @@ without a turn token (Cursor, `claude mcp add`). The binary still never opens
 a database. The token is checked only after the secret and user id, so it
 never opens the socket by itself. Contract: [docs/mcp-server.md](../mcp-server.md)
 ("Turn binding", "Approval broker", and the tool tables).
+
+## Addendum: private Windows transport (2026-11-02)
+
+The approved Windows expansion in D6 of
+`openspec/changes/melhorias-agente-audio-automacao/design.md` uses local byte-mode
+named pipes in place of the Unix endpoint. It shares the same framing,
+handshake, quotas, turn registry, revocation and receipt handling. The endpoint
+is derived from the canonical installation directory; protected explicit
+user/SYSTEM DACLs, remote-client rejection and process TokenUser checks precede
+secret/token validation. Existing ambiguous storage is refused, not repaired.
+The CLI-owned relay does not authenticate against its parent process.
+
+This preserves the decision to keep databases and tool authority in the app
+without introducing a TCP or public MCP endpoint. The installer includes a
+real target/profile-specific relay signed by the configured publisher, checked
+after extraction. Native Windows security, I/O and packaging qualification
+remains separate from cross-target typechecking; see the subsystem doc.

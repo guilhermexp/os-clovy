@@ -47,7 +47,7 @@ the host binding; every bound dispatch and post-approval mutation checks it.
 | Path | What |
 | --- | --- |
 | `src-tauri/src/mcp_server/mod.rs` | Switch, listener lifecycle, Tauri commands, configuration snippets, per-message data access |
-| `src-tauri/src/mcp_server/channel.rs` | Unix socket + installation secret, handshake, listener, client connect |
+| `src-tauri/src/mcp_server/channel.rs`, `channel/` | Shared handshake/quotas/revocation, Unix socket or private Windows named pipe, installation secret and client I/O |
 | `src-tauri/src/mcp_server/stdio.rs` | The `clovy-mcp` relay (and its answers while the app is unreachable) |
 | `src-tauri/src/mcp_server/protocol.rs` | MCP JSON-RPC: lifecycle, `tools/*`, `resources/*`, `clovy://context`, `clovy://guide`, MCP content blocks |
 | `src-tauri/src/mcp_server/turns.rs` | Turn registry: issue, bind, revoke turn tokens (`turn_required`, `turn_expired`) |
@@ -58,6 +58,7 @@ the host binding; every bound dispatch and post-approval mutation checks it.
 | `src-tauri/src/chat_engine/policy.rs` | The flags each CLI turn gets (safety mode, attended, tool timeout) |
 | `src-tauri/src/bin/clovy_mcp.rs` | Binary entry point |
 | `src-tauri/bundle-clovy-mcp.sh` | macOS `beforeBundleCommand` step: copies and signs the binary into `.tauri-helper/` |
+| `scripts/prepare-windows-mcp.mjs` | Builds the Cargo-reported Windows relay, signs it and stages its source/target/profile/digest manifest for the installer |
 | `src/components/settings/McpServerSection.tsx`, `src/lib/mcp-server.ts` | Settings, Agent section and its bindings |
 
 Tests: `cargo test mcp_server` (protocol against test databases, the relay
@@ -82,7 +83,7 @@ runner builds the relay).
 ```mermaid
 flowchart LR
   client["MCP client (Claude Code, Cursor, CLI engine)"] -- "stdio JSON-RPC" --> relay["clovy-mcp --dir <data>/mcp"]
-  relay -- "Unix socket 0600 + secret" --> app["Clovy app: mcp_server"]
+  relay -- "Private local channel + secret" --> app["Clovy app: mcp_server"]
   app --> notes["notes.sqlite3 (current data partition)"]
   app --> activity["activity.sqlite3 (timeline queries)"]
 ```
@@ -94,6 +95,22 @@ and retention as the agent tools and the "Today" view.
 
 ## Local channel
 
+- macOS uses the Unix socket below. Windows uses a duplex byte-mode local
+  named pipe, `\\.\pipe\clovy-mcp-<SHA256 of canonical installation directory>`.
+  `--dir` still identifies the installation, never an arbitrary pipe address.
+  Remote clients are rejected, and every instance has an explicit protected
+  user/SYSTEM DACL. The first instance reserves the name; renewal keeps an
+  instance alive while creating its replacement. Both peers qualify the real
+  process TokenUser through a retained process handle, failing closed when it
+  cannot be queried. The relay is a child of the CLI, not of Clovy, so no
+  parent-PID rule applies. The secret and turn token remain mandatory.
+- Windows creates the MCP directory and secret with a protected private ACL
+  from the start. Existing objects must have the current owner and a private
+  protected ACL; inherited/ambiguous ACLs, reparse ancestors and hard-linked
+  secrets are refused. Ancestor handles prevent rename/delete during access.
+  No ancestor ACL, existing secret or client configuration is rewritten.
+  The debug relay protects the same Roaming AppData release directory Tauri
+  resolves, while the dev app keeps its separate `-dev` directory.
 - Directory `<app data dir>/mcp/` (mode 0700): `clovy.sock` (Unix socket, mode
   0600) and `secret` (64 hex characters, mode 0600, created the first time the
   server starts and kept across restarts: the installation secret).
@@ -120,6 +137,14 @@ and retention as the agent tools and the "Today" view.
   - persistent `accept` errors (out of descriptors) back off 100 ms.
 - Unix socket paths are limited to 104 bytes on macOS; a data dir deeper than
   that makes the server fail to start with the error shown in Settings.
+- Server handshake reading and writing are bounded by 5 s and observe
+  shutdown. Windows client authentication has one total 5 s deadline. The
+  relay keeps one I/O runtime per process across reconnects, with concurrent
+  read/write halves. Native pending writes are explicitly cancelled on abort;
+  Tokio/Mio retains OVERLAPPED storage until completion. Graceful pipe close
+  uses a zero-byte write as a native-write completion barrier, under the common
+  drain deadline; it never calls blocking `FlushFileBuffers`. These details
+  rely on the locked Tokio 1.52.3 / Mio 1.2.1 implementations.
 
 ## Turn binding
 
@@ -153,6 +178,11 @@ routines `false`), and the surface (`chat` or `routine`).
 - Revocation stops new admissions immediately. An in-flight handler may still
   report a correlated delivery receipt during that grace period; if its result
   is unknown, the response does not claim the action was safely undelivered.
+- A connection lost after writing a tool request yields a correlated
+  `mcp_delivery_unknown` result (`delivery: unknown`, `effect: unknown`,
+  `retrySafe: false`, original `callId`) when no real receipt arrived. The
+  relay never resends that request, including after a partial write. A later
+  independent request can reconnect. EOF alone does not prove turn expiry.
 - An unbound connection never sees a turn-bound tool in `tools/list`, and
   calling one returns an `isError` result ending in `(turn_required)` without
   running it.
@@ -676,5 +706,24 @@ arrives earlier gets the relay's own answer: `initialize` and `ping` succeed
 locally, `tools/call` returns an error result, and other requests (such as
 `tools/list` and `resources/*`) fail, both with the unreachable reason. The
 relay opens a new connection for a later request when it has none, so
-requests after the listener is ready reach the app. macOS only
-(`supported: false` elsewhere hides the section).
+requests after the listener is ready reach the app. macOS and Windows with
+activity settings available are supported; other platforms hide this section.
+On Windows the resolver prefers `native/bin/clovy-mcp.exe`, then the relay
+beside the dev executable. The copied shell command targets PowerShell (single
+quotes inside an argument are doubled); JSON command/args stay structured.
+
+Windows release preparation always invokes Cargo with the requested target,
+profile and `CARGO_TARGET_DIR`, selects its executable event, signs the relay
+with the configured publisher and stages it with a source/digest manifest.
+Bootstrap creates only the resource directory. Final NSIS verification requires
+one relay and manifest under `native/bin`, compares extracted/staged hashes,
+checks current-source provenance and requires the same Authenticode publisher
+as the host and installer. No certificate is provisioned by these scripts.
+
+Transport-only proof: `mcp_server::channel::transport_tests` and
+`tests/mcp_transport_stdio.rs` exercise real local I/O and the relay executable
+without desktop/CLI credentials. Windows-only cases cover storage, real peer
+token qualification, handshake deadlines and cancellation; the reparse fixture
+is ignored unless the host already permits symlinks. GNU typechecking does not
+prove Windows ACL enforcement, another SID, remote refusal, Authenticode, NSIS
+extraction or live Claude/Codex turns. Those require a native Windows run.

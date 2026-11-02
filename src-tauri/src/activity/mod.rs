@@ -153,7 +153,7 @@ fn runtime<'a>(state: &'a State<'_, ActivityState>) -> Result<&'a ActivityRuntim
     state.0.as_ref().ok_or_else(|| {
         AppError::new(
             "activity_unsupported",
-            "Activity capture is available on macOS only.",
+            "Activity settings are unavailable. Restart Clovy and try again.",
         )
     })
 }

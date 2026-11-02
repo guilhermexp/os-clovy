@@ -10,7 +10,6 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use chrono::{TimeZone, Utc};
-use clovy_lib::agent_sessions::domain::AgentSafetyMode;
 use clovy_lib::chat_engine::policy::{turn_policy, TurnPermissions};
 use clovy_lib::connectors::agent_tools::routine_tool_allowed;
 use clovy_lib::connectors::notion::runtime_name_to_provider;
@@ -128,16 +127,11 @@ fn data(notes: &SqlitePool) -> McpData {
 }
 
 fn binding(cli: CliKind, attended: bool) -> TurnBinding {
-    TurnBinding {
-        session_id: "session-doc".into(),
-        run_id: "run-doc".into(),
-        data_partition: "default".into(),
-        cli,
-        safety_mode: AgentSafetyMode::Sandboxed,
-        attended,
-        surface: if attended { "chat" } else { "routine" }.into(),
-    }
+    host_binding::binding(cli, attended, "session-doc", "run-doc")
 }
+
+#[path = "support/mcp_binding.rs"]
+mod host_binding;
 
 async fn request(ctx: &ToolCtx<'_>, method: &str, params: Value) -> Value {
     let message = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });

@@ -9,7 +9,6 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 use super::tests::{by_id, data, notes_pool, Captured};
 use super::tools::{ActivityAccess, McpData, ToolCtx, ToolGroup};
@@ -142,15 +141,13 @@ fn read_catalog() -> Vec<String> {
 /// (the write half keeps the connection open).
 type Raw = (
     Value,
-    BufReader<tokio::net::unix::OwnedReadHalf>,
-    tokio::net::unix::OwnedWriteHalf,
+    BufReader<tokio::io::ReadHalf<channel::TestStream>>,
+    tokio::io::WriteHalf<channel::TestStream>,
 );
 
 async fn handshake(dir: &Path, hello: Value) -> Raw {
-    let stream = UnixStream::connect(channel::socket_path(dir))
-        .await
-        .unwrap();
-    let (read, mut write) = stream.into_split();
+    let stream = channel::test_stream(dir).await;
+    let (read, mut write) = tokio::io::split(stream);
     write
         .write_all(format!("{hello}\n").as_bytes())
         .await

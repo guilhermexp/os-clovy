@@ -4,17 +4,14 @@
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 use super::tests::{data, handler_for, notes_pool};
 use super::tools::ActivityAccess;
 use super::*;
 
 async fn exchange(dir: &std::path::Path, first_line: Value) -> (Value, Option<String>) {
-    let stream = UnixStream::connect(channel::socket_path(dir))
-        .await
-        .unwrap();
-    let (read, mut write) = stream.into_split();
+    let stream = channel::test_stream(dir).await;
+    let (read, mut write) = tokio::io::split(stream);
     let mut reader = BufReader::new(read);
     write
         .write_all(format!("{first_line}\n").as_bytes())

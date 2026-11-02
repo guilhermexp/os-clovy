@@ -1,7 +1,7 @@
 //! The `clovy-mcp` binary driven the way an MCP client drives it (spawned,
 //! JSON-RPC over stdio), with the app side of the local channel (Unix socket
 //! + installation secret) served in this process against test databases.
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 
 use std::path::Path;
 use std::process::Stdio;
@@ -13,7 +13,6 @@ use clovy_lib::activity::key::{ActivityKeyStore, KeyStoreError};
 use clovy_lib::activity::settings::ActivitySettings;
 use clovy_lib::activity::store::{ActivityStore, NewFrame, TextSource, ACTIVITY_DB_FILE};
 use clovy_lib::activity::timeline::etl::run_pass;
-use clovy_lib::agent_sessions::domain::AgentSafetyMode;
 use clovy_lib::db::repositories::Repositories;
 use clovy_lib::llm::cli::CliKind;
 use clovy_lib::mcp_server::tools::{ActivityAccess, McpData, ToolCtx};
@@ -28,6 +27,9 @@ use zeroize::Zeroizing;
 
 const RANGE_FROM: &str = "2026-10-01T08:00:00Z";
 const RANGE_TO: &str = "2026-10-01T12:00:00Z";
+
+#[path = "support/mcp_binding.rs"]
+mod host_binding;
 
 fn at(hour: u32, minute: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 10, 1, hour, minute, 0).unwrap()
@@ -391,7 +393,7 @@ async fn mcp_server_binary_answers_a_stdio_client_from_the_active_profile() {
 
     // Turned off in Settings: the same client process gets the reason, and
     // answers again once the server is back on.
-    listener.stop();
+    listener.stop_and_wait().await;
     assert_eq!(
         client
             .call("search_notes", json!({ "query": "zephyr" }))
@@ -407,7 +409,7 @@ async fn mcp_server_binary_answers_a_stdio_client_from_the_active_profile() {
         .is_ok());
 
     client.close().await;
-    listener.stop();
+    listener.stop_and_wait().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -441,10 +443,11 @@ async fn mcp_server_binary_reports_never_enabled_and_a_refused_secret() {
     let listed = refused.request("tools/list", json!({})).await;
     assert_eq!(listed["error"]["message"], json!(stdio::REFUSED_MESSAGE));
     refused.close().await;
-    listener.stop();
+    listener.stop_and_wait().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(target_os = "macos")]
 async fn mcp_server_debug_binary_refuses_the_installed_app_data() {
     // A throwaway HOME (short path: Unix socket paths are capped at 104
     // bytes) whose production data directory has a live channel.
@@ -482,7 +485,7 @@ async fn mcp_server_debug_binary_refuses_the_installed_app_data() {
         .await
         .is_ok());
     allowed.close().await;
-    listener.stop();
+    listener.stop_and_wait().await;
 }
 
 /// The app side with turn bindings, as the app serves CLI turns.
@@ -516,15 +519,12 @@ async fn mcp_server_binary_binds_a_turn_until_it_is_revoked() {
         channel::Listener::start_with_turns(&dir, turn_handler(notes_pool().await), turns.clone())
             .await
             .unwrap();
-    let token = turns.issue(TurnBinding {
-        session_id: "session-1".into(),
-        run_id: "run-1".into(),
-        data_partition: "default".into(),
-        cli: CliKind::Codex,
-        safety_mode: AgentSafetyMode::Sandboxed,
-        attended: true,
-        surface: "chat".into(),
-    });
+    let token = turns.issue(host_binding::binding(
+        CliKind::Codex,
+        true,
+        "session-1",
+        "run-1",
+    ));
 
     // A live turn: the compiled relay is accepted and serves the catalog.
     let mut bound = Client::spawn_for_turn(&dir, &token).await;
@@ -576,7 +576,7 @@ async fn mcp_server_binary_binds_a_turn_until_it_is_revoked() {
         .await
         .unwrap();
     assert_eq!(status.code(), Some(2));
-    listener.stop();
+    listener.stop_and_wait().await;
 }
 
 /// The app side of a turn whose `computer_use` answers with a capture as MCP
@@ -620,15 +620,12 @@ async fn mcp_server_binary_carries_image_content_blocks_to_the_cli() {
     )
     .await
     .unwrap();
-    let token = turns.issue(TurnBinding {
-        session_id: "session-1".into(),
-        run_id: "run-1".into(),
-        data_partition: "default".into(),
-        cli: CliKind::Claude,
-        safety_mode: AgentSafetyMode::Sandboxed,
-        attended: true,
-        surface: "chat".into(),
-    });
+    let token = turns.issue(host_binding::binding(
+        CliKind::Claude,
+        true,
+        "session-1",
+        "run-1",
+    ));
     let mut client = Client::spawn_for_turn(&dir, &token).await;
     let response = client
         .request(
@@ -657,5 +654,5 @@ async fn mcp_server_binary_carries_image_content_blocks_to_the_cli() {
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0]["type"], json!("text"));
     client.close().await;
-    listener.stop();
+    listener.stop_and_wait().await;
 }

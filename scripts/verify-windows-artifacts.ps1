@@ -83,6 +83,15 @@ try {
   }
 
   $app = Require-One "clovy.exe"
+  $relay = Require-One "clovy-mcp.exe"
+  $relayManifest = Require-One "clovy-mcp-manifest.json"
+  if (-not $relay.DirectoryName.Replace('\', '/').ToLowerInvariant().EndsWith('/native/bin') -or
+      $relayManifest.DirectoryName -ne $relay.DirectoryName) { throw "MCP relay and provenance must be under native/bin." }
+  $stagedRelay = Join-Path $PSScriptRoot "../.tauri-helper/mcp-windows/clovy-mcp.exe"
+  if ((Get-FileHash -LiteralPath $stagedRelay -Algorithm SHA256).Hash -ne
+      (Get-FileHash -LiteralPath $relay.FullName -Algorithm SHA256).Hash) { throw "Packaged MCP relay differs from the staged signed Cargo artifact." }
+  & node (Join-Path $PSScriptRoot "prepare-windows-mcp.mjs") --check --target x86_64-pc-windows-msvc --profile release --executable $relay.FullName --manifest $relayManifest.FullName
+  if ($LASTEXITCODE -ne 0) { throw "Final MCP relay provenance verification failed." }
   # The MSVC target statically links WebView2Loader; only GNU builds ship its DLL.
   $helper = Require-One "clovy-dictation-helper.exe"
   $nativeBin = $helper.DirectoryName.Replace('\', '/').ToLowerInvariant()
@@ -131,7 +140,7 @@ try {
   $reviewHash = (Get-FileHash -LiteralPath (Join-Path $desktopEngine.DirectoryName "source-review.md") -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($reviewHash -ne $pin.sourceReviewSha256) { throw "Nested engine source qualification digest mismatch." }
   $publisher = $null
-  foreach ($signedFile in @($installer, $app, $desktopHelper, $desktopEngine)) {
+  foreach ($signedFile in @($installer, $app, $relay, $desktopHelper, $desktopEngine)) {
     $signature = Get-AuthenticodeSignature -LiteralPath $signedFile.FullName
     if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
       throw "Expected a valid Authenticode signature: $($signedFile.FullName)"

@@ -95,12 +95,49 @@ pub fn production_data_refusal(dir: &std::path::Path) -> Option<&'static str> {
     if !cfg!(debug_assertions) || crate::app_paths::use_prod_data_dir() {
         return None;
     }
-    let production = crate::app_paths::production_app_data_dir()?;
+    let Some(production) = crate::app_paths::production_app_data_dir() else {
+        return cfg!(windows).then_some(PRODUCTION_DATA_MESSAGE);
+    };
+    production_directory_refusal(dir, &production)
+}
+
+fn production_directory_refusal(
+    dir: &std::path::Path,
+    production: &std::path::Path,
+) -> Option<&'static str> {
     let resolve =
         |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     resolve(dir)
-        .starts_with(resolve(&production))
+        .starts_with(resolve(production))
         .then_some(PRODUCTION_DATA_MESSAGE)
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    #[test]
+    fn synthetic_release_root_is_refused_and_sibling_dev_root_is_allowed() {
+        let root = tempfile::tempdir().unwrap();
+        let production = root.path().join("synthetic-installation");
+        let channel = production.join("mcp");
+        let dev = root.path().join("synthetic-installation-dev/mcp");
+        std::fs::create_dir_all(&channel).unwrap();
+        std::fs::create_dir_all(&dev).unwrap();
+        assert_eq!(
+            production_directory_refusal(&channel, &production),
+            Some(PRODUCTION_DATA_MESSAGE)
+        );
+        assert_eq!(production_directory_refusal(&dev, &production), None);
+        #[cfg(unix)]
+        {
+            let alias = root.path().join("alias");
+            std::os::unix::fs::symlink(&production, &alias).unwrap();
+            assert_eq!(
+                production_directory_refusal(&alias.join("mcp"), &production),
+                Some(PRODUCTION_DATA_MESSAGE)
+            );
+        }
+    }
 }
 
 /// One input line.
@@ -177,7 +214,7 @@ pub fn relay(dir: &std::path::Path, input: impl BufRead, output: Box<dyn Write +
     relay_turn(dir, None, input, output);
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub fn relay_turn(
     _dir: &std::path::Path,
     _turn: Option<&str>,
@@ -190,7 +227,7 @@ pub fn relay_turn(
             continue;
         };
         if let Some(response) =
-            fallback(&message, "The Clovy MCP server is available on macOS only.")
+            fallback(&message, "The Clovy MCP server requires macOS or Windows.")
         {
             let _ = writeln!(output, "{response}");
             let _ = output.flush();
@@ -198,14 +235,13 @@ pub fn relay_turn(
     }
 }
 
-#[cfg(unix)]
-pub use unix::relay_turn;
+#[cfg(any(unix, windows))]
+pub use local::relay_turn;
 
-#[cfg(unix)]
-mod unix {
+#[cfg(any(unix, windows))]
+mod local {
     use std::collections::HashMap;
     use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, PoisonError};
@@ -223,21 +259,35 @@ mod unix {
         let _ = output.flush();
     }
 
-    /// Why requests lost their connection: the listener removes its socket
-    /// before closing connections, so a missing socket means the server was
-    /// turned off; otherwise Clovy dropped the connection (or quit). Checks the
-    /// file only: connecting would take a connection slot from real clients.
     fn dropped_reason(dir: &Path) -> &'static str {
-        if channel::socket_path(dir).exists() {
+        if channel::endpoint_available(dir) {
             DROPPED_MESSAGE
         } else {
             OFF_MESSAGE
         }
     }
 
+    // Once writing began, EOF/errors cannot prove zero delivery. Preserve a
+    // real receipt when present; otherwise retain correlation and uncertainty.
+    fn uncertain(message: &Value, reason: &str) -> Option<Value> {
+        if protocol::method(message) != Some("tools/call") {
+            return fallback(message, reason);
+        }
+        let id = protocol::request_id(message)?;
+        let mut error = crate::domain::types::AppError::new("mcp_delivery_unknown", reason);
+        error.details = Some(
+            json!({"delivery":"unknown","effect":"unknown","retrySafe":false,"callId":id.clone()}),
+        );
+        Some(protocol::result_response(
+            id,
+            protocol::tool_error_for(&error),
+        ))
+    }
+
     /// An authenticated connection and the requests still waiting on it.
     struct Connection {
-        stream: UnixStream,
+        stream: channel::SyncStream,
+        reader: Option<std::thread::JoinHandle<()>>,
         alive: Arc<AtomicBool>,
         pending: Arc<Mutex<HashMap<String, Value>>>,
     }
@@ -251,11 +301,12 @@ mod unix {
             let (thread_alive, thread_pending, thread_output) =
                 (Arc::clone(&alive), Arc::clone(&pending), Arc::clone(output));
             let probe_dir = dir.to_path_buf();
-            let bound = turn.is_some();
-            std::thread::spawn(move || {
-                for line in BufReader::new(reader).lines() {
-                    let Ok(line) = line else { break };
-                    let Ok(message) = serde_json::from_str::<Value>(&line) else {
+            let reader = std::thread::spawn(move || {
+                let mut reader = BufReader::new(reader);
+                while let Ok(Some(InputLine::Line(line))) =
+                    read_bounded_line(&mut reader, channel::MAX_LINE_BYTES)
+                {
+                    let Ok(message) = serde_json::from_slice::<Value>(&line) else {
                         continue;
                     };
                     if let Some(id) = message.get("id") {
@@ -266,22 +317,17 @@ mod unix {
                     }
                     emit(&thread_output, &message);
                 }
-                thread_alive.store(false, Ordering::SeqCst);
-                let orphans: Vec<Value> = thread_pending
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .drain()
-                    .map(|(_, message)| message)
-                    .collect();
+                let orphans: Vec<Value> = {
+                    let mut pending = thread_pending
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    thread_alive.store(false, Ordering::SeqCst);
+                    pending.drain().map(|(_, message)| message).collect()
+                };
                 if !orphans.is_empty() {
-                    // A bound connection only closes while the socket is up
-                    // when its turn was revoked.
-                    let reason = match dropped_reason(&probe_dir) {
-                        DROPPED_MESSAGE if bound => TURN_EXPIRED_MESSAGE,
-                        other => other,
-                    };
+                    let reason = dropped_reason(&probe_dir);
                     for message in orphans {
-                        if let Some(response) = fallback(&message, reason) {
+                        if let Some(response) = uncertain(&message, reason) {
                             emit(&thread_output, &response);
                         }
                     }
@@ -289,34 +335,60 @@ mod unix {
             });
             Ok(Self {
                 stream,
+                reader: Some(reader),
                 alive,
                 pending,
             })
         }
 
         fn send(&mut self, line: &str, message: &Value) -> bool {
-            let key = protocol::request_id(message).map(|id| id.to_string());
-            if let Some(key) = &key {
-                self.pending
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(key.clone(), message.clone());
+            // Register while holding the same lock used for EOF draining.
+            // No request may be added after the reader has drained the map.
+            {
+                let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+                if !self.alive.load(Ordering::SeqCst) {
+                    drop(pending);
+                    // The caller only reconnects before starting a write.
+                    return false;
+                }
+                if let Some(id) = protocol::request_id(message) {
+                    pending.insert(id.to_string(), message.clone());
+                }
             }
-            let sent = self
+            if self
                 .stream
                 .write_all(line.as_bytes())
                 .and_then(|()| self.stream.write_all(b"\n"))
-                .is_ok();
-            if !sent {
-                self.alive.store(false, Ordering::SeqCst);
-                if let Some(key) = key {
-                    self.pending
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .remove(&key);
-                }
+                .is_err()
+            {
+                // Never replay after write_all: even its error may mean a
+                // prefix reached Clovy. The reader emits unknown for orphans.
+                let _ = self.stream.shutdown(std::net::Shutdown::Both);
             }
-            sent
+            true
+        }
+
+        fn finish(&mut self) {
+            #[cfg(unix)]
+            let _ = self.stream.shutdown(std::net::Shutdown::Write);
+            // stdin EOF allows a bounded drain of receipts before closing IO.
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while self
+                .reader
+                .as_ref()
+                .is_some_and(|reader| !reader.is_finished())
+                && std::time::Instant::now() < until
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    }
+    impl Drop for Connection {
+        fn drop(&mut self) {
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+            if let Some(reader) = self.reader.take() {
+                let _ = reader.join();
+            }
         }
     }
 
@@ -400,32 +472,28 @@ mod unix {
             {
                 connection = None;
             }
-            let mut failure = None;
-            for _attempt in 0..2 {
-                if connection.is_none() {
-                    match Connection::open(dir, turn, &output) {
-                        Ok(opened) => connection = Some(opened),
-                        Err(error) => {
-                            failure = Some(reason(&error));
-                            break;
+            if connection.is_none() {
+                match Connection::open(dir, turn, &output) {
+                    Ok(opened) => connection = Some(opened),
+                    Err(error) => {
+                        if let Some(response) = fallback(&message, &reason(&error)) {
+                            emit(&output, &response);
                         }
+                        continue;
                     }
                 }
-                if connection
-                    .as_mut()
-                    .is_some_and(|connection| connection.send(line, &message))
-                {
-                    failure = None;
-                    break;
-                }
-                connection = None;
-                failure = Some(DROPPED_MESSAGE.to_string());
             }
-            if let Some(reason) = failure {
-                if let Some(response) = fallback(&message, &reason) {
+            let connection = connection.as_mut().expect("opened above");
+            // If the reader won the race before registration, no bytes were
+            // written. Answer conservatively without replaying this call.
+            if !connection.send(line, &message) {
+                if let Some(response) = uncertain(&message, DROPPED_MESSAGE) {
                     emit(&output, &response);
                 }
             }
+        }
+        if let Some(connection) = connection.as_mut() {
+            connection.finish();
         }
     }
 }

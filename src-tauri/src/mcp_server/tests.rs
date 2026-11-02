@@ -546,15 +546,43 @@ fn configuration_snippets_point_at_the_bundled_relay() {
         cursor_config(&launch)["mcpServers"]["clovy"].get("type"),
         None
     );
+    #[cfg(not(windows))]
     assert_eq!(
         claude_code_command(&launch),
         "claude mcp add --scope user clovy -- /Applications/Clovy.app/Contents/Resources/native/bin/clovy-mcp --dir '/Users/me/Library/Application Support/dev.guilhermexp.clovy/mcp'"
+    );
+    #[cfg(windows)]
+    assert_eq!(
+        claude_code_command(&launch),
+        "claude mcp add --scope user clovy -- '/Applications/Clovy.app/Contents/Resources/native/bin/clovy-mcp' '--dir' '/Users/me/Library/Application Support/dev.guilhermexp.clovy/mcp'"
     );
     assert_eq!(
         stdio::parse_dir(&["--dir".into(), "/tmp/x".into()]).unwrap(),
         Path::new("/tmp/x")
     );
     assert!(stdio::parse_dir(&[]).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_launch_uses_exe_and_powershell_literals_while_json_stays_structured() {
+    let resources = Path::new(r"C:\Clovy's folder\resources");
+    let exe = Path::new(r"C:\Clovy's folder\clovy.exe");
+    let candidates = binary_candidates(Some(resources), Some(exe));
+    assert_eq!(candidates[0], resources.join("native/bin/clovy-mcp.exe"));
+    assert_eq!(candidates[1], exe.parent().unwrap().join("clovy-mcp.exe"));
+    let launch = launch(&candidates[0], Path::new(r"C:\Data ' literal\mcp"));
+    assert!(claude_code_command(&launch).contains("Clovy''s folder"));
+    assert!(claude_code_command(&launch).ends_with("'C:\\Data '' literal\\mcp'"));
+    let config = claude_code_config(&launch);
+    assert_eq!(
+        config["mcpServers"][SERVER_KEY]["args"][1],
+        r"C:\Data ' literal\mcp"
+    );
+    assert_eq!(
+        config["mcpServers"][SERVER_KEY]["command"],
+        launch.command.display().to_string()
+    );
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -603,7 +631,7 @@ pub(crate) fn by_id(messages: &[Value], id: i64) -> &Value {
         .unwrap_or_else(|| panic!("no answer for id {id}: {messages:?}"))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) fn handler_for(data: McpData) -> channel::Handler {
     let data = Arc::new(data);
     Arc::new(move |message: Value| {
@@ -675,7 +703,7 @@ async fn the_relay_answers_mcp_calls_through_the_authenticated_socket() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn the_relay_reports_a_server_that_is_off_or_never_enabled() {
     let root = tempfile::tempdir().unwrap();
     let dir = channel::channel_dir(root.path());
@@ -697,7 +725,7 @@ async fn the_relay_reports_a_server_that_is_off_or_never_enabled() {
     )
     .await
     .unwrap();
-    listener.stop();
+    listener.stop_and_wait().await;
     let off = run_relay(&dir, &lines).await.messages(3);
     assert!(by_id(&off, 1)["result"]["instructions"]
         .as_str()

@@ -268,7 +268,7 @@ pub fn groups() -> Vec<&'static dyn ToolGroup> {
     groups.push(&media::MediaTools);
     groups.push(&recorder::RecorderTools);
     groups.push(&interaction::InteractionTools);
-    #[cfg(all(test, unix))]
+    #[cfg(all(test, any(unix, windows)))]
     groups.push(&super::turn_tests::TurnProbe);
     groups
 }
