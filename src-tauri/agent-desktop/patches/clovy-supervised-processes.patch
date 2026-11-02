@@ -4732,8 +4732,21 @@ index 632d83f..cb53e17 100644
      }
 
      fn observed_change(
+diff --git a/crates/macos/src/actions/adapter.rs b/crates/macos/src/actions/adapter.rs
+index 111e263..1f2f9c6 100644
+--- a/crates/macos/src/actions/adapter.rs
++++ b/crates/macos/src/actions/adapter.rs
+@@ -45,7 +45,7 @@ fn execute_global_action(
+     let Action::PressKey(combo) = request.action else {
+         return Err(AdapterError::not_supported("global element action"));
+     };
+-    crate::input::keyboard::synthesize_key(&combo, None, lease.deadline())?;
++    crate::input::keyboard::synthesize_global_key(&combo, lease.deadline())?;
+     Ok(
+         ActionResult::delivered_unverified("press_key").with_steps(vec![
+             ActionStep::succeeded("CGEventPost")
 diff --git a/crates/macos/src/actions/ax_helpers.rs b/crates/macos/src/actions/ax_helpers.rs
-index a4aadfc..00bcc29 100644
+index a4aadfc..1f43077 100644
 --- a/crates/macos/src/actions/ax_helpers.rs
 +++ b/crates/macos/src/actions/ax_helpers.rs
 @@ -20,7 +20,7 @@ mod imp {
@@ -4745,7 +4758,38 @@ index a4aadfc..00bcc29 100644
              return Ok(false);
          }
          let action = CFString::new(name);
-@@ -100,11 +100,14 @@ mod imp {
+@@ -33,6 +33,30 @@ mod imp {
+         })
+     }
+
++    pub(crate) fn try_window_key_action(
++        el: &AXElement,
++        name: &str,
++        focused: &AXElement,
++        window: &AXElement,
++        require_foreground: bool,
++        deadline: agent_desktop_core::Deadline,
++    ) -> Result<bool, AdapterError> {
++        if advertises_action(el, name, deadline)? == Some(false) {
++            return Ok(false);
++        }
++        let action = CFString::new(name);
++        run_mutation(el, name, ax_mutation::PERFORM_API, deadline, |deadline| {
++            crate::tree::properties::ax_ipc::perform_window_key_action(
++                el,
++                action.as_concrete_TypeRef(),
++                focused,
++                window,
++                require_foreground,
++                deadline,
++            )
++        })
++    }
++
+     pub(crate) fn set_ax_bool_or_err(
+         el: &AXElement,
+         attr: &str,
+@@ -100,11 +124,14 @@ mod imp {
          deadline: agent_desktop_core::Deadline,
      ) -> Result<bool, AdapterError> {
          let cf_attr = CFString::new(attr);
@@ -4760,7 +4804,7 @@ index a4aadfc..00bcc29 100644
          ensure_read_finished(deadline)?;
          classify_settable_read(attr, err, settable)
      }
-@@ -126,11 +129,19 @@ mod imp {
+@@ -126,11 +153,19 @@ mod imp {
          deadline: agent_desktop_core::Deadline,
      ) -> Result<(), AdapterError> {
          let cf_attr = CFString::new(kAXValueAttribute);
@@ -4780,7 +4824,7 @@ index a4aadfc..00bcc29 100644
          ensure_read_finished(deadline)?;
          if read != kAXErrorSuccess {
              if !current.is_null() {
-@@ -285,14 +296,31 @@ mod imp {
+@@ -285,14 +320,31 @@ mod imp {
          use accessibility_sys::kAXRoleAttribute;
          prepare(el, deadline)?;
          let read_deadline = crate::tree::properties::ax_ipc::AxDeadline::absolute(deadline)?;
@@ -4816,6 +4860,15 @@ index a4aadfc..00bcc29 100644
          ensure_read_finished(deadline)?;
          Ok(role.map(|role| crate::tree::roles::ax_role_to_str(&role).to_string()))
      }
+@@ -387,6 +439,8 @@ mod imp {
+     }
+ }
+
++#[cfg(target_os = "macos")]
++pub(crate) use imp::try_window_key_action;
+ pub(crate) use imp::{
+     ax_focus_or_err, element_role, is_attr_settable, set_ax_bool_or_err, set_ax_string_or_err,
+     set_ax_value_coerced, try_ax_action_or_err,
 diff --git a/crates/macos/src/actions/ax_perform.rs b/crates/macos/src/actions/ax_perform.rs
 index 386ae66..c91e6b4 100644
 --- a/crates/macos/src/actions/ax_perform.rs
@@ -5257,11 +5310,24 @@ index 3f1b878..8e74fa5 100644
              return Ok(true);
          }
          if deadline.is_expired() {
+diff --git a/crates/macos/src/actions/mod.rs b/crates/macos/src/actions/mod.rs
+index d03382d..f1488df 100644
+--- a/crates/macos/src/actions/mod.rs
++++ b/crates/macos/src/actions/mod.rs
+@@ -9,7 +9,7 @@ pub(crate) mod delivery_tracker;
+ pub(crate) mod dispatch;
+ pub(crate) mod extras;
+ mod physical_click;
+-mod physical_keyboard;
++pub(crate) mod physical_keyboard;
+ mod physical_target;
+ pub(crate) mod post_state;
+ pub(crate) mod scroll;
 diff --git a/crates/macos/src/actions/physical_keyboard.rs b/crates/macos/src/actions/physical_keyboard.rs
-index 8fa71be..59d8045 100644
+index 8fa71be..7b9506c 100644
 --- a/crates/macos/src/actions/physical_keyboard.rs
 +++ b/crates/macos/src/actions/physical_keyboard.rs
-@@ -21,12 +21,13 @@ pub(crate) fn press_sequence(
+@@ -21,12 +21,14 @@ pub(crate) fn press_sequence(
      let mut delivery = crate::actions::DeliveryTracker::default();
      let identity = prepare_target(element, policy, deadline, &mut delivery)
          .map_err(|error| delivery.annotate(error))?;
@@ -5272,23 +5338,235 @@ index 8fa71be..59d8045 100644
 -        crate::input::keyboard::synthesize_key(combo, Some(pid), deadline)
 -            .map_err(|error| delivery.annotate(error))?;
 +        crate::input::keyboard::synthesize_key_guarded(combo, identity, deadline, |deadline| {
-+            verify_delivery_target(element, identity, deadline)
++            verify_delivery_target(element, identity, deadline)?;
++            keyboard_effect_authority(element, true, deadline)
 +        })
 +        .map_err(|error| delivery.annotate(error))?;
          delivery.mark_delivered();
      }
      Ok(())
-@@ -42,8 +43,7 @@ pub(crate) fn type_text(
+@@ -42,13 +44,217 @@ pub(crate) fn type_text(
      let mut delivery = crate::actions::DeliveryTracker::default();
      let identity = prepare_target(element, policy, deadline, &mut delivery)
          .map_err(|error| delivery.annotate(error))?;
 -    let pid = identity.pid();
 -    crate::input::keyboard::synthesize_text(text, pid, deadline, |deadline| {
+-        verify_delivery_target(element, identity, deadline)
 +    crate::input::keyboard::synthesize_text(text, identity, deadline, |deadline| {
-         verify_delivery_target(element, identity, deadline)
++        verify_delivery_target(element, identity, deadline)?;
++        keyboard_effect_authority(element, true, deadline)
      })
      .map_err(|error| delivery.annotate(error))
-@@ -61,25 +61,14 @@ fn prepare_target(
+ }
+
++pub(crate) fn keyboard_effect_authority(
++    expected: &AXElement,
++    require_foreground: bool,
++    deadline: Deadline,
++) -> Result<crate::tree::ax_element::NativeEffectAuthority, AdapterError> {
++    use core_foundation::{base::TCFType, string::CFString};
++
++    let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++    let identity = expected.root_identity()?;
++    let pid = crate::system::process::process_identity::to_pid_t(identity.pid)?;
++    let mut app = crate::tree::element_for_pid(pid);
++    app.bind_child(expected, instant)?;
++    crate::tree::properties::ax_ipc::prepare(&app, instant)?;
++    let attribute = CFString::new("AXFocusedUIElement");
++    let system = AXElement::from_raw(unsafe { accessibility_sys::AXUIElementCreateSystemWide() });
++    let app_attribute = CFString::new("AXFocusedApplication");
++    if require_foreground {
++        crate::tree::properties::ax_ipc::prepare(&system, instant)?;
++    }
++    let authority = expected.effect_authority(instant)?;
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
++    authority.revalidate(expected, instant)?;
++    let mut value = std::ptr::null();
++    let error = unsafe {
++        accessibility_sys::AXUIElementCopyAttributeValue(
++            app.raw(),
++            attribute.as_concrete_TypeRef(),
++            &mut value,
++        )
++    };
++    if error != accessibility_sys::kAXErrorSuccess {
++        if !value.is_null() {
++            unsafe { core_foundation::base::CFRelease(value) };
++        }
++        return Err(AdapterError::stale_ref_because(
++            "Keyboard focus could not be revalidated",
++        ));
++    }
++    let current = crate::tree::properties::ax_value::created_ax_element(value)
++        .ok_or_else(|| AdapterError::stale_ref_because("Keyboard focus is unavailable"))?;
++    if !crate::tree::same_element(expected, &current) {
++        return Err(AdapterError::stale_ref_because("Keyboard focus changed"));
++    }
++    authority.revalidate(expected, instant)?;
++    if require_foreground {
++        let mut value = std::ptr::null();
++        let error = unsafe {
++            accessibility_sys::AXUIElementCopyAttributeValue(
++                system.raw(),
++                app_attribute.as_concrete_TypeRef(),
++                &mut value,
++            )
++        };
++        if error != accessibility_sys::kAXErrorSuccess {
++            if !value.is_null() {
++                unsafe { core_foundation::base::CFRelease(value) };
++            }
++            return Err(AdapterError::stale_ref_because(
++                "Foreground application could not be revalidated",
++            ));
++        }
++        let current =
++            crate::tree::properties::ax_value::created_ax_element(value).ok_or_else(|| {
++                AdapterError::stale_ref_because("Foreground application is unavailable")
++            })?;
++        if !crate::tree::same_element(&app, &current) {
++            return Err(AdapterError::stale_ref_because(
++                "Foreground application changed",
++            ));
++        }
++    }
++    let mut value = std::ptr::null();
++    let error = unsafe {
++        accessibility_sys::AXUIElementCopyAttributeValue(
++            app.raw(),
++            attribute.as_concrete_TypeRef(),
++            &mut value,
++        )
++    };
++    if error != accessibility_sys::kAXErrorSuccess {
++        if !value.is_null() {
++            unsafe { core_foundation::base::CFRelease(value) };
++        }
++        return Err(AdapterError::stale_ref_because(
++            "Keyboard focus could not be revalidated",
++        ));
++    }
++    let current = crate::tree::properties::ax_value::created_ax_element(value)
++        .ok_or_else(|| AdapterError::stale_ref_because("Keyboard focus is unavailable"))?;
++    if !crate::tree::same_element(expected, &current) {
++        return Err(AdapterError::stale_ref_because("Keyboard focus changed"));
++    }
++    authority.revalidate(expected, instant)?;
++    deadline.ensure_remaining()?;
++    Ok(authority)
++}
++
++pub(crate) fn global_focused_element(deadline: Deadline) -> Result<AXElement, AdapterError> {
++    let system = AXElement::from_raw(unsafe { accessibility_sys::AXUIElementCreateSystemWide() });
++    let mut app = crate::tree::properties::attributes::copy_element_attr_result(
++        &system,
++        "AXFocusedApplication",
++        deadline,
++    )
++    .map_err(|_| AdapterError::stale_ref_because("Foreground application is unavailable"))?
++    .ok_or_else(|| AdapterError::stale_ref_because("Foreground application is unavailable"))?;
++    let pid = crate::tree::properties::ax_ipc::pid(&app, deadline)
++        .map_err(|_| AdapterError::stale_ref_because("Foreground process is unavailable"))?;
++    let instance = crate::system::private_browser_guard::require_pid(pid, None)?;
++    let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++    app.bind_process(pid, &instance, instant)?;
++    crate::tree::surface_read::element(&app, "AXFocusedUIElement", instant)?
++        .ok_or_else(|| AdapterError::stale_ref_because("Keyboard focus is unavailable"))
++}
++
++pub(crate) fn keyboard_window_authority(
++    expected: &AXElement,
++    window: &AXElement,
++    require_foreground: bool,
++    deadline: Deadline,
++) -> Result<
++    (
++        crate::tree::ax_element::NativeEffectAuthority,
++        crate::tree::ax_element::NativeEffectAuthority,
++    ),
++    AdapterError,
++> {
++    use core_foundation::{base::TCFType, string::CFString};
++    let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++    let window_authority = window.effect_authority(instant)?;
++    let pid = crate::system::process::process_identity::to_pid_t(expected.root_identity()?.pid)?;
++    let mut app = crate::tree::element_for_pid(pid);
++    app.bind_child(expected, instant)?;
++    crate::tree::properties::ax_ipc::prepare(expected, instant)?;
++    crate::tree::properties::ax_ipc::prepare(&app, instant)?;
++    let window_attribute = CFString::new("AXWindow");
++    let focus_attribute = CFString::new("AXFocusedUIElement");
++    let focused_authority = keyboard_effect_authority(expected, require_foreground, deadline)?;
++    let read = |element: &AXElement, attribute: &CFString| -> Result<AXElement, AdapterError> {
++        let mut value = std::ptr::null();
++        let error = unsafe {
++            accessibility_sys::AXUIElementCopyAttributeValue(
++                element.raw(),
++                attribute.as_concrete_TypeRef(),
++                &mut value,
++            )
++        };
++        if error != accessibility_sys::kAXErrorSuccess {
++            if !value.is_null() {
++                unsafe { core_foundation::base::CFRelease(value) };
++            }
++            return Err(AdapterError::stale_ref_because(
++                "Original keyboard window could not be revalidated",
++            ));
++        }
++        crate::tree::properties::ax_value::created_ax_element(value).ok_or_else(|| {
++            AdapterError::stale_ref_because("Original keyboard window is unavailable")
++        })
++    };
++    if !crate::tree::same_element(&read(expected, &window_attribute)?, window) {
++        return Err(AdapterError::stale_ref_because("Keyboard window changed"));
++    }
++    if !crate::tree::same_element(&read(&app, &focus_attribute)?, expected) {
++        return Err(AdapterError::stale_ref_because("Keyboard focus changed"));
++    }
++    window_authority.revalidate(window, instant)?;
++    focused_authority.revalidate(expected, instant)?;
++    if !crate::tree::same_element(&read(&app, &focus_attribute)?, expected) {
++        return Err(AdapterError::stale_ref_because("Keyboard focus changed"));
++    }
++    deadline.ensure_remaining()?;
++    Ok((focused_authority, window_authority))
++}
++
++pub(crate) fn global_focus_is_original(
++    expected: &AXElement,
++    system: &AXElement,
++    authority: &crate::tree::ax_element::NativeEffectAuthority,
++) -> bool {
++    use core_foundation::{base::TCFType, string::CFString};
++    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
++    if authority.revalidate(expected, deadline).is_err() {
++        return false;
++    }
++    let attribute = CFString::new("AXFocusedUIElement");
++    let mut value = std::ptr::null();
++    let error = unsafe {
++        accessibility_sys::AXUIElementCopyAttributeValue(
++            system.raw(),
++            attribute.as_concrete_TypeRef(),
++            &mut value,
++        )
++    };
++    if error != accessibility_sys::kAXErrorSuccess {
++        if !value.is_null() {
++            unsafe { core_foundation::base::CFRelease(value) };
++        }
++        return false;
++    }
++    crate::tree::properties::ax_value::created_ax_element(value)
++        .is_some_and(|current| crate::tree::same_element(expected, &current))
++        && authority.revalidate(expected, deadline).is_ok()
++}
++
+ fn prepare_target(
+     element: &AXElement,
+     policy: InteractionPolicy,
+@@ -61,25 +267,14 @@ fn prepare_target(
              policy,
          ));
      }
@@ -5315,20 +5593,20 @@ index 8fa71be..59d8045 100644
          crate::system::focus::verify_window_main(&window, deadline)?;
      }
 -    crate::system::focus::verify_app_focused(pid, deadline)?;
-+    crate::system::focus::verify_app_focused(element, deadline)?;
++    verify_root_focused(element, deadline)?;
      prepare(element, deadline)?;
      if !crate::actions::ax_helpers::ax_focus_or_err(element, deadline)? {
          return Err(AdapterError::new(
-@@ -90,7 +79,7 @@ fn prepare_target(
+@@ -90,7 +285,7 @@ fn prepare_target(
      }
      delivery.mark_delivered();
      wait_for_focused_element(element, pid, deadline)?;
 -    crate::system::focus::verify_app_focused(pid, deadline)?;
-+    crate::system::focus::verify_app_focused(element, deadline)?;
++    verify_root_focused(element, deadline)?;
      verify_delivery_target(element, identity, deadline)?;
      Ok(identity)
  }
-@@ -114,12 +103,11 @@ fn target_window(
+@@ -114,12 +309,11 @@ fn target_window(
      element: &AXElement,
      deadline: Deadline,
  ) -> Result<Option<AXElement>, AdapterError> {
@@ -5346,17 +5624,21 @@ index 8fa71be..59d8045 100644
  }
 
  fn wait_for_focused_element(
-@@ -149,7 +137,7 @@ fn verify_focused_element(
+@@ -149,7 +343,7 @@ fn verify_focused_element(
      pid: i32,
      deadline: Deadline,
  ) -> Result<(), AdapterError> {
 -    crate::system::focus::verify_app_focused(pid, deadline)?;
-+    crate::system::focus::verify_app_focused(expected, deadline)?;
++    verify_root_focused(expected, deadline)?;
      if focused_element_matches(expected, pid, deadline)? {
          return Ok(());
      }
-@@ -165,43 +153,13 @@ fn focused_element_matches(
-     pid: i32,
+@@ -162,46 +356,25 @@ fn verify_focused_element(
+
+ fn focused_element_matches(
+     expected: &AXElement,
+-    pid: i32,
++    _pid: i32,
      deadline: Deadline,
  ) -> Result<bool, AdapterError> {
 -    let app = crate::tree::element_for_pid(pid);
@@ -5369,16 +5651,23 @@ index 8fa71be..59d8045 100644
 -    deadline.ensure_remaining()?;
 -    let focused = result.map_err(|error| read_error("AXFocusedUIElement", error))?;
 +    let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++    let pid = crate::system::process::process_identity::to_pid_t(expected.root_identity()?.pid)?;
 +    let mut app = crate::tree::element_for_pid(pid);
 +    app.bind_child(expected, instant)?;
 +    let focused = crate::tree::surface_read::element(&app, "AXFocusedUIElement", instant)?;
      Ok(focused.is_some_and(|focused| crate::tree::same_element(&focused, expected)))
  }
 
- fn prepare(element: &AXElement, deadline: Deadline) -> Result<(), AdapterError> {
-     crate::tree::properties::attributes::set_messaging_timeout(element, deadline)
+-fn prepare(element: &AXElement, deadline: Deadline) -> Result<(), AdapterError> {
+-    crate::tree::properties::attributes::set_messaging_timeout(element, deadline)
++fn verify_root_focused(expected: &AXElement, deadline: Deadline) -> Result<(), AdapterError> {
++    let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++    let pid = crate::system::process::process_identity::to_pid_t(expected.root_identity()?.pid)?;
++    let mut app = crate::tree::element_for_pid(pid);
++    app.bind_child(expected, instant)?;
++    crate::system::focus::verify_app_focused(&app, deadline)
  }
--
+
 -fn read_error(attribute: &str, error: i32) -> AdapterError {
 -    use accessibility_sys::{
 -        kAXErrorAPIDisabled, kAXErrorCannotComplete, kAXErrorInvalidUIElement,
@@ -5402,7 +5691,9 @@ index 8fa71be..59d8045 100644
 -        "ax_error": error,
 -    }))
 -    .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered())
--}
++fn prepare(element: &AXElement, deadline: Deadline) -> Result<(), AdapterError> {
++    crate::tree::properties::attributes::set_messaging_timeout(element, deadline)
+ }
 diff --git a/crates/macos/src/actions/physical_target.rs b/crates/macos/src/actions/physical_target.rs
 index ff01b41..e0c1fe6 100644
 --- a/crates/macos/src/actions/physical_target.rs
@@ -6073,25 +6364,146 @@ index 1f8a933..a283355 100644
              Ok(())
          })
 diff --git a/crates/macos/src/input/keyboard/keyboard_event.rs b/crates/macos/src/input/keyboard/keyboard_event.rs
-index e0296ef..bec19b0 100644
+index e0296ef..94ac39d 100644
 --- a/crates/macos/src/input/keyboard/keyboard_event.rs
 +++ b/crates/macos/src/input/keyboard/keyboard_event.rs
-@@ -27,7 +27,7 @@ pub(crate) fn post_key(
+@@ -8,28 +8,114 @@ const TEXT_CHUNK_BUDGET: Duration = Duration::from_millis(400);
+ const MAX_TEXT_UTF16: usize = 1_000_000;
+ const TEXT_CHUNK_UTF16: usize = 32;
 
- pub(crate) fn post_text(
+-pub(crate) fn post_key(
++pub(crate) fn post_global_key(
+     key_code: u16,
+     flags: CGEventFlags,
+-    target_pid: Option<i32>,
++    expected: &crate::tree::AXElement,
+     deadline: Deadline,
+-    progress: (usize, usize),
+ ) -> Result<(), AdapterError> {
+-    let mut delivery = crate::actions::DeliveryTracker::from_delivered_units(progress.0);
+-    ensure_budget(deadline, progress.1, delivery)?;
+-    let source = event_source().map_err(|error| delivery.annotate(error))?;
+-    let down = create_key_event(&source, key_code, true, flags)
+-        .map_err(|error| delivery.annotate(error))?;
+-    let up = create_key_event(&source, key_code, false, flags)
+-        .map_err(|error| delivery.annotate(error))?;
+-    post_pair((down, up), target_pid, deadline, &mut delivery, progress.1)
++    let mut delivery = crate::actions::DeliveryTracker::default();
++    ensure_budget(deadline, 1, delivery)?;
++    let source = event_source()?;
++    let down = create_key_event(&source, key_code, true, flags)?;
++    let up = create_key_event(&source, key_code, false, flags)?;
++    let identity =
++        crate::system::process::process_identity::require_core(expected.owner_identity()?)?;
++    let system = crate::tree::AXElement::from_raw(unsafe {
++        accessibility_sys::AXUIElementCreateSystemWide()
++    });
++    crate::tree::properties::ax_ipc::prepare(&system, deadline)?;
++    let authority =
++        crate::actions::physical_keyboard::keyboard_effect_authority(expected, true, deadline)?;
++    if key_is_down(key_code) {
++        return Err(
++            AdapterError::new(ErrorCode::ActionFailed, "The key is already held")
++                .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered()),
++        );
++    }
++    deadline.ensure_remaining()?;
++    let mut release = GlobalReleaseGuard {
++        event: Some(up),
++        expected,
++        system: &system,
++        identity,
++        authority,
++        key_code,
++        observed_down: false,
++    };
++    down.post(CGEventTapLocation::HID);
++    delivery.mark_delivered();
++    release.observed_down = key_is_down(key_code) && !physical_key_is_down(key_code);
++    sleep_bounded(deadline, KEY_SETTLE, delivery, 1)
++        .map_err(crate::actions::DeliveryTracker::uncertain)?;
++    if !release.release() {
++        return Err(crate::actions::DeliveryTracker::uncertain(
++            AdapterError::stale_ref_because("Keyboard receiver changed before release"),
++        ));
++    }
++    ensure_budget(deadline, 1, delivery).map_err(crate::actions::DeliveryTracker::uncertain)
+ }
+
+-pub(crate) fn post_text(
++struct GlobalReleaseGuard<'a> {
++    event: Option<CGEvent>,
++    expected: &'a crate::tree::AXElement,
++    system: &'a crate::tree::AXElement,
++    identity: crate::system::process::process_identity::ProcessIdentity,
++    authority: crate::tree::ax_element::NativeEffectAuthority,
++    key_code: u16,
++    observed_down: bool,
++}
++
++impl GlobalReleaseGuard<'_> {
++    fn release(&mut self) -> bool {
++        let Some(event) = self.event.take() else {
++            return true;
++        };
++        if !self.identity.still_matches().unwrap_or(false)
++            || physical_key_is_down(self.key_code)
++            || !crate::actions::physical_keyboard::global_focus_is_original(
++                self.expected,
++                self.system,
++                &self.authority,
++            )
++            || physical_key_is_down(self.key_code)
++        {
++            return false;
++        }
++        event.post(CGEventTapLocation::HID);
++        if self.observed_down && !key_is_down(self.key_code) && !physical_key_is_down(self.key_code)
++        {
++            agent_desktop_core::commands::clovy_cancel::acknowledge_release(true);
++        }
++        true
++    }
++}
++
++impl Drop for GlobalReleaseGuard<'_> {
++    fn drop(&mut self) {
++        self.release();
++    }
++}
++
++fn key_is_down(key_code: u16) -> bool {
++    unsafe extern "C" {
++        fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
++    }
++    unsafe { CGEventSourceKeyState(0, key_code) }
++}
++
++fn physical_key_is_down(key_code: u16) -> bool {
++    unsafe extern "C" {
++        fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
++    }
++    unsafe { CGEventSourceKeyState(1, key_code) }
++}
++
++pub(crate) fn post_text<T>(
      text: &str,
 -    target_pid: i32,
 +    identity: crate::system::process::process_identity::ProcessIdentity,
      deadline: Deadline,
-     mut verify_target: impl FnMut(Deadline) -> Result<(), AdapterError>,
+-    mut verify_target: impl FnMut(Deadline) -> Result<(), AdapterError>,
++    mut verify_target: impl FnMut(Deadline) -> Result<T, AdapterError>,
  ) -> Result<(), AdapterError> {
-@@ -49,11 +49,90 @@ pub(crate) fn post_text(
+     preflight_text(text, deadline)?;
+     let chunks = text_chunks(text)?;
+@@ -49,11 +135,115 @@ pub(crate) fn post_text(
          down.set_string_from_utf16_unchecked(&chunk);
          let up = create_key_event(&source, 0, false, CGEventFlags::empty())
              .map_err(|error| delivery.annotate(error))?;
 -        post_pair((down, up), Some(target_pid), deadline, &mut delivery, total)?;
 +        post_guarded_pair(
 +            (down, up),
++            0,
 +            identity,
 +            deadline,
 +            &mut delivery,
@@ -6102,12 +6514,12 @@ index e0296ef..bec19b0 100644
      Ok(())
  }
 
-+pub(crate) fn post_key_guarded(
++pub(crate) fn post_key_guarded<T>(
 +    key_code: u16,
 +    flags: CGEventFlags,
 +    identity: crate::system::process::process_identity::ProcessIdentity,
 +    deadline: Deadline,
-+    mut verify_target: impl FnMut(Deadline) -> Result<(), AdapterError>,
++    mut verify_target: impl FnMut(Deadline) -> Result<T, AdapterError>,
 +) -> Result<(), AdapterError> {
 +    let mut delivery = crate::actions::DeliveryTracker::default();
 +    ensure_budget(deadline, 1, delivery)?;
@@ -6118,6 +6530,7 @@ index e0296ef..bec19b0 100644
 +        .map_err(|error| delivery.annotate(error))?;
 +    post_guarded_pair(
 +        (down, up),
++        key_code,
 +        identity,
 +        deadline,
 +        &mut delivery,
@@ -6126,58 +6539,141 @@ index e0296ef..bec19b0 100644
 +    )
 +}
 +
-+fn post_guarded_pair(
++fn post_guarded_pair<T>(
 +    (down, up): (CGEvent, CGEvent),
++    key_code: u16,
 +    identity: crate::system::process::process_identity::ProcessIdentity,
 +    deadline: Deadline,
 +    delivery: &mut crate::actions::DeliveryTracker,
 +    total: usize,
-+    verify_target: &mut impl FnMut(Deadline) -> Result<(), AdapterError>,
++    verify_target: &mut impl FnMut(Deadline) -> Result<T, AdapterError>,
 +) -> Result<(), AdapterError> {
 +    ensure_budget(deadline, total, *delivery)?;
-+    verify_target(deadline).map_err(|error| delivery.annotate(error))?;
++    let _authority = verify_target(deadline).map_err(|error| delivery.annotate(error))?;
++    if physical_key_is_down(key_code) {
++        return Err(delivery.annotate(AdapterError::new(
++            ErrorCode::ActionFailed,
++            "The key is already held",
++        )));
++    }
++    deadline
++        .ensure_remaining()
++        .map_err(|error| delivery.annotate(error))?;
 +    let mut release = TextReleaseGuard {
 +        event: Some(up),
 +        identity,
++        key_code,
++        observed_down: false,
 +    };
 +    down.post_to_pid(identity.pid());
 +    delivery.mark_delivered();
-+    sleep_bounded(deadline, KEY_SETTLE, *delivery, total)?;
-+    if identity
-+        .still_matches()
-+        .map_err(|error| delivery.annotate(error))?
-+    {
-+        if let Some(up) = release.event.take() {
-+            up.post_to_pid(identity.pid());
-+        }
-+    } else {
-+        release.event.take();
-+        return Err(delivery.annotate(AdapterError::stale_ref_because(
-+            "Keyboard target generation changed",
-+        )));
++    release.observed_down = key_is_down(key_code) && !physical_key_is_down(key_code);
++    sleep_bounded(deadline, KEY_SETTLE, *delivery, total)
++        .map_err(crate::actions::DeliveryTracker::uncertain)?;
++    if !release.release() {
++        return Err(crate::actions::DeliveryTracker::uncertain(
++            AdapterError::stale_ref_because(
++                "Keyboard release could not be delivered to the original receiver",
++            ),
++        ));
 +    }
-+    ensure_budget(deadline, total, *delivery)
++    ensure_budget(deadline, total, *delivery).map_err(crate::actions::DeliveryTracker::uncertain)
 +}
 +
 +struct TextReleaseGuard {
 +    event: Option<CGEvent>,
 +    identity: crate::system::process::process_identity::ProcessIdentity,
++    key_code: u16,
++    observed_down: bool,
++}
++
++impl TextReleaseGuard {
++    fn release(&mut self) -> bool {
++        let Some(event) = self.event.take() else {
++            return true;
++        };
++        if !self.identity.still_matches().unwrap_or(false) || physical_key_is_down(self.key_code) {
++            return false;
++        }
++        event.post_to_pid(self.identity.pid());
++        if self.observed_down && !key_is_down(self.key_code) && !physical_key_is_down(self.key_code)
++        {
++            agent_desktop_core::commands::clovy_cancel::acknowledge_release(true);
++        }
++        true
++    }
 +}
 +
 +impl Drop for TextReleaseGuard {
 +    fn drop(&mut self) {
-+        if let Some(event) = self.event.take()
-+            && self.identity.still_matches().unwrap_or(false)
-+        {
-+            event.post_to_pid(self.identity.pid());
-+        }
++        self.release();
 +    }
 +}
 +
  pub(crate) fn preflight_text(text: &str, deadline: Deadline) -> Result<(), AdapterError> {
      let chunks = planned_chunk_count(text)?;
      let multiplier = u32::try_from(chunks)
-@@ -161,6 +240,7 @@ fn ensure_budget(
+@@ -76,44 +266,6 @@ pub(crate) fn preflight_text(text: &str, deadline: Deadline) -> Result<(), Adapt
+     Ok(())
+ }
+
+-fn post_pair(
+-    events: (CGEvent, CGEvent),
+-    target_pid: Option<i32>,
+-    deadline: Deadline,
+-    delivery: &mut crate::actions::DeliveryTracker,
+-    total: usize,
+-) -> Result<(), AdapterError> {
+-    ensure_budget(deadline, total, *delivery)?;
+-    let (down, up) = events;
+-    let mut release = KeyReleaseGuard {
+-        event: Some(up),
+-        target_pid,
+-    };
+-    post(&down, target_pid);
+-    delivery.mark_delivered();
+-    sleep_bounded(deadline, KEY_SETTLE, *delivery, total)?;
+-    let up = release
+-        .event
+-        .take()
+-        .ok_or_else(|| AdapterError::internal("Keyboard release guard lost its key-up event"))
+-        .map_err(|error| delivery.annotate(error))?;
+-    post(&up, target_pid);
+-    ensure_budget(deadline, total, *delivery)
+-}
+-
+-struct KeyReleaseGuard {
+-    event: Option<CGEvent>,
+-    target_pid: Option<i32>,
+-}
+-
+-impl Drop for KeyReleaseGuard {
+-    fn drop(&mut self) {
+-        if let Some(event) = self.event.take() {
+-            post(&event, self.target_pid);
+-        }
+-    }
+-}
+-
+ fn create_key_event(
+     source: &CGEventSource,
+     key_code: u16,
+@@ -131,14 +283,6 @@ fn event_source() -> Result<CGEventSource, AdapterError> {
+         .map_err(|()| AdapterError::internal("Failed to create keyboard CGEventSource"))
+ }
+
+-fn post(event: &CGEvent, target_pid: Option<i32>) {
+-    if let Some(pid) = target_pid {
+-        event.post_to_pid(pid);
+-    } else {
+-        event.post(CGEventTapLocation::HID);
+-    }
+-}
+-
+ fn sleep_bounded(
+     deadline: Deadline,
+     duration: Duration,
+@@ -161,6 +305,7 @@ fn ensure_budget(
      total: usize,
      delivery: crate::actions::DeliveryTracker,
  ) -> Result<(), AdapterError> {
@@ -6186,41 +6682,70 @@ index e0296ef..bec19b0 100644
          return Ok(());
      }
 diff --git a/crates/macos/src/input/keyboard/mod.rs b/crates/macos/src/input/keyboard/mod.rs
-index 80a3bd4..d9ad7dd 100644
+index 80a3bd4..68f3027 100644
 --- a/crates/macos/src/input/keyboard/mod.rs
 +++ b/crates/macos/src/input/keyboard/mod.rs
-@@ -22,6 +22,23 @@ pub(crate) fn synthesize_key(
-     )
- }
+@@ -6,19 +6,42 @@ pub(crate) mod keyboard_map;
+ use agent_desktop_core::{AdapterError, Deadline, ErrorCode, KeyCombo};
 
-+#[cfg(target_os = "macos")]
-+pub(crate) fn synthesize_key_guarded(
-+    combo: &KeyCombo,
-+    identity: crate::system::process::process_identity::ProcessIdentity,
-+    deadline: Deadline,
-+    verify_target: impl FnMut(Deadline) -> Result<(), AdapterError>,
-+) -> Result<(), AdapterError> {
-+    let key_code = crate::input::keyboard::keyboard_map::key_name_to_code(&combo.key)?;
-+    keyboard_event::post_key_guarded(
+ #[cfg(target_os = "macos")]
+-pub(crate) fn synthesize_key(
++pub(crate) fn synthesize_global_key(
+     combo: &KeyCombo,
+-    target_pid: Option<i32>,
+     deadline: Deadline,
+ ) -> Result<(), AdapterError> {
+-    tracing::debug!(target_pid, "keyboard: synthesize atomic key press");
++    let expected = crate::actions::physical_keyboard::global_focused_element(deadline)?;
++    let key_code = keyboard_map::key_name_to_code(&combo.key)?;
++    keyboard_event::post_global_key(
 +        key_code,
 +        crate::input::mouse::event_flags(&combo.modifiers),
-+        identity,
++        &expected,
 +        deadline,
-+        verify_target,
 +    )
 +}
 +
++#[cfg(not(target_os = "macos"))]
++pub(crate) fn synthesize_global_key(
++    _combo: &KeyCombo,
++    _deadline: Deadline,
++) -> Result<(), AdapterError> {
++    Err(AdapterError::not_supported("synthesize_global_key"))
++}
++
++#[cfg(target_os = "macos")]
++pub(crate) fn synthesize_key_guarded<T>(
++    combo: &KeyCombo,
++    identity: crate::system::process::process_identity::ProcessIdentity,
++    deadline: Deadline,
++    verify_target: impl FnMut(Deadline) -> Result<T, AdapterError>,
++) -> Result<(), AdapterError> {
+     let key_code = crate::input::keyboard::keyboard_map::key_name_to_code(&combo.key)?;
+-    crate::input::keyboard::keyboard_event::post_key(
++    keyboard_event::post_key_guarded(
+         key_code,
+         crate::input::mouse::event_flags(&combo.modifiers),
+-        target_pid,
++        identity,
+         deadline,
+-        (0, 1),
++        verify_target,
+     )
+ }
+
+@@ -41,18 +64,18 @@ pub(crate) fn reject_standalone_key_state(
+ }
+
  #[cfg(target_os = "macos")]
- pub(crate) fn reject_standalone_key_state(
-     _combo: &KeyCombo,
-@@ -43,16 +60,16 @@ pub(crate) fn reject_standalone_key_state(
- #[cfg(target_os = "macos")]
- pub(crate) fn synthesize_text(
+-pub(crate) fn synthesize_text(
++pub(crate) fn synthesize_text<T>(
      text: &str,
 -    target_pid: i32,
 +    identity: crate::system::process::process_identity::ProcessIdentity,
      deadline: Deadline,
-     verify_target: impl FnMut(Deadline) -> Result<(), AdapterError>,
+-    verify_target: impl FnMut(Deadline) -> Result<(), AdapterError>,
++    verify_target: impl FnMut(Deadline) -> Result<T, AdapterError>,
  ) -> Result<(), AdapterError> {
      tracing::debug!(
          characters = text.chars().count(),
@@ -6233,15 +6758,37 @@ index 80a3bd4..d9ad7dd 100644
  }
 
  #[cfg(target_os = "macos")]
-@@ -80,7 +97,7 @@ pub(crate) fn reject_standalone_key_state(
+@@ -60,15 +83,6 @@ pub(crate) fn preflight_text(text: &str, deadline: Deadline) -> Result<(), Adapt
+     crate::input::keyboard::keyboard_event::preflight_text(text, deadline)
+ }
+
+-#[cfg(not(target_os = "macos"))]
+-pub(crate) fn synthesize_key(
+-    _combo: &KeyCombo,
+-    _target_pid: Option<i32>,
+-    _deadline: Deadline,
+-) -> Result<(), AdapterError> {
+-    Err(AdapterError::not_supported("synthesize_key"))
+-}
+-
  #[cfg(not(target_os = "macos"))]
- pub(crate) fn synthesize_text(
+ pub(crate) fn reject_standalone_key_state(
+     _combo: &KeyCombo,
+@@ -78,11 +92,11 @@ pub(crate) fn reject_standalone_key_state(
+ }
+
+ #[cfg(not(target_os = "macos"))]
+-pub(crate) fn synthesize_text(
++pub(crate) fn synthesize_text<T>(
      _text: &str,
 -    _target_pid: i32,
 +    _identity: crate::system::process::process_identity::ProcessIdentity,
      _deadline: Deadline,
-     _verify_target: impl FnMut(Deadline) -> Result<(), AdapterError>,
+-    _verify_target: impl FnMut(Deadline) -> Result<(), AdapterError>,
++    _verify_target: impl FnMut(Deadline) -> Result<T, AdapterError>,
  ) -> Result<(), AdapterError> {
+     Err(AdapterError::not_supported("synthesize_text"))
+ }
 diff --git a/crates/macos/src/input/mouse/mod.rs b/crates/macos/src/input/mouse/mod.rs
 index ec255cd..94ce9ad 100644
 --- a/crates/macos/src/input/mouse/mod.rs
@@ -6412,11 +6959,418 @@ index 3012d7f..7b7e14c 100644
  mod input;
  mod notifications;
  mod system;
+diff --git a/crates/macos/src/notifications/actions.rs b/crates/macos/src/notifications/actions.rs
+index 9c1d692..ebf27f1 100644
+--- a/crates/macos/src/notifications/actions.rs
++++ b/crates/macos/src/notifications/actions.rs
+@@ -18,7 +18,9 @@ pub fn dismiss_notification(
+ ) -> Result<NotificationInfo, AdapterError> {
+     require_foreground_policy(policy)?;
+     let session = NcSession::open(policy, deadline)?;
+-    let result = dismiss_impl(index, app_filter, identity, policy, session.pid(), deadline);
++    let result = session
++        .process()
++        .and_then(|process| dismiss_impl(index, app_filter, identity, policy, process, deadline));
+     close_session(session, result)
+ }
+
+@@ -29,7 +31,9 @@ pub fn dismiss_all(
+ ) -> Result<(Vec<NotificationInfo>, Vec<String>), AdapterError> {
+     require_foreground_policy(policy)?;
+     let session = NcSession::open(policy, deadline)?;
+-    let result = dismiss_all_impl(app_filter, policy, session.pid(), deadline);
++    let result = session
++        .process()
++        .and_then(|process| dismiss_all_impl(app_filter, policy, process, deadline));
+     close_session(session, result)
+ }
+
+@@ -42,7 +46,9 @@ pub fn notification_action(
+ ) -> Result<ActionResult, AdapterError> {
+     require_foreground_policy(policy)?;
+     let session = NcSession::open(policy, deadline)?;
+-    let result = action_impl(index, identity, action_name, session.pid(), deadline);
++    let result = session
++        .process()
++        .and_then(|process| action_impl(index, identity, action_name, process, deadline));
+     close_session(session, result)
+ }
+
+@@ -52,11 +58,11 @@ fn dismiss_impl(
+     app_filter: Option<&str>,
+     identity: Option<&NotificationIdentity>,
+     policy: InteractionPolicy,
+-    pid: i32,
++    process: &agent_desktop_core::ProcessIdentity,
+     deadline: Deadline,
+ ) -> Result<NotificationInfo, AdapterError> {
+     let filter = build_filter(app_filter);
+-    let entries = super::list::list_entries(&filter, pid, deadline)?;
++    let entries = super::list::list_entries(&filter, process, deadline)?;
+
+     let entry = entries
+         .iter()
+@@ -66,7 +72,7 @@ fn dismiss_impl(
+
+     let info = entry.info.clone();
+     let matching_before = super::dismiss_verify::matching_count(&entries, entry);
+-    dismiss_entry(entry, policy, &filter, matching_before, pid, deadline)?;
++    dismiss_entry(entry, policy, &filter, matching_before, process, deadline)?;
+     Ok(info)
+ }
+
+@@ -74,17 +80,17 @@ fn dismiss_impl(
+ fn dismiss_all_impl(
+     app_filter: Option<&str>,
+     policy: InteractionPolicy,
+-    pid: i32,
++    process: &agent_desktop_core::ProcessIdentity,
+     deadline: Deadline,
+ ) -> Result<(Vec<NotificationInfo>, Vec<String>), AdapterError> {
+     let filter = build_filter(app_filter);
+-    let entries = super::list::list_entries(&filter, pid, deadline)?;
++    let entries = super::list::list_entries(&filter, process, deadline)?;
+
+     let mut dismissed = Vec::new();
+     let mut failures = Vec::new();
+
+     for original in entries.iter().rev() {
+-        let current_entries = super::list::list_entries(&filter, pid, deadline)?;
++        let current_entries = super::list::list_entries(&filter, process, deadline)?;
+         let Some(current) = current_entries
+             .iter()
+             .find(|entry| super::dismiss_verify::matches(original, entry))
+@@ -96,8 +102,23 @@ fn dismiss_all_impl(
+             continue;
+         };
+         let matching_before = super::dismiss_verify::matching_count(&current_entries, current);
+-        match dismiss_entry(current, policy, &filter, matching_before, pid, deadline) {
++        match dismiss_entry(current, policy, &filter, matching_before, process, deadline) {
+             Ok(()) => dismissed.push(original.info.clone()),
++            Err(error)
++                if matches!(error.code, ErrorCode::PolicyDenied | ErrorCode::StaleRef)
++                    || error
++                        .details
++                        .as_ref()
++                        .is_some_and(|details| details["clovy_code"] == "computer_use_stopped") =>
++            {
++                return Err(if dismissed.is_empty() {
++                    error
++                } else {
++                    error.with_disposition(
++                        agent_desktop_core::DeliverySemantics::delivered_unverified(),
++                    )
++                });
++            }
+             Err(e) => failures.push(format!("#{}: {}", original.info.index, e)),
+         }
+     }
+@@ -111,13 +132,13 @@ fn dismiss_entry(
+     policy: InteractionPolicy,
+     filter: &NotificationFilter,
+     matching_before: usize,
+-    pid: i32,
++    process: &agent_desktop_core::ProcessIdentity,
+     deadline: Deadline,
+ ) -> Result<(), AdapterError> {
+     for action in ["AXDismiss", "AXRemoveFromParent"] {
+         let outcome =
+             crate::actions::ax_helpers::try_ax_action_or_err(&entry.element, action, deadline);
+-        if strategy_verified(outcome, entry, filter, matching_before, pid, deadline)? {
++        if strategy_verified(outcome, entry, filter, matching_before, process, deadline)? {
+             return Ok(());
+         }
+     }
+@@ -128,7 +149,14 @@ fn dismiss_entry(
+     )?
+     .unwrap_or_default();
+     let pressed = try_dismiss_button(&children, deadline)?;
+-    if strategy_verified(Ok(pressed), entry, filter, matching_before, pid, deadline)? {
++    if strategy_verified(
++        Ok(pressed),
++        entry,
++        filter,
++        matching_before,
++        process,
++        deadline,
++    )? {
+         return Ok(());
+     }
+
+@@ -154,7 +182,14 @@ fn dismiss_entry(
+     )?
+     .unwrap_or_default();
+     let pressed = try_dismiss_button(&children, deadline)?;
+-    if strategy_verified(Ok(pressed), entry, filter, matching_before, pid, deadline)? {
++    if strategy_verified(
++        Ok(pressed),
++        entry,
++        filter,
++        matching_before,
++        process,
++        deadline,
++    )? {
+         return Ok(());
+     }
+
+@@ -206,11 +241,11 @@ fn action_impl(
+     index: usize,
+     identity: Option<&NotificationIdentity>,
+     action_name: &str,
+-    pid: i32,
++    process: &agent_desktop_core::ProcessIdentity,
+     deadline: Deadline,
+ ) -> Result<ActionResult, AdapterError> {
+     let filter = NotificationFilter::default();
+-    let entries = super::list::list_entries(&filter, pid, deadline)?;
++    let entries = super::list::list_entries(&filter, process, deadline)?;
+
+     let entry = entries
+         .into_iter()
+@@ -328,11 +363,12 @@ fn strategy_verified(
+     entry: &super::list::NotificationEntry,
+     filter: &NotificationFilter,
+     matching_before: usize,
+-    pid: i32,
++    process: &agent_desktop_core::ProcessIdentity,
+     deadline: Deadline,
+ ) -> Result<bool, AdapterError> {
+     super::dismiss_verify::verified_after_strategy(outcome, deadline, || {
+-        match super::dismiss_verify::disappeared(entry, filter, matching_before, pid, deadline) {
++        match super::dismiss_verify::disappeared(entry, filter, matching_before, process, deadline)
++        {
+             Ok(disappeared) => Ok(disappeared),
+             Err(error) => {
+                 crate::notifications::read::tolerate_ax_strategy_error(error, deadline)?;
+@@ -355,7 +391,7 @@ fn dismiss_impl(
+     _app_filter: Option<&str>,
+     _identity: Option<&NotificationIdentity>,
+     _policy: InteractionPolicy,
+-    _pid: i32,
++    _process: &agent_desktop_core::ProcessIdentity,
+     _deadline: Deadline,
+ ) -> Result<NotificationInfo, AdapterError> {
+     Err(AdapterError::not_supported("dismiss_notification"))
+@@ -365,7 +401,7 @@ fn dismiss_impl(
+ fn dismiss_all_impl(
+     _app_filter: Option<&str>,
+     _policy: InteractionPolicy,
+-    _pid: i32,
++    _process: &agent_desktop_core::ProcessIdentity,
+     _deadline: Deadline,
+ ) -> Result<(Vec<NotificationInfo>, Vec<String>), AdapterError> {
+     Err(AdapterError::not_supported("dismiss_all_notifications"))
+@@ -376,7 +412,7 @@ fn action_impl(
+     _index: usize,
+     _identity: Option<&NotificationIdentity>,
+     _action_name: &str,
+-    _pid: i32,
++    _process: &agent_desktop_core::ProcessIdentity,
+     _deadline: Deadline,
+ ) -> Result<ActionResult, AdapterError> {
+     Err(AdapterError::not_supported("notification_action"))
+diff --git a/crates/macos/src/notifications/dismiss_verify.rs b/crates/macos/src/notifications/dismiss_verify.rs
+index 2844b01..d94a5c5 100644
+--- a/crates/macos/src/notifications/dismiss_verify.rs
++++ b/crates/macos/src/notifications/dismiss_verify.rs
+@@ -15,13 +15,13 @@ pub(super) fn disappeared(
+     original: &NotificationEntry,
+     filter: &NotificationFilter,
+     matching_before: usize,
+-    pid: i32,
++    process: &agent_desktop_core::ProcessIdentity,
+     deadline: Deadline,
+ ) -> Result<bool, AdapterError> {
+     let settle_deadline = deadline.capped(STRATEGY_SETTLE_TIME);
+     let result = wait_with(
+         || {
+-            let current = super::list::list_entries(filter, pid, settle_deadline)?;
++            let current = super::list::list_entries(filter, process, settle_deadline)?;
+             Ok(matching_count(&current, original) >= matching_before)
+         },
+         settle_deadline,
+@@ -37,10 +37,17 @@ pub(super) fn verified_after_strategy(
+     deadline: Deadline,
+     verify: impl FnOnce() -> Result<bool, AdapterError>,
+ ) -> Result<bool, AdapterError> {
++    let delivered = matches!(&outcome, Ok(true));
+     if let Err(error) = outcome {
+         super::read::tolerate_ax_strategy_error(error, deadline)?;
+     }
+-    verify()
++    verify().map_err(|error| {
++        if delivered {
++            error.with_disposition(agent_desktop_core::DeliverySemantics::delivered_unverified())
++        } else {
++            error
++        }
++    })
+ }
+
+ fn wait_with(
+diff --git a/crates/macos/src/notifications/list.rs b/crates/macos/src/notifications/list.rs
+index c9a0bbd..c25d2f4 100644
+--- a/crates/macos/src/notifications/list.rs
++++ b/crates/macos/src/notifications/list.rs
+@@ -10,17 +10,19 @@ pub fn list_notifications(
+     deadline: Deadline,
+ ) -> Result<Vec<NotificationInfo>, AdapterError> {
+     let session = NcSession::open(policy, deadline)?;
+-    let result = list_from_nc(filter, session.pid(), deadline);
++    let result = session
++        .process()
++        .and_then(|process| list_from_nc(filter, process, deadline));
+     close_session(session, result)
+ }
+
+ #[cfg(target_os = "macos")]
+ fn list_from_nc(
+     filter: &NotificationFilter,
+-    pid: i32,
++    process: &agent_desktop_core::ProcessIdentity,
+     deadline: Deadline,
+ ) -> Result<Vec<NotificationInfo>, AdapterError> {
+-    let entries = list_entries(filter, pid, deadline)?;
++    let entries = list_entries(filter, process, deadline)?;
+     Ok(entries.into_iter().map(|e| e.info).collect())
+ }
+
+@@ -33,12 +35,18 @@ pub(super) struct NotificationEntry {
+ #[cfg(target_os = "macos")]
+ pub(super) fn list_entries(
+     filter: &NotificationFilter,
+-    pid: i32,
++    process: &agent_desktop_core::ProcessIdentity,
+     deadline: Deadline,
+ ) -> Result<Vec<NotificationEntry>, AdapterError> {
+     use crate::tree::element_for_pid;
+
+-    let app = element_for_pid(pid);
++    let pid = crate::system::process::process_identity::to_pid_t(process.pid)?;
++    let mut app = element_for_pid(pid);
++    app.bind_process(
++        pid,
++        &process.instance,
++        crate::tree::locator_deadline::from_operation(deadline)?,
++    )?;
+     let windows = crate::notifications::read::children_for_attribute(&app, "AXWindows", deadline)?;
+     if windows.is_empty() {
+         return Ok(vec![]);
+@@ -83,7 +91,7 @@ pub(super) fn matches_filters(
+ #[cfg(not(target_os = "macos"))]
+ fn list_from_nc(
+     _filter: &NotificationFilter,
+-    _pid: i32,
++    _process: &agent_desktop_core::ProcessIdentity,
+     _deadline: Deadline,
+ ) -> Result<Vec<NotificationInfo>, AdapterError> {
+     Err(AdapterError::not_supported("list_notifications"))
 diff --git a/crates/macos/src/notifications/nc_session.rs b/crates/macos/src/notifications/nc_session.rs
-index d4ab966..5bab20c 100644
+index d4ab966..0037f58 100644
 --- a/crates/macos/src/notifications/nc_session.rs
 +++ b/crates/macos/src/notifications/nc_session.rs
-@@ -203,7 +203,7 @@ fn reactivate_app(app: &ProcessIdentity, deadline: Deadline) -> Result<(), Adapt
+@@ -25,7 +25,7 @@ fn merge_session_result<T>(
+ }
+
+ pub(crate) struct NcSession {
+-    pid: i32,
++    process: Option<ProcessIdentity>,
+     close_pending: bool,
+     previous_app: Option<ProcessIdentity>,
+     cleanup_on_drop: bool,
+@@ -34,8 +34,8 @@ pub(crate) struct NcSession {
+ struct NcSessionOps<Open, WaitUntilReady, Close, Reactivate>
+ where
+     Open: FnMut(Deadline) -> Result<(), AdapterError>,
+-    WaitUntilReady: FnMut(Deadline) -> Result<i32, AdapterError>,
+-    Close: FnMut(Deadline) -> Result<(), AdapterError>,
++    WaitUntilReady: FnMut(Deadline) -> Result<ProcessIdentity, AdapterError>,
++    Close: FnMut(Option<&ProcessIdentity>, Deadline) -> Result<(), AdapterError>,
+     Reactivate: FnMut(&ProcessIdentity, Deadline) -> Result<(), AdapterError>,
+ {
+     open: Open,
+@@ -50,10 +50,11 @@ impl NcSession {
+         deadline: Deadline,
+     ) -> Result<Self, AdapterError> {
+         if let Some(pid) = nc_pid(deadline)?
+-            && is_nc_open(pid, deadline)
++            && let Some(process) = identify_nc(pid)?
++            && is_nc_open(&process, deadline)?
+         {
+             return Ok(Self {
+-                pid,
++                process: Some(process),
+                 close_pending: false,
+                 previous_app: None,
+                 cleanup_on_drop: true,
+@@ -83,20 +84,20 @@ impl NcSession {
+     ) -> Result<Self, AdapterError>
+     where
+         Open: FnMut(Deadline) -> Result<(), AdapterError>,
+-        WaitUntilReady: FnMut(Deadline) -> Result<i32, AdapterError>,
+-        Close: FnMut(Deadline) -> Result<(), AdapterError>,
++        WaitUntilReady: FnMut(Deadline) -> Result<ProcessIdentity, AdapterError>,
++        Close: FnMut(Option<&ProcessIdentity>, Deadline) -> Result<(), AdapterError>,
+         Reactivate: FnMut(&ProcessIdentity, Deadline) -> Result<(), AdapterError>,
+     {
+         let mut session = Self {
+-            pid: 0,
++            process: None,
+             close_pending: true,
+             previous_app,
+             cleanup_on_drop: true,
+         };
+         let result = (ops.open)(deadline).and_then(|()| (ops.wait_until_ready)(deadline));
+         match result {
+-            Ok(pid) => {
+-                session.pid = pid;
++            Ok(process) => {
++                session.process = Some(process);
+                 Ok(session)
+             }
+             Err(error) => {
+@@ -106,8 +107,10 @@ impl NcSession {
+         }
+     }
+
+-    pub(crate) fn pid(&self) -> i32 {
+-        self.pid
++    pub(crate) fn process(&self) -> Result<&ProcessIdentity, AdapterError> {
++        self.process.as_ref().ok_or_else(|| {
++            AdapterError::stale_ref_because("Notification session identity is unavailable")
++        })
+     }
+
+     pub(crate) fn close(mut self) -> Result<(), AdapterError> {
+@@ -116,7 +119,7 @@ impl NcSession {
+
+     fn close_with(
+         &mut self,
+-        mut close: impl FnMut(Deadline) -> Result<(), AdapterError>,
++        mut close: impl FnMut(Option<&ProcessIdentity>, Deadline) -> Result<(), AdapterError>,
+         mut reactivate: impl FnMut(&ProcessIdentity, Deadline) -> Result<(), AdapterError>,
+     ) -> Result<(), AdapterError> {
+         let first = self.cleanup_with(&mut close, &mut reactivate);
+@@ -131,12 +134,15 @@ impl NcSession {
+
+     fn cleanup_with(
+         &mut self,
+-        mut close: impl FnMut(Deadline) -> Result<(), AdapterError>,
++        mut close: impl FnMut(Option<&ProcessIdentity>, Deadline) -> Result<(), AdapterError>,
+         mut reactivate: impl FnMut(&ProcessIdentity, Deadline) -> Result<(), AdapterError>,
+     ) -> Result<(), AdapterError> {
+         let close_result = if self.close_pending {
+-            close(Deadline::detached_after(CLEANUP_TIMEOUT_MS)?)
+-                .inspect(|()| self.close_pending = false)
++            close(
++                self.process.as_ref(),
++                Deadline::detached_after(CLEANUP_TIMEOUT_MS)?,
++            )
++            .inspect(|()| self.close_pending = false)
+         } else {
+             Ok(())
+         };
+@@ -203,7 +209,7 @@ fn reactivate_app(app: &ProcessIdentity, deadline: Deadline) -> Result<(), Adapt
      if !crate::system::process::process_identity::matches_instance(pid, &app.instance)? {
          return Ok(());
      }
@@ -6425,6 +7379,309 @@ index d4ab966..5bab20c 100644
  }
 
  #[cfg(not(target_os = "macos"))]
+@@ -253,13 +259,35 @@ fn nc_pid_from_output(
+ }
+
+ #[cfg(target_os = "macos")]
+-fn is_nc_open(pid: i32, deadline: Deadline) -> bool {
++fn is_nc_open(process: &ProcessIdentity, deadline: Deadline) -> Result<bool, AdapterError> {
+     use crate::tree::element_for_pid;
+
+-    let app = element_for_pid(pid);
+-    let windows = crate::notifications::read::children_for_attribute(&app, "AXWindows", deadline)
+-        .unwrap_or_default();
+-    !windows.is_empty()
++    let pid = crate::system::process::process_identity::to_pid_t(process.pid)?;
++    let mut app = element_for_pid(pid);
++    app.bind_process(
++        pid,
++        &process.instance,
++        crate::tree::locator_deadline::from_operation(deadline)?,
++    )?;
++    let windows = crate::notifications::read::children_for_attribute(&app, "AXWindows", deadline)?;
++    Ok(!windows.is_empty())
++}
++
++#[cfg(target_os = "macos")]
++fn identify_nc(pid: i32) -> Result<Option<ProcessIdentity>, AdapterError> {
++    let Some(instance) = crate::system::process::process_identity::token_for_pid(pid)? else {
++        return Ok(None);
++    };
++    crate::system::private_browser_guard::require_pid(pid, Some(&instance))?;
++    Ok(Some(ProcessIdentity::new(
++        crate::system::process::process_identity::from_pid_t(pid)?,
++        instance,
++    )))
++}
++
++#[cfg(not(target_os = "macos"))]
++fn identify_nc(_pid: i32) -> Result<Option<ProcessIdentity>, AdapterError> {
++    Err(AdapterError::not_supported("notification identity"))
+ }
+
+ #[cfg(not(target_os = "macos"))]
+@@ -268,8 +296,8 @@ fn nc_pid(_deadline: Deadline) -> Result<Option<i32>, AdapterError> {
+ }
+
+ #[cfg(not(target_os = "macos"))]
+-fn is_nc_open(_pid: i32, _deadline: Deadline) -> bool {
+-    false
++fn is_nc_open(_process: &ProcessIdentity, _deadline: Deadline) -> Result<bool, AdapterError> {
++    Err(AdapterError::not_supported("notification identity"))
+ }
+
+ #[cfg(target_os = "macos")]
+@@ -301,20 +329,18 @@ fn open_nc(_deadline: Deadline) -> Result<(), AdapterError> {
+ }
+
+ #[cfg(target_os = "macos")]
+-fn close_nc(deadline: Deadline) -> Result<(), AdapterError> {
+-    use crate::input::keyboard;
+-
+-    let Some(pid) = nc_pid(deadline)? else {
+-        return Ok(());
+-    };
+-    if !is_nc_open(pid, deadline) {
++fn close_nc(process: Option<&ProcessIdentity>, deadline: Deadline) -> Result<(), AdapterError> {
++    let process = process.ok_or_else(|| {
++        AdapterError::stale_ref_because("Notification session identity is unavailable")
++    })?;
++    if !is_nc_open(process, deadline)? {
+         return Ok(());
+     }
+     let combo = KeyCombo {
+         key: "escape".into(),
+         modifiers: vec![],
+     };
+-    keyboard::synthesize_key(&combo, None, deadline)?;
++    crate::system::key_dispatch::press_physical_for_process(process, &combo, deadline)?;
+     std::thread::sleep(std::time::Duration::from_millis(300));
+     Ok(())
+ }
+@@ -324,18 +350,20 @@ fn close_nc(deadline: Deadline) -> Result<(), AdapterError> {
+ mod tests;
+
+ #[cfg(not(target_os = "macos"))]
+-fn close_nc(_deadline: Deadline) -> Result<(), AdapterError> {
++fn close_nc(_process: Option<&ProcessIdentity>, _deadline: Deadline) -> Result<(), AdapterError> {
+     Err(AdapterError::not_supported("close_nc"))
+ }
+
+ #[cfg(target_os = "macos")]
+-fn wait_for_nc_ready(deadline: Deadline) -> Result<i32, AdapterError> {
++fn wait_for_nc_ready(deadline: Deadline) -> Result<ProcessIdentity, AdapterError> {
+     let poll = std::time::Duration::from_millis(50);
+
+     loop {
+         if let Some(pid) = nc_pid(deadline)? {
+-            if is_nc_open(pid, deadline) {
+-                return Ok(pid);
++            if let Some(process) = identify_nc(pid)?
++                && is_nc_open(&process, deadline)?
++            {
++                return Ok(process);
+             }
+         }
+         if deadline.is_expired() {
+@@ -348,7 +376,7 @@ fn wait_for_nc_ready(deadline: Deadline) -> Result<i32, AdapterError> {
+ }
+
+ #[cfg(not(target_os = "macos"))]
+-fn wait_for_nc_ready(_deadline: Deadline) -> Result<i32, AdapterError> {
++fn wait_for_nc_ready(_deadline: Deadline) -> Result<ProcessIdentity, AdapterError> {
+     Err(AdapterError::not_supported("wait_for_nc_ready"))
+ }
+
+diff --git a/crates/macos/src/notifications/nc_session_tests.rs b/crates/macos/src/notifications/nc_session_tests.rs
+index 06dcad8..b9479bb 100644
+--- a/crates/macos/src/notifications/nc_session_tests.rs
++++ b/crates/macos/src/notifications/nc_session_tests.rs
+@@ -28,7 +28,7 @@ fn closed_notification_center_is_policy_denied_headlessly() {
+ #[test]
+ fn cleanup_retries_only_the_failed_step_with_a_fresh_budget() {
+     let mut session = NcSession {
+-        pid: 7,
++        process: Some(ProcessIdentity::new(7_u32, "instance-7")),
+         close_pending: true,
+         previous_app: Some(ProcessIdentity::new(9_u32, "instance")),
+         cleanup_on_drop: false,
+@@ -38,7 +38,7 @@ fn cleanup_retries_only_the_failed_step_with_a_fresh_budget() {
+
+     let error = session
+         .cleanup_with(
+-            |deadline| {
++            |_, deadline| {
+                 assert!(!deadline.is_expired());
+                 close_attempts += 1;
+                 Err(AdapterError::timeout("close failed"))
+@@ -59,7 +59,7 @@ fn cleanup_retries_only_the_failed_step_with_a_fresh_budget() {
+
+     session
+         .cleanup_with(
+-            |deadline| {
++            |_, deadline| {
+                 assert!(!deadline.is_expired());
+                 close_attempts += 1;
+                 Ok(())
+@@ -93,7 +93,7 @@ fn cleanup_failure_replaces_an_apparent_operation_success() {
+ #[test]
+ fn explicit_close_returns_success_when_bounded_retry_recovers() {
+     let mut session = NcSession {
+-        pid: 7,
++        process: Some(ProcessIdentity::new(7_u32, "instance-7")),
+         close_pending: true,
+         previous_app: None,
+         cleanup_on_drop: true,
+@@ -101,7 +101,7 @@ fn explicit_close_returns_success_when_bounded_retry_recovers() {
+     let attempts = std::cell::Cell::new(0);
+
+     let result = session.close_with(
+-        |_| {
++        |_, _| {
+             attempts.set(attempts.get() + 1);
+             if attempts.get() == 1 {
+                 Err(AdapterError::timeout("transient close failure"))
+@@ -120,7 +120,7 @@ fn explicit_close_returns_success_when_bounded_retry_recovers() {
+ #[test]
+ fn explicit_close_returns_final_error_without_arming_drop_retry() {
+     let mut session = NcSession {
+-        pid: 7,
++        process: Some(ProcessIdentity::new(7_u32, "instance-7")),
+         close_pending: true,
+         previous_app: None,
+         cleanup_on_drop: true,
+@@ -129,7 +129,7 @@ fn explicit_close_returns_final_error_without_arming_drop_retry() {
+
+     let error = session
+         .close_with(
+-            |_| {
++            |_, _| {
+                 attempts.set(attempts.get() + 1);
+                 Err(AdapterError::timeout(format!(
+                     "close attempt {} failed",
+@@ -157,7 +157,8 @@ fn partial_open_failure_closes_center_and_restores_previous_app() {
+         NcSessionOps {
+             open: |_| Ok(()),
+             wait_until_ready: |_| Err(AdapterError::timeout("readiness failed")),
+-            close: |deadline| {
++            close: |process, deadline| {
++                assert!(process.is_none());
+                 assert!(!deadline.is_expired());
+                 close_attempts += 1;
+                 Ok(())
+@@ -183,7 +184,7 @@ fn partial_open_failure_closes_center_and_restores_previous_app() {
+ #[test]
+ fn close_delay_does_not_consume_focus_restoration_budget() {
+     let mut session = NcSession {
+-        pid: 7,
++        process: Some(ProcessIdentity::new(7_u32, "instance-7")),
+         close_pending: true,
+         previous_app: Some(ProcessIdentity::new(9_u32, "instance")),
+         cleanup_on_drop: false,
+@@ -193,7 +194,7 @@ fn close_delay_does_not_consume_focus_restoration_budget() {
+
+     session
+         .cleanup_with(
+-            |deadline| {
++            |_, deadline| {
+                 close_deadline.set(Some(deadline));
+                 std::thread::sleep(std::time::Duration::from_millis(200));
+                 Err(AdapterError::timeout("close timed out"))
+diff --git a/crates/macos/src/notifications/read.rs b/crates/macos/src/notifications/read.rs
+index 1595fba..a091e8f 100644
+--- a/crates/macos/src/notifications/read.rs
++++ b/crates/macos/src/notifications/read.rs
+@@ -20,15 +20,17 @@ pub(super) fn children_for_attribute(
+     attribute: &str,
+     deadline: Deadline,
+ ) -> Result<Vec<AXElement>, AdapterError> {
+-    crate::tree::properties::attributes::set_messaging_timeout(element, deadline)?;
++    let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++    element.qualify(instant)?;
+     let result = crate::tree::properties::attributes::copy_ax_array_prefix_result(
+         element,
+         attribute,
+         MAX_NOTIFICATION_CHILDREN,
+         deadline,
+     );
++    element.qualify(instant)?;
+     deadline.ensure_remaining()?;
+-    let children = result
++    let mut children = result
+         .map(|value| value.unwrap_or_default())
+         .map_err(|error| read_error(attribute, error))?;
+     if children.len() == MAX_NOTIFICATION_CHILDREN {
+@@ -38,6 +40,9 @@ pub(super) fn children_for_attribute(
+         )
+         .with_details(serde_json::json!({ "complete": false })));
+     }
++    for child in &mut children {
++        child.bind_child(element, instant)?;
++    }
+     Ok(children)
+ }
+
+@@ -46,11 +51,11 @@ pub(super) fn string(
+     attribute: &str,
+     deadline: Deadline,
+ ) -> Result<Option<String>, AdapterError> {
+-    crate::tree::properties::attributes::set_messaging_timeout(element, deadline)?;
+-    let result =
+-        crate::tree::properties::attributes::copy_string_attr_result(element, attribute, deadline);
+-    deadline.ensure_remaining()?;
+-    result.map_err(|error| read_error(attribute, error))
++    crate::tree::surface_read::string(
++        element,
++        attribute,
++        crate::tree::locator_deadline::from_operation(deadline)?,
++    )
+ }
+
+ pub(super) fn title_or_description(
+@@ -76,11 +81,17 @@ pub(super) fn tolerate_ax_strategy_error(
+     if deadline.is_expired() {
+         return Err(deadline.timeout_error());
+     }
++    if error
++        .details
++        .as_ref()
++        .is_some_and(|details| details["clovy_code"] == "computer_use_stopped")
++    {
++        return Err(error);
++    }
+     match error.code {
+-        ErrorCode::ActionFailed
+-        | ErrorCode::ActionNotSupported
+-        | ErrorCode::StaleRef
+-        | ErrorCode::AppUnresponsive => Ok(()),
++        ErrorCode::ActionFailed | ErrorCode::ActionNotSupported | ErrorCode::AppUnresponsive => {
++            Ok(())
++        }
+         _ => Err(error),
+     }
+ }
+diff --git a/crates/macos/src/system/adapter.rs b/crates/macos/src/system/adapter.rs
+index 10f953e..0516b1b 100644
+--- a/crates/macos/src/system/adapter.rs
++++ b/crates/macos/src/system/adapter.rs
+@@ -194,6 +194,17 @@ impl SystemOps for MacOSAdapter {
+         crate::system::key_dispatch::press_for_app_impl(process, combo, policy, lease.deadline())
+     }
+
++    #[cfg(target_os = "macos")]
++    fn press_key_for_window(
++        &self,
++        window: &WindowInfo,
++        combo: &agent_desktop_core::KeyCombo,
++        policy: agent_desktop_core::InteractionPolicy,
++        lease: &InteractionLease,
++    ) -> Result<ActionResult, AdapterError> {
++        crate::system::key_dispatch::press_for_window_impl(window, combo, policy, lease.deadline())
++    }
++
+     fn wait_for_menu(
+         &self,
+         process: ProcessIdentity,
 diff --git a/crates/macos/src/system/cursor_overlay/spawn.rs b/crates/macos/src/system/cursor_overlay/spawn.rs
 index d962b69..9c3f568 100644
 --- a/crates/macos/src/system/cursor_overlay/spawn.rs
@@ -6568,10 +7825,121 @@ index 2b078a3..cc9293c 100644
  }
 
 diff --git a/crates/macos/src/system/key_dispatch.rs b/crates/macos/src/system/key_dispatch.rs
-index b618ed4..d7eb9b6 100644
+index b618ed4..ca9d488 100644
 --- a/crates/macos/src/system/key_dispatch.rs
 +++ b/crates/macos/src/system/key_dispatch.rs
-@@ -28,7 +28,12 @@ fn press_for_app(
+@@ -9,6 +9,25 @@ use crate::tree::AXElement;
+ #[path = "key_dispatch_menu.rs"]
+ mod menu;
+
++#[cfg(target_os = "macos")]
++pub(crate) fn press_physical_for_process(
++    process: &ProcessIdentity,
++    combo: &KeyCombo,
++    deadline: Deadline,
++) -> Result<(), AdapterError> {
++    let identity = crate::system::process::process_identity::require_core(process)?;
++    let mut app = crate::tree::element_for_pid(identity.pid());
++    app.bind_process(
++        identity.pid(),
++        &process.instance,
++        crate::tree::locator_deadline::from_operation(deadline)?,
++    )?;
++    let focused = require_focused_element(&app, InteractionPolicy::headed(), deadline)?;
++    crate::input::keyboard::synthesize_key_guarded(combo, identity, deadline, |deadline| {
++        crate::actions::physical_keyboard::keyboard_effect_authority(&focused, true, deadline)
++    })
++}
++
+ pub(crate) fn press_for_app_impl(
+     process: ProcessIdentity,
+     combo: &KeyCombo,
+@@ -19,6 +38,84 @@ pub(crate) fn press_for_app_impl(
+         .map_err(|error| crate::actions::DeliveryTracker::default().annotate(error))
+ }
+
++#[cfg(target_os = "macos")]
++pub(crate) fn press_for_window_impl(
++    original: &agent_desktop_core::WindowInfo,
++    combo: &KeyCombo,
++    policy: InteractionPolicy,
++    deadline: Deadline,
++) -> Result<ActionResult, AdapterError> {
++    if original.id.is_empty() {
++        return Err(AdapterError::stale_ref_because(
++            "Original keyboard window identity is unavailable",
++        ));
++    }
++    let window =
++        crate::system::window::window_resolve::window_element_for_info(original, deadline)?;
++    let instance = original
++        .process_instance
++        .as_deref()
++        .filter(|v| !v.is_empty())
++        .ok_or_else(|| AdapterError::stale_ref_because("Window generation is unavailable"))?;
++    let process = ProcessIdentity::new(original.pid, instance);
++    let identity = crate::system::process::process_identity::require_core(&process)?;
++    let mut app = crate::tree::element_for_pid(identity.pid());
++    app.bind_child(
++        &window,
++        crate::tree::locator_deadline::from_operation(deadline)?,
++    )?;
++    let focused = require_focused_element(&app, policy, deadline)?;
++    let perform = |element: &AXElement, action: &str, deadline: Deadline| {
++        crate::actions::ax_helpers::try_window_key_action(
++            element,
++            action,
++            &focused,
++            &window,
++            policy.allow_focus_steal,
++            deadline,
++        )
++        .map_err(|error| {
++            if error.disposition.retry() == agent_desktop_core::RetryDisposition::Unsafe {
++                crate::actions::DeliveryTracker::uncertain(error)
++            } else {
++                error
++            }
++        })
++    };
++    if uses_menu_shortcut(combo, policy) {
++        match menu::try_menu_bar_shortcut(&app, combo, deadline, perform) {
++            Ok(true) => {
++                return post_delivery_process_result(&process, semantic_step("AXPress menu item"))
++                    .map_err(crate::actions::DeliveryTracker::uncertain);
++            }
++            Ok(false) => {}
++            Err(error) if menu::is_bounded_menu_incomplete(&error) => {}
++            Err(error) => return Err(error),
++        }
++    }
++    if let Some(action) = simple_key_action(combo)
++        && perform(&focused, action, deadline)?
++    {
++        return post_delivery_process_result(&process, semantic_step(action))
++            .map_err(crate::actions::DeliveryTracker::uncertain);
++    }
++    crate::input::keyboard::synthesize_key_guarded(combo, identity, deadline, |deadline| {
++        crate::actions::physical_keyboard::keyboard_window_authority(
++            &focused,
++            &window,
++            policy.allow_focus_steal,
++            deadline,
++        )
++    })?;
++    post_delivery_process_result(
++        &process,
++        ActionStep::succeeded("CGEventPostToPid")
++            .with_mechanism(StepMechanism::PhysicalSynthetic)
++            .with_verified(false),
++    )
++    .map_err(crate::actions::DeliveryTracker::uncertain)
++}
++
+ fn press_for_app(
+     process: ProcessIdentity,
+     combo: &KeyCombo,
+@@ -28,10 +125,20 @@ fn press_for_app(
      tracing::debug!(pid = process.pid.get(), "system: press key for app");
      let identity = crate::system::process::process_identity::require_core(&process)?;
      let pid = identity.pid();
@@ -6584,8 +7952,17 @@ index b618ed4..d7eb9b6 100644
 +    )?;
 
      if uses_menu_shortcut(combo, policy) {
-         match menu::try_menu_bar_shortcut(&app, combo, deadline) {
-@@ -51,12 +56,25 @@ fn press_for_app(
+-        match menu::try_menu_bar_shortcut(&app, combo, deadline) {
++        match menu::try_menu_bar_shortcut(
++            &app,
++            combo,
++            deadline,
++            crate::actions::ax_helpers::try_ax_action_or_err,
++        ) {
+             Ok(true) => {
+                 return post_delivery_process_result(&process, semantic_step("AXPress menu item"));
+             }
+@@ -51,12 +158,29 @@ fn press_for_app(
      crate::input::keyboard::keyboard_map::key_name_to_code(&combo.key)?;
      if policy.allow_focus_steal {
          crate::system::process::process_identity::require_core(&process)?;
@@ -6609,12 +7986,16 @@ index b618ed4..d7eb9b6 100644
 +                "Focused keyboard element changed",
 +            ));
 +        }
-+        Ok(())
++        crate::actions::physical_keyboard::keyboard_effect_authority(
++            &focused,
++            policy.allow_focus_steal,
++            deadline,
++        )
 +    })?;
      post_delivery_process_result(
          &process,
          ActionStep::succeeded("CGEventPostToPid")
-@@ -88,7 +106,7 @@ fn try_simple_key_action(
+@@ -88,7 +212,7 @@ fn try_simple_key_action(
      let Some(focused) = focused_element(app, deadline)? else {
          return Ok(false);
      };
@@ -6623,7 +8004,7 @@ index b618ed4..d7eb9b6 100644
          return Ok(false);
      }
      crate::actions::ax_helpers::try_ax_action_or_err(&focused, action, deadline)
-@@ -130,6 +148,7 @@ fn require_focused_element(
+@@ -130,6 +254,7 @@ fn require_focused_element(
  ) -> Result<AXElement, AdapterError> {
      let local_deadline = local_deadline(deadline, Duration::from_millis(500))?;
      loop {
@@ -6631,7 +8012,7 @@ index b618ed4..d7eb9b6 100644
          if let Some(focused) = focused_element(app, deadline)? {
              return Ok(focused);
          }
-@@ -151,10 +170,11 @@ fn element_attribute(
+@@ -151,10 +276,11 @@ fn element_attribute(
      attribute: &str,
      deadline: Deadline,
  ) -> Result<Option<AXElement>, AdapterError> {
@@ -6648,10 +8029,27 @@ index b618ed4..d7eb9b6 100644
 
  fn local_deadline(deadline: Deadline, maximum: Duration) -> Result<Instant, AdapterError> {
 diff --git a/crates/macos/src/system/key_dispatch_menu.rs b/crates/macos/src/system/key_dispatch_menu.rs
-index df52b2b..df8d2f2 100644
+index df52b2b..74c7ec6 100644
 --- a/crates/macos/src/system/key_dispatch_menu.rs
 +++ b/crates/macos/src/system/key_dispatch_menu.rs
-@@ -64,7 +64,12 @@ fn children(element: &AXElement, deadline: Deadline) -> Result<Vec<AXElement>, A
+@@ -17,6 +17,7 @@ pub(super) fn try_menu_bar_shortcut(
+     app: &AXElement,
+     combo: &KeyCombo,
+     deadline: Deadline,
++    mut perform: impl FnMut(&AXElement, &str, Deadline) -> Result<bool, AdapterError>,
+ ) -> Result<bool, AdapterError> {
+     let Some(target_char) = single_uppercase_character(&combo.key) else {
+         return Ok(false);
+@@ -38,7 +39,7 @@ pub(super) fn try_menu_bar_shortcut(
+             .is_some_and(|value| value.to_uppercase() == target_char)
+             && read_menu_item_modifiers(&element, deadline)? == Some(target_modifiers)
+         {
+-            return crate::actions::ax_helpers::try_ax_action_or_err(&element, "AXPress", deadline);
++            return perform(&element, "AXPress", deadline);
+         }
+         if depth >= MAX_MENU_DEPTH {
+             if has_children(&element, deadline)? {
+@@ -64,7 +65,12 @@ fn children(element: &AXElement, deadline: Deadline) -> Result<Vec<AXElement>, A
          instant(deadline)?,
      );
      deadline.ensure_remaining()?;
@@ -6665,7 +8063,7 @@ index df52b2b..df8d2f2 100644
  }
 
  fn has_children(element: &AXElement, deadline: Deadline) -> Result<bool, AdapterError> {
-@@ -99,6 +104,9 @@ fn validate_menu_children(
+@@ -99,6 +105,9 @@ fn validate_menu_children(
  fn validate_child_status(
      read: &crate::tree::query::child_read::ChildRead,
  ) -> Result<(), AdapterError> {
@@ -6675,7 +8073,7 @@ index df52b2b..df8d2f2 100644
      if read.status.api_disabled {
          return Err(read_error(
              "AXChildren",
-@@ -125,8 +133,11 @@ fn read_string(
+@@ -125,8 +134,11 @@ fn read_string(
      attribute: &str,
      deadline: Deadline,
  ) -> Result<Option<String>, AdapterError> {
@@ -6687,7 +8085,7 @@ index df52b2b..df8d2f2 100644
      deadline.ensure_remaining()?;
      result.map_err(|error| read_error(attribute, error))
  }
-@@ -139,11 +150,16 @@ fn read_menu_item_modifiers(
+@@ -139,11 +151,16 @@ fn read_menu_item_modifiers(
      use core_foundation::{base::TCFType, string::CFString};
 
      let attribute = CFString::new("AXMenuItemCmdModifiers");
@@ -6704,7 +8102,7 @@ index df52b2b..df8d2f2 100644
      deadline.ensure_remaining()?;
      if error != kAXErrorSuccess {
          return if error == accessibility_sys::kAXErrorNoValue
-@@ -154,10 +170,7 @@ fn read_menu_item_modifiers(
+@@ -154,10 +171,7 @@ fn read_menu_item_modifiers(
              Err(read_error("AXMenuItemCmdModifiers", error))
          };
      }
@@ -8179,10 +9577,10 @@ index dce76cf..87a52bd 100644
      super::cg_window::inventory_error(message).with_details(serde_json::json!({
          "kind": "exact_window_inventory_source",
 diff --git a/crates/macos/src/system/window/cg_window_tests.rs b/crates/macos/src/system/window/cg_window_tests.rs
-index f01c6e5..ffab37b 100644
+index f01c6e5..fb35f68 100644
 --- a/crates/macos/src/system/window/cg_window_tests.rs
 +++ b/crates/macos/src/system/window/cg_window_tests.rs
-@@ -44,32 +44,79 @@ fn missing_optional_owner_name_does_not_block_scoped_windows() {
+@@ -44,32 +44,80 @@ fn missing_optional_owner_name_does_not_block_scoped_windows() {
          (CFString::new("kCGWindowBounds"), bounds.as_CFType()),
      ]);
 
@@ -8237,6 +9635,7 @@ index f01c6e5..ffab37b 100644
 
 +#[test]
 +fn exact_dictionary_rejects_replacement_owner_before_decoding_content() {
++    use core_foundation::{base::TCFType, number::CFNumber};
 +    let dictionary = CFDictionary::from_CFType_pairs(&[
 +        (
 +            CFString::new("kCGWindowLayer"),
@@ -8270,7 +9669,7 @@ index f01c6e5..ffab37b 100644
  #[test]
  fn expired_deadline_before_any_attempt_is_a_plain_timeout() {
      let error = expired_deadline_error(0, 0, None);
-@@ -315,7 +362,10 @@ fn scoped_records(
+@@ -315,7 +363,10 @@ fn scoped_records(
      dictionaries: Vec<WindowDictionary>,
      scope: WindowRecordScope<'_>,
  ) -> Vec<WindowRecord> {
@@ -9477,10 +10876,10 @@ index 7dee59c..f18085f 100644
 
      fn get_live_element(
 diff --git a/crates/macos/src/tree/ax_element.rs b/crates/macos/src/tree/ax_element.rs
-index a0fcaf4..cc33b0c 100644
+index a0fcaf4..d27a179 100644
 --- a/crates/macos/src/tree/ax_element.rs
 +++ b/crates/macos/src/tree/ax_element.rs
-@@ -1,68 +1,412 @@
+@@ -1,68 +1,422 @@
 +use agent_desktop_core::{AdapterError, NativeHandle, ProcessIdentity, RefEntry, WindowInfo};
 +use std::{sync::Arc, time::Instant};
 +
@@ -9491,11 +10890,7 @@ index a0fcaf4..cc33b0c 100644
 +    source_window: Option<Arc<str>>,
 +}
 +
- #[cfg(target_os = "macos")]
--mod imp {
--    use accessibility_sys::AXUIElementRef;
--    use agent_desktop_core::NativeHandle;
--    use core_foundation::base::{CFRelease, CFRetain, CFTypeRef};
++#[cfg(target_os = "macos")]
 +pub(crate) type RawElement = accessibility_sys::AXUIElementRef;
 +#[cfg(not(target_os = "macos"))]
 +pub(crate) type RawElement = *const std::ffi::c_void;
@@ -9514,7 +10909,11 @@ index a0fcaf4..cc33b0c 100644
 +    source_window: Option<i64>,
 +}
 +
-+#[cfg(target_os = "macos")]
+ #[cfg(target_os = "macos")]
+-mod imp {
+-    use accessibility_sys::AXUIElementRef;
+-    use agent_desktop_core::NativeHandle;
+-    use core_foundation::base::{CFRelease, CFRetain, CFTypeRef};
 +impl NativeEffectAuthority {
 +    pub(crate) fn revalidate(
 +        &self,
@@ -9548,8 +10947,7 @@ index a0fcaf4..cc33b0c 100644
 +        Ok(())
 +    }
 +}
-
--    pub struct AXElement(pub(crate) AXUIElementRef);
++
 +impl AXElement {
 +    // A raw element is metadata-only until bound to an original identity.
 +    pub(crate) fn from_raw(raw: RawElement) -> Self {
@@ -9574,6 +10972,17 @@ index a0fcaf4..cc33b0c 100644
 +            })
 +    }
 +
++    #[cfg(target_os = "macos")]
++    pub(crate) fn root_identity(&self) -> Result<&ProcessIdentity, AdapterError> {
++        self.binding
++            .as_ref()
++            .map(|binding| binding.root.as_ref())
++            .ok_or_else(|| {
++                AdapterError::stale_ref_because("Accessibility root identity is unavailable")
++            })
++    }
+
+-    pub struct AXElement(pub(crate) AXUIElementRef);
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn effect_authority(
 +        &self,
@@ -9772,7 +11181,10 @@ index a0fcaf4..cc33b0c 100644
 +            && left.source_window == right.source_window
 +            && left.owner == right.owner)
 +    }
-+
+
+-    impl AXElement {
+-        pub(crate) fn into_native_handle(self) -> NativeHandle {
+-            NativeHandle::new(self)
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn owner_is_root(&self) -> Result<bool, AdapterError> {
 +        let binding = self
@@ -9806,17 +11218,16 @@ index a0fcaf4..cc33b0c 100644
 +                ));
 +            }
 +            return self.qualify(deadline);
-+        }
+         }
 +        self.bind_root(
 +            Arc::new(ProcessIdentity::new(window.pid, instance)),
 +            (!window.id.is_empty()).then(|| Arc::from(window.id.as_str())),
 +            deadline,
 +        )
-+    }
+     }
 
--    impl AXElement {
--        pub(crate) fn into_native_handle(self) -> NativeHandle {
--            NativeHandle::new(self)
+-    impl Drop for AXElement {
+-        fn drop(&mut self) {}
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn bind_child(
 +        &mut self,
@@ -9837,7 +11248,7 @@ index a0fcaf4..cc33b0c 100644
 +                self.binding = Some(Arc::clone(binding));
 +                return self.qualify(deadline);
 +            }
-         }
++        }
 +        self.bind_root(
 +            Arc::clone(&binding.root),
 +            binding.source_window.clone(),
@@ -9845,8 +11256,9 @@ index a0fcaf4..cc33b0c 100644
 +        )
      }
 
--    impl Drop for AXElement {
--        fn drop(&mut self) {}
+-    impl Clone for AXElement {
+-        fn clone(&self) -> Self {
+-            AXElement(self.0)
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn qualify(&self, deadline: Instant) -> Result<(), AdapterError> {
 +        let binding = self.binding.as_ref().ok_or_else(|| {
@@ -9870,7 +11282,7 @@ index a0fcaf4..cc33b0c 100644
 +                owner_pid,
 +                Some(&binding.owner.instance),
 +            )?;
-+        }
+         }
 +        crate::tree::locator_deadline::remaining(deadline)?;
 +        if crate::tree::properties::ax_ipc::pid(self, deadline).ok() != Some(owner_pid) {
 +            return Err(AdapterError::stale_ref_because(
@@ -9880,11 +11292,9 @@ index a0fcaf4..cc33b0c 100644
 +        crate::tree::locator_deadline::remaining(deadline)?;
 +        Ok(())
      }
-+}
+ }
 
--    impl Clone for AXElement {
--        fn clone(&self) -> Self {
--            AXElement(self.0)
+-pub(crate) use imp::AXElement;
 +impl Clone for AXElement {
 +    fn clone(&self) -> Self {
 +        #[cfg(target_os = "macos")]
@@ -9896,11 +11306,10 @@ index a0fcaf4..cc33b0c 100644
 +        Self {
 +            raw: self.raw,
 +            binding: self.binding.clone(),
-         }
-     }
- }
-
--pub(crate) use imp::AXElement;
++        }
++    }
++}
++
 +impl Drop for AXElement {
 +    fn drop(&mut self) {
 +        #[cfg(target_os = "macos")]
@@ -10517,7 +11926,7 @@ index e01a4b2..10f0e24 100644
  };
 
 diff --git a/crates/macos/src/tree/properties/ax_ipc.rs b/crates/macos/src/tree/properties/ax_ipc.rs
-index 951b697..4af1d8e 100644
+index 951b697..fa1cad8 100644
 --- a/crates/macos/src/tree/properties/ax_ipc.rs
 +++ b/crates/macos/src/tree/properties/ax_ipc.rs
 @@ -69,7 +69,9 @@ fn prepare_mutation(
@@ -10617,7 +12026,7 @@ index 951b697..4af1d8e 100644
          Err(error) => adapter_error_to_ax(&error),
      };
      (error, settable != 0)
-@@ -222,8 +229,21 @@ pub(crate) fn perform_action(
+@@ -222,8 +229,85 @@ pub(crate) fn perform_action(
      action: CFStringRef,
      deadline: impl AxDeadline,
  ) -> Result<i32, AdapterError> {
@@ -10638,10 +12047,74 @@ index 951b697..4af1d8e 100644
 +        )));
 +    }
 +    Ok(unsafe { AXUIElementPerformAction(element.raw(), action) })
++}
++
++#[cfg(target_os = "macos")]
++pub(crate) fn perform_window_key_action(
++    element: &crate::tree::AXElement,
++    action: CFStringRef,
++    focused: &crate::tree::AXElement,
++    window: &crate::tree::AXElement,
++    require_foreground: bool,
++    deadline: Deadline,
++) -> Result<i32, AdapterError> {
++    use core_foundation::{base::TCFType, string::CFString};
++    let instant = deadline.absolute().map_err(pre_mutation_error)?;
++    let authority = element
++        .effect_authority(instant)
++        .map_err(pre_mutation_error)?;
++    let timeout = prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
++    let root = focused.root_identity().map_err(pre_mutation_error)?;
++    let pid =
++        crate::system::process::process_identity::to_pid_t(root.pid).map_err(pre_mutation_error)?;
++    let mut app = crate::tree::element_for_pid(pid);
++    app.bind_child(focused, instant)
++        .map_err(pre_mutation_error)?;
++    prepare(&app, deadline).map_err(pre_mutation_error)?;
++    let focus_attribute = CFString::new("AXFocusedUIElement");
++    let _scope = crate::actions::physical_keyboard::keyboard_window_authority(
++        focused,
++        window,
++        require_foreground,
++        deadline,
++    )
++    .map_err(pre_mutation_error)?;
++    authority
++        .revalidate(element, instant)
++        .map_err(pre_mutation_error)?;
++    let mut value = std::ptr::null();
++    let error = unsafe {
++        AXUIElementCopyAttributeValue(app.raw(), focus_attribute.as_concrete_TypeRef(), &mut value)
++    };
++    if error != kAXErrorSuccess {
++        if !value.is_null() {
++            unsafe { core_foundation::base::CFRelease(value) };
++        }
++        return Err(pre_mutation_error(AdapterError::stale_ref_because(
++            "Keyboard focus could not be revalidated",
++        )));
++    }
++    let current =
++        crate::tree::properties::ax_value::created_ax_element(value).ok_or_else(|| {
++            pre_mutation_error(AdapterError::stale_ref_because(
++                "Keyboard focus is unavailable",
++            ))
++        })?;
++    if !crate::tree::same_element(focused, &current) {
++        return Err(pre_mutation_error(AdapterError::stale_ref_because(
++            "Keyboard focus changed",
++        )));
++    }
++    if instant.saturating_duration_since(Instant::now()) < timeout {
++        return Err(pre_mutation_error(AdapterError::timeout(
++            "Accessibility mutation budget expired before dispatch",
++        )));
++    }
++    Ok(unsafe { AXUIElementPerformAction(element.raw(), action) })
  }
 
  #[cfg(target_os = "macos")]
-@@ -233,8 +253,21 @@ pub(crate) fn set_attribute_value(
+@@ -233,8 +317,21 @@ pub(crate) fn set_attribute_value(
      value: CFTypeRef,
      deadline: impl AxDeadline,
  ) -> Result<i32, AdapterError> {
@@ -10665,7 +12138,7 @@ index 951b697..4af1d8e 100644
  }
 
  #[cfg(target_os = "macos")]
-@@ -246,7 +279,7 @@ pub(crate) fn element_at_position(
+@@ -246,7 +343,7 @@ pub(crate) fn element_at_position(
      let mut element = std::ptr::null_mut();
      let error = match prepare(system, deadline) {
          Ok(_) => unsafe {
@@ -10674,7 +12147,7 @@ index 951b697..4af1d8e 100644
          },
          Err(error) => adapter_error_to_ax(&error),
      };
-@@ -257,7 +290,7 @@ pub(crate) fn element_at_position(
+@@ -257,7 +354,7 @@ pub(crate) fn element_at_position(
  pub(crate) fn pid(element: &crate::tree::AXElement, deadline: impl AxDeadline) -> Result<i32, i32> {
      let mut pid = 0_i32;
      let error = match prepare(element, deadline) {
@@ -10706,7 +12179,7 @@ index 68ae227..0f016bc 100644
 
      fn is_ax_element(value: CFTypeRef) -> bool {
 diff --git a/crates/macos/src/tree/properties/capabilities.rs b/crates/macos/src/tree/properties/capabilities.rs
-index 893e79a..b770329 100644
+index 893e79a..50cff51 100644
 --- a/crates/macos/src/tree/properties/capabilities.rs
 +++ b/crates/macos/src/tree/properties/capabilities.rs
 @@ -1,6 +1,7 @@
@@ -10725,7 +12198,7 @@ index 893e79a..b770329 100644
          }
      }
 
-@@ -15,23 +17,46 @@ impl<T> NativeRead<T> {
+@@ -15,23 +17,58 @@ impl<T> NativeRead<T> {
          Self {
              value: None,
              error: Some(error),
@@ -10738,21 +12211,33 @@ index 893e79a..b770329 100644
  fn read_with_recovery<T>(
 +    element: &crate::tree::AXElement,
      deadline: std::time::Instant,
++    read: impl FnMut() -> NativeRead<T>,
++) -> NativeRead<T> {
++    read_with_authority(
++        deadline,
++        || {
++            agent_desktop_core::commands::clovy_cancel::ensure()?;
++            element.qualify(deadline)
++        },
++        read,
++    )
++}
++
++#[cfg(target_os = "macos")]
++fn read_with_authority<T>(
++    deadline: std::time::Instant,
++    mut qualify: impl FnMut() -> Result<(), agent_desktop_core::AdapterError>,
      mut read: impl FnMut() -> NativeRead<T>,
  ) -> NativeRead<T> {
 -    crate::tree::read_recovery::read(deadline, || {
 +    let mut authority_error = None;
 +    let result = crate::tree::read_recovery::read(deadline, || {
-+        if let Err(error) = agent_desktop_core::commands::clovy_cancel::ensure() {
-+            authority_error = Some(error);
-+            return Err(i32::MIN);
-+        }
-+        if let Err(error) = element.qualify(deadline) {
++        if let Err(error) = qualify() {
 +            authority_error = Some(error);
 +            return Err(i32::MIN);
 +        }
          let result = read();
-+        if let Err(error) = element.qualify(deadline) {
++        if let Err(error) = qualify() {
 +            authority_error = Some(error);
 +            return Err(i32::MIN);
 +        }
@@ -10774,7 +12259,7 @@ index 893e79a..b770329 100644
  }
 
  #[cfg(target_os = "macos")]
-@@ -50,7 +75,7 @@ mod imp {
+@@ -50,7 +87,7 @@ mod imp {
          deadline: std::time::Instant,
      ) -> NativeRead<bool> {
          let cf_attr = CFString::new(attr);
@@ -10783,7 +12268,7 @@ index 893e79a..b770329 100644
              let (err, settable) = crate::tree::properties::ax_ipc::is_attribute_settable(
                  el,
                  cf_attr.as_concrete_TypeRef(),
-@@ -69,7 +94,7 @@ mod imp {
+@@ -69,7 +106,7 @@ mod imp {
          deadline: std::time::Instant,
          usage: &mut crate::tree::observation_usage::ObservationUsage,
      ) -> NativeRead<Vec<String>> {
@@ -10792,7 +12277,7 @@ index 893e79a..b770329 100644
      }
 
      fn copy_action_names_once(
-@@ -110,7 +135,7 @@ mod imp {
+@@ -110,7 +147,7 @@ mod imp {
      }
 
      pub fn same_element(a: &AXElement, b: &AXElement) -> bool {
@@ -10801,6 +12286,99 @@ index 893e79a..b770329 100644
      }
  }
 
+@@ -166,14 +203,18 @@ mod tests {
+         };
+         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+         let mut reads = 0;
+-        let recovered = super::read_with_recovery(deadline, || {
+-            reads += 1;
+-            if reads < 3 {
+-                NativeRead::failure(kAXErrorCannotComplete)
+-            } else {
+-                NativeRead::success(false)
+-            }
+-        });
++        let recovered = super::read_with_authority(
++            deadline,
++            || Ok(()),
++            || {
++                reads += 1;
++                if reads < 3 {
++                    NativeRead::failure(kAXErrorCannotComplete)
++                } else {
++                    NativeRead::success(false)
++                }
++            },
++        );
+         assert_eq!(reads, 3);
+         assert_eq!(recovered.value, Some(false));
+         assert_eq!(recovered.error, None);
+@@ -184,10 +225,14 @@ mod tests {
+             kAXErrorFailure,
+         ] {
+             let mut reads = 0;
+-            let result = super::read_with_recovery::<bool>(deadline, || {
+-                reads += 1;
+-                NativeRead::failure(code)
+-            });
++            let result = super::read_with_authority::<bool>(
++                deadline,
++                || Ok(()),
++                || {
++                    reads += 1;
++                    NativeRead::failure(code)
++                },
++            );
+             assert_eq!(reads, if code == kAXErrorCannotComplete { 3 } else { 1 });
+             assert_eq!(result.error, Some(code));
+             assert_eq!(result.value, None);
+@@ -197,11 +242,44 @@ mod tests {
+     #[test]
+     #[cfg(target_os = "macos")]
+     fn expired_capability_budget_never_calls_native_reader() {
+-        let result =
+-            super::read_with_recovery::<bool>(std::time::Instant::now(), || panic!("expired read"));
++        let result = super::read_with_authority::<bool>(
++            std::time::Instant::now(),
++            || Ok(()),
++            || panic!("expired read"),
++        );
+         assert_eq!(
+             result.error,
+             Some(accessibility_sys::kAXErrorCannotComplete)
+         );
+     }
++
++    #[test]
++    #[cfg(target_os = "macos")]
++    fn authority_failure_after_read_is_terminal() {
++        let mut qualifications = 0;
++        let mut reads = 0;
++        let result = super::read_with_authority(
++            std::time::Instant::now() + std::time::Duration::from_secs(10),
++            || {
++                qualifications += 1;
++                if qualifications == 2 {
++                    Err(agent_desktop_core::AdapterError::stale_ref_because(
++                        "generation changed",
++                    ))
++                } else {
++                    Ok(())
++                }
++            },
++            || {
++                reads += 1;
++                NativeRead::success(true)
++            },
++        );
++        assert_eq!(reads, 1);
++        assert!(result.value.is_none());
++        assert_eq!(
++            result.authority_error.unwrap().code,
++            agent_desktop_core::ErrorCode::StaleRef
++        );
++    }
+ }
 diff --git a/crates/macos/src/tree/properties/element.rs b/crates/macos/src/tree/properties/element.rs
 index 8d9fe2d..d5ef42f 100644
 --- a/crates/macos/src/tree/properties/element.rs

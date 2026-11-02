@@ -228,8 +228,8 @@ Retained AX objects also distinguish root, owner and source-window bindings;
 uncertain setter failures retain their original evidence if verification fails.
 PID-targeted reference keyboard and text posts recheck the bound focused target
 after event creation, and their owned key-up refuses a reused PID generation.
-This is a partial input checkpoint: global keyboard, scoped window pointer and
-drag, receiver qualification and cleanup acknowledgement remain open. The
+This is a partial input checkpoint: scoped window pointer and drag and their
+receiver qualification remain open. The
 metadata and portable error-flow checks do not establish native behavior.
 
 The AX effect boundary now retains filesystem-qualified process evidence,
@@ -237,10 +237,15 @@ checks Stop, then revalidates process image, birth, window and AX owner using
 native metadata before dispatch. The mutation timeout remains installed during
 that final check. Descendant activation binds children before reading or acting.
 Exact screenshot spawn records an attempt only at the actual spawn boundary,
-after the work-deadline check. Standalone notification traversal still has a
-separate raw-child consumer and is outside this checkpoint; it needs its own
-original session identity migration. Native AX and screenshot behavior remain
-unverified.
+after the work-deadline check. Standalone notification traversal carries the
+session's original process generation through descendant reads, verification
+and process-scoped cleanup. Window-scoped keyboard delivery retains the
+original window and focused element through menu, semantic and physical paths;
+the final guards recheck native identity after Stop. Global keyboard discovery
+qualifies the focused process and its owned release refuses a changed receiver
+or a physically held key. ACK requires observing the key down and then up.
+Errors after a possible physical post remain unsafe. Rust metadata and portable
+delivery-state tests do not establish native AX, screenshot or input behavior.
 
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:
