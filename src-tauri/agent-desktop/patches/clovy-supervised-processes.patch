@@ -2365,7 +2365,7 @@ index 282cc86..ea86583 100644
              source_window_id: Some("w-42".into()),
              source_window_title: Some("Fixture".into()),
 diff --git a/crates/core/src/commands/pointer_action.rs b/crates/core/src/commands/pointer_action.rs
-index 6ec7a8f..1c8ed45 100644
+index 6ec7a8f..014426a 100644
 --- a/crates/core/src/commands/pointer_action.rs
 +++ b/crates/core/src/commands/pointer_action.rs
 @@ -22,6 +22,67 @@ pub(crate) struct PointResolveAttempt<'a> {
@@ -2520,7 +2520,7 @@ index 6ec7a8f..1c8ed45 100644
  ) -> Result<bool, AppError> {
      if !args.headed_requirement.requires_focus() {
          return Ok(false);
-@@ -243,7 +316,23 @@ pub(crate) fn focus_point_under_lease(
+@@ -243,7 +316,24 @@ pub(crate) fn focus_point_under_lease(
          return Ok(false);
      };
      let entry = load_ref_entry(ref_id, context)?;
@@ -2538,6 +2538,7 @@ index 6ec7a8f..1c8ed45 100644
 +        {
 +            effects.focus.set(effects.focus.get().max(1))
 +        }
++        Err(AppError::Adapter(_)) => {}
 +        Err(_) => effects.focus.set(effects.focus.get().max(1)),
 +        _ => {}
 +    }
@@ -2545,7 +2546,7 @@ index 6ec7a8f..1c8ed45 100644
  }
 
  pub(crate) fn resolve_point_under_lease<'a>(
-@@ -259,6 +348,7 @@ pub(crate) fn resolve_point_under_lease<'a>(
+@@ -259,6 +349,7 @@ pub(crate) fn resolve_point_under_lease<'a>(
          args,
          stability,
          allow_scroll,
@@ -2553,7 +2554,7 @@ index 6ec7a8f..1c8ed45 100644
      } = attempt;
      let Some(ref_id) = args.ref_id else {
          return resolve_point_from_ref_or_xy_with_context(args, adapter, context, deadline, lease);
-@@ -275,6 +365,7 @@ pub(crate) fn resolve_point_under_lease<'a>(
+@@ -275,6 +366,7 @@ pub(crate) fn resolve_point_under_lease<'a>(
          deadline,
          adapter,
          context,
@@ -2561,7 +2562,7 @@ index 6ec7a8f..1c8ed45 100644
      )
  }
 
-@@ -282,12 +373,15 @@ pub(crate) fn retry_leased_point_phase<T>(
+@@ -282,12 +374,15 @@ pub(crate) fn retry_leased_point_phase<T>(
      timeout_ms: Option<u64>,
      deadline: crate::Deadline,
      mut attempt: impl FnMut() -> Result<T, AppError>,
@@ -2578,7 +2579,7 @@ index 6ec7a8f..1c8ed45 100644
                  let remaining = deadline.remaining();
                  if remaining.is_zero() {
                      return Err(point_actionability_timeout(Some(point_error_report(
-@@ -307,11 +401,12 @@ fn scroll_point_target(
+@@ -307,11 +402,12 @@ fn scroll_point_target(
      deadline: crate::Deadline,
      adapter: &dyn PlatformAdapter,
      context: &CommandContext,
@@ -2594,10 +2595,119 @@ index 6ec7a8f..1c8ed45 100644
  }
 
 diff --git a/crates/core/src/commands/pointer_action_focus_tests.rs b/crates/core/src/commands/pointer_action_focus_tests.rs
-index c7d7f96..5af6dd6 100644
+index c7d7f96..778ca8d 100644
 --- a/crates/core/src/commands/pointer_action_focus_tests.rs
 +++ b/crates/core/src/commands/pointer_action_focus_tests.rs
-@@ -115,6 +115,7 @@ fn a_minimized_source_window_is_restored_before_the_wait_scrolls_its_target() {
+@@ -4,6 +4,8 @@ struct MinimizedWindowAdapter {
+     restored: std::sync::atomic::AtomicBool,
+     keeps_it_hidden: bool,
+     scrolls: AtomicU32,
++    safe_refusals: AtomicU32,
++    focus_calls: AtomicU32,
+ }
+
+ impl MinimizedWindowAdapter {
+@@ -12,6 +14,8 @@ impl MinimizedWindowAdapter {
+             restored: std::sync::atomic::AtomicBool::new(false),
+             keeps_it_hidden,
+             scrolls: AtomicU32::new(0),
++            safe_refusals: AtomicU32::new(0),
++            focus_calls: AtomicU32::new(0),
+         }
+     }
+ }
+@@ -83,6 +87,18 @@ impl SystemOps for MinimizedWindowAdapter {
+         _window: &crate::WindowInfo,
+         _lease: &crate::InteractionLease,
+     ) -> Result<(), AdapterError> {
++        self.focus_calls.fetch_add(1, Ordering::SeqCst);
++        if self
++            .safe_refusals
++            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
++            .is_ok()
++        {
++            return Err(
++                AdapterError::new(ErrorCode::ActionFailed, "Window is temporarily hidden")
++                    .with_details(json!({"check": "visible"}))
++                    .with_disposition(DeliverySemantics::not_delivered()),
++            );
++        }
+         if self.keeps_it_hidden {
+             return Err(AdapterError::new(
+                 ErrorCode::ActionNotSupported,
+@@ -95,6 +111,71 @@ impl SystemOps for MinimizedWindowAdapter {
+     }
+ }
+
++#[test]
++fn safe_focus_refusal_can_retry_but_delivered_focus_is_never_replayed() {
++    let _guard = HomeGuard::new();
++    let snapshot_id = point_ref_snapshot();
++    let args = headed_point_args(&snapshot_id);
++    let adapter = MinimizedWindowAdapter::new(false);
++    adapter.safe_refusals.store(1, Ordering::SeqCst);
++    let deadline = crate::Deadline::after(5_000).unwrap();
++    let context = crate::CommandContext::default().with_headed(true);
++    let effects = super::PointEffects::default();
++    let error = before_first_event(
++        || {
++            let lease = adapter.acquire_interaction_lease(deadline)?;
++            focus_point_under_lease(args, &lease, &adapter, &context, &effects)
++        },
++        &effects,
++    )
++    .unwrap_err();
++    let AppError::Adapter(error) = error else {
++        panic!("expected adapter failure")
++    };
++    assert_eq!(error.disposition.retry(), crate::RetryDisposition::Safe);
++    adapter.safe_refusals.store(1, Ordering::SeqCst);
++    let result = before_first_event(
++        || {
++            retry_leased_point_phase(
++                Some(5_000),
++                deadline,
++                || {
++                    let lease = adapter.acquire_interaction_lease(deadline)?;
++                    focus_point_under_lease(args, &lease, &adapter, &context, &effects)
++                },
++                &effects,
++            )
++        },
++        &effects,
++    )
++    .unwrap();
++    assert!(result);
++    assert_eq!(adapter.focus_calls.load(Ordering::SeqCst), 3);
++
++    let delivered = MinimizedWindowAdapter::new(true);
++    let effects = super::PointEffects::default();
++    let error = before_first_event(
++        || {
++            retry_leased_point_phase(
++                Some(5_000),
++                deadline,
++                || {
++                    let lease = delivered.acquire_interaction_lease(deadline)?;
++                    focus_point_under_lease(args, &lease, &delivered, &context, &effects)
++                },
++                &effects,
++            )
++        },
++        &effects,
++    )
++    .unwrap_err();
++    let AppError::Adapter(error) = error else {
++        panic!("expected adapter failure")
++    };
++    assert_eq!(error.disposition.retry(), crate::RetryDisposition::Unsafe);
++    assert_eq!(delivered.focus_calls.load(Ordering::SeqCst), 1);
++}
++
+ fn headed_point_args(
+     snapshot_id: &str,
+ ) -> crate::commands::point_resolve::PointResolveArgs<'static> {
+@@ -115,6 +196,7 @@ fn a_minimized_source_window_is_restored_before_the_wait_scrolls_its_target() {
          crate::Deadline::after(5_000).unwrap(),
          &adapter,
          &crate::CommandContext::default().with_headed(true),
@@ -2605,7 +2715,7 @@ index c7d7f96..5af6dd6 100644
      )
      .unwrap();
 
-@@ -133,6 +134,7 @@ fn a_window_the_manager_keeps_hidden_ends_the_wait_with_the_focus_refusal() {
+@@ -133,6 +215,7 @@ fn a_window_the_manager_keeps_hidden_ends_the_wait_with_the_focus_refusal() {
          crate::Deadline::after(5_000).unwrap(),
          &adapter,
          &crate::CommandContext::default().with_headed(true),
@@ -8167,10 +8277,10 @@ index 6242bba..5e8986e 100644
          return Err(AdapterError::new(
 diff --git a/crates/macos/src/input/mouse/scoped.rs b/crates/macos/src/input/mouse/scoped.rs
 new file mode 100644
-index 0000000..fcb9928
+index 0000000..2c1c453
 --- /dev/null
 +++ b/crates/macos/src/input/mouse/scoped.rs
-@@ -0,0 +1,1218 @@
+@@ -0,0 +1,1217 @@
 +use crate::tree::AXElement;
 +use agent_desktop_core::{AdapterError, Deadline, MouseEvent, MouseEventKind, Point};
 +use core_graphics::event::{
@@ -8954,16 +9064,15 @@ index 0000000..fcb9928
 +    target: Target<'_>,
 +    destination: Destination<'_>,
 +    id: &str,
-+    params: agent_desktop_core::DragParams,
++    mut params: agent_desktop_core::DragParams,
 +    deadline: Deadline,
 +) -> Result<(), AdapterError> {
 +    use core_graphics::event::CGMouseButton;
 +    let duration = params.duration_ms.unwrap_or(300);
 +    let drop_delay = params.drop_delay_ms.unwrap_or(500);
-+    let mut effective = params.clone();
-+    effective.duration_ms = Some(duration);
-+    effective.drop_delay_ms = Some(drop_delay);
-+    effective.validate(deadline)?;
++    params.duration_ms = Some(duration);
++    params.drop_delay_ms = Some(drop_delay);
++    params.validate(deadline)?;
 +    let required = duration
 +        .checked_add(drop_delay)
 +        .and_then(|v| v.checked_add(210))
@@ -9027,7 +9136,7 @@ index 0000000..fcb9928
 +            kind: MouseEventKind::Move,
 +            point: params.from.clone(),
 +            button: agent_desktop_core::MouseButton::Left,
-+            modifiers: params.modifiers.clone(),
++            modifiers: params.modifiers,
 +        },
 +        deadline,
 +    )?;

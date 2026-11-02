@@ -27,9 +27,8 @@ source changes and cross-compilation evidence, not Windows runtime acceptance.
 Resolved Windows UIA handles now retain distinct root and element process
 generations. Live element reads, text selection and caret reads qualify the
 element's current native PID and those stored generations before provider
-reads and requalify around later calls. Missing identity fails closed. Tree
-traversal, batched cache and related-element reads still require their own
-guards; this increment does not establish native UIA acceptance.
+reads and requalify around later calls. Missing identity fails closed. These
+source changes do not establish native UIA acceptance.
 Process-generation mismatches and disappeared processes retain the StaleRef
 contract; a private or indeterminate policy classification is PolicyDenied.
 Live UIA qualification observes the existing deadline before and after its
@@ -38,8 +37,7 @@ sibling elements without content-prefetch; each node's process and root
 provenance are qualified before its element-scoped cache or live read. A
 qualification error propagates through the walk and resolver. LabeledBy now
 qualifies its related element separately before reading security state or name,
-and propagates identity or policy failures. Native UIA acceptance and the
-remaining input/action boundaries are still pending.
+and propagates identity or policy failures. Native UIA acceptance is pending.
 
 The live element and root-binding paths also check the original deadline
 immediately after the initial native PID read, before process or filesystem
@@ -52,9 +50,8 @@ that same binding when producing a native handle. The root generation remains
 separate. The shared HRESULT import is available to its unconditional generic
 error function on all targets; this permits a portable walker control-flow
 proof and does not establish Windows UIA behavior.
-Windows UIA descendants, capture, input and other native guards, macOS guards,
-a newly prepared engine, and native acceptance remain pending. This partial
-change does not qualify an existing engine artifact.
+Native Windows and macOS acceptance remain pending; existing engine artifacts
+must match the current pinned inputs to be qualified.
 
 The source commit is less than seven days old. The specific reason to use it
 is the Windows CLI shutdown correction in `0768da43` (the main thread's UIA
@@ -127,6 +124,8 @@ guard disposition is retained separately before elevating the outer result,
 so focus evidence does not erase not-delivered evidence about target input.
 No such error authorizes replay or fallback; a pre-focus refusal can still
 be not-delivered/safe.
+An adapter refusal known safe before focus leaves the effect state unchanged,
+so eligible auto-wait can retry; uncertain or delivered focus remains unsafe.
 
 macOS launch receipts now carry executable path, bundle and native process birth
 from the retained NSRunningApplication completion object. Objective-C strings
@@ -198,7 +197,7 @@ window names or titles. Exact window decoding receives the original PID and
 generation, and refuses a different owner before decoding content. AX window and focus reads carry that captured
 generation and verify the AX element owner before reading its content. Strict
 resolution and the title fallback repeat qualification against the original
-generation; other macOS read, capture and input surfaces remain separate work.
+generation.
 Tree observation and reference resolution qualify the original root generation
 before selecting a surface and after resolution retry waits. AX candidates carry
 the original root, source window and their own process generation through
@@ -221,14 +220,14 @@ and attribute mutations check Stop and requalify the bound element at their
 native call boundary, including focus, renderer activation, menu and selection
 paths. Verification after an effect preserves its delivery disposition.
 The portable subprocess proof and Rust metadata checks do not establish macOS
-runtime behavior. Physical input and native qualification remain open.
+runtime behavior. Native qualification remains open.
 
 The AX count's short native-call slice no longer limits its authority checks.
 Retained AX objects also distinguish root, owner and source-window bindings;
 uncertain setter failures retain their original evidence if verification fails.
 PID-targeted reference keyboard and text posts recheck the bound focused target
 after event creation, and their owned key-up refuses a reused PID generation.
-This is a partial input checkpoint: native input qualification remains open. The
+Native input qualification remains open. The
 metadata and portable error-flow checks do not establish native behavior.
 
 The AX effect boundary now retains filesystem-qualified process evidence,
