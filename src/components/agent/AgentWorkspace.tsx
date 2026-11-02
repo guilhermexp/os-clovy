@@ -62,6 +62,7 @@ import {
   type AgentSessionStatusKind,
   dispatchAgentSessionStatus,
   dispatchAgentSessionsChanged,
+  invalidateAgentSessionSnapshots,
   readAgentSessionSnapshotEpoch,
 } from "../../lib/agent-events";
 import { filterAgentSessionsForDataPartition } from "../../lib/session-partition-filter";
@@ -635,6 +636,17 @@ export function AgentWorkspace({
         .map((session) => session.id),
     });
   }, []);
+
+  const publishSavedApproval = useCallback(
+    (updated: AgentSessionDto, partition: string) => {
+      // Fence every list producer that started before the persisted mutation.
+      invalidateAgentSessionSnapshots();
+      sessionListRevisionRef.current += 1;
+      if (partition !== getCurrentDataPartitionName()) return;
+      publishSessions(sessionsRef.current.map((item) => (item.id === updated.id ? updated : item)));
+    },
+    [publishSessions],
+  );
 
   const refreshSessions = useCallback(async () => {
     const revision = ++sessionListRevisionRef.current;
@@ -1303,6 +1315,7 @@ export function AgentWorkspace({
         const pending = { sessionId: activeSession.id, mode: pendingMode };
         pendingApprovalRef.current = pending;
         setPendingApproval(pending);
+        const approvalPartition = getCurrentDataPartitionName();
         try {
           activeSession = await agentRuntimeBindings.setApprovalMode(activeSession.id, pendingMode);
         } catch (cause) {
@@ -1313,10 +1326,11 @@ export function AgentWorkspace({
           pendingApprovalRef.current = undefined;
           setPendingApproval(undefined);
         }
-        setSessions((current) =>
-          current.map((item) => (item.id === activeSession.id ? activeSession : item)),
-        );
-        if (selectedIdRef.current === activeSession.id) {
+        publishSavedApproval(activeSession, approvalPartition);
+        if (
+          approvalPartition === getCurrentDataPartitionName() &&
+          selectedIdRef.current === activeSession.id
+        ) {
           setProjection((current) => ({ ...current, session: activeSession }));
         }
       }
@@ -2010,11 +2024,10 @@ export function AgentWorkspace({
         if (approvalSavingRef.current) return;
         approvalSavingRef.current = true;
         setApprovalSaving(true);
+        const approvalPartition = getCurrentDataPartitionName();
         try {
           const updated = await agentRuntimeBindings.setApprovalMode(selectedSession.id, mode);
-          setSessions((current) =>
-            current.map((item) => (item.id === updated.id ? updated : item)),
-          );
+          publishSavedApproval(updated, approvalPartition);
           if (pendingApprovalRef.current?.sessionId === updated.id) {
             pendingApprovalRef.current = undefined;
             setPendingApproval(undefined);
