@@ -1160,15 +1160,20 @@ fn release_self_test_call_allowed(name: &str, arguments: &Value) -> bool {
         });
     }
     #[cfg(target_os = "macos")]
-    matches!(
-        identity.bundle_id.as_str(),
-        "dev.guilhermexp.clovy.computer-use-self-test.target"
-            | "dev.guilhermexp.clovy.computer-use-self-test.observer"
-    ) && identity
-        .executable_path
-        .file_name()
-        .is_some_and(|name| name == "computer-use-fixture")
-        && crate::computer_use_macos::verify_fixture(&identity.executable_path, &identity.bundle_id)
+    {
+        matches!(
+            identity.bundle_id.as_str(),
+            "dev.guilhermexp.clovy.computer-use-self-test.target"
+                | "dev.guilhermexp.clovy.computer-use-self-test.observer"
+        ) && identity
+            .executable_path
+            .file_name()
+            .is_some_and(|name| name == "computer-use-fixture")
+            && crate::computer_use_macos::verify_fixture(
+                &identity.executable_path,
+                &identity.bundle_id,
+            )
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
