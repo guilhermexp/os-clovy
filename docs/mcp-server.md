@@ -140,6 +140,9 @@ routines `false`), and the surface (`chat` or `routine`).
   delivers the answers of the calls in flight for at most 2 s, then closes;
   a call still unanswered then, and every later call, gets
   `... (turn_expired)` from the relay.
+- Revocation stops new admissions immediately. An in-flight handler may still
+  report a correlated delivery receipt during that grace period; if its result
+  is unknown, the response does not claim the action was safely undelivered.
 - An unbound connection never sees a turn-bound tool in `tools/list`, and
   calling one returns an `isError` result ending in `(turn_required)` without
   running it.
@@ -486,6 +489,9 @@ reference and prevents reuse. Remote revocation failure survives restart and
 remains distinct from local cleanup. Settings never accept pasted OAuth
 identity/tokens, and changes to HTTP headers preserve the host-owned grant;
 changing its URL or transport requires disconnect first.
+OAuth transport uses the active grant for `Authorization`; a manual header
+with that name is removed on conversion and rejected for OAuth configurations.
+Other configured headers and manual-credential servers keep their own rules.
 
 If a refresh returns rotated credentials after cancellation/disconnect, or the
 new credentials cannot be saved, the host tries to revoke that actual rotated
@@ -574,7 +580,8 @@ the authority snapshot.
 The custom authority follows initialization, session waits and elicitation to
 the transport write boundary. Invalidation before dispatch sends no tool call;
 an already admitted call or lost elicitation session remains delivery-uncertain
-and is never replayed. The final chat error string retains the safe numeric
+and is never replayed. Cancellation or a later approval failure does not erase
+that uncertainty. The final chat error string retains the safe numeric
 remote code. OAuth callback errors retain only allowlisted provider codes:
 denied consent, client approval and provider failure remain distinct, while
 unknown codes and free-form descriptions are sanitized.

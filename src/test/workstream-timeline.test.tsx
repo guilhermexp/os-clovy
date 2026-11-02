@@ -37,7 +37,9 @@ type Fixture = {
   notes?: string[];
 };
 
-const now = new Date();
+// An ordinary local day keeps the synthetic wall-clock durations equal to
+// elapsed minutes, including when the real previous day crosses DST.
+const now = new Date(2026, 4, 20, 12);
 const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
 const at = (base: Date, clock: string) => {
   const [hour, minute] = clock.split(":").map(Number);
@@ -123,6 +125,8 @@ function serveDay(base: Date, fixtures: Fixture[]) {
 let canvasHeight = 903;
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(now);
   applyInterfaceLocale("en");
   vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(() => canvasHeight);
 });
