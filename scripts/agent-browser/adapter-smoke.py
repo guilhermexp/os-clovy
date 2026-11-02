@@ -13,7 +13,7 @@ import shlex
 import subprocess
 import sys
 import time
-from process_survivors import descendants, same_image, snapshot, survivors
+from process_survivors import descendants, invalidate_reused_groups, same_image, snapshot, survivors
 
 root = pathlib.Path(__file__).resolve().parents[2]
 def require_space():
@@ -93,22 +93,27 @@ try:
     engine_stat = (resources / 'linux64/clovy-agent-browser').stat()
     engine_image = (engine_stat.st_dev, engine_stat.st_ino)
     known, groups = {}, {}
+    observed_engine = False
     adapter = subprocess.Popen(['cargo', 'run', '--manifest-path', str(cargo / 'Cargo.toml'), '--locked'], env=env, start_new_session=True)
     while adapter.poll() is None:
         processes = snapshot()
+        invalidate_reused_groups(processes, groups)
         for pid in descendants(processes, adapter.pid, known):
             info = processes.get(pid)
             if info is None:
                 continue
             known[pid] = info['birth']
             if same_image(pid, engine_image):
+                observed_engine = True
                 groups[info['group']] = min(groups.get(info['group'], info['birth']), info['birth'])
         time.sleep(.05)
     if adapter.returncode != 0:
         raise subprocess.CalledProcessError(adapter.returncode, adapter.args)
-    if not groups:
+    if not observed_engine:
         raise RuntimeError('The proof did not observe an engine process identity.')
-    remaining = survivors(snapshot(), known, groups)
+    processes = snapshot()
+    invalidate_reused_groups(processes, groups)
+    remaining = survivors(processes, known, groups)
     (evidence / 'process-survivors.json').write_text(json.dumps({'identities': known, 'groups': groups, 'survivors': remaining}))
     if remaining:
         raise RuntimeError(f'The run left browser processes alive: {remaining}')

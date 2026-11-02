@@ -68,8 +68,9 @@ fn read_frame(reader: &mut File, buffered: &mut Vec<u8>, closed: &AtomicBool) ->
             if end > LIMIT {
                 return None;
             }
-            let frame = buffered.drain(..=end).collect::<Vec<_>>();
-            return Some(frame[..end].to_vec());
+            let mut frame = buffered.drain(..=end).collect::<Vec<_>>();
+            frame.pop();
+            return Some(frame);
         }
         scanned = buffered.len();
         if buffered.len() > LIMIT {
@@ -601,34 +602,32 @@ fn redact_original(
     output_budget: &mut usize,
 ) -> Result<String, &'static str> {
     let mut safe = String::new();
-    let mut offset = 0;
-    while offset < text.len() {
+    let mut covered_until = 0;
+    let mut masking = false;
+    for (offset, character) in text.char_indices() {
         let remaining = &text[offset..];
-        let mut found = None;
+        *budget = budget
+            .checked_sub(character.len_utf8())
+            .ok_or("redaction_failed")?;
         for value in &buckets[remaining.as_bytes()[0] as usize] {
             *budget = budget.checked_sub(value.len()).ok_or("redaction_failed")?;
             if remaining.starts_with(value) {
-                found = Some(*value);
+                if !masking {
+                    *output_budget = output_budget.checked_sub(10).ok_or("redaction_failed")?;
+                    safe.push_str("[redacted]");
+                    masking = true;
+                }
+                covered_until = covered_until.max(offset + value.len());
                 break;
             }
         }
-        let (chunk, advance) = match found {
-            Some(value) => ("[redacted]", value.len()),
-            None => {
-                let len = remaining
-                    .chars()
-                    .next()
-                    .ok_or("redaction_failed")?
-                    .len_utf8();
-                *budget = budget.checked_sub(len).ok_or("redaction_failed")?;
-                (&remaining[..len], len)
-            }
-        };
-        *output_budget = output_budget
-            .checked_sub(chunk.len())
-            .ok_or("redaction_failed")?;
-        safe.push_str(chunk);
-        offset += advance;
+        if offset >= covered_until {
+            masking = false;
+            *output_budget = output_budget
+                .checked_sub(character.len_utf8())
+                .ok_or("redaction_failed")?;
+            safe.push(character);
+        }
     }
     Ok(safe)
 }
@@ -636,6 +635,43 @@ fn redact_original(
 #[cfg(test)]
 mod private_redaction_tests {
     use super::*;
+    #[cfg(unix)]
+    fn wait_for_pipe_data(file: &File) {
+        use std::os::fd::AsRawFd;
+        let mut pollfd = libc::pollfd {
+            fd: file.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(
+            unsafe { libc::poll(&mut pollfd, 1, 2000) },
+            1,
+            "writer did not reach the pipe"
+        );
+        assert_ne!(pollfd.revents & libc::POLLIN, 0);
+    }
+    #[test]
+    fn overlapping_private_values_mask_their_entire_union() {
+        for (original, values, expected) in [
+            (
+                "public 1234567 end",
+                vec!["12", "234567"],
+                "public [redacted] end",
+            ),
+            ("前猫犬鳥後", vec!["猫犬", "犬鳥"], "前[redacted]後"),
+            ("前😀🐱犬後", vec!["😀🐱", "🐱犬"], "前[redacted]後"),
+            ("xabcdefz", vec!["abc", "cde", "ef"], "x[redacted]z"),
+            ("xabcdy", vec!["ab", "cd"], "x[redacted]y"),
+            ("xabcdy", vec!["a", "abc"], "x[redacted]dy"),
+        ] {
+            let raw = json!({"nodes":[{"nodeId":"1","name":{"value":original}}]});
+            let values: Vec<String> = values.into_iter().map(String::from).collect();
+            let safe =
+                redact_response("Accessibility.getFullAXTree", raw, &HashSet::new(), &values)
+                    .unwrap();
+            assert_eq!(safe["nodes"][0]["name"]["value"], expected);
+        }
+    }
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn close_does_not_wait_for_a_blocked_pipe_writer() {
@@ -658,19 +694,20 @@ mod private_redaction_tests {
                 )
                 .await
         });
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        wait_for_pipe_data(&peer_read);
+        assert_eq!(client.pending_len().await, 1);
         let close_client = client.clone();
         let close = tokio::spawn(async move { close_client.close().await });
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(500), close)
-                .await
-                .is_ok()
-        );
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(2), request)
-                .await
-                .is_ok()
-        );
+        tokio::time::timeout(std::time::Duration::from_millis(500), close)
+            .await
+            .expect("close timed out")
+            .expect("close task failed");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), request)
+            .await
+            .expect("writer timed out")
+            .expect("writer task failed");
+        assert!(result.is_err());
+        assert_eq!(client.pending_len().await, 0);
         drop(peer_read);
         drop(peer_write);
     }
@@ -684,7 +721,7 @@ mod private_redaction_tests {
             unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) }
         }
         let (host_read, _peer_write) = pipe();
-        let (_peer_read, host_write) = pipe();
+        let (peer_read, host_write) = pipe();
         let client = Arc::new(CdpClient::from_pipe(host_read, host_write).unwrap());
         let worker = client.clone();
         let request = tokio::spawn(async move {
@@ -696,10 +733,10 @@ mod private_redaction_tests {
                 )
                 .await
         });
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        wait_for_pipe_data(&peer_read);
         assert_eq!(client.pending_len().await, 1);
         request.abort();
-        let _ = request.await;
+        assert!(request.await.unwrap_err().is_cancelled());
         assert_eq!(client.pending_len().await, 0);
         client.close().await;
     }
@@ -712,12 +749,8 @@ mod private_redaction_tests {
         let (mut read, mut write) =
             unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) };
         nonblocking(&read, false).unwrap();
-        let sender = std::thread::spawn(move || {
-            write.write_all(b"first").unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            write.write_all(b"-part\0second\0").unwrap();
-        });
-        let mut buffered = Vec::new();
+        write.write_all(b"-part\0second\0").unwrap();
+        let mut buffered = b"first".to_vec();
         let closed = AtomicBool::new(false);
         assert_eq!(
             read_frame(&mut read, &mut buffered, &closed).unwrap(),
@@ -727,7 +760,6 @@ mod private_redaction_tests {
             read_frame(&mut read, &mut buffered, &closed).unwrap(),
             b"second"
         );
-        sender.join().unwrap();
     }
     #[test]
     fn repeated_short_values_redact_original_text_without_expanding_markers() {
@@ -737,10 +769,13 @@ mod private_redaction_tests {
         let safe =
             redact_response("Accessibility.getFullAXTree", raw, &HashSet::new(), &values).unwrap();
         assert_eq!(safe["nodes"][0]["name"]["value"], "[redacted] [redacted]");
-        let raw = json!({"nodes":[{"nodeId":"1","name":{"value":"a".repeat(2_000_000)}}]});
-        assert!(
-            redact_response("Accessibility.getFullAXTree", raw, &HashSet::new(), &values).is_err()
-        );
+        let raw = json!({"nodes":[{"nodeId":"1","name":{"value":"a".repeat(10_000)}}]});
+        let safe =
+            redact_response("Accessibility.getFullAXTree", raw, &HashSet::new(), &values).unwrap();
+        assert_eq!(safe["nodes"][0]["name"]["value"], "[redacted]");
+        let mut buckets: [Vec<&str>; 256] = std::array::from_fn(|_| Vec::new());
+        buckets[b'a' as usize].push("a");
+        assert!(redact_original("aaaa", &buckets, &mut 3, &mut 100).is_err());
     }
     #[test]
     fn debugger_notifications_never_retain_foreign_urls_or_stack_values() {

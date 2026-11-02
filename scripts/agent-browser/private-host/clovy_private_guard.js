@@ -120,22 +120,33 @@ function _clovyGuard(
   const redact = (value) => {
     if (value.length > 1024 * 1024) return null;
     const safe = [];
+    let coveredUntil = 0;
+    let masking = false;
     for (let i = 0; i < value.length; ) {
-      let matched = null;
+      const size = value.codePointAt(i) > 0xffff ? 2 : 1;
+      budget -= size;
+      if (budget < 0) return null;
       for (const secret of buckets.get(value[i]) || []) {
         budget -= secret.length;
         if (budget < 0) return null;
         if (value.startsWith(secret, i)) {
-          matched = secret;
+          if (!masking) {
+            outputBudget -= "[redacted]".length;
+            if (outputBudget < 0) return null;
+            safe.push("[redacted]");
+            masking = true;
+          }
+          coveredUntil = Math.max(coveredUntil, i + secret.length);
           break;
         }
       }
-      const chunk = matched ? "[redacted]" : value[i];
-      if (!matched && --budget < 0) return null;
-      outputBudget -= chunk.length;
-      if (outputBudget < 0) return null;
-      safe.push(chunk);
-      i += matched ? matched.length : 1;
+      if (i >= coveredUntil) {
+        masking = false;
+        outputBudget -= size;
+        if (outputBudget < 0) return null;
+        safe.push(value.slice(i, i + size));
+      }
+      i += size;
     }
     return safe.join("");
   };
@@ -237,26 +248,29 @@ function _clovyGuard(
       key === "Delete" ||
       (key === "Space" && (textControl || this.isContentEditable));
     if (editing && (this.readOnly || this.disabled)) return { error: "unsupported_operation" };
+    const originalForm = this.form;
     this.focus();
     if (!verify() || this.getRootNode().activeElement !== this) return { error: "effect_unknown" };
+    if (this.form !== originalForm) return { error: "effect_unknown" };
     if (editing && (this.readOnly || this.disabled)) return { error: "effect_unknown" };
     const actual = key === "Space" ? " " : key;
     const proceed = this.dispatchEvent(
       new KeyboardEvent("keydown", { key: actual, bubbles: true, cancelable: true }),
     );
     if (!verify() || this.getRootNode().activeElement !== this) return { error: "effect_unknown" };
+    if (this.form !== originalForm) return { error: "effect_unknown" };
     if (editing && (this.readOnly || this.disabled)) return { error: "effect_unknown" };
     if (proceed && key === "Enter") {
       if (tag === "button" || tag === "a" || ["submit", "button"].includes(inputType)) this.click();
       else if (this.form && tag !== "textarea") {
-        const submitter = Array.from(this.form.elements).find(
+        const submitter = Array.from(this.form.getRootNode().querySelectorAll("button,input")).find(
           (control) =>
             control.form === this.form &&
             ((control.tagName === "BUTTON" && control.type === "submit") ||
               (control.tagName === "INPUT" && ["submit", "image"].includes(control.type))),
         );
         if (submitter) {
-          if (!submitter.disabled) submitter.click();
+          if (!submitter.matches(":disabled")) submitter.click();
         } else {
           const blocking = Array.from(this.form.elements).filter(
             (control) =>
@@ -294,10 +308,13 @@ function _clovyGuard(
           !this.contains(selection.focusNode)
         )
           return { error: "effect_unknown" };
-      } else if (this.selectionStart === null || this.selectionEnd === null) {
+      } else if (
+        inputType !== "email" &&
+        (this.selectionStart === null || this.selectionEnd === null)
+      ) {
         return { error: "effect_unknown" };
       }
-      const inputType =
+      const editInputType =
         key === "Space"
           ? "insertText"
           : key === "Delete"
@@ -307,7 +324,7 @@ function _clovyGuard(
         new InputEvent("beforeinput", {
           bubbles: true,
           cancelable: true,
-          inputType,
+          inputType: editInputType,
           data: key === "Space" ? " " : null,
         }),
       );
