@@ -53,6 +53,7 @@ export type NotesAction =
       notes: NoteListItemDto[];
       deletedId?: string;
       preserveIds?: string[];
+      preserveFolderIdsForNoteIds?: string[];
     }
   | { type: "noteDeleted"; noteId: string }
   | { type: "recoveriesUpdated"; recoveries: RecoverableRecordingDto[] }
@@ -217,11 +218,19 @@ export function notesReducer(state: NotesState, action: NotesAction): NotesState
         ...state,
         notes: action.notes
           .filter((note) => !state.deletedNoteIds?.has(note.id))
-          .map((note) =>
-            action.preserveIds?.includes(note.id)
-              ? (state.notes.find((current) => current.id === note.id) ?? note)
-              : note,
-          ),
+          .map((note) => {
+            if (
+              !action.preserveIds?.includes(note.id) &&
+              !action.preserveFolderIdsForNoteIds?.includes(note.id)
+            )
+              return note;
+            const current = state.notes.find((item) => item.id === note.id);
+            if (action.preserveIds?.includes(note.id)) return current ?? note;
+            if (action.preserveFolderIdsForNoteIds?.includes(note.id) && current) {
+              return { ...note, folderIds: current.folderIds };
+            }
+            return note;
+          }),
         selectedNoteId:
           state.selectedNoteId === action.deletedId ? undefined : state.selectedNoteId,
         selectedNote: state.selectedNoteId === action.deletedId ? undefined : state.selectedNote,

@@ -159,9 +159,14 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
                     (note) =>
                       pendingAtRead.has(note.id) ||
                       noteSaveController.hasPending(note.id) ||
-                      folderVersions.get(note.id) !== folderChangesRef.current.notes.get(note.id) ||
                       (editVersions.get(note.id) ?? 0) !==
                         noteSaveController.getEditVersion(note.id),
+                  )
+                  .map((note) => note.id),
+                preserveFolderIdsForNoteIds: response.items
+                  .filter(
+                    (note) =>
+                      folderVersions.get(note.id) !== folderChangesRef.current.notes.get(note.id),
                   )
                   .map((note) => note.id),
                 deletedId: deleted ? noteId : undefined,

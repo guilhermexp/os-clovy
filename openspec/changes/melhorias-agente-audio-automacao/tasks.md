@@ -65,3 +65,5 @@ Rodadas integradas da box: `.tmp/verify/T7/integrated-60/report.md` preserva o r
 As correções após a revisão de F40–F45 e suas provas estão em `.tmp/verify/T7/integrated-review-fixes-63/report.md`. Elas também requerem revisão independente e não antecipam os gates nativos.
 
 A rodada `.tmp/verify/T7/integrated-review-fixes-64/report.md` registra a reconciliação de associações e suas provas na box; a revisão independente e os critérios nativos continuam pendentes.
+
+A rodada `.tmp/verify/T7/integrated-review-fixes-65/report.md` registra a reconciliação por campo das linhas de notas e suas provas; ela não encerra a revisão independente ou os critérios nativos.

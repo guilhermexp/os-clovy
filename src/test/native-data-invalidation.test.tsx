@@ -140,6 +140,84 @@ beforeEach(() => {
 });
 
 describe("native mutation invalidation", () => {
+  it.each([
+    false,
+    true,
+  ])("reconciles native list fields after a local removal (content pending: %s)", async (contentPending) => {
+    const localRemoval = deferred<NoteDto>();
+    const nativeList = deferred<{ items: NoteDto[]; hasMore: boolean }>();
+    const old = { ...note("old title"), folderIds: ["p"] };
+    const newer = {
+      ...note("native title"),
+      preview: "native preview",
+      processingStatus: "failed" as const,
+      folderIds: ["p"],
+    };
+    mocks.removeNoteFromFolder.mockReturnValueOnce(localRemoval.promise);
+    mocks.getNote.mockResolvedValueOnce(newer);
+    mocks.listNotes.mockReturnValueOnce(nativeList.promise);
+    const { result } = renderHook(() => {
+      const [state, dispatch] = useReducer(notesReducer, { ...createInitialState(), notes: [old] });
+      const [live, setLive] = useState<LiveTranscriptEventDto[]>([]);
+      const [, setError] = useState<string | null>(null);
+      const controller = useRef(
+        new NoteSaveController({
+          debounceMs: 60000,
+          persist: async (id, patch) => ({ ...old, id, ...patch }),
+        }),
+      ).current;
+      const folderChangesRef = useRef({
+        notes: new Map<string, number>(),
+        deletedProjects: new Map<string, number>(),
+      });
+      useNoteProcessingEvents({
+        dispatch,
+        noteSaveController: controller,
+        folderChangesRef,
+        notes: state.notes,
+        selectedNote: state.selectedNote,
+        liveTranscriptEvents: live,
+        setLiveTranscriptEvents: setLive,
+        setError,
+      });
+      const actions = createAppDomainActions(
+        actionDependencies({
+          state,
+          dispatch,
+          noteSaveController: controller,
+          folderChangesRef,
+          setError,
+        }),
+      );
+      return { state, dispatch, controller, actions };
+    });
+    let removal!: Promise<void>;
+    act(() => {
+      removal = result.current.actions.handleRemoveNoteFromFolder("note", "p");
+    });
+    await waitFor(() => expect(mocks.removeNoteFromFolder).toHaveBeenCalledTimes(1));
+    await emit({ profile: "default", kind: "notes", id: "note" });
+    await waitFor(() => expect(mocks.listNotes).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      localRemoval.resolve({ ...old, folderIds: [] });
+      await removal;
+    });
+    if (contentPending) {
+      act(() => {
+        result.current.controller.queue("note", { title: "local title" });
+        result.current.dispatch({
+          type: "noteUpdated",
+          note: { ...old, title: "local title", folderIds: [] },
+        });
+      });
+    }
+    await act(async () => nativeList.resolve({ items: [newer], hasMore: false }));
+    const row = result.current.state.notes[0];
+    expect(row.folderIds).toEqual([]);
+    expect(row.title).toBe(contentPending ? "local title" : "native title");
+    expect(row.preview).toBe(contentPending ? "old title" : "native preview");
+    expect(row.processingStatus).toBe(contentPending ? "ready" : "failed");
+  });
   it("deleting a project does not resurrect another project's removed association or a pending deleted-project member", async () => {
     const pending = deferred<Array<{ sessionId: string; folderId: string }>>();
     mocks.listSessionFolders.mockReturnValueOnce(pending.promise);
