@@ -1,4 +1,6 @@
 //! Managed bundled skills and the local MCP subprocess sandbox.
+pub(crate) use super::skill_catalog::catalog_from_roots;
+use super::skill_catalog::skill_read_error;
 use super::skill_identity::reconcile_managed_obsidian_skill;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -89,73 +91,6 @@ pub(crate) fn skill_roots(app: &AppHandle) -> Vec<(PathBuf, bool)> {
         roots.push((PathBuf::from(home).join(".agents").join("skills"), false));
     }
     roots
-}
-
-pub(crate) fn skill_description(text: &str) -> Option<String> {
-    let mut lines = text.lines().map(str::trim);
-    if lines.next() == Some("---") {
-        for line in &mut lines {
-            if line == "---" {
-                break;
-            }
-            if let Some((key, value)) = line.split_once(':') {
-                if key.trim() == "description" {
-                    let value = value.trim().trim_matches(['"', '\'']);
-                    if !value.is_empty() {
-                        return Some(value.to_string());
-                    }
-                }
-            }
-        }
-    }
-    lines
-        .find(|line| !line.is_empty() && !line.starts_with('#') && *line != "---")
-        .map(str::to_string)
-}
-
-fn skill_read_error(error: std::io::Error) -> crate::domain::types::AppError {
-    let code = if error.kind() == std::io::ErrorKind::InvalidData
-        && error.to_string() == "Skill content exceeds 512 KiB."
-    {
-        "agent_skill_too_large"
-    } else {
-        "agent_skill_read_failed"
-    };
-    crate::domain::types::AppError::new(code, error.to_string())
-}
-
-pub(crate) async fn catalog_from_roots(
-    roots: Vec<(PathBuf, bool)>,
-    overrides: &std::collections::HashMap<String, bool>,
-) -> Result<Vec<serde_json::Value>, crate::domain::types::AppError> {
-    use super::skill_identity::inspect_skills;
-    let mut result = Vec::new();
-    for inspected in inspect_skills(&roots, overrides) {
-        let enabled = inspected.enabled();
-        let readable = inspected.readable();
-        let configured_enabled = inspected.configured_enabled;
-        let skill = inspected.skill;
-        let (description, error) = match inspected.content {
-            Ok(content) => (
-                skill_description(&content).unwrap_or_else(|| "Clovy agent skill".into()),
-                None,
-            ),
-            Err(error) => {
-                let error = skill_read_error(error);
-                let message = if error.code == "agent_skill_too_large" {
-                    "Skill content exceeds 512 KiB."
-                } else {
-                    "Skill instructions could not be read as UTF-8 text."
-                };
-                (
-                    format!("Unavailable skill: {message}"),
-                    Some(serde_json::json!({"code":error.code,"message":message})),
-                )
-            }
-        };
-        result.push(serde_json::json!({"id":skill.id,"name":skill.id,"description":description,"source":if skill.managed {"managed"} else {"user_global"},"enabled":enabled,"configuredEnabled":configured_enabled,"readable":readable,"error":error,"editable":skill.managed,"root":skill.root}));
-    }
-    Ok(result)
 }
 
 pub(crate) async fn read_from_roots(
@@ -410,8 +345,24 @@ mod bound_admin_tests {
 
 #[cfg(test)]
 mod catalog_content_regressions {
+    use super::super::skill_catalog::skill_description;
     use super::super::skill_identity::MAX_SKILL_BYTES;
     use super::*;
+    #[test]
+    fn description_keeps_the_first_non_frontmatter_line() {
+        for (input, expected) in [
+            ("One line", "One line"),
+            ("First line\nSecond line", "First line"),
+            ("# Heading\nBody", "Body"),
+            (
+                "---\nname: example\ndescription: 'Summary'\n---\nBody",
+                "Summary",
+            ),
+            ("---\nname: example\n---\n# Heading\nBody", "Body"),
+        ] {
+            assert_eq!(skill_description(input).as_deref(), Some(expected));
+        }
+    }
     #[tokio::test]
     async fn invalid_global_content_does_not_block_valid_admin_or_active_catalog() {
         let managed = tempfile::tempdir().unwrap();
@@ -440,6 +391,10 @@ mod catalog_content_regressions {
         let overrides = std::collections::HashMap::from([("oversized".into(), false)]);
         let catalog = catalog_from_roots(roots.clone(), &overrides).await.unwrap();
         assert_eq!(catalog.len(), 4);
+        assert_eq!(
+            catalog.iter().find(|entry| entry["id"] == "valid").unwrap()["description"],
+            "Valid instructions"
+        );
         assert_eq!(
             catalog
                 .iter()

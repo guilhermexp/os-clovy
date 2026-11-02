@@ -9,6 +9,7 @@ pub mod persona;
 pub mod protocol;
 pub mod repository;
 pub(crate) mod retirement;
+pub(crate) mod skill_catalog;
 pub(crate) mod skill_identity;
 pub mod skills;
 pub(crate) mod terminal;

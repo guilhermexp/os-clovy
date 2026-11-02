@@ -1555,7 +1555,7 @@ pub async fn set_agent_skill_enabled(
 }
 
 #[cfg(test)]
-use super::{skill_identity::skill_file, skills::skill_description};
+use super::{skill_catalog::skill_description, skill_identity::skill_file};
 
 /// Historical native/endpoint sessions continue through the selected local CLI.
 fn normalize_agent_model(model: &str) -> String {
