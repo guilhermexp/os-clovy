@@ -5771,7 +5771,7 @@ index 6a629ce..e18f647 100644
      Ok(WindowInfo {
          id: expected.id.clone(),
 diff --git a/crates/windows/src/tree/element.rs b/crates/windows/src/tree/element.rs
-index 473e0cc..e9eeb75 100644
+index 473e0cc..201b8a1 100644
 --- a/crates/windows/src/tree/element.rs
 +++ b/crates/windows/src/tree/element.rs
 @@ -9,6 +9,8 @@ use agent_desktop_core::{AdapterError, ErrorCode, NativeHandle};
@@ -5808,7 +5808,7 @@ index 473e0cc..e9eeb75 100644
      }
 
      /// The verified process identity, if this element resolved through the
-@@ -83,6 +99,120 @@ impl UIAElement {
+@@ -83,6 +99,123 @@ impl UIAElement {
              .as_ref()
              .map(|payload| (payload.pid, payload.token.as_str()))
      }
@@ -5836,6 +5836,7 @@ index 473e0cc..e9eeb75 100644
 +    if pid == 0 {
 +        return Err(stale());
 +    }
++    deadline.ensure_remaining()?;
 +    let authority = crate::private_browser_guard::qualify(agent_desktop_core::ProcessId::new(pid))?;
 +    deadline.ensure_remaining()?;
 +    if element.0.get_process_id().map_err(|_| stale())? != pid {
@@ -5862,6 +5863,7 @@ index 473e0cc..e9eeb75 100644
 +        .0
 +        .get_process_id()
 +        .map_err(|_| AdapterError::new(ErrorCode::StaleRef, "Element identity is unavailable"))?;
++    deadline.ensure_remaining()?;
 +    let authority = qualify_current(&element, deadline)?;
 +    if authority.pid() != agent_desktop_core::ProcessId::new(pid) {
 +        return Err(AdapterError::new(
@@ -5895,6 +5897,7 @@ index 473e0cc..e9eeb75 100644
 +    if current == 0 || current != payload.pid {
 +        return Err(stale());
 +    }
++    deadline.ensure_remaining()?;
 +    let root = crate::private_browser_guard::qualify_expected(
 +        ProcessId::new(payload.root_pid),
 +        &payload.root_token,
@@ -6650,7 +6653,7 @@ index 67cfc47..19cf46f 100644
          result.is_ok(),
          "a live fixture root must pass the liveness gate: {result:?}"
 diff --git a/crates/windows/src/tree/resolve/mod.rs b/crates/windows/src/tree/resolve/mod.rs
-index 123d6fd..040b44f 100644
+index 123d6fd..ab8fdd3 100644
 --- a/crates/windows/src/tree/resolve/mod.rs
 +++ b/crates/windows/src/tree/resolve/mod.rs
 @@ -77,7 +77,7 @@ fn resolve_attempt(entry: &RefEntry, deadline: Deadline) -> Result<NativeHandle,
@@ -6695,7 +6698,7 @@ index 123d6fd..040b44f 100644
          }
          SearchVerdict::Ambiguous => Err(ambiguous_target_error(entry, searched.len())),
      }
-@@ -216,21 +219,48 @@ fn classify_search(
+@@ -216,21 +219,49 @@ fn classify_search(
      }
  }
 
@@ -6728,6 +6731,7 @@ index 123d6fd..040b44f 100644
 +    if pid == 0 {
 +        return Err(stale_ref_error(entry));
 +    }
++    deadline.ensure_remaining()?;
 +    let authority = crate::private_browser_guard::qualify(agent_desktop_core::ProcessId::new(pid))?;
 +    deadline.ensure_remaining()?;
 +    if element
@@ -6752,7 +6756,7 @@ index 123d6fd..040b44f 100644
  }
 
  #[cfg(target_os = "windows")]
-@@ -332,6 +362,7 @@ pub(crate) fn resolve_window_root(
+@@ -332,6 +363,7 @@ pub(crate) fn resolve_window_root(
          bounds: None,
          state: Default::default(),
      };
@@ -6760,7 +6764,7 @@ index 123d6fd..040b44f 100644
      crate::system::window::window_identity::WindowIdentityEvidence::from_info(
          crate::system::window::window_ops::parse_handle(&window.id),
          &window,
-@@ -340,10 +371,23 @@ pub(crate) fn resolve_window_root(
+@@ -340,10 +372,23 @@ pub(crate) fn resolve_window_root(
      .verify_stored()
      .map_err(|_| verify_stored_failure_error(entry, deadline))?;
 
@@ -7437,7 +7441,7 @@ index c4b458d..304df81 100644
                  Ok(element)
              } else {
 diff --git a/crates/windows/src/tree/text_insertion.rs b/crates/windows/src/tree/text_insertion.rs
-index 0cd7b9b..e74abc4 100644
+index 0cd7b9b..98652d9 100644
 --- a/crates/windows/src/tree/text_insertion.rs
 +++ b/crates/windows/src/tree/text_insertion.rs
 @@ -38,7 +38,7 @@ fn count_line_breaks(text: &str) -> u32 {
@@ -7464,16 +7468,18 @@ index 0cd7b9b..e74abc4 100644
      }
 
      /// The insertion caret of the element with keyboard focus, when it belongs
-@@ -68,114 +71,214 @@ mod imp {
+@@ -68,114 +71,216 @@ mod imp {
          let Ok(focused) = client.get_focused_element() else {
              return Ok(None);
          };
 -        if process.is_some_and(|process| {
 -            focused.get_process_id().ok().map(ProcessId::new) != Some(process)
 -        }) {
++        deadline.ensure_remaining()?;
 +        let pid = focused.get_process_id().map_err(|error| {
 +            crate::tree::automation::uia_error(&error, "read focused element identity")
 +        })?;
++        deadline.ensure_remaining()?;
 +        if pid == 0 || process.is_some_and(|process| ProcessId::new(pid) != process) {
              return Ok(None);
          }

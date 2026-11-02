@@ -40,6 +40,11 @@ qualification error propagates through the walk and resolver. LabeledBy now
 qualifies its related element separately before reading security state or name,
 and propagates identity or policy failures. Native UIA acceptance and the
 remaining input/action boundaries are still pending.
+
+The live element and root-binding paths also check the original deadline
+immediately after the initial native PID read, before process or filesystem
+qualification. This is a source-level correction; it does not establish
+native timing behavior.
 Windows UIA descendants, capture, input and other native guards, macOS guards,
 a newly prepared engine, and native acceptance remain pending. This partial
 change does not qualify an existing engine artifact.
