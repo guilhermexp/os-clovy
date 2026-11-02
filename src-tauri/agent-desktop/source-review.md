@@ -158,12 +158,15 @@ exposed through that route. An incomplete ancestor read reports stale unless
 the actual deadline has expired. Keyboard focus preparation retains the
 element authority through the focus read. Key-down and Unicode sends retain
 the original foreground and focused process generations and qualify them at
-each send; exact-window and ref paths also requalify their original target.
-Owned key-up cleanup is separate from new input. Mouse modifier sends qualify
-the actual keyboard receiver but do not yet carry the original pointer target
-through the mouse adapter. A drag abort releases its own button without moving
-the pointer, and errors after attempted pointer movement are unsafe to retry.
-Mouse sends and native acceptance remain pending.
+each send; exact-window and ref paths also requalify their original target. The
+ref path rechecks the focused UIA element after blocking identity queries.
+Owned key-up cleanup is separate from new input. The private targeted mouse and
+drag paths now pass the original window into Windows input and requalify it,
+including its captured native owner, at each send and modifier key-down. A drag
+abort releases its own button without moving the pointer, and errors after
+attempted pointer movement are unsafe to retry. Qualification of the actual
+pointer receiver at each point and native acceptance remain pending. Scoped
+mouse and drag still fail unsupported on platforms without an override.
 
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:
