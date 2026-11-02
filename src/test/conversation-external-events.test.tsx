@@ -168,6 +168,110 @@ beforeEach(() => {
   );
 });
 describe("external conversation mutations", () => {
+  it("reconciles a native rename concurrent with a saved approval", async () => {
+    const idleA: AgentSessionDto = { ...a, status: "idle", approvalMode: "approvals" };
+    const renamedB: AgentSessionDto = { ...b, title: "Renamed B" };
+    const nativeRead = deferred<AgentSessionDto[]>();
+    const savedRead = deferred<AgentSessionDto[]>();
+    const save = deferred<AgentSessionDto>();
+    const fallback = mocks.invoke.getMockImplementation();
+    let phase: "initial" | "native" | "saved" = "initial";
+    let nativeStarted = false;
+    let savedStarted = false;
+    persisted = [idleA];
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "list_agent_sessions" && phase === "native") {
+        nativeStarted = true;
+        return nativeRead.promise;
+      }
+      if (command === "list_agent_sessions" && phase === "saved") {
+        savedStarted = true;
+        return savedRead.promise;
+      }
+      if (command === "set_agent_session_approval_mode") return save.promise;
+      return fallback?.(command, args);
+    });
+    render(
+      <>
+        <Surface />
+        <AgentWorkspace initialSession={idleA} />
+      </>,
+    );
+    const sidebar = screen.getByRole("complementary");
+    await within(sidebar).findByText(idleA.title);
+    await waitFor(() => expect(nativeListeners.size).toBeGreaterThan(0));
+    const control = await screen.findByRole("combobox", { name: "Tool approval" });
+    const user = userEvent.setup();
+    await user.selectOptions(control, "bypass");
+    phase = "native";
+    await change({ profile: "other", kind: "conversations", id: b.id });
+    expect(nativeStarted).toBe(false);
+    await change({ profile: "default", kind: "conversations", id: b.id });
+    await waitFor(() => expect(nativeStarted).toBe(true));
+    const savedA: AgentSessionDto = { ...idleA, approvalMode: "bypass" };
+    persisted = [savedA, renamedB];
+    phase = "saved";
+    await act(async () => save.resolve(savedA));
+    await waitFor(() => expect(control).toHaveValue("bypass"));
+    await act(async () => nativeRead.resolve([idleA, renamedB]));
+    expect(control).toHaveValue("bypass");
+    await act(async () => savedRead.resolve([savedA, renamedB]));
+    expect(await within(sidebar).findByText("Renamed B")).toBeVisible();
+    expect(savedStarted).toBe(true);
+    expect(control).toHaveValue("bypass");
+  });
+
+  it.each([
+    "resolve",
+    "reject",
+  ])("discards post-save reconciliation after a partition change (%s)", async (outcome) => {
+    const idleA: AgentSessionDto = { ...a, status: "idle", approvalMode: "approvals" };
+    const savedA: AgentSessionDto = { ...idleA, approvalMode: "bypass" };
+    const reconcile = deferred<AgentSessionDto[]>();
+    const fallback = mocks.invoke.getMockImplementation();
+    let saving = false;
+    let started = false;
+    persisted = [idleA];
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "list_agent_sessions" && saving) {
+        started = true;
+        return reconcile.promise;
+      }
+      if (command === "set_agent_session_approval_mode") {
+        saving = true;
+        return Promise.resolve(savedA);
+      }
+      return fallback?.(command, args);
+    });
+    render(
+      <>
+        <Surface />
+        <AgentWorkspace initialSession={idleA} />
+      </>,
+    );
+    await within(screen.getByRole("complementary")).findByText(idleA.title);
+    const user = userEvent.setup();
+    await user.selectOptions(
+      await screen.findByRole("combobox", { name: "Tool approval" }),
+      "bypass",
+    );
+    await waitFor(() => expect(started).toBe(true));
+    act(() => setCurrentDataPartitionName("other"));
+    const published = vi.fn();
+    window.addEventListener(AGENT_SESSIONS_CHANGED_EVENT, published);
+    try {
+      await act(async () => {
+        if (outcome === "resolve") reconcile.resolve([savedA, b]);
+        else reconcile.reject(new Error("Old partition read failed"));
+      });
+      expect(published).not.toHaveBeenCalled();
+      expect(screen.queryByText(b.title)).not.toBeInTheDocument();
+      expect(screen.queryByText("Old partition read failed")).not.toBeInTheDocument();
+    } finally {
+      window.removeEventListener(AGENT_SESSIONS_CHANGED_EVENT, published);
+    }
+  });
+
   it("publishes MCP create and rename snapshots to Sidebar outside Workspace while A stays running", async () => {
     writeAgentSessionDraft(a.id, "Keep A's draft");
     render(<Surface />);

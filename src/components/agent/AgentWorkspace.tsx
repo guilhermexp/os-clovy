@@ -637,17 +637,6 @@ export function AgentWorkspace({
     });
   }, []);
 
-  const publishSavedApproval = useCallback(
-    (updated: AgentSessionDto, partition: string) => {
-      // Fence every list producer that started before the persisted mutation.
-      invalidateAgentSessionSnapshots();
-      sessionListRevisionRef.current += 1;
-      if (partition !== getCurrentDataPartitionName()) return;
-      publishSessions(sessionsRef.current.map((item) => (item.id === updated.id ? updated : item)));
-    },
-    [publishSessions],
-  );
-
   const refreshSessions = useCallback(async () => {
     const revision = ++sessionListRevisionRef.current;
     const nativeEpoch = readAgentSessionSnapshotEpoch();
@@ -672,6 +661,20 @@ export function AgentWorkspace({
     publishSessions(next);
     return next;
   }, [publishSessions]);
+
+  const publishSavedApproval = useCallback(
+    (updated: AgentSessionDto, partition: string) => {
+      // Fence every list producer that started before the persisted mutation.
+      invalidateAgentSessionSnapshots();
+      sessionListRevisionRef.current += 1;
+      if (partition !== getCurrentDataPartitionName()) return;
+      publishSessions(sessionsRef.current.map((item) => (item.id === updated.id ? updated : item)));
+      // The publication supersedes pending native reads in the App consumer.
+      // Replace them with a fresh authoritative read in the new epoch.
+      void refreshSessions().catch((cause) => setError(messageFromError(cause)));
+    },
+    [publishSessions, refreshSessions],
+  );
 
   useEffect(() => {
     const acceptSessionSnapshot = (event: Event) => {
