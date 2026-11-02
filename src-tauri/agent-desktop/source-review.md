@@ -45,6 +45,13 @@ The live element and root-binding paths also check the original deadline
 immediately after the initial native PID read, before process or filesystem
 qualification. This is a source-level correction; it does not establish
 native timing behavior.
+
+Windows path, search, chrome-repair and anchor resolution now bind each
+candidate's own process generation before reading matching evidence and require
+that same binding when producing a native handle. The root generation remains
+separate. The shared HRESULT import is available to its unconditional generic
+error function on all targets; this permits a portable walker control-flow
+proof and does not establish Windows UIA behavior.
 Windows UIA descendants, capture, input and other native guards, macOS guards,
 a newly prepared engine, and native acceptance remain pending. This partial
 change does not qualify an existing engine artifact.

@@ -5618,6 +5618,18 @@ index 75b4c76..b091e04 100644
              scale_factor: scale,
          },
          deadline,
+diff --git a/crates/windows/src/system/runtime/hresult.rs b/crates/windows/src/system/runtime/hresult.rs
+index d176588..3d558cd 100644
+--- a/crates/windows/src/system/runtime/hresult.rs
++++ b/crates/windows/src/system/runtime/hresult.rs
+@@ -13,7 +13,6 @@
+ //! record per code makes a code's disposition and its error code the same
+ //! fact, written once.
+
+-#[cfg(target_os = "windows")]
+ use agent_desktop_core::AdapterError;
+ use agent_desktop_core::ErrorCode;
+
 diff --git a/crates/windows/src/system/window/window_identity.rs b/crates/windows/src/system/window/window_identity.rs
 index 15125cc..a49c42f 100644
 --- a/crates/windows/src/system/window/window_identity.rs
@@ -6653,7 +6665,7 @@ index 67cfc47..19cf46f 100644
          result.is_ok(),
          "a live fixture root must pass the liveness gate: {result:?}"
 diff --git a/crates/windows/src/tree/resolve/mod.rs b/crates/windows/src/tree/resolve/mod.rs
-index 123d6fd..ab8fdd3 100644
+index 123d6fd..395fee9 100644
 --- a/crates/windows/src/tree/resolve/mod.rs
 +++ b/crates/windows/src/tree/resolve/mod.rs
 @@ -77,7 +77,7 @@ fn resolve_attempt(entry: &RefEntry, deadline: Deadline) -> Result<NativeHandle,
@@ -6698,7 +6710,7 @@ index 123d6fd..ab8fdd3 100644
          }
          SearchVerdict::Ambiguous => Err(ambiguous_target_error(entry, searched.len())),
      }
-@@ -216,21 +219,49 @@ fn classify_search(
+@@ -216,21 +219,26 @@ fn classify_search(
      }
  }
 
@@ -6714,6 +6726,11 @@ index 123d6fd..ab8fdd3 100644
      entry: &RefEntry,
 -) -> NativeHandle {
 -    element
+-        .with_verified_process(
+-            entry.process.pid.get(),
+-            entry.process.process_instance.clone().unwrap_or_default(),
+-        )
+-        .into_native_handle()
 +    deadline: Deadline,
 +) -> Result<NativeHandle, AdapterError> {
 +    deadline.ensure_remaining()?;
@@ -6722,41 +6739,16 @@ index 123d6fd..ab8fdd3 100644
 +        .process_instance
 +        .as_ref()
 +        .ok_or_else(|| stale_ref_error(entry))?;
-+    let _root = crate::private_browser_guard::qualify_expected(entry.process.pid, root_token)?;
-+    deadline.ensure_remaining()?;
-+    let pid = element
-+        .0
-+        .get_process_id()
-+        .map_err(|_| stale_ref_error(entry))?;
-+    if pid == 0 {
++    if !element.matches_root(entry.process.pid.get(), root_token) {
 +        return Err(stale_ref_error(entry));
 +    }
++    let _authority = crate::tree::element::qualify_verified(&element, deadline)?;
 +    deadline.ensure_remaining()?;
-+    let authority = crate::private_browser_guard::qualify(agent_desktop_core::ProcessId::new(pid))?;
-+    deadline.ensure_remaining()?;
-+    if element
-+        .0
-+        .get_process_id()
-+        .map_err(|_| stale_ref_error(entry))?
-+        != pid
-+    {
-+        return Err(stale_ref_error(entry));
-+    }
-+    deadline.ensure_remaining()?;
-+    Ok(element
-         .with_verified_process(
-+            pid,
-+            authority.token().to_owned(),
-             entry.process.pid.get(),
--            entry.process.process_instance.clone().unwrap_or_default(),
-+            root_token.clone(),
-         )
--        .into_native_handle()
-+        .into_native_handle())
++    Ok(element.into_native_handle())
  }
 
  #[cfg(target_os = "windows")]
-@@ -332,6 +363,7 @@ pub(crate) fn resolve_window_root(
+@@ -332,6 +340,7 @@ pub(crate) fn resolve_window_root(
          bounds: None,
          state: Default::default(),
      };
@@ -6764,7 +6756,7 @@ index 123d6fd..ab8fdd3 100644
      crate::system::window::window_identity::WindowIdentityEvidence::from_info(
          crate::system::window::window_ops::parse_handle(&window.id),
          &window,
-@@ -340,10 +372,23 @@ pub(crate) fn resolve_window_root(
+@@ -340,10 +349,23 @@ pub(crate) fn resolve_window_root(
      .verify_stored()
      .map_err(|_| verify_stored_failure_error(entry, deadline))?;
 
@@ -6809,7 +6801,7 @@ index ca89e32..d2b9daa 100644
      let budget = WalkBudget::new(10, deadline);
 
 diff --git a/crates/windows/src/tree/resolve/resolve_anchor.rs b/crates/windows/src/tree/resolve/resolve_anchor.rs
-index 3990eff..159b009 100644
+index 3990eff..d866413 100644
 --- a/crates/windows/src/tree/resolve/resolve_anchor.rs
 +++ b/crates/windows/src/tree/resolve/resolve_anchor.rs
 @@ -78,7 +78,7 @@ fn resolve_locator_anchor_once(
@@ -6821,11 +6813,12 @@ index 3990eff..159b009 100644
      let prepared = source.prepare_root(&root)?;
      let budget = resolve_walk_budget(deadline);
 
-@@ -92,11 +92,11 @@ fn resolve_locator_anchor_once(
+@@ -92,11 +92,12 @@ fn resolve_locator_anchor_once(
      let Some(candidate) = landing.element else {
          return Err(stale_ref_error(entry));
      };
 -    let (_, evidence, _) = source.evidence(&candidate);
++    let candidate = source.bind(&candidate)?;
 +    let (_, evidence, _) = source.evidence(&candidate)?;
      anchor_role_verdict(entry, &evidence)?;
      match anchor_geometry_verdict(entry, &evidence) {
@@ -6887,7 +6880,7 @@ index b534f1b..aafe8dd 100644
          evidence
              .role
 diff --git a/crates/windows/src/tree/resolve/resolve_chrome_repair.rs b/crates/windows/src/tree/resolve/resolve_chrome_repair.rs
-index ef9ea05..bd4be54 100644
+index ef9ea05..9147d6e 100644
 --- a/crates/windows/src/tree/resolve/resolve_chrome_repair.rs
 +++ b/crates/windows/src/tree/resolve/resolve_chrome_repair.rs
 @@ -11,7 +11,7 @@
@@ -6911,7 +6904,7 @@ index ef9ea05..bd4be54 100644
      }
      let mut parent = None;
      let mut current = root.clone();
-@@ -59,31 +59,41 @@ pub(crate) fn repair_past_leading_chrome<S: TreeSource>(
+@@ -59,31 +59,42 @@ pub(crate) fn repair_past_leading_chrome<S: TreeSource>(
      for &index in entry.scope.path.iter() {
          let take = index.saturating_add(MAX_LEADING_CHROME + 1);
          let children =
@@ -6950,6 +6943,7 @@ index ef9ea05..bd4be54 100644
 +    let Some(parent) = parent else {
 +        return Ok(None);
 +    };
++    let current = source.bind(&current)?;
 +    Ok(
 +        (shifted && is_unique_identity_match(source, &parent, &current, entry, budget)?)
 +            .then_some(current),
@@ -6969,7 +6963,7 @@ index ef9ea05..bd4be54 100644
  }
 
  fn is_unique_identity_match<S: TreeSource>(
-@@ -92,7 +102,7 @@ fn is_unique_identity_match<S: TreeSource>(
+@@ -92,7 +103,7 @@ fn is_unique_identity_match<S: TreeSource>(
      landing: &S::Node,
      entry: &RefEntry,
      budget: &WalkBudget,
@@ -6978,7 +6972,7 @@ index ef9ea05..bd4be54 100644
      let Ok(siblings) = descent::read_children(
          source,
          parent,
-@@ -100,21 +110,21 @@ fn is_unique_identity_match<S: TreeSource>(
+@@ -100,21 +111,22 @@ fn is_unique_identity_match<S: TreeSource>(
          &SEARCH_DESCENT,
          Some(SIBLING_CHECK_CAP + 1),
      ) else {
@@ -6992,7 +6986,8 @@ index ef9ea05..bd4be54 100644
      let mut matched = None;
      for sibling in &siblings.elements {
 -        let (_, evidence, _) = source.evidence(sibling);
-+        let (_, evidence, _) = source.evidence(sibling)?;
++        let sibling = source.bind(sibling)?;
++        let (_, evidence, _) = source.evidence(&sibling)?;
          match admit_node(entry, &evidence) {
              NodeAdmission::Collect if matched.is_none() => matched = Some(sibling),
 -            NodeAdmission::Collect | NodeAdmission::Unread => return false,
@@ -7001,7 +6996,7 @@ index ef9ea05..bd4be54 100644
          }
      }
 -    matched.is_some_and(|only| source.same_element(only, landing))
-+    Ok(matched.is_some_and(|only| source.same_element(only, landing)))
++    Ok(matched.is_some_and(|only| source.same_element(&only, landing)))
  }
 
  #[cfg(test)]
@@ -7067,10 +7062,20 @@ index 6fc647c..851f565 100644
      assert_eq!(
          repaired, None,
 diff --git a/crates/windows/src/tree/resolve/resolve_descent_tests.rs b/crates/windows/src/tree/resolve/resolve_descent_tests.rs
-index 5bdf16a..8333b45 100644
+index 5bdf16a..083a4e6 100644
 --- a/crates/windows/src/tree/resolve/resolve_descent_tests.rs
 +++ b/crates/windows/src/tree/resolve/resolve_descent_tests.rs
-@@ -83,14 +83,17 @@ impl TreeSource for StubTree {
+@@ -52,6 +52,9 @@ impl StubTree {
+
+ impl TreeSource for StubTree {
+     type Node = usize;
++    fn bind(&self, node: &usize) -> Result<usize, agent_desktop_core::AdapterError> {
++        Ok(*node)
++    }
+
+     fn first_child(&self, node: &usize) -> Result<usize, UiaFailure> {
+         if let Some(failure) = self.first_child_failure {
+@@ -83,14 +86,17 @@ impl TreeSource for StubTree {
          left == right
      }
 
@@ -7092,10 +7097,20 @@ index 5bdf16a..8333b45 100644
 
      fn is_web_wrapper(&self, _node: &usize, _properties: &ElementProperties) -> bool {
 diff --git a/crates/windows/src/tree/resolve/resolve_landing_tests.rs b/crates/windows/src/tree/resolve/resolve_landing_tests.rs
-index 12c500d..d72a237 100644
+index 12c500d..0e1b77b 100644
 --- a/crates/windows/src/tree/resolve/resolve_landing_tests.rs
 +++ b/crates/windows/src/tree/resolve/resolve_landing_tests.rs
-@@ -151,11 +151,14 @@ impl TreeSource for Counting<'_> {
+@@ -129,6 +129,9 @@ impl<'a> Counting<'a> {
+
+ impl TreeSource for Counting<'_> {
+     type Node = usize;
++    fn bind(&self, node: &usize) -> Result<usize, agent_desktop_core::AdapterError> {
++        self.inner.bind(node)
++    }
+
+     fn first_child(&self, node: &usize) -> Result<usize, UiaFailure> {
+         self.calls.set(self.calls.get() + 1);
+@@ -151,11 +154,14 @@ impl TreeSource for Counting<'_> {
      fn evidence(
          &self,
          node: &usize,
@@ -7227,39 +7242,52 @@ index 075865b..27c4f6e 100644
      let budget = WalkBudget::new(10, deadline);
      let found = find_password(&source, &prepared, &budget)
 diff --git a/crates/windows/src/tree/resolve/resolve_search.rs b/crates/windows/src/tree/resolve/resolve_search.rs
-index bba7ab9..e1cb4c7 100644
+index bba7ab9..d88c436 100644
 --- a/crates/windows/src/tree/resolve/resolve_search.rs
 +++ b/crates/windows/src/tree/resolve/resolve_search.rs
-@@ -145,15 +145,15 @@ pub(crate) fn accept_path_landing(
+@@ -145,15 +145,16 @@ pub(crate) fn accept_path_landing(
      source: &UiaTreeSource,
      candidate: &UIAElement,
      entry: &RefEntry,
 -) -> Option<UIAElement> {
 -    let (_, evidence, _) = source.evidence(candidate);
 +) -> Result<Option<UIAElement>, AdapterError> {
-+    let (_, evidence, _) = source.evidence(candidate)?;
++    let candidate = source.bind(candidate)?;
++    let (_, evidence, _) = source.evidence(&candidate)?;
      if geometry_contradicts(entry, &evidence) {
 -        return None;
 +        return Ok(None);
      }
 -    match admit_node(entry, &evidence) {
+-        NodeAdmission::Collect => Some(candidate.clone()),
 +    Ok(match admit_node(entry, &evidence) {
-         NodeAdmission::Collect => Some(candidate.clone()),
++        NodeAdmission::Collect => Some(candidate),
          NodeAdmission::Unread | NodeAdmission::Reject => None,
 -    }
 +    })
  }
 
  /// The geometry promotion eligibility predicate.
-@@ -326,7 +326,7 @@ pub(crate) fn search_under(
+@@ -326,15 +327,16 @@ pub(crate) fn search_under(
      }
      ctx.budget.deadline.ensure_remaining()?;
 
 -    let (_, evidence, _) = ctx.source.evidence(element);
-+    let (_, evidence, _) = ctx.source.evidence(element)?;
++    let element = ctx.source.bind(element)?;
++    let (_, evidence, _) = ctx.source.evidence(&element)?;
      match admit_node(ctx.entry, &evidence) {
-         NodeAdmission::Collect => out.push(build_candidate(element, &evidence)),
+-        NodeAdmission::Collect => out.push(build_candidate(element, &evidence)),
++        NodeAdmission::Collect => out.push(build_candidate(&element, &evidence)),
          NodeAdmission::Unread => *unread_region = true,
+         NodeAdmission::Reject => {}
+     }
+
+     if child_search_is_reachable(depth) {
+-        let children = enumerate_children(ctx.source, element, ctx.budget, unread_region)?;
++        let children = enumerate_children(ctx.source, &element, ctx.budget, unread_region)?;
+         for child in children {
+             search_under(ctx, &child, depth + 1, out, unread_region)?;
+         }
 diff --git a/crates/windows/src/tree/resolve/resolve_search_tests.rs b/crates/windows/src/tree/resolve/resolve_search_tests.rs
 index a9f7667..33d7cb8 100644
 --- a/crates/windows/src/tree/resolve/resolve_search_tests.rs
@@ -7916,10 +7944,20 @@ index 4c8d506..90b7421 100644
      }
  }
 diff --git a/crates/windows/src/tree/walk/walker.rs b/crates/windows/src/tree/walk/walker.rs
-index d289fef..5ce8b98 100644
+index d289fef..4ed0cd9 100644
 --- a/crates/windows/src/tree/walk/walker.rs
 +++ b/crates/windows/src/tree/walk/walker.rs
-@@ -95,11 +95,14 @@ pub trait TreeSource {
+@@ -74,6 +74,9 @@ pub enum NodeKey {
+ pub trait TreeSource {
+     type Node: Clone;
+
++    /// Bind a candidate's process generation before reading matching evidence.
++    fn bind(&self, node: &Self::Node) -> Result<Self::Node, AdapterError>;
++
+     /// Descends one level. `Err` whose failure `is_exhaustion()` means the
+     /// element has no children.
+     fn first_child(&self, node: &Self::Node) -> Result<Self::Node, UiaFailure>;
+@@ -95,11 +98,14 @@ pub trait TreeSource {
      fn evidence(
          &self,
          node: &Self::Node,
@@ -8005,7 +8043,7 @@ index 13ebc9a..bf804ae 100644
                  Some(subtree) => {
                      complete &= subtree.is_complete();
 diff --git a/crates/windows/src/tree/walk/walker_fake.rs b/crates/windows/src/tree/walk/walker_fake.rs
-index 10b8e07..7a8463d 100644
+index 10b8e07..d6b307c 100644
 --- a/crates/windows/src/tree/walk/walker_fake.rs
 +++ b/crates/windows/src/tree/walk/walker_fake.rs
 @@ -19,6 +19,21 @@ use crate::tree::{
@@ -8030,7 +8068,18 @@ index 10b8e07..7a8463d 100644
  /// The benign end-of-list pair A14-3 measured: `code() == 0` with `result()`
  /// `None`, on both build 17763 and build 26100.
  pub(crate) const EXHAUSTION: UiaFailure = UiaFailure::Sentinel(ERR_NONE);
-@@ -159,15 +174,18 @@ impl TreeSource for FakeTree {
+@@ -131,6 +146,10 @@ impl FakeTree {
+ impl TreeSource for FakeTree {
+     type Node = i32;
+
++    fn bind(&self, node: &i32) -> Result<i32, AdapterError> {
++        Ok(*node)
++    }
++
+     fn first_child(&self, node: &i32) -> Result<i32, UiaFailure> {
+         if let Some(delay) = self.faults.first_child_delay.get(node) {
+             std::thread::sleep(*delay);
+@@ -159,15 +178,18 @@ impl TreeSource for FakeTree {
          self.alias_of(*left) == self.alias_of(*right)
      }
 
@@ -8052,7 +8101,7 @@ index 10b8e07..7a8463d 100644
      }
 
      fn is_web_wrapper(&self, node: &i32, _properties: &ElementProperties) -> bool {
-@@ -295,7 +313,7 @@ fn scan_at<T>(
+@@ -295,7 +317,7 @@ fn scan_at<T>(
      if prefix.len() >= limits.max_depth as usize {
          return Ok(None);
      }
@@ -8061,7 +8110,7 @@ index 10b8e07..7a8463d 100644
      if let ControlFlow::Break(value) = visit(prefix, properties, evidence, failed) {
          return Ok(Some(value));
      }
-@@ -326,14 +344,14 @@ pub(crate) fn walk_all(
+@@ -326,14 +348,14 @@ pub(crate) fn walk_all(
      budget: &WalkBudget,
      max_depth: u8,
      visit: &mut impl FnMut(&[usize], LocatorEvidence),
@@ -8078,7 +8127,7 @@ index 10b8e07..7a8463d 100644
  }
 
  #[cfg(target_os = "windows")]
-@@ -343,19 +361,21 @@ fn walk_all_at(
+@@ -343,19 +365,21 @@ fn walk_all_at(
      limits: ScanLimits<'_>,
      prefix: &mut Vec<usize>,
      visit: &mut impl FnMut(&[usize], LocatorEvidence),
@@ -8106,7 +8155,7 @@ index 10b8e07..7a8463d 100644
 +    Ok(())
  }
 diff --git a/crates/windows/src/tree/walk/walker_source.rs b/crates/windows/src/tree/walk/walker_source.rs
-index 9feff85..8004a3a 100644
+index 9feff85..c59fb57 100644
 --- a/crates/windows/src/tree/walk/walker_source.rs
 +++ b/crates/windows/src/tree/walk/walker_source.rs
 @@ -9,7 +9,7 @@ mod imp {
@@ -8192,16 +8241,37 @@ index 9feff85..8004a3a 100644
          }
 
          /// Whether the root this source walks carries Chromium provenance; the
-@@ -214,21 +222,17 @@ mod imp {
+@@ -213,22 +221,38 @@ mod imp {
+     impl TreeSource for UiaTreeSource {
          type Node = UIAElement;
 
-         fn first_child(&self, node: &UIAElement) -> Result<UIAElement, UiaFailure> {
+-        fn first_child(&self, node: &UIAElement) -> Result<UIAElement, UiaFailure> {
 -            match &self.cache {
 -                Some(request) => self.walker.get_first_child_build_cache(&node.0, request),
 -                None => self.walker.get_first_child(&node.0),
--            }
++        fn bind(&self, node: &UIAElement) -> Result<UIAElement, AdapterError> {
++            if node.1.is_some() {
++                if !node.matches_root(self.root_pid, &self.root_token) {
++                    return Err(AdapterError::new(
++                        agent_desktop_core::ErrorCode::StaleRef,
++                        "Element root identity changed",
++                    ));
++                }
++                let _authority = crate::tree::element::qualify_verified(node, self.deadline)?;
++                Ok(node.clone())
++            } else {
++                crate::tree::element::bind_root(
++                    node.clone(),
++                    self.root_pid,
++                    &self.root_token,
++                    self.deadline,
++                )
+             }
 -            .map(UIAElement::from)
 -            .map_err(|error| failure_of(&error))
++        }
++
++        fn first_child(&self, node: &UIAElement) -> Result<UIAElement, UiaFailure> {
 +            self.walker
 +                .get_first_child(&node.0)
 +                .map(UIAElement::from)
@@ -8222,7 +8292,7 @@ index 9feff85..8004a3a 100644
          }
 
          fn identity(&self, node: &UIAElement) -> NodeKey {
-@@ -242,23 +246,131 @@ mod imp {
+@@ -242,23 +266,139 @@ mod imp {
          fn evidence(
              &self,
              node: &UIAElement,
@@ -8260,6 +8330,14 @@ index 9feff85..8004a3a 100644
 +                None
 +            };
 +            let node_authority = crate::tree::element::qualify_current(node, self.deadline)?;
++            if let Some((pid, token)) = node.verified_process() {
++                if node_authority.pid().get() != pid || node_authority.token() != token {
++                    return Err(AdapterError::new(
++                        agent_desktop_core::ErrorCode::StaleRef,
++                        "Element identity changed",
++                    ));
++                }
++            }
 +            let pid = node.0.get_process_id().map_err(|_| {
 +                AdapterError::new(
 +                    agent_desktop_core::ErrorCode::StaleRef,
@@ -8365,7 +8443,7 @@ index 9feff85..8004a3a 100644
          }
 
          fn is_web_wrapper(
-@@ -286,7 +398,10 @@ mod imp {
+@@ -286,7 +426,10 @@ mod imp {
      pub struct UiaTreeSource;
 
      impl UiaTreeSource {
@@ -8377,7 +8455,18 @@ index 9feff85..8004a3a 100644
              Ok(Self)
          }
 
-@@ -317,16 +432,19 @@ mod imp {
+@@ -298,6 +441,10 @@ mod imp {
+     impl TreeSource for UiaTreeSource {
+         type Node = UIAElement;
+
++        fn bind(&self, _node: &UIAElement) -> Result<UIAElement, AdapterError> {
++            Err(AdapterError::not_supported("Windows UI Automation"))
++        }
++
+         fn first_child(&self, _node: &UIAElement) -> Result<UIAElement, UiaFailure> {
+             Err(UiaFailure::Sentinel(ERR_NONE))
+         }
+@@ -317,16 +464,19 @@ mod imp {
          fn evidence(
              &self,
              _node: &UIAElement,
@@ -8403,7 +8492,7 @@ index 9feff85..8004a3a 100644
          }
 
          fn is_web_wrapper(
-@@ -357,7 +475,7 @@ pub fn walk_uia_subtree(
+@@ -357,7 +507,7 @@ pub fn walk_uia_subtree(
      root_source: &ObservationRoot<'_>,
      budget: WalkBudget,
  ) -> Result<WalkOutcome, AdapterError> {
@@ -8432,10 +8521,10 @@ index 9d645ac..797da4a 100644
              !source.chromium_provenance(),
              "the crate's own fixture must not be treated as Chromium provenance"
 diff --git a/crates/windows/src/tree/walk/walker_tests.rs b/crates/windows/src/tree/walk/walker_tests.rs
-index 80f1b92..de55840 100644
+index 80f1b92..764f633 100644
 --- a/crates/windows/src/tree/walk/walker_tests.rs
 +++ b/crates/windows/src/tree/walk/walker_tests.rs
-@@ -6,6 +6,58 @@ use crate::tree::walk::walker_fake::{
+@@ -6,6 +6,61 @@ use crate::tree::walk::walker_fake::{
  };
  use agent_desktop_core::{Deadline, ErrorCode};
 
@@ -8448,6 +8537,9 @@ index 80f1b92..de55840 100644
 +    }
 +    impl TreeSource for RefusingTree {
 +        type Node = i32;
++        fn bind(&self, node: &i32) -> Result<i32, AdapterError> {
++            self.inner.bind(node)
++        }
 +        fn first_child(&self, node: &i32) -> Result<i32, UiaFailure> {
 +            self.inner.first_child(node)
 +        }
