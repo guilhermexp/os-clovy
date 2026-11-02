@@ -5138,10 +5138,10 @@ index 3dd15a6..da6422e 100644
              Ok(()) => classify_success()?,
              Err(error) => classify_write("SetValue", RANGE_LABEL, &error)?,
 diff --git a/crates/windows/src/input/native_owner.rs b/crates/windows/src/input/native_owner.rs
-index 36e690e..bcece98 100644
+index 36e690e..e849a52 100644
 --- a/crates/windows/src/input/native_owner.rs
 +++ b/crates/windows/src/input/native_owner.rs
-@@ -80,12 +80,61 @@ pub(crate) fn ensure_interactive_desktop() -> Result<(), AdapterError> {
+@@ -80,12 +80,60 @@ pub(crate) fn ensure_interactive_desktop() -> Result<(), AdapterError> {
      })?;
      observation.map(|_| ())
  }
@@ -5178,10 +5178,9 @@ index 36e690e..bcece98 100644
 +    element: &crate::tree::element::UIAElement,
 +    deadline: agent_desktop_core::Deadline,
 +) -> Result<crate::tree::element::ElementAuthority, AdapterError> {
-+    deadline.ensure_remaining()?;
-+    ensure_interactive_desktop()?;
-+    let prior = UIA_ATTEMPTED.load(Ordering::Acquire);
 +    let guard_result = (|| {
++        deadline.ensure_remaining()?;
++        ensure_interactive_desktop()?;
 +        let authority = crate::tree::element::qualify_verified(element, deadline)?;
 +        deadline.ensure_remaining()?;
 +        agent_desktop_core::commands::clovy_cancel::ensure()?;
@@ -5189,7 +5188,7 @@ index 36e690e..bcece98 100644
 +        Ok(authority)
 +    })();
 +    let authority = guard_result.map_err(|error: AdapterError| {
-+        if prior
++        if UIA_ATTEMPTED.load(Ordering::Acquire)
 +            && matches!(
 +                error.disposition,
 +                DeliverySemantics::NotDelivered | DeliverySemantics::Unknown
