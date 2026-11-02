@@ -721,10 +721,10 @@ index 0000000..de43171
 +}
 diff --git a/crates/core/src/commands/clovy_targeted.rs b/crates/core/src/commands/clovy_targeted.rs
 new file mode 100644
-index 0000000..5f64d9b
+index 0000000..d799bf0
 --- /dev/null
 +++ b/crates/core/src/commands/clovy_targeted.rs
-@@ -0,0 +1,457 @@
+@@ -0,0 +1,460 @@
 +//! Private exact-window input. Expected capture identity is revalidated inside
 +//! the interaction lease; preparatory focus is retained as a separate effect.
 +use crate::{
@@ -738,7 +738,10 @@ index 0000000..5f64d9b
 +        .with_disposition(DeliverySemantics::not_delivered())
 +        .into()
 +}
-+fn checked_window(expected: &WindowInfo, live: WindowInfo) -> Result<WindowInfo, AppError> {
++pub(super) fn checked_window(
++    expected: &WindowInfo,
++    live: WindowInfo,
++) -> Result<WindowInfo, AppError> {
 +    if expected.id != live.id
 +        || expected.pid != live.pid
 +        || expected
@@ -1982,8 +1985,64 @@ index 4c09602..3a75171 100644
              source_app,
              source_window_id: None,
              source_window_title: None,
+diff --git a/crates/core/src/commands/screenshot.rs b/crates/core/src/commands/screenshot.rs
+index 747e9fe..fe90b82 100644
+--- a/crates/core/src/commands/screenshot.rs
++++ b/crates/core/src/commands/screenshot.rs
+@@ -10,6 +10,7 @@ use std::path::PathBuf;
+ const PROCESS_STATE_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+
+ pub struct ScreenshotArgs {
++    pub clovy_target_json: Option<String>,
+     pub app: Option<String>,
+     pub window_id: Option<String>,
+     pub screen: Option<usize>,
+@@ -48,6 +49,43 @@ fn resolve_target(
+     adapter: &dyn PlatformAdapter,
+     deadline: crate::Deadline,
+ ) -> Result<ScreenshotTarget, AppError> {
++    if let Some(encoded) = &args.clovy_target_json {
++        if args.screen.is_some() || args.app.is_some() {
++            return Err(AppError::invalid_input_with_suggestion(
++                "A private window target cannot be combined with another target",
++                "Choose one exact window target.",
++            ));
++        }
++        let expected: crate::WindowInfo = serde_json::from_str(encoded).map_err(|_| {
++            AppError::invalid_input_with_suggestion(
++                "Invalid exact window target",
++                "Refresh the window and retry.",
++            )
++        })?;
++        if args.window_id.as_deref() != Some(expected.id.as_str()) {
++            return Err(AppError::Adapter(AdapterError::stale_ref_because(
++                "Exact screenshot window changed",
++            )));
++        }
++        let matches = adapter
++            .list_windows(
++                &WindowFilter {
++                    focused_only: false,
++                    app: None,
++                },
++                deadline,
++            )?
++            .into_iter()
++            .filter(|window| window.id == expected.id)
++            .collect::<Vec<_>>();
++        let [live] = matches.as_slice() else {
++            return Err(AppError::Adapter(AdapterError::stale_ref_because(
++                "Exact screenshot window is unavailable or ambiguous",
++            )));
++        };
++        let live = crate::commands::clovy_targeted::checked_window(&expected, live.clone())?;
++        return Ok(ScreenshotTarget::ExactWindow(live));
++    }
+     if args.screen.is_some() && (args.app.is_some() || args.window_id.is_some()) {
+         return Err(AppError::invalid_input_with_suggestion(
+             "--screen cannot be combined with --app or --window-id",
 diff --git a/crates/core/src/commands/screenshot_tests.rs b/crates/core/src/commands/screenshot_tests.rs
-index a4c71c6..043d904 100644
+index a4c71c6..25a9035 100644
 --- a/crates/core/src/commands/screenshot_tests.rs
 +++ b/crates/core/src/commands/screenshot_tests.rs
 @@ -102,6 +102,7 @@ fn display(id: &str, is_primary: bool, scale: f64) -> DisplayInfo {
@@ -1994,6 +2053,63 @@ index a4c71c6..043d904 100644
          id: id.into(),
          title: format!("Window {id}"),
          app: "Example".into(),
+@@ -117,6 +118,7 @@ fn window(id: &str, pid: u32) -> WindowInfo {
+
+ fn args() -> ScreenshotArgs {
+     ScreenshotArgs {
++        clovy_target_json: None,
+         app: None,
+         window_id: None,
+         screen: None,
+@@ -124,6 +126,48 @@ fn args() -> ScreenshotArgs {
+     }
+ }
+
++#[test]
++fn private_screenshot_rejects_reused_window_generation_before_capture() {
++    let mut adapter = ScreenshotAdapter::new();
++    let mut expected = adapter.windows[0].clone();
++    expected.bounds = Some(Rect {
++        x: 0.0,
++        y: 0.0,
++        width: 80.0,
++        height: 60.0,
++    });
++    adapter.windows[0].bounds = expected.bounds;
++    adapter.windows[0].process_instance = Some("replacement".into());
++    let mut request = args();
++    request.window_id = Some(expected.id.clone());
++    request.clovy_target_json = Some(serde_json::to_string(&expected).unwrap());
++    assert_eq!(
++        screenshot::execute(request, &adapter).unwrap_err().code(),
++        "STALE_REF"
++    );
++    assert!(adapter.take_target().is_none());
++}
++
++#[test]
++fn private_screenshot_accepts_the_original_window_identity() {
++    let mut adapter = ScreenshotAdapter::new();
++    adapter.windows[0].bounds = Some(Rect {
++        x: 0.0,
++        y: 0.0,
++        width: 80.0,
++        height: 60.0,
++    });
++    let expected = &adapter.windows[0];
++    let mut request = args();
++    request.window_id = Some(expected.id.clone());
++    request.clovy_target_json = Some(serde_json::to_string(expected).unwrap());
++    screenshot::execute(request, &adapter).unwrap();
++    assert!(matches!(
++        adapter.take_target(),
++        Some(ScreenshotTarget::ExactWindow(_))
++    ));
++}
++
+ #[test]
+ fn screen_target_pins_selected_display_identity() {
+     let adapter = ScreenshotAdapter::new();
 diff --git a/crates/core/src/commands/snapshot.rs b/crates/core/src/commands/snapshot.rs
 index 94f1dcd..a8f34ca 100644
 --- a/crates/core/src/commands/snapshot.rs
@@ -4415,6 +4531,377 @@ index 2066fbc..37bb426 100644
              id: "w-1.1-p".into(),
              title: "frame".into(),
              app: "fixture".into(),
+diff --git a/crates/macos/src/actions/activation_effect.rs b/crates/macos/src/actions/activation_effect.rs
+index 632d83f..cb53e17 100644
+--- a/crates/macos/src/actions/activation_effect.rs
++++ b/crates/macos/src/actions/activation_effect.rs
+@@ -1,6 +1,6 @@
+ #[cfg(target_os = "macos")]
+ mod imp {
+-    use agent_desktop_core::Deadline;
++    use agent_desktop_core::{AdapterError, Deadline, ErrorCode};
+
+     use crate::tree::AXElement;
+
+@@ -41,53 +41,79 @@ mod imp {
+         }
+     }
+
+-    pub(crate) fn focus_state(element: &AXElement, deadline: Deadline) -> Option<FocusState> {
+-        let app = crate::system::app::app_ops::pid_from_element(element, deadline)
+-            .map(crate::tree::element_for_pid)?;
+-        Some(FocusState {
+-            focused_element: crate::tree::properties::attributes::copy_element_attr_result(
++    pub(crate) fn focus_state(
++        element: &AXElement,
++        deadline: Deadline,
++    ) -> Result<Option<FocusState>, AdapterError> {
++        let end = crate::tree::locator_deadline::from_operation(deadline)?;
++        element.qualify(end)?;
++        let pid = crate::system::app::app_ops::pid_from_element(element, deadline)
++            .ok_or_else(|| AdapterError::stale_ref_because("Accessibility owner is unavailable"))?;
++        element.qualify(end)?;
++        let mut app = crate::tree::element_for_pid(pid);
++        app.bind_child(element, end)?;
++        Ok(Some(FocusState {
++            focused_element: optional(crate::tree::surface_read::element(
+                 &app,
+                 "AXFocusedUIElement",
+-                deadline,
+-            )
+-            .ok()?,
+-            selected: crate::tree::properties::attributes::copy_bool_attr_result(
++                end,
++            ))?,
++            selected: optional(crate::tree::surface_read::boolean(
+                 element,
+                 crate::actions::select::container_select::SELECTED,
+-                deadline,
+-            )
+-            .ok()
+-            .flatten(),
+-            menu_open: owned_menu_open(element, deadline),
+-        })
++                end,
++            ))?,
++            menu_open: owned_menu_open(element, deadline)?,
++        }))
++    }
++
++    fn optional<T>(result: Result<Option<T>, AdapterError>) -> Result<Option<T>, AdapterError> {
++        match result {
++            Err(error) if matches!(error.code, ErrorCode::PolicyDenied | ErrorCode::StaleRef) => {
++                Err(error)
++            }
++            Err(_) => Ok(None),
++            result => result,
++        }
+     }
+
+-    fn owned_menu_open(element: &AXElement, deadline: Deadline) -> Option<bool> {
++    fn owned_menu_open(
++        element: &AXElement,
++        deadline: Deadline,
++    ) -> Result<Option<bool>, AdapterError> {
+         use crate::tree::surface_read;
+-        let end = crate::tree::locator_deadline::from_operation(deadline).ok()?;
+-        let role = surface_read::string(element, "AXRole", end).ok()??;
++        let end = crate::tree::locator_deadline::from_operation(deadline)?;
++        let Some(role) = optional(surface_read::string(element, "AXRole", end))? else {
++            return Ok(None);
++        };
+         if !matches!(
+             role.as_str(),
+             "AXMenuButton" | "AXPopUpButton" | "AXMenuBarItem" | "AXMenuItem"
+         ) {
+-            return None;
++            return Ok(None);
+         }
+         let mut complete = true;
+-        for child in surface_read::elements(element, "AXChildren", end).ok()? {
+-            if surface_read::string(&child, "AXRole", end).ok()?? != "AXMenu" {
++        let Some(children) =
++            optional(surface_read::elements(element, "AXChildren", end).map(Some))?
++        else {
++            return Ok(None);
++        };
++        for child in children {
++            if optional(surface_read::string(&child, "AXRole", end))?.as_deref() != Some("AXMenu") {
+                 continue;
+             }
+-            let visible = surface_read::boolean(&child, "AXVisible", end).ok()?;
+-            let hidden = surface_read::boolean(&child, "AXHidden", end).ok()?;
+-            let bounds =
+-                crate::tree::element_bounds::read_bounds_with_deadline(&child, end).ok()?;
++            let visible = optional(surface_read::boolean(&child, "AXVisible", end))?;
++            let hidden = optional(surface_read::boolean(&child, "AXHidden", end))?;
++            let bounds = optional(crate::tree::element_bounds::read_bounds_with_deadline(
++                &child, end,
++            ))?;
+             match menu_visibility(visible, hidden, bounds) {
+-                Some(true) => return Some(true),
++                Some(true) => return Ok(Some(true)),
+                 Some(false) => {}
+                 None => complete = false,
+             }
+         }
+-        complete.then_some(false)
++        Ok(complete.then_some(false))
+     }
+
+     fn menu_visibility(
+@@ -109,13 +135,16 @@ mod imp {
+         before: &Option<FocusState>,
+         element: &AXElement,
+         deadline: Deadline,
+-    ) -> bool {
+-        let after = focus_state(element, deadline);
+-        let target_focused = after
++    ) -> Result<bool, AdapterError> {
++        let after = focus_state(element, deadline)?;
++        let target_focused = match after
+             .as_ref()
+             .and_then(|state| state.focused_element.as_ref())
+-            .is_some_and(|focused| focus_reached(focused, element, deadline));
+-        observed_change(before, &after, target_focused)
++        {
++            Some(focused) => focus_reached(focused, element, deadline)?,
++            None => false,
++        };
++        Ok(observed_change(before, &after, target_focused))
+     }
+
+     /// A control that owns an editor hands focus to the editor, not to itself:
+@@ -126,36 +155,37 @@ mod imp {
+         focused: &AXElement,
+         element: &AXElement,
+         deadline: Deadline,
+-    ) -> bool {
++    ) -> Result<bool, AdapterError> {
+         let mut current = focused.clone();
+         for _ in 0..FOCUS_DESCENT_WALK {
+             if crate::tree::same_element(&current, element) {
+-                return true;
++                return Ok(true);
+             }
+-            let Some(parent) = crate::tree::properties::attributes::copy_element_attr_result(
+-                &current, "AXParent", deadline,
+-            )
+-            .ok()
+-            .flatten() else {
+-                return false;
++            let end = crate::tree::locator_deadline::from_operation(deadline)?;
++            let Some(parent) = optional(crate::tree::surface_read::element(
++                &current, "AXParent", end,
++            ))?
++            else {
++                return Ok(false);
+             };
+             current = parent;
+         }
+-        false
++        Ok(false)
+     }
+
+     pub(crate) fn settled_change(
+         before: &Option<FocusState>,
+         element: &AXElement,
+         deadline: Deadline,
+-    ) -> bool {
++    ) -> Result<bool, AdapterError> {
+         if before.is_none() {
+-            return false;
++            return Ok(false);
+         }
+         let deadline = deadline.capped(std::time::Duration::from_millis(SETTLE_BUDGET_MS));
+         while !deadline.is_expired() {
+-            if changed_now(before, element, deadline) {
+-                return true;
++            agent_desktop_core::commands::clovy_cancel::ensure()?;
++            if changed_now(before, element, deadline)? {
++                return Ok(true);
+             }
+             std::thread::sleep(
+                 deadline
+@@ -163,7 +193,7 @@ mod imp {
+                     .min(std::time::Duration::from_millis(SETTLE_POLL_MS)),
+             );
+         }
+-        false
++        Ok(false)
+     }
+
+     fn observed_change(
+diff --git a/crates/macos/src/actions/ax_helpers.rs b/crates/macos/src/actions/ax_helpers.rs
+index a4aadfc..00bcc29 100644
+--- a/crates/macos/src/actions/ax_helpers.rs
++++ b/crates/macos/src/actions/ax_helpers.rs
+@@ -20,7 +20,7 @@ mod imp {
+         name: &str,
+         deadline: agent_desktop_core::Deadline,
+     ) -> Result<bool, AdapterError> {
+-        if advertises_action(el, name, deadline) == Some(false) {
++        if advertises_action(el, name, deadline)? == Some(false) {
+             return Ok(false);
+         }
+         let action = CFString::new(name);
+@@ -100,11 +100,14 @@ mod imp {
+         deadline: agent_desktop_core::Deadline,
+     ) -> Result<bool, AdapterError> {
+         let cf_attr = CFString::new(attr);
++        let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++        el.qualify(instant)?;
+         let (err, settable) = crate::tree::properties::ax_ipc::is_attribute_settable(
+             el,
+             cf_attr.as_concrete_TypeRef(),
+             deadline,
+         );
++        el.qualify(instant)?;
+         ensure_read_finished(deadline)?;
+         classify_settable_read(attr, err, settable)
+     }
+@@ -126,11 +129,19 @@ mod imp {
+         deadline: agent_desktop_core::Deadline,
+     ) -> Result<(), AdapterError> {
+         let cf_attr = CFString::new(kAXValueAttribute);
++        let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++        el.qualify(instant)?;
+         let (read, current) = crate::tree::properties::ax_ipc::copy_attribute_value(
+             el,
+             cf_attr.as_concrete_TypeRef(),
+             deadline,
+         );
++        if let Err(error) = el.qualify(instant) {
++            if !current.is_null() {
++                unsafe { core_foundation::base::CFRelease(current) };
++            }
++            return Err(error);
++        }
+         ensure_read_finished(deadline)?;
+         if read != kAXErrorSuccess {
+             if !current.is_null() {
+@@ -285,14 +296,31 @@ mod imp {
+         use accessibility_sys::kAXRoleAttribute;
+         prepare(el, deadline)?;
+         let read_deadline = crate::tree::properties::ax_ipc::AxDeadline::absolute(deadline)?;
++        let mut authority_error = None;
+         let role = crate::tree::read_recovery::read(read_deadline, || {
+-            crate::tree::properties::attributes::copy_string_attr_result(
++            if let Err(error) = agent_desktop_core::commands::clovy_cancel::ensure() {
++                authority_error = Some(error);
++                return Err(i32::MIN);
++            }
++            if let Err(error) = el.qualify(read_deadline) {
++                authority_error = Some(error);
++                return Err(i32::MIN);
++            }
++            let result = crate::tree::properties::attributes::copy_string_attr_result(
+                 el,
+                 kAXRoleAttribute,
+                 read_deadline,
+-            )
+-        })
+-        .map_err(|error| read_failure(kAXRoleAttribute, error))?;
++            );
++            if let Err(error) = el.qualify(read_deadline) {
++                authority_error = Some(error);
++                return Err(i32::MIN);
++            }
++            result
++        });
++        if let Some(error) = authority_error {
++            return Err(error);
++        }
++        let role = role.map_err(|error| read_failure(kAXRoleAttribute, error))?;
+         ensure_read_finished(deadline)?;
+         Ok(role.map(|role| crate::tree::roles::ax_role_to_str(&role).to_string()))
+     }
+diff --git a/crates/macos/src/actions/ax_perform.rs b/crates/macos/src/actions/ax_perform.rs
+index 386ae66..c91e6b4 100644
+--- a/crates/macos/src/actions/ax_perform.rs
++++ b/crates/macos/src/actions/ax_perform.rs
+@@ -22,10 +22,10 @@ mod imp {
+         use crate::actions::chain::chain_delivery::DeliveryOutcome;
+         use ax_mutation::PerformSignal;
+
+-        if advertises_action(el, name, deadline) == Some(false) {
++        if advertises_action(el, name, deadline)? == Some(false) {
+             return Ok(DeliveryOutcome::NotDelivered);
+         }
+-        let before = activation_effect::focus_state(el, deadline);
++        let before = activation_effect::focus_state(el, deadline)?;
+         let action = CFString::new(name);
+         let error = crate::tree::properties::ax_ipc::perform_action(
+             el,
+@@ -40,7 +40,9 @@ mod imp {
+                 return ax_mutation::settle_uninformative_perform(
+                     name,
+                     error,
+-                    activation_effect::settled_change(&before, el, deadline),
++                    activation_effect::settled_change(&before, el, deadline).map_err(|error| {
++                        error.with_disposition(agent_desktop_core::DeliverySemantics::uncertain())
++                    })?,
+                 )
+                 .map_err(|_| failure);
+             }
+@@ -50,12 +52,18 @@ mod imp {
+             PerformSignal::ReportedUnsupported => Ok(DeliveryOutcome::NotDelivered),
+             PerformSignal::ReportedDelivered => Ok(DeliveryOutcome::from_delivery(
+                 true,
+-                activation_effect::changed_now(&before, el, deadline),
++                activation_effect::changed_now(&before, el, deadline).map_err(|error| {
++                    error.with_disposition(
++                        agent_desktop_core::DeliverySemantics::delivered_unverified(),
++                    )
++                })?,
+             )),
+             PerformSignal::Uninformative => ax_mutation::settle_uninformative_perform(
+                 name,
+                 error,
+-                activation_effect::settled_change(&before, el, deadline),
++                activation_effect::settled_change(&before, el, deadline).map_err(|error| {
++                    error.with_disposition(agent_desktop_core::DeliverySemantics::uncertain())
++                })?,
+             ),
+         }
+     }
+@@ -64,15 +72,22 @@ mod imp {
+         el: &AXElement,
+         name: &str,
+         deadline: agent_desktop_core::Deadline,
+-    ) -> Option<bool> {
++    ) -> Result<Option<bool>, AdapterError> {
++        let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++        el.qualify(instant)?;
+         let mut usage = crate::tree::observation_usage::ObservationUsage::with_defaults();
+         let read = crate::tree::properties::capabilities::copy_action_names_with_status(
+             el,
+             std::time::Instant::now() + deadline.remaining(),
+             &mut usage,
+         );
+-        read.value
+-            .map(|actions| actions.iter().any(|action| action == name))
++        el.qualify(instant)?;
++        if let Some(error) = read.authority_error {
++            return Err(error);
++        }
++        Ok(read
++            .value
++            .map(|actions| actions.iter().any(|action| action == name)))
+     }
+ }
+
+@@ -85,8 +100,8 @@ mod imp {
+         _el: &AXElement,
+         _name: &str,
+         _deadline: agent_desktop_core::Deadline,
+-    ) -> Option<bool> {
+-        None
++    ) -> Result<Option<bool>, AdapterError> {
++        Ok(None)
+     }
+
+     pub fn perform_observed_action(
 diff --git a/crates/macos/src/actions/chain/chain_disclosure_steps.rs b/crates/macos/src/actions/chain/chain_disclosure_steps.rs
 index a5589ff..4c80398 100644
 --- a/crates/macos/src/actions/chain/chain_disclosure_steps.rs
@@ -4521,7 +5008,7 @@ index bc0a543..64a00a7 100644
 
  fn select_containing_item(element: &AXElement, deadline: Deadline) -> Result<bool, AdapterError> {
 diff --git a/crates/macos/src/actions/chain/chain_value_write.rs b/crates/macos/src/actions/chain/chain_value_write.rs
-index 860c488..c24e5be 100644
+index 860c488..0302a63 100644
 --- a/crates/macos/src/actions/chain/chain_value_write.rs
 +++ b/crates/macos/src/actions/chain/chain_value_write.rs
 @@ -21,7 +21,9 @@ mod imp {
@@ -4545,7 +5032,68 @@ index 860c488..c24e5be 100644
          Ok(DeliveryOutcome::from_delivery(
              true,
              chain_verify::dynamic_write_had_effect(
-@@ -210,7 +213,7 @@ mod imp {
+@@ -128,13 +131,15 @@ mod imp {
+         prepare(element, deadline)?;
+         let delivered = match ax_helpers::set_ax_bool_or_err(element, attribute, value, deadline) {
+             Ok(delivered) => delivered,
+-            Err(error)
++            Err(error) => {
+                 if error.disposition == agent_desktop_core::DeliverySemantics::uncertain()
+-                    && focus_write_had_effect(element, attribute, value, deadline) =>
+-            {
+-                return Ok(DeliveryOutcome::DeliveredVerified);
++                    && focus_write_had_effect(element, attribute, value, deadline)
++                        .map_err(|failure| failure.with_disposition(agent_desktop_core::DeliverySemantics::uncertain()))?
++                {
++                    return Ok(DeliveryOutcome::DeliveredVerified);
++                }
++                return Err(error);
+             }
+-            Err(error) => return Err(error),
+         };
+         if !delivered {
+             return Ok(DeliveryOutcome::NotDelivered);
+@@ -142,9 +147,13 @@ mod imp {
+         let mut delivery = crate::actions::DeliveryTracker::default();
+         delivery.mark_delivered();
+         prepare(element, deadline).map_err(|error| delivery.annotate(error))?;
+-        let observed = crate::tree::copy_bool_attr(element, attribute, deadline);
++        let instant = crate::tree::locator_deadline::from_operation(deadline)
++            .map_err(|error| delivery.annotate(error))?;
++        let observed = crate::tree::surface_read::boolean(element, attribute, instant)
++            .map_err(|error| delivery.annotate(error))?;
+         let verified = chain_verify::bool_write_had_effect(attribute, value, observed)
+-            || focus_write_had_effect(element, attribute, value, deadline);
++            || focus_write_had_effect(element, attribute, value, deadline)
++                .map_err(|error| delivery.annotate(error))?;
+         Ok(DeliveryOutcome::from_delivery(
+             delivered,
+             delivered && verified,
+@@ -160,15 +169,18 @@ mod imp {
+         attribute: &str,
+         value: bool,
+         deadline: Deadline,
+-    ) -> bool {
++    ) -> Result<bool, AdapterError> {
+         if attribute != accessibility_sys::kAXFocusedAttribute || !value {
+-            return false;
++            return Ok(false);
+         }
+-        crate::actions::activation_effect::focus_state(element, deadline)
++        match crate::actions::activation_effect::focus_state(element, deadline)?
+             .and_then(|state| state.focused_element())
+-            .is_some_and(|focused| {
++        {
++            Some(focused) => {
+                 crate::actions::activation_effect::focus_reached(&focused, element, deadline)
+-            })
++            }
++            None => Ok(false),
++        }
+     }
+
+     pub(crate) fn increment_action(current: &str, target: &str) -> Option<&'static str> {
+@@ -210,7 +222,7 @@ mod imp {
          deadline: Deadline,
      ) -> Result<Option<(f64, String)>, AdapterError> {
          prepare(element, deadline)?;
@@ -4554,6 +5102,75 @@ index 860c488..c24e5be 100644
              .and_then(|value| finite_target(&value).map(|number| (number, value))))
      }
 
+diff --git a/crates/macos/src/actions/chain/press_selection.rs b/crates/macos/src/actions/chain/press_selection.rs
+index 037ce59..91fc894 100644
+--- a/crates/macos/src/actions/chain/press_selection.rs
++++ b/crates/macos/src/actions/chain/press_selection.rs
+@@ -39,7 +39,10 @@ mod imp {
+         }
+         Ok(outcome_from_selection(
+             pressed,
+-            selection_after_press(element, deadline),
++            selection_after_press(element, deadline).map_err(|error| {
++                error
++                    .with_disposition(agent_desktop_core::DeliverySemantics::delivered_unverified())
++            })?,
+         ))
+     }
+
+@@ -48,29 +51,31 @@ mod imp {
+     /// writes a selection that was already on its way. The wait is the same
+     /// bounded one the container write uses, and it ends the instant the
+     /// selection turns on.
+-    fn selection_after_press(element: &AXElement, deadline: Deadline) -> Option<bool> {
++    fn selection_after_press(
++        element: &AXElement,
++        deadline: Deadline,
++    ) -> Result<Option<bool>, AdapterError> {
+         if !crate::actions::select::container_select::element_activates_by_selection(
+             element, deadline,
+-        ) {
+-            return None;
++        )? {
++            return Ok(None);
+         }
+         let settle_end = std::time::Instant::now()
+             + std::time::Duration::from_millis(
+                 crate::actions::select::container_select::SELECTION_SETTLE_MS,
+             );
+         loop {
+-            let observed = crate::tree::properties::attributes::copy_bool_attr_result(
++            agent_desktop_core::commands::clovy_cancel::ensure()?;
++            let observed = crate::tree::surface_read::boolean(
+                 element,
+                 crate::actions::select::container_select::SELECTED,
+-                deadline,
+-            )
+-            .ok()
+-            .flatten();
++                crate::tree::locator_deadline::from_operation(deadline)?,
++            )?;
+             if observed != Some(false)
+                 || deadline.is_expired()
+                 || std::time::Instant::now() >= settle_end
+             {
+-                return observed;
++                return Ok(observed);
+             }
+             std::thread::sleep(deadline.remaining().min(std::time::Duration::from_millis(
+                 crate::actions::select::container_select::SELECTION_POLL_MS,
+diff --git a/crates/macos/src/actions/dispatch.rs b/crates/macos/src/actions/dispatch.rs
+index 920d34c..b339bce 100644
+--- a/crates/macos/src/actions/dispatch.rs
++++ b/crates/macos/src/actions/dispatch.rs
+@@ -18,6 +18,7 @@ mod imp {
+         request: &ActionRequest,
+         deadline: Deadline,
+     ) -> Result<ActionResult, AdapterError> {
++        el.qualify(crate::tree::locator_deadline::from_operation(deadline)?)?;
+         let budget = ChainContext {
+             dynamic_value: None,
+             verified_point: request.verified_point(),
 diff --git a/crates/macos/src/actions/extras.rs b/crates/macos/src/actions/extras.rs
 index 3f1b878..8e74fa5 100644
 --- a/crates/macos/src/actions/extras.rs
@@ -4567,6 +5184,160 @@ index 3f1b878..8e74fa5 100644
              return Ok(true);
          }
          if deadline.is_expired() {
+diff --git a/crates/macos/src/actions/physical_keyboard.rs b/crates/macos/src/actions/physical_keyboard.rs
+index 8fa71be..fb48582 100644
+--- a/crates/macos/src/actions/physical_keyboard.rs
++++ b/crates/macos/src/actions/physical_keyboard.rs
+@@ -79,7 +79,7 @@ fn prepare_target(
+     if let Some(window) = target_window(element, deadline)? {
+         crate::system::focus::verify_window_main(&window, deadline)?;
+     }
+-    crate::system::focus::verify_app_focused(pid, deadline)?;
++    crate::system::focus::verify_app_focused(element, deadline)?;
+     prepare(element, deadline)?;
+     if !crate::actions::ax_helpers::ax_focus_or_err(element, deadline)? {
+         return Err(AdapterError::new(
+@@ -90,7 +90,7 @@ fn prepare_target(
+     }
+     delivery.mark_delivered();
+     wait_for_focused_element(element, pid, deadline)?;
+-    crate::system::focus::verify_app_focused(pid, deadline)?;
++    crate::system::focus::verify_app_focused(element, deadline)?;
+     verify_delivery_target(element, identity, deadline)?;
+     Ok(identity)
+ }
+@@ -114,12 +114,11 @@ fn target_window(
+     element: &AXElement,
+     deadline: Deadline,
+ ) -> Result<Option<AXElement>, AdapterError> {
+-    prepare(element, deadline)?;
+-    let result = crate::tree::properties::attributes::copy_element_attr_result(
+-        element, "AXWindow", deadline,
+-    );
+-    deadline.ensure_remaining()?;
+-    result.map_err(|error| read_error("AXWindow", error))
++    crate::tree::surface_read::element(
++        element,
++        "AXWindow",
++        crate::tree::locator_deadline::from_operation(deadline)?,
++    )
+ }
+
+ fn wait_for_focused_element(
+@@ -149,7 +148,7 @@ fn verify_focused_element(
+     pid: i32,
+     deadline: Deadline,
+ ) -> Result<(), AdapterError> {
+-    crate::system::focus::verify_app_focused(pid, deadline)?;
++    crate::system::focus::verify_app_focused(expected, deadline)?;
+     if focused_element_matches(expected, pid, deadline)? {
+         return Ok(());
+     }
+@@ -165,43 +164,13 @@ fn focused_element_matches(
+     pid: i32,
+     deadline: Deadline,
+ ) -> Result<bool, AdapterError> {
+-    let app = crate::tree::element_for_pid(pid);
+-    prepare(&app, deadline)?;
+-    let result = crate::tree::properties::attributes::copy_element_attr_result(
+-        &app,
+-        "AXFocusedUIElement",
+-        deadline,
+-    );
+-    deadline.ensure_remaining()?;
+-    let focused = result.map_err(|error| read_error("AXFocusedUIElement", error))?;
++    let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++    let mut app = crate::tree::element_for_pid(pid);
++    app.bind_child(expected, instant)?;
++    let focused = crate::tree::surface_read::element(&app, "AXFocusedUIElement", instant)?;
+     Ok(focused.is_some_and(|focused| crate::tree::same_element(&focused, expected)))
+ }
+
+ fn prepare(element: &AXElement, deadline: Deadline) -> Result<(), AdapterError> {
+     crate::tree::properties::attributes::set_messaging_timeout(element, deadline)
+ }
+-
+-fn read_error(attribute: &str, error: i32) -> AdapterError {
+-    use accessibility_sys::{
+-        kAXErrorAPIDisabled, kAXErrorCannotComplete, kAXErrorInvalidUIElement,
+-    };
+-
+-    let code = if error == kAXErrorAPIDisabled {
+-        ErrorCode::PermDenied
+-    } else if error == kAXErrorCannotComplete {
+-        ErrorCode::Timeout
+-    } else if error == kAXErrorInvalidUIElement {
+-        ErrorCode::StaleRef
+-    } else {
+-        ErrorCode::ActionFailed
+-    };
+-    AdapterError::new(
+-        code,
+-        format!("Could not read {attribute} for keyboard targeting"),
+-    )
+-    .with_details(serde_json::json!({
+-        "attribute": attribute,
+-        "ax_error": error,
+-    }))
+-    .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered())
+-}
+diff --git a/crates/macos/src/actions/physical_target.rs b/crates/macos/src/actions/physical_target.rs
+index ff01b41..e0c1fe6 100644
+--- a/crates/macos/src/actions/physical_target.rs
++++ b/crates/macos/src/actions/physical_target.rs
+@@ -24,7 +24,7 @@ impl PreparedPhysicalTarget {
+                 )
+             })?;
+         let window = target_window(element, deadline)?;
+-        crate::system::focus::verify_app_focused(pid, deadline)?;
++        crate::system::focus::verify_app_focused(element, deadline)?;
+         crate::system::focus::verify_window_main(&window, deadline)?;
+         Ok(Self { identity, window })
+     }
+@@ -35,7 +35,7 @@ impl PreparedPhysicalTarget {
+         point: &Point,
+         deadline: Deadline,
+     ) -> Result<(), AdapterError> {
+-        crate::system::focus::verify_app_focused(self.identity.pid(), deadline)?;
++        crate::system::focus::verify_app_focused(&self.window, deadline)?;
+         crate::system::focus::verify_window_main(&self.window, deadline)?;
+         match crate::tree::hit_test::hit_test_ax_element(element, point.clone(), deadline)? {
+             agent_desktop_core::adapter::hit_test::HitTestResult::ReachesTarget => {}
+@@ -74,27 +74,16 @@ impl PreparedPhysicalTarget {
+ }
+
+ fn target_window(element: &AXElement, deadline: Deadline) -> Result<AXElement, AdapterError> {
+-    crate::tree::properties::attributes::set_messaging_timeout(element, deadline)?;
+-    let result = crate::tree::properties::attributes::copy_element_attr_result(
+-        element, "AXWindow", deadline,
+-    );
+-    if deadline.is_expired() {
+-        return Err(deadline.timeout_error());
+-    }
+-    match result {
+-        Ok(Some(window)) => Ok(window),
+-        Ok(None) => Err(AdapterError::new(
++    match crate::tree::surface_read::element(
++        element,
++        "AXWindow",
++        crate::tree::locator_deadline::from_operation(deadline)?,
++    )? {
++        Some(window) => Ok(window),
++        None => Err(AdapterError::new(
+             ErrorCode::ActionFailed,
+             "Physical input target has no verified owning window",
+         )
+         .with_details(serde_json::json!({ "physical_delivery_started": false }))),
+-        Err(error) => Err(AdapterError::new(
+-            ErrorCode::ActionFailed,
+-            "Could not verify the physical input target window",
+-        )
+-        .with_details(serde_json::json!({
+-            "ax_error": error,
+-            "physical_delivery_started": false,
+-        }))),
+     }
+ }
 diff --git a/crates/macos/src/actions/post_state_tests.rs b/crates/macos/src/actions/post_state_tests.rs
 index 754aeb4..c83d1d7 100644
 --- a/crates/macos/src/actions/post_state_tests.rs
@@ -4607,11 +5378,214 @@ index 754aeb4..c83d1d7 100644
      let bounds = Rect {
          x: 0.0,
          y: 0.0,
+diff --git a/crates/macos/src/actions/scroll_read.rs b/crates/macos/src/actions/scroll_read.rs
+index 60e3a22..8cbc62d 100644
+--- a/crates/macos/src/actions/scroll_read.rs
++++ b/crates/macos/src/actions/scroll_read.rs
+@@ -9,26 +9,28 @@ pub(crate) fn element(
+     attribute: &str,
+     deadline: Deadline,
+ ) -> Result<Option<AXElement>, AdapterError> {
+-    prepare(source, deadline)?;
+-    let result =
+-        crate::tree::properties::attributes::copy_element_attr_result(source, attribute, deadline);
+-    deadline.ensure_remaining()?;
+-    result.map_err(|error| read_error(attribute, error))
++    crate::tree::surface_read::element(
++        source,
++        attribute,
++        crate::tree::locator_deadline::from_operation(deadline)?,
++    )
+ }
+
+ pub(crate) fn children(
+     element: &AXElement,
+     deadline: Deadline,
+ ) -> Result<Vec<AXElement>, AdapterError> {
+-    prepare(element, deadline)?;
++    let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++    element.qualify(instant)?;
+     let result = crate::tree::properties::attributes::copy_ax_array_prefix_result(
+         element,
+         "AXChildren",
+         MAX_SCROLL_CHILDREN,
+         deadline,
+     );
++    element.qualify(instant)?;
+     deadline.ensure_remaining()?;
+-    let children = result
++    let mut children = result
+         .map(|children| children.unwrap_or_default())
+         .map_err(|error| read_error("AXChildren", error))?;
+     if children.len() == MAX_SCROLL_CHILDREN {
+@@ -38,6 +40,9 @@ pub(crate) fn children(
+         )
+         .with_details(serde_json::json!({ "complete": false })));
+     }
++    for child in &mut children {
++        child.bind_child(element, instant)?;
++    }
+     Ok(children)
+ }
+
+@@ -46,11 +51,11 @@ pub(crate) fn string(
+     attribute: &str,
+     deadline: Deadline,
+ ) -> Result<Option<String>, AdapterError> {
+-    prepare(element, deadline)?;
+-    let result =
+-        crate::tree::properties::attributes::copy_string_attr_result(element, attribute, deadline);
+-    deadline.ensure_remaining()?;
+-    result.map_err(|error| read_error(attribute, error))
++    crate::tree::surface_read::string(
++        element,
++        attribute,
++        crate::tree::locator_deadline::from_operation(deadline)?,
++    )
+ }
+
+ pub(crate) fn number(
+@@ -61,13 +66,17 @@ pub(crate) fn number(
+     use accessibility_sys::kAXErrorSuccess;
+     use core_foundation::{base::TCFType, number::CFNumber, string::CFString};
+
+-    prepare(element, deadline)?;
++    let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++    element.qualify(instant)?;
+     let attribute = CFString::new(attribute);
+     let (error, value) = crate::tree::properties::ax_ipc::copy_attribute_value(
+         element,
+         attribute.as_concrete_TypeRef(),
+         deadline,
+     );
++    let value = (!value.is_null())
++        .then(|| unsafe { core_foundation::base::CFType::wrap_under_create_rule(value) });
++    element.qualify(instant)?;
+     deadline.ensure_remaining()?;
+     if error != kAXErrorSuccess {
+         return if error == accessibility_sys::kAXErrorNoValue
+@@ -78,19 +87,12 @@ pub(crate) fn number(
+             Err(read_error("AXValue", error))
+         };
+     }
+-    if value.is_null() {
+-        return Ok(None);
+-    }
+-    let value = unsafe { core_foundation::base::CFType::wrap_under_create_rule(value) };
++    let Some(value) = value else { return Ok(None) };
+     Ok(value
+         .downcast::<CFNumber>()
+         .and_then(|number| number.to_f64()))
+ }
+
+-fn prepare(element: &AXElement, deadline: Deadline) -> Result<(), AdapterError> {
+-    crate::tree::properties::attributes::set_messaging_timeout(element, deadline)
+-}
+-
+ fn read_error(attribute: &str, error: i32) -> AdapterError {
+     AdapterError::new(
+         if error == accessibility_sys::kAXErrorCannotComplete {
 diff --git a/crates/macos/src/actions/select/container_select.rs b/crates/macos/src/actions/select/container_select.rs
-index d50e797..fd77cc8 100644
+index d50e797..66de68e 100644
 --- a/crates/macos/src/actions/select/container_select.rs
 +++ b/crates/macos/src/actions/select/container_select.rs
-@@ -172,7 +172,7 @@ mod imp {
+@@ -11,12 +11,14 @@ pub(crate) fn role_activates_by_selection(role: &str) -> bool {
+ #[cfg(any(target_os = "macos", test))]
+ fn verify_selection(
+     delivered: bool,
+-    verify: impl FnOnce() -> bool,
++    verify: impl FnOnce() -> Result<bool, agent_desktop_core::AdapterError>,
+ ) -> Result<bool, agent_desktop_core::AdapterError> {
+     if !delivered {
+         return Ok(false);
+     }
+-    if verify() {
++    if verify().map_err(|error| {
++        error.with_disposition(agent_desktop_core::DeliverySemantics::delivered_unverified())
++    })? {
+         return Ok(true);
+     }
+     Err(agent_desktop_core::AdapterError::new(
+@@ -52,15 +54,20 @@ mod imp {
+     /// Reading the subrole would add nothing: no subrole moves an element into
+     /// or out of this set, because the ones that redefine a native role keep a
+     /// row a row and a cell a cell.
+-    pub(crate) fn element_activates_by_selection(element: &AXElement, deadline: Deadline) -> bool {
+-        crate::tree::properties::attributes::copy_string_attr_result(element, "AXRole", deadline)
+-            .ok()
+-            .flatten()
+-            .is_some_and(|role| {
+-                super::role_activates_by_selection(crate::tree::roles::ax_role_and_subrole_to_str(
+-                    &role, None,
+-                ))
+-            })
++    pub(crate) fn element_activates_by_selection(
++        element: &AXElement,
++        deadline: Deadline,
++    ) -> Result<bool, AdapterError> {
++        Ok(crate::tree::surface_read::string(
++            element,
++            "AXRole",
++            crate::tree::locator_deadline::from_operation(deadline)?,
++        )?
++        .is_some_and(|role| {
++            super::role_activates_by_selection(crate::tree::roles::ax_role_and_subrole_to_str(
++                &role, None,
++            ))
++        }))
+     }
+
+     /// Every write is verified by readback. Which element to select depends on
+@@ -73,7 +80,7 @@ mod imp {
+         if select_member_directly(element, deadline)? {
+             return Ok(DeliveryOutcome::DeliveredVerified);
+         }
+-        if element_activates_by_selection(element, deadline) {
++        if element_activates_by_selection(element, deadline)? {
+             return select_in_ancestor_containers(element, deadline);
+         }
+         climb_to_selectable_ancestor(element, deadline)
+@@ -89,7 +96,7 @@ mod imp {
+     ) -> Result<DeliveryOutcome, AdapterError> {
+         let mut container = element.clone();
+         for _ in 0..MAX_ANCESTOR_WALK {
+-            let Some(parent) = parent_of(&container, deadline) else {
++            let Some(parent) = parent_of(&container, deadline)? else {
+                 return Ok(DeliveryOutcome::NotDelivered);
+             };
+             if select_member_in_container(&parent, element, deadline)? {
+@@ -108,7 +115,7 @@ mod imp {
+     ) -> Result<DeliveryOutcome, AdapterError> {
+         let mut member = element.clone();
+         for _ in 0..MAX_ANCESTOR_WALK {
+-            let Some(parent) = parent_of(&member, deadline) else {
++            let Some(parent) = parent_of(&member, deadline)? else {
+                 return Ok(DeliveryOutcome::NotDelivered);
+             };
+             if select_member_in_container(&parent, &member, deadline)? {
+@@ -132,8 +139,11 @@ mod imp {
+         let delivered =
+             crate::actions::ax_helpers::set_ax_bool_or_err(member, SELECTED, true, deadline)?;
+         super::verify_selection(delivered, || {
+-            crate::tree::properties::attributes::copy_bool_attr(member, SELECTED, deadline)
+-                == Some(true)
++            Ok(crate::tree::surface_read::boolean(
++                member,
++                SELECTED,
++                crate::tree::locator_deadline::from_operation(deadline)?,
++            )? == Some(true))
+         })
+     }
+
+@@ -148,6 +158,7 @@ mod imp {
+             }
+             let members = selection_array(member);
+             let cf_attr = core_foundation::string::CFString::new(attribute);
++            member.qualify(crate::tree::locator_deadline::from_operation(deadline)?)?;
+             let error = crate::tree::properties::ax_ipc::set_attribute_value(
+                 container,
+                 cf_attr.as_concrete_TypeRef(),
+@@ -172,7 +183,7 @@ mod imp {
      /// `AXElement` does not implement `TCFType`, so the array is built through
      /// the CoreFoundation C API.
      fn selection_array(member: &AXElement) -> CFArray {
@@ -4620,6 +5594,116 @@ index d50e797..fd77cc8 100644
          unsafe {
              let raw = core_foundation_sys::array::CFArrayCreate(
                  std::ptr::null(),
+@@ -184,10 +195,15 @@ mod imp {
+         }
+     }
+
+-    fn parent_of(element: &AXElement, deadline: Deadline) -> Option<AXElement> {
+-        crate::tree::properties::attributes::copy_element_attr_result(element, "AXParent", deadline)
+-            .ok()
+-            .flatten()
++    fn parent_of(
++        element: &AXElement,
++        deadline: Deadline,
++    ) -> Result<Option<AXElement>, AdapterError> {
++        crate::tree::surface_read::element(
++            element,
++            "AXParent",
++            crate::tree::locator_deadline::from_operation(deadline)?,
++        )
+     }
+
+     /// A selection write is applied asynchronously. The application answers the
+@@ -200,15 +216,16 @@ mod imp {
+         member: &AXElement,
+         attribute: &str,
+         deadline: Deadline,
+-    ) -> bool {
++    ) -> Result<bool, AdapterError> {
+         let settle_end =
+             std::time::Instant::now() + std::time::Duration::from_millis(SELECTION_SETTLE_MS);
+         loop {
+-            if selection_contains(container, member, attribute, deadline) {
+-                return true;
++            agent_desktop_core::commands::clovy_cancel::ensure()?;
++            if selection_contains(container, member, attribute, deadline)? {
++                return Ok(true);
+             }
+             if deadline.is_expired() || std::time::Instant::now() >= settle_end {
+-                return false;
++                return Ok(false);
+             }
+             std::thread::sleep(
+                 deadline
+@@ -223,20 +240,30 @@ mod imp {
+         member: &AXElement,
+         attribute: &str,
+         deadline: Deadline,
+-    ) -> bool {
+-        crate::tree::properties::attributes::copy_ax_array_prefix_result(
++    ) -> Result<bool, AdapterError> {
++        let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++        container.qualify(instant)?;
++        member.qualify(instant)?;
++        let result = crate::tree::properties::attributes::copy_ax_array_prefix_result(
+             container,
+             attribute,
+             MAX_SELECTION_READBACK,
+             deadline,
+-        )
+-        .ok()
+-        .flatten()
+-        .is_some_and(|selected| {
+-            selected
+-                .iter()
+-                .any(|entry| crate::tree::properties::capabilities::same_element(entry, member))
+-        })
++        );
++        container.qualify(instant)?;
++        member.qualify(instant)?;
++        let Some(mut selected) = result
++            .map_err(|error| crate::tree::query::read_error::semantic_read(error, "selection"))?
++        else {
++            return Ok(false);
++        };
++        for entry in &mut selected {
++            entry.bind_child(container, instant)?;
++            if crate::tree::properties::capabilities::same_element(entry, member) {
++                return Ok(true);
++            }
++        }
++        Ok(false)
+     }
+ }
+
+@@ -257,8 +284,8 @@ mod imp {
+     pub(crate) fn element_activates_by_selection(
+         _element: &AXElement,
+         _deadline: Deadline,
+-    ) -> bool {
+-        false
++    ) -> Result<bool, AdapterError> {
++        Ok(false)
+     }
+ }
+
+@@ -286,7 +313,7 @@ mod tests {
+         let result: Result<bool, agent_desktop_core::AdapterError> = (|| {
+             for verified in [false, true] {
+                 attempts += 1;
+-                if super::verify_selection(true, || verified)? {
++                if super::verify_selection(true, || Ok(verified))? {
+                     return Ok(true);
+                 }
+             }
+@@ -307,6 +334,6 @@ mod tests {
+     #[test]
+     fn unsupported_selection_skips_readback_and_verified_selection_succeeds() {
+         assert!(!super::verify_selection(false, || panic!("not delivered")).unwrap());
+-        assert!(super::verify_selection(true, || true).unwrap());
++        assert!(super::verify_selection(true, || Ok(true)).unwrap());
+     }
+ }
 diff --git a/crates/macos/src/actions/select/select_menu.rs b/crates/macos/src/actions/select/select_menu.rs
 index aea6431..7e5a98b 100644
 --- a/crates/macos/src/actions/select/select_menu.rs
@@ -5048,6 +6132,19 @@ index 3012d7f..7b7e14c 100644
  mod input;
  mod notifications;
  mod system;
+diff --git a/crates/macos/src/notifications/nc_session.rs b/crates/macos/src/notifications/nc_session.rs
+index d4ab966..5bab20c 100644
+--- a/crates/macos/src/notifications/nc_session.rs
++++ b/crates/macos/src/notifications/nc_session.rs
+@@ -203,7 +203,7 @@ fn reactivate_app(app: &ProcessIdentity, deadline: Deadline) -> Result<(), Adapt
+     if !crate::system::process::process_identity::matches_instance(pid, &app.instance)? {
+         return Ok(());
+     }
+-    crate::system::focus::ensure_app_focused(pid, deadline)
++    crate::system::focus::ensure_app_focused(app, deadline)
+ }
+
+ #[cfg(not(target_os = "macos"))]
 diff --git a/crates/macos/src/system/cursor_overlay/spawn.rs b/crates/macos/src/system/cursor_overlay/spawn.rs
 index d962b69..9c3f568 100644
 --- a/crates/macos/src/system/cursor_overlay/spawn.rs
@@ -5070,8 +6167,128 @@ index d962b69..9c3f568 100644
          .stdin(Stdio::piped())
          .stdout(Stdio::null())
          .stderr(Stdio::null())
+diff --git a/crates/macos/src/system/focus.rs b/crates/macos/src/system/focus.rs
+index 2b078a3..cc9293c 100644
+--- a/crates/macos/src/system/focus.rs
++++ b/crates/macos/src/system/focus.rs
+@@ -7,16 +7,28 @@ use std::time::{Duration, Instant};
+ const VERIFY_LIMIT: Duration = Duration::from_millis(500);
+
+ #[cfg(target_os = "macos")]
+-pub(crate) fn ensure_app_focused(pid: i32, deadline: Deadline) -> Result<(), AdapterError> {
+-    focus_app(pid, deadline).map(|_| ())
++pub(crate) fn ensure_app_focused(
++    process: &agent_desktop_core::ProcessIdentity,
++    deadline: Deadline,
++) -> Result<(), AdapterError> {
++    focus_app(process, deadline).map(|_| ())
+ }
+
+ #[cfg(target_os = "macos")]
+-fn focus_app(pid: i32, deadline: Deadline) -> Result<bool, AdapterError> {
++fn focus_app(
++    process: &agent_desktop_core::ProcessIdentity,
++    deadline: Deadline,
++) -> Result<bool, AdapterError> {
+     use core_foundation::{base::TCFType, boolean::CFBoolean, string::CFString};
+
++    let pid = crate::system::process::process_identity::to_pid_t(process.pid)?;
+     tracing::debug!("system: ensure app focused pid={pid}");
+-    let app = crate::tree::element_for_pid(pid);
++    let mut app = crate::tree::element_for_pid(pid);
++    app.bind_process(
++        pid,
++        &process.instance,
++        crate::tree::locator_deadline::from_operation(deadline)?,
++    )?;
+     if read_frontmost(&app, deadline)? {
+         return Ok(false);
+     }
+@@ -40,8 +52,16 @@ fn focus_app(pid: i32, deadline: Deadline) -> Result<bool, AdapterError> {
+ }
+
+ #[cfg(target_os = "macos")]
+-pub(crate) fn verify_app_focused(pid: i32, deadline: Deadline) -> Result<(), AdapterError> {
+-    let app = crate::tree::element_for_pid(pid);
++pub(crate) fn verify_app_focused(
++    element: &crate::tree::AXElement,
++    deadline: Deadline,
++) -> Result<(), AdapterError> {
++    let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++    element.qualify(instant)?;
++    let pid = crate::tree::properties::ax_ipc::pid(element, instant)
++        .map_err(|_| AdapterError::stale_ref_because("Focus owner is unavailable"))?;
++    let mut app = crate::tree::element_for_pid(pid);
++    app.bind_child(element, instant)?;
+     if read_frontmost(&app, deadline)? {
+         Ok(())
+     } else {
+@@ -63,13 +83,18 @@ pub(crate) fn focus_window_impl(
+     deadline: Deadline,
+ ) -> Result<(), AdapterError> {
+     tracing::debug!("system: focus window");
+-    let pid = crate::system::process::process_identity::to_pid_t(window.pid)?;
+     let element = crate::system::window::window_resolve::window_element_for_info(window, deadline)?;
+-    let focused = focus_app(pid, deadline)?;
++    let instance = window
++        .process_instance
++        .as_deref()
++        .filter(|value| !value.is_empty())
++        .ok_or_else(|| AdapterError::stale_ref_because("Window generation is unavailable"))?;
++    let process = agent_desktop_core::ProcessIdentity::new(window.pid, instance);
++    let focused = focus_app(&process, deadline)?;
+     crate::system::window::window_ops::raise_window(&element, deadline).map_err(|error| {
+         crate::actions::DeliveryTracker::from_delivered_units(usize::from(focused)).annotate(error)
+     })?;
+-    verify_app_focused(pid, deadline).map_err(after_delivery)
++    verify_app_focused(&element, deadline).map_err(after_delivery)
+ }
+
+ #[cfg(target_os = "macos")]
+@@ -108,15 +133,12 @@ fn read_boolean(
+     attribute: &str,
+     deadline: Deadline,
+ ) -> Result<bool, AdapterError> {
+-    prepare(element, deadline)?;
+-    let result =
+-        crate::tree::properties::attributes::copy_bool_attr_result(element, attribute, deadline);
+-    deadline.ensure_remaining()?;
+-    match result {
+-        Ok(Some(value)) => Ok(value),
+-        Ok(None) => Ok(false),
+-        Err(error) => Err(map_ax_read_error(error, "verify focus")),
+-    }
++    Ok(crate::tree::surface_read::boolean(
++        element,
++        attribute,
++        crate::tree::locator_deadline::from_operation(deadline)?,
++    )?
++    .unwrap_or(false))
+ }
+
+ #[cfg(target_os = "macos")]
+@@ -128,6 +150,7 @@ fn wait_until(
+ ) -> Result<(), AdapterError> {
+     let local_deadline = Instant::now() + VERIFY_LIMIT;
+     loop {
++        agent_desktop_core::commands::clovy_cancel::ensure()?;
+         if read_boolean(element, attribute, deadline)? {
+             return Ok(());
+         }
+@@ -209,7 +232,10 @@ fn after_delivery(error: AdapterError) -> AdapterError {
+ }
+
+ #[cfg(not(target_os = "macos"))]
+-pub(crate) fn ensure_app_focused(_pid: i32, _deadline: Deadline) -> Result<(), AdapterError> {
++pub(crate) fn ensure_app_focused(
++    _process: &agent_desktop_core::ProcessIdentity,
++    _deadline: Deadline,
++) -> Result<(), AdapterError> {
+     Err(AdapterError::not_supported("focus_app"))
+ }
+
 diff --git a/crates/macos/src/system/key_dispatch.rs b/crates/macos/src/system/key_dispatch.rs
-index b618ed4..8128419 100644
+index b618ed4..9555b6d 100644
 --- a/crates/macos/src/system/key_dispatch.rs
 +++ b/crates/macos/src/system/key_dispatch.rs
 @@ -28,7 +28,12 @@ fn press_for_app(
@@ -5088,7 +6305,33 @@ index b618ed4..8128419 100644
 
      if uses_menu_shortcut(combo, policy) {
          match menu::try_menu_bar_shortcut(&app, combo, deadline) {
-@@ -151,10 +156,11 @@ fn element_attribute(
+@@ -51,7 +56,7 @@ fn press_for_app(
+     crate::input::keyboard::keyboard_map::key_name_to_code(&combo.key)?;
+     if policy.allow_focus_steal {
+         crate::system::process::process_identity::require_core(&process)?;
+-        crate::system::focus::verify_app_focused(pid, deadline)?;
++        crate::system::focus::verify_app_focused(&app, deadline)?;
+     }
+     crate::system::process::process_identity::require_core(&process)?;
+     require_focused_element(&app, policy, deadline)?;
+@@ -88,7 +93,7 @@ fn try_simple_key_action(
+     let Some(focused) = focused_element(app, deadline)? else {
+         return Ok(false);
+     };
+-    if crate::actions::ax_helpers::advertises_action(&focused, action, deadline) != Some(true) {
++    if crate::actions::ax_helpers::advertises_action(&focused, action, deadline)? != Some(true) {
+         return Ok(false);
+     }
+     crate::actions::ax_helpers::try_ax_action_or_err(&focused, action, deadline)
+@@ -130,6 +135,7 @@ fn require_focused_element(
+ ) -> Result<AXElement, AdapterError> {
+     let local_deadline = local_deadline(deadline, Duration::from_millis(500))?;
+     loop {
++        agent_desktop_core::commands::clovy_cancel::ensure()?;
+         if let Some(focused) = focused_element(app, deadline)? {
+             return Ok(focused);
+         }
+@@ -151,10 +157,11 @@ fn element_attribute(
      attribute: &str,
      deadline: Deadline,
  ) -> Result<Option<AXElement>, AdapterError> {
@@ -5949,10 +7192,46 @@ index 0000000..5bf1e1d
 +    .unwrap_or(false) as u8
 +}
 diff --git a/crates/macos/src/system/process/mod.rs b/crates/macos/src/system/process/mod.rs
-index 98cc130..99b3f23 100644
+index 98cc130..e800a2b 100644
 --- a/crates/macos/src/system/process/mod.rs
 +++ b/crates/macos/src/system/process/mod.rs
-@@ -114,7 +114,12 @@ pub(crate) fn run_with_deadline(
+@@ -5,6 +5,8 @@ use std::sync::mpsc;
+ use std::thread::JoinHandle;
+ use std::time::{Duration, Instant};
+
++mod spawn_checked;
++
+ const MAX_CAPTURED_STREAM_BYTES: usize = 8 * 1024 * 1024;
+ const OUTPUT_CONTEXT_BYTES: usize = 4 * 1024;
+ const MAX_CLEANUP_RESERVE: Duration = Duration::from_millis(250);
+@@ -36,6 +38,15 @@ pub(crate) fn run_with_deadline(
+     command: &mut Command,
+     label: &str,
+     deadline: Instant,
++) -> Result<Output, AdapterError> {
++    run_with_deadline_checked(command, label, deadline, || Ok(()))
++}
++
++pub(crate) fn run_with_deadline_checked(
++    command: &mut Command,
++    label: &str,
++    deadline: Instant,
++    before_spawn: impl FnOnce() -> Result<(), AdapterError>,
+ ) -> Result<Output, AdapterError> {
+     let remaining = deadline.saturating_duration_since(Instant::now());
+     if remaining.is_zero() {
+@@ -49,9 +60,7 @@ pub(crate) fn run_with_deadline(
+     })?;
+     configure_process_group(command);
+     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+-    let mut child = command
+-        .spawn()
+-        .map_err(|error| AdapterError::internal(format!("{label}: {error}")))?;
++    let mut child = spawn_checked::spawn_checked(command, label, work_deadline, before_spawn)?;
+     let process_group = i32::try_from(child.id()).map_err(|_| {
+         let _ = child.kill();
+         let _ = child.wait();
+@@ -114,7 +123,12 @@ pub(crate) fn run_with_deadline(
 
  fn configure_process_group(command: &mut Command) {
      use std::os::unix::process::CommandExt;
@@ -5966,7 +7245,7 @@ index 98cc130..99b3f23 100644
  }
 
  fn wait_for_status(child: &mut Child, deadline: Instant) -> Result<ExitStatus, AdapterError> {
-@@ -196,7 +201,17 @@ fn signal_group(process_group: i32, signal: i32) -> std::io::Result<bool> {
+@@ -196,7 +210,17 @@ fn signal_group(process_group: i32, signal: i32) -> std::io::Result<bool> {
      unsafe extern "C" {
          fn kill(pid: i32, signal: i32) -> i32;
      }
@@ -6046,8 +7325,36 @@ index 8d068ba..c1adb70 100644
          return AxProbeResult::Responsive;
      }
      let cf_attr = CFString::new(kAXRoleAttribute);
+diff --git a/crates/macos/src/system/process/spawn_checked.rs b/crates/macos/src/system/process/spawn_checked.rs
+new file mode 100644
+index 0000000..46e3933
+--- /dev/null
++++ b/crates/macos/src/system/process/spawn_checked.rs
+@@ -0,0 +1,22 @@
++use agent_desktop_core::AdapterError;
++use std::{
++    process::{Child, Command},
++    time::Instant,
++};
++
++pub(crate) fn spawn_checked(
++    command: &mut Command,
++    label: &str,
++    deadline: Instant,
++    before_spawn: impl FnOnce() -> Result<(), AdapterError>,
++) -> Result<Child, AdapterError> {
++    before_spawn()?;
++    if Instant::now() >= deadline {
++        return Err(AdapterError::timeout(format!(
++            "{label} has no subprocess cleanup budget"
++        )));
++    }
++    command
++        .spawn()
++        .map_err(|error| AdapterError::internal(format!("{label}: {error}")))
++}
 diff --git a/crates/macos/src/system/renderer_activation.rs b/crates/macos/src/system/renderer_activation.rs
-index f1296b1..77b8173 100644
+index f1296b1..fa5931c 100644
 --- a/crates/macos/src/system/renderer_activation.rs
 +++ b/crates/macos/src/system/renderer_activation.rs
 @@ -7,7 +7,14 @@ const ENHANCED_ACTIVATION_DELAY: Duration = Duration::from_secs(2);
@@ -6066,7 +7373,18 @@ index f1296b1..77b8173 100644
      let attribute = renderer_probe::activation_attribute(
          &application,
          instant(deadline).map_err(not_delivered)?,
-@@ -120,7 +127,7 @@ mod tests {
+@@ -72,6 +79,10 @@ fn enable_attribute(
+             .timeout_error()
+             .with_disposition(DeliverySemantics::delivered_unverified()));
+     }
++    agent_desktop_core::commands::clovy_cancel::ensure().map_err(uncertain)?;
++    application
++        .qualify(instant(deadline).map_err(uncertain)?)
++        .map_err(uncertain)?;
+     Ok(())
+ }
+
+@@ -120,7 +131,7 @@ mod tests {
 
      #[test]
      fn observed_activation_overrides_a_setters_not_implemented_response() {
@@ -6075,7 +7393,7 @@ index f1296b1..77b8173 100644
          assert!(
              activation_delivered(
                  &application,
-@@ -143,7 +150,7 @@ mod tests {
+@@ -143,7 +154,7 @@ mod tests {
 
      #[test]
      fn enhanced_activation_with_insufficient_budget_never_touches_native_handle() {
@@ -6084,7 +7402,7 @@ index f1296b1..77b8173 100644
          let deadline = Deadline::after(1_000).unwrap();
          let error = enable_attribute(&application, renderer_probe::ENHANCED, deadline).unwrap_err();
          assert_eq!(error.code, ErrorCode::Timeout);
-@@ -152,7 +159,7 @@ mod tests {
+@@ -152,7 +163,7 @@ mod tests {
 
      #[test]
      fn reported_success_with_disabled_readback_is_not_activation_success() {
@@ -6093,7 +7411,7 @@ index f1296b1..77b8173 100644
          let error = activation_delivered(
              &application,
              renderer_probe::ENHANCED,
-@@ -166,7 +173,7 @@ mod tests {
+@@ -166,7 +177,7 @@ mod tests {
 
      #[test]
      fn accepted_manual_write_with_disabled_readback_is_not_an_error() {
@@ -6102,7 +7420,7 @@ index f1296b1..77b8173 100644
          assert!(
              activation_delivered(
                  &application,
-@@ -180,7 +187,7 @@ mod tests {
+@@ -180,7 +191,7 @@ mod tests {
 
      #[test]
      fn missing_readback_keeps_legacy_success_and_preserves_real_failures() {
@@ -6111,6 +7429,127 @@ index f1296b1..77b8173 100644
          assert!(
              activation_delivered(
                  &application,
+diff --git a/crates/macos/src/system/screenshot.rs b/crates/macos/src/system/screenshot.rs
+index 2217f04..d6f1957 100644
+--- a/crates/macos/src/system/screenshot.rs
++++ b/crates/macos/src/system/screenshot.rs
+@@ -23,16 +23,35 @@ mod imp {
+         scale_factor: f64,
+         deadline: Deadline,
+         arguments: impl FnOnce(&Path) -> Result<Vec<OsString>, AdapterError>,
++        before_spawn: impl FnOnce() -> Result<(), AdapterError>,
++        after_spawn_error: impl Fn(AdapterError) -> AdapterError,
+     ) -> Result<ImageBuffer, AdapterError> {
+         deadline.ensure_remaining()?;
+         let temp = TempPng::new()?;
+         let mut command = Command::new(SCREENCAPTURE);
+         command.args(arguments(temp.path())?);
+-        let output = run_screencapture(&mut command, deadline)?;
++        let attempted = std::cell::Cell::new(false);
++        let output = crate::system::process::run_with_deadline_checked(
++            &mut command,
++            "screencapture",
++            deadline_instant(deadline)?,
++            || {
++                before_spawn()?;
++                attempted.set(true);
++                Ok(())
++            },
++        )
++        .map_err(|error| {
++            if attempted.get() {
++                after_spawn_error(error)
++            } else {
++                error
++            }
++        })?;
+         if !output.status.success() {
+-            return Err(map_screencapture_error(&output));
++            return Err(after_spawn_error(map_screencapture_error(&output)));
+         }
+-        let mut buffer = read_png(temp.path(), deadline)?;
++        let mut buffer = read_png(temp.path(), deadline).map_err(after_spawn_error)?;
+         buffer.scale_factor = scale_factor;
+         Ok(buffer)
+     }
+@@ -80,9 +99,13 @@ mod imp {
+         let (raw_index, current) = crate::system::display::capture_selection(expected, deadline)?;
+         deadline.ensure_remaining()?;
+         verify_display_identity(index, expected, &current)?;
+-        let captured = capture(current.scale, deadline, |path| {
+-            display_args(raw_index, path)
+-        })?;
++        let captured = capture(
++            current.scale,
++            deadline,
++            |path| display_args(raw_index, path),
++            || Ok(()),
++            |error| error,
++        )?;
+         deadline.ensure_remaining()?;
+         let after = crate::system::display::display_at_capture_index(raw_index, deadline)?;
+         deadline.ensure_remaining()?;
+@@ -123,20 +146,43 @@ mod imp {
+         let window_id = parse_window_id(&verified.id)?;
+         let scale = crate::system::display::scale_for_bounds(verified.bounds, deadline)?;
+         deadline.ensure_remaining()?;
+-        let captured = capture(scale, deadline, |path| {
+-            let mut args = window_args(window_id, path);
+-            if omit_shadow {
+-                args.insert(0, OsString::from("-o"));
+-            }
+-            Ok(args)
+-        })?;
++        let captured = capture(
++            scale,
++            deadline,
++            |path| {
++                let mut args = window_args(window_id, path);
++                if omit_shadow {
++                    args.insert(0, OsString::from("-o"));
++                }
++                Ok(args)
++            },
++            || {
++                (|| {
++                    agent_desktop_core::commands::clovy_cancel::ensure()?;
++                    crate::system::window::window_resolve::resolve_capture_window(
++                        window,
++                        deadline_instant(deadline)?,
++                    )?;
++                    deadline.ensure_remaining()
++                })()
++                .map_err(|error: AdapterError| {
++                    error.with_disposition(agent_desktop_core::DeliverySemantics::not_delivered())
++                })
++            },
++            after_capture,
++        )?;
+         crate::system::window::window_resolve::resolve_capture_window(
+             &verified,
+-            deadline_instant(deadline)?,
+-        )?;
++            deadline_instant(deadline).map_err(after_capture)?,
++        )
++        .map_err(after_capture)?;
+         Ok(captured)
+     }
+
++    fn after_capture(error: AdapterError) -> AdapterError {
++        error.with_disposition(agent_desktop_core::DeliverySemantics::uncertain())
++    }
++
+     struct TempPng {
+         dir: PathBuf,
+         path: PathBuf,
+@@ -180,6 +226,7 @@ mod imp {
+         }
+     }
+
++    #[cfg(test)]
+     pub(super) fn run_screencapture(
+         command: &mut Command,
+         deadline: Deadline,
 diff --git a/crates/macos/src/system/signals.rs b/crates/macos/src/system/signals.rs
 index b7e8074..ea987e1 100644
 --- a/crates/macos/src/system/signals.rs
@@ -7252,6 +8691,18 @@ index cf81f76..975193b 100644
          id: id.to_owned(),
          title: "w".into(),
          app: "Fixture".into(),
+diff --git a/crates/macos/src/system/window/window_postcondition.rs b/crates/macos/src/system/window/window_postcondition.rs
+index 3f53bca..5d54cb8 100644
+--- a/crates/macos/src/system/window/window_postcondition.rs
++++ b/crates/macos/src/system/window/window_postcondition.rs
+@@ -38,6 +38,7 @@ fn wait_until(
+     mut complete: impl FnMut() -> Result<bool, AdapterError>,
+ ) -> Result<(), AdapterError> {
+     loop {
++        agent_desktop_core::commands::clovy_cancel::ensure().map_err(after_delivery)?;
+         if complete().map_err(after_delivery)? {
+             return Ok(());
+         }
 diff --git a/crates/macos/src/system/window/window_resolve.rs b/crates/macos/src/system/window/window_resolve.rs
 index 5523577..40814cf 100644
 --- a/crates/macos/src/system/window/window_resolve.rs
@@ -8386,11 +9837,24 @@ index 462a63c..837f58d 100644
      let mut visited = Vec::new();
 
      assert!(remember_ancestor(&mut visited, &system));
+diff --git a/crates/macos/src/tree/mod.rs b/crates/macos/src/tree/mod.rs
+index 78251e5..d7a119c 100644
+--- a/crates/macos/src/tree/mod.rs
++++ b/crates/macos/src/tree/mod.rs
+@@ -23,7 +23,7 @@ pub(crate) mod window_surface;
+
+ pub(crate) use ax_element::AXElement;
+ pub(crate) use build_context::TreeBuildContext;
+-pub(crate) use properties::attributes::{copy_bool_attr, copy_value_typed};
++pub(crate) use properties::attributes::copy_value_typed;
+ pub(crate) use properties::capabilities::same_element;
+ pub(crate) use properties::element::element_for_pid;
+ pub(crate) use properties::node_attrs::NodeAttrs;
 diff --git a/crates/macos/src/tree/properties/action_list.rs b/crates/macos/src/tree/properties/action_list.rs
-index 2b38cf0..a8a1202 100644
+index 2b38cf0..7b124ce 100644
 --- a/crates/macos/src/tree/properties/action_list.rs
 +++ b/crates/macos/src/tree/properties/action_list.rs
-@@ -40,14 +40,16 @@ pub(crate) fn read_platform_available_actions(
+@@ -40,14 +40,19 @@ pub(crate) fn read_platform_available_actions(
      attrs: &crate::tree::NodeAttrs,
      deadline: std::time::Instant,
      usage: &mut crate::tree::observation_usage::ObservationUsage,
@@ -8406,10 +9870,13 @@ index 2b38cf0..a8a1202 100644
 +    el.qualify(deadline)?;
      let native_actions = copy_action_names_with_status(el, deadline, usage);
 +    el.qualify(deadline)?;
++    if let Some(error) = native_actions.authority_error {
++        return Err(error);
++    }
      if let Some(error) = native_actions.error {
          record_error(&mut read, error);
      }
-@@ -66,7 +68,7 @@ pub(crate) fn read_platform_available_actions(
+@@ -66,7 +71,7 @@ pub(crate) fn read_platform_available_actions(
              crate::actions::select::container_select::SELECTED,
              deadline,
              &mut read,
@@ -8418,7 +9885,7 @@ index 2b38cf0..a8a1202 100644
          .unwrap_or(false)
      {
          push_unique(&mut read.actions, capability::CLICK);
-@@ -80,9 +82,12 @@ pub(crate) fn read_platform_available_actions(
+@@ -80,9 +85,12 @@ pub(crate) fn read_platform_available_actions(
      if has_scroll_mechanism(&has, attrs.has_scrollbars) {
          push_unique(&mut read.actions, capability::SCROLL);
      }
@@ -8434,7 +9901,7 @@ index 2b38cf0..a8a1202 100644
      if has("AXIncrement") || has("AXDecrement") || value_settable {
          push_unique(&mut read.actions, capability::SET_VALUE);
      }
-@@ -90,24 +95,24 @@ pub(crate) fn read_platform_available_actions(
+@@ -90,24 +98,24 @@ pub(crate) fn read_platform_available_actions(
          push_unique(&mut read.actions, capability::SELECT);
      }
      if role_may_accept_focus(role)
@@ -8463,7 +9930,7 @@ index 2b38cf0..a8a1202 100644
  }
 
  #[cfg(target_os = "macos")]
-@@ -116,18 +121,20 @@ fn read_settable(
+@@ -116,18 +124,23 @@ fn read_settable(
      attribute: &str,
      deadline: std::time::Instant,
      read: &mut AvailableActionsRead,
@@ -8479,6 +9946,9 @@ index 2b38cf0..a8a1202 100644
 +    element.qualify(deadline)?;
      let result = is_attr_settable_with_status(element, attribute, deadline);
 +    element.qualify(deadline)?;
++    if let Some(error) = result.authority_error {
++        return Err(error);
++    }
      if let Some(error) = result.error {
          record_error(read, error);
      }
@@ -8487,7 +9957,7 @@ index 2b38cf0..a8a1202 100644
  }
 
  #[cfg(target_os = "macos")]
-@@ -203,11 +210,11 @@ pub(crate) fn read_platform_available_actions(
+@@ -203,11 +216,11 @@ pub(crate) fn read_platform_available_actions(
      _attrs: &crate::tree::NodeAttrs,
      _deadline: std::time::Instant,
      _usage: &mut crate::tree::observation_usage::ObservationUsage,
@@ -8502,8 +9972,51 @@ index 2b38cf0..a8a1202 100644
  }
 
  fn push_unique(actions: &mut Vec<String>, action: &str) {
+diff --git a/crates/macos/src/tree/properties/attributes.rs b/crates/macos/src/tree/properties/attributes.rs
+index e01a4b2..10f0e24 100644
+--- a/crates/macos/src/tree/properties/attributes.rs
++++ b/crates/macos/src/tree/properties/attributes.rs
+@@ -21,14 +21,6 @@ mod imp {
+         crate::tree::properties::ax_ipc::prepare(el, deadline).map(|_| ())
+     }
+
+-    pub fn copy_bool_attr(
+-        el: &AXElement,
+-        attr: &str,
+-        deadline: impl crate::tree::properties::ax_ipc::AxDeadline,
+-    ) -> Option<bool> {
+-        copy_bool_attr_result(el, attr, deadline).ok().flatten()
+-    }
+-
+     pub(crate) fn copy_bool_attr_result(
+         el: &AXElement,
+         attr: &str,
+@@ -196,14 +188,6 @@ mod imp {
+         Ok(None)
+     }
+
+-    pub fn copy_bool_attr(
+-        _el: &AXElement,
+-        _attr: &str,
+-        _deadline: impl crate::tree::properties::ax_ipc::AxDeadline,
+-    ) -> Option<bool> {
+-        None
+-    }
+-
+     pub(crate) fn copy_bool_attr_result(
+         _el: &AXElement,
+         _attr: &str,
+@@ -242,7 +226,7 @@ pub(crate) use super::text_attributes::{
+     copy_value_typed_bounded_result, copy_value_typed_result,
+ };
+ pub(crate) use imp::{
+-    copy_ax_array_prefix_result, copy_bool_attr, copy_bool_attr_result, copy_element_attr_result,
++    copy_ax_array_prefix_result, copy_bool_attr_result, copy_element_attr_result,
+     set_messaging_timeout,
+ };
+
 diff --git a/crates/macos/src/tree/properties/ax_ipc.rs b/crates/macos/src/tree/properties/ax_ipc.rs
-index 951b697..6f716b5 100644
+index 951b697..ab76bce 100644
 --- a/crates/macos/src/tree/properties/ax_ipc.rs
 +++ b/crates/macos/src/tree/properties/ax_ipc.rs
 @@ -78,7 +78,7 @@ fn install_messaging_timeout(
@@ -8592,25 +10105,41 @@ index 951b697..6f716b5 100644
          Err(error) => adapter_error_to_ax(&error),
      };
      (error, settable != 0)
-@@ -223,7 +228,7 @@ pub(crate) fn perform_action(
+@@ -222,8 +227,15 @@ pub(crate) fn perform_action(
+     action: CFStringRef,
      deadline: impl AxDeadline,
  ) -> Result<i32, AdapterError> {
++    element
++        .qualify(deadline.absolute().map_err(pre_mutation_error)?)
++        .map_err(pre_mutation_error)?;
      prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
 -    Ok(unsafe { AXUIElementPerformAction(element.0, action) })
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
++    let instant = deadline.absolute().map_err(pre_mutation_error)?;
++    element.qualify(instant).map_err(pre_mutation_error)?;
++    crate::tree::locator_deadline::remaining(instant).map_err(pre_mutation_error)?;
 +    Ok(unsafe { AXUIElementPerformAction(element.raw(), action) })
  }
 
  #[cfg(target_os = "macos")]
-@@ -234,7 +239,7 @@ pub(crate) fn set_attribute_value(
+@@ -233,8 +245,15 @@ pub(crate) fn set_attribute_value(
+     value: CFTypeRef,
      deadline: impl AxDeadline,
  ) -> Result<i32, AdapterError> {
++    element
++        .qualify(deadline.absolute().map_err(pre_mutation_error)?)
++        .map_err(pre_mutation_error)?;
      prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
 -    Ok(unsafe { AXUIElementSetAttributeValue(element.0, attribute, value) })
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
++    let instant = deadline.absolute().map_err(pre_mutation_error)?;
++    element.qualify(instant).map_err(pre_mutation_error)?;
++    crate::tree::locator_deadline::remaining(instant).map_err(pre_mutation_error)?;
 +    Ok(unsafe { AXUIElementSetAttributeValue(element.raw(), attribute, value) })
  }
 
  #[cfg(target_os = "macos")]
-@@ -246,7 +251,7 @@ pub(crate) fn element_at_position(
+@@ -246,7 +265,7 @@ pub(crate) fn element_at_position(
      let mut element = std::ptr::null_mut();
      let error = match prepare(system, deadline) {
          Ok(_) => unsafe {
@@ -8619,7 +10148,7 @@ index 951b697..6f716b5 100644
          },
          Err(error) => adapter_error_to_ax(&error),
      };
-@@ -257,7 +262,7 @@ pub(crate) fn element_at_position(
+@@ -257,7 +276,7 @@ pub(crate) fn element_at_position(
  pub(crate) fn pid(element: &crate::tree::AXElement, deadline: impl AxDeadline) -> Result<i32, i32> {
      let mut pid = 0_i32;
      let error = match prepare(element, deadline) {
@@ -8651,10 +10180,93 @@ index 68ae227..0f016bc 100644
 
      fn is_ax_element(value: CFTypeRef) -> bool {
 diff --git a/crates/macos/src/tree/properties/capabilities.rs b/crates/macos/src/tree/properties/capabilities.rs
-index 893e79a..bb5fb4e 100644
+index 893e79a..b770329 100644
 --- a/crates/macos/src/tree/properties/capabilities.rs
 +++ b/crates/macos/src/tree/properties/capabilities.rs
-@@ -110,7 +110,7 @@ mod imp {
+@@ -1,6 +1,7 @@
+ pub(crate) struct NativeRead<T> {
+     pub(crate) value: Option<T>,
+     pub(crate) error: Option<i32>,
++    pub(crate) authority_error: Option<agent_desktop_core::AdapterError>,
+ }
+
+ impl<T> NativeRead<T> {
+@@ -8,6 +9,7 @@ impl<T> NativeRead<T> {
+         Self {
+             value: Some(value),
+             error: None,
++            authority_error: None,
+         }
+     }
+
+@@ -15,23 +17,46 @@ impl<T> NativeRead<T> {
+         Self {
+             value: None,
+             error: Some(error),
++            authority_error: None,
+         }
+     }
+ }
+
+ #[cfg(target_os = "macos")]
+ fn read_with_recovery<T>(
++    element: &crate::tree::AXElement,
+     deadline: std::time::Instant,
+     mut read: impl FnMut() -> NativeRead<T>,
+ ) -> NativeRead<T> {
+-    crate::tree::read_recovery::read(deadline, || {
++    let mut authority_error = None;
++    let result = crate::tree::read_recovery::read(deadline, || {
++        if let Err(error) = agent_desktop_core::commands::clovy_cancel::ensure() {
++            authority_error = Some(error);
++            return Err(i32::MIN);
++        }
++        if let Err(error) = element.qualify(deadline) {
++            authority_error = Some(error);
++            return Err(i32::MIN);
++        }
+         let result = read();
++        if let Err(error) = element.qualify(deadline) {
++            authority_error = Some(error);
++            return Err(i32::MIN);
++        }
+         match result.error {
+             Some(error) => Err(error),
+             None => Ok(result),
+         }
+     })
+-    .unwrap_or_else(NativeRead::failure)
++    .unwrap_or_else(NativeRead::failure);
++    if let Some(error) = authority_error {
++        return NativeRead {
++            value: None,
++            error: None,
++            authority_error: Some(error),
++        };
++    }
++    result
+ }
+
+ #[cfg(target_os = "macos")]
+@@ -50,7 +75,7 @@ mod imp {
+         deadline: std::time::Instant,
+     ) -> NativeRead<bool> {
+         let cf_attr = CFString::new(attr);
+-        super::read_with_recovery(deadline, || {
++        super::read_with_recovery(el, deadline, || {
+             let (err, settable) = crate::tree::properties::ax_ipc::is_attribute_settable(
+                 el,
+                 cf_attr.as_concrete_TypeRef(),
+@@ -69,7 +94,7 @@ mod imp {
+         deadline: std::time::Instant,
+         usage: &mut crate::tree::observation_usage::ObservationUsage,
+     ) -> NativeRead<Vec<String>> {
+-        super::read_with_recovery(deadline, || copy_action_names_once(el, deadline, usage))
++        super::read_with_recovery(el, deadline, || copy_action_names_once(el, deadline, usage))
+     }
+
+     fn copy_action_names_once(
+@@ -110,7 +135,7 @@ mod imp {
      }
 
      pub fn same_element(a: &AXElement, b: &AXElement) -> bool {
@@ -8686,7 +10298,7 @@ index 8d9fe2d..d5ef42f 100644
  }
 
 diff --git a/crates/macos/src/tree/properties/node_attribute_fetch.rs b/crates/macos/src/tree/properties/node_attribute_fetch.rs
-index 316930c..05c8e5e 100644
+index 316930c..4cdb8ba 100644
 --- a/crates/macos/src/tree/properties/node_attribute_fetch.rs
 +++ b/crates/macos/src/tree/properties/node_attribute_fetch.rs
 @@ -31,23 +31,30 @@ mod imp {
@@ -8809,15 +10421,21 @@ index 316930c..05c8e5e 100644
          let readonly = if requirements.states {
              crate::tree::properties::readonly::read_readonly(element, role.as_deref(), deadline)
          } else {
-@@ -218,6 +247,7 @@ mod imp {
+@@ -216,8 +245,13 @@ mod imp {
+                 error: None,
+                 attempted: false,
                  deadline_exhausted: false,
++                authority_error: None,
              }
          };
 +        element.qualify(deadline)?;
++        if let Some(error) = readonly.authority_error {
++            return Err(error);
++        }
          if let Some(error) = readonly.error {
              status.record_readonly_error(error);
          }
-@@ -237,7 +267,7 @@ mod imp {
+@@ -237,7 +271,7 @@ mod imp {
              identifier_field(AX_DOM_IDENTIFIER),
          );
          let mut get = |index: usize| texts[index].take();
@@ -8826,7 +10444,7 @@ index 316930c..05c8e5e 100644
              attrs: NodeAttrs {
                  name_evidence: agent_desktop_core::NameEvidence {
                      explicit_label: get(LABEL).or_else(|| {
-@@ -286,7 +316,7 @@ mod imp {
+@@ -286,7 +320,7 @@ mod imp {
                  deadline_exhausted,
              },
              status,
@@ -8835,7 +10453,7 @@ index 316930c..05c8e5e 100644
      }
 
      fn failed_node_attribute_read(
-@@ -314,17 +344,30 @@ mod imp {
+@@ -314,17 +348,30 @@ mod imp {
          }
      }
 
@@ -8868,7 +10486,7 @@ index 316930c..05c8e5e 100644
          if let Some(title) = title.filter(|value| !value.value.trim().is_empty()) {
              return Ok(Some(title));
          }
-@@ -332,30 +375,56 @@ mod imp {
+@@ -332,30 +379,56 @@ mod imp {
              element,
              kAXRoleAttribute,
              deadline,
@@ -8930,7 +10548,7 @@ index 316930c..05c8e5e 100644
      }
  }
 
-@@ -371,14 +440,14 @@ mod imp {
+@@ -371,14 +444,14 @@ mod imp {
          _requirements: agent_desktop_core::EvidenceRequirements,
          _deadline: std::time::Instant,
          _usage: &mut crate::tree::observation_usage::ObservationUsage,
@@ -8945,6 +10563,42 @@ index 316930c..05c8e5e 100644
              status: crate::tree::properties::node_attribute_status::NodeAttributeStatus::default(),
 -        }
 +        })
+     }
+ }
+
+diff --git a/crates/macos/src/tree/properties/readonly.rs b/crates/macos/src/tree/properties/readonly.rs
+index dc5e5bf..f280c18 100644
+--- a/crates/macos/src/tree/properties/readonly.rs
++++ b/crates/macos/src/tree/properties/readonly.rs
+@@ -3,6 +3,7 @@ pub(crate) struct ReadonlyRead {
+     pub(crate) error: Option<i32>,
+     pub(crate) attempted: bool,
+     pub(crate) deadline_exhausted: bool,
++    pub(crate) authority_error: Option<agent_desktop_core::AdapterError>,
+ }
+
+ #[cfg(target_os = "macos")]
+@@ -17,6 +18,7 @@ pub(crate) fn read_readonly(
+             error: None,
+             attempted: false,
+             deadline_exhausted: false,
++            authority_error: None,
+         };
+     }
+     if crate::tree::locator_deadline::remaining(deadline).is_err() {
+@@ -25,6 +27,7 @@ pub(crate) fn read_readonly(
+             error: None,
+             attempted: false,
+             deadline_exhausted: true,
++            authority_error: None,
+         };
+     }
+     let read = super::capabilities::is_attr_settable_with_status(element, "AXValue", deadline);
+@@ -33,6 +36,7 @@ pub(crate) fn read_readonly(
+         error: read.error,
+         attempted: true,
+         deadline_exhausted: false,
++        authority_error: read.authority_error,
      }
  }
 
@@ -9849,7 +11503,7 @@ index 6987c14..6debc08 100644
 
          let (children, complete) = traversal.visit_children(read, (1, 0)).unwrap();
 diff --git a/crates/macos/src/tree/renderer_probe.rs b/crates/macos/src/tree/renderer_probe.rs
-index ae9491f..0988f51 100644
+index ae9491f..892c5ef 100644
 --- a/crates/macos/src/tree/renderer_probe.rs
 +++ b/crates/macos/src/tree/renderer_probe.rs
 @@ -18,7 +18,8 @@ pub(crate) fn activation_required(
@@ -9862,7 +11516,7 @@ index ae9491f..0988f51 100644
      activation_needed(
          web_surface,
          absence_proven,
-@@ -69,12 +70,13 @@ fn attribute_supported(
+@@ -69,12 +70,16 @@ fn attribute_supported(
      attribute: &str,
      deadline: std::time::Instant,
  ) -> Result<bool, AdapterError> {
@@ -9874,6 +11528,9 @@ index ae9491f..0988f51 100644
          deadline,
      );
 +    application.qualify(deadline)?;
++    if let Some(error) = read.authority_error {
++        return Err(error);
++    }
      super::locator_deadline::remaining(deadline)?;
      match (read.value, read.error) {
          (Some(value), None) => Ok(value),
@@ -15127,7 +16784,7 @@ index f33a96f..c4088df 100644
              Err(error) => {
                  tracing::debug!(
 diff --git a/crates/windows/src/system/capture/capture_envelope_parity_tests.rs b/crates/windows/src/system/capture/capture_envelope_parity_tests.rs
-index 63799f7..851805b 100644
+index 63799f7..a3b5cb9 100644
 --- a/crates/windows/src/system/capture/capture_envelope_parity_tests.rs
 +++ b/crates/windows/src/system/capture/capture_envelope_parity_tests.rs
 @@ -56,6 +56,7 @@ fn screenshot_failure_disposition_serializes_not_delivered() {
@@ -15138,6 +16795,22 @@ index 63799f7..851805b 100644
          id: format!("w-{}", fixture.handle() as usize),
          title: String::new(),
          app: String::new(),
+@@ -89,6 +90,7 @@ fn screenshot_path_and_inline_data_shapes_match_core_serialization() {
+
+     let with_path = screenshot::execute(
+         ScreenshotArgs {
++            clovy_target_json: None,
+             app: None,
+             window_id: None,
+             screen: None,
+@@ -110,6 +112,7 @@ fn screenshot_path_and_inline_data_shapes_match_core_serialization() {
+
+     let inline = screenshot::execute(
+         ScreenshotArgs {
++            clovy_target_json: None,
+             app: None,
+             window_id: None,
+             screen: None,
 diff --git a/crates/windows/src/system/capture/capture_live_breadth_tests.rs b/crates/windows/src/system/capture/capture_live_breadth_tests.rs
 index 01ba760..4978d30 100644
 --- a/crates/windows/src/system/capture/capture_live_breadth_tests.rs
@@ -15395,6 +17068,18 @@ index 450c140..56c4138 100644
          .expect_err("forced failure after session start");
      assert_eq!(forced.code, ErrorCode::ActionFailed);
      assert_eq!(
+diff --git a/crates/windows/src/system/capture/capture_routing_parity_tests.rs b/crates/windows/src/system/capture/capture_routing_parity_tests.rs
+index 34229b8..23b9206 100644
+--- a/crates/windows/src/system/capture/capture_routing_parity_tests.rs
++++ b/crates/windows/src/system/capture/capture_routing_parity_tests.rs
+@@ -116,6 +116,7 @@ fn screenshot_user_path_bypasses_private_policy_that_refuses_reparse() {
+
+     let response = screenshot::execute(
+         ScreenshotArgs {
++            clovy_target_json: None,
+             app: None,
+             window_id: None,
+             screen: None,
 diff --git a/crates/windows/src/system/capture/capture_test_support.rs b/crates/windows/src/system/capture/capture_test_support.rs
 index 1a390e7..f5207a0 100644
 --- a/crates/windows/src/system/capture/capture_test_support.rs
@@ -19580,6 +21265,30 @@ index 80f1b92..764f633 100644
  /// The fakes encode the measured pair, not a reading of the crate. If this
  /// fails, every other fake-driven assertion below is testing the wrong model.
  #[test]
+diff --git a/src/batch/baseline_tests.rs b/src/batch/baseline_tests.rs
+index bb358c1..5e8b766 100644
+--- a/src/batch/baseline_tests.rs
++++ b/src/batch/baseline_tests.rs
+@@ -58,6 +58,7 @@ impl agent_desktop_core::SystemOps for AtomicEventAdapter {
+             .opened
+             .load(Ordering::SeqCst)
+             .then(|| agent_desktop_core::WindowInfo {
++                native_owner: None,
+                 id: "w-sync".into(),
+                 title: "Synchronous".into(),
+                 app: "Fixture".into(),
+diff --git a/src/batch/open_system_surface_parity_tests.rs b/src/batch/open_system_surface_parity_tests.rs
+index 202d703..dcd628b 100644
+--- a/src/batch/open_system_surface_parity_tests.rs
++++ b/src/batch/open_system_surface_parity_tests.rs
+@@ -39,6 +39,7 @@ impl SystemOps for SurfaceAdapter {
+     ) -> Result<WindowInfo, AdapterError> {
+         self.opens.lock().unwrap().push((surface, policy));
+         Ok(WindowInfo {
++            native_owner: None,
+             id: "w-77".into(),
+             title: "Action center".into(),
+             app: "ShellExperienceHost.exe".into(),
 diff --git a/src/cli_args/actions.rs b/src/cli_args/actions.rs
 index 0aeb00f..5e9fa57 100644
 --- a/src/cli_args/actions.rs
@@ -19628,6 +21337,20 @@ index 424ba69..c80b454 100644
      #[command(flatten)]
      #[serde(flatten)]
      pub target: DragTargetArgs,
+diff --git a/src/cli_args/mod.rs b/src/cli_args/mod.rs
+index 7df0b72..45c3f6e 100644
+--- a/src/cli_args/mod.rs
++++ b/src/cli_args/mod.rs
+@@ -231,6 +231,9 @@ pub(crate) struct FindArgs {
+ #[derive(Parser, Debug, Deserialize)]
+ #[serde(deny_unknown_fields)]
+ pub(crate) struct ScreenshotArgs {
++    #[arg(long = "clovy-target-json", hide = true)]
++    #[serde(default)]
++    pub clovy_target_json: Option<String>,
+     #[command(flatten)]
+     #[serde(flatten)]
+     pub scope: WindowScope,
 diff --git a/src/cli_args/mouse_wheel.rs b/src/cli_args/mouse_wheel.rs
 index 8809a00..df4969f 100644
 --- a/src/cli_args/mouse_wheel.rs
@@ -19652,6 +21375,26 @@ index 8809a00..df4969f 100644
              x: 0.0,
              y: 0.0,
              dy,
+diff --git a/src/command_policy/tests.rs b/src/command_policy/tests.rs
+index 79c0536..2bedca4 100644
+--- a/src/command_policy/tests.rs
++++ b/src/command_policy/tests.rs
+@@ -31,6 +31,7 @@ fn permission_report_is_collected_only_for_permission_consumers() {
+ fn unknown_permission_does_not_mask_platform_errors() {
+     let report = PermissionReport::default();
+     let command = Commands::Screenshot(ScreenshotArgs {
++        clovy_target_json: None,
+         scope: WindowScope {
+             app: None,
+             window_id: None,
+@@ -52,6 +53,7 @@ fn screen_recording_denial_is_preflighted() {
+         automation: PermissionState::NotRequired,
+     };
+     let command = Commands::Screenshot(ScreenshotArgs {
++        clovy_target_json: None,
+         scope: WindowScope {
+             app: None,
+             window_id: None,
 diff --git a/src/dispatch/cursor_overlay_lifecycle_tests.rs b/src/dispatch/cursor_overlay_lifecycle_tests.rs
 index 323d87f..7b1e1dd 100644
 --- a/src/dispatch/cursor_overlay_lifecycle_tests.rs
@@ -19782,6 +21525,18 @@ index 373674f..83d7442 100644
      dispatch_command(cmd, adapter, permission_report, context)
          .map_err(|error| disposition::settle_unknown_delivery(error, read_only))
  }
+diff --git a/src/dispatch/observation.rs b/src/dispatch/observation.rs
+index 9083533..7ffd816 100644
+--- a/src/dispatch/observation.rs
++++ b/src/dispatch/observation.rs
+@@ -81,6 +81,7 @@ pub(super) fn screenshot(
+ ) -> Result<Value, AppError> {
+     screenshot_command::execute(
+         screenshot_command::ScreenshotArgs {
++            clovy_target_json: args.clovy_target_json,
+             app: args.scope.app,
+             window_id: args.scope.window_id,
+             screen: args.screen,
 diff --git a/src/main.rs b/src/main.rs
 index c889b9f..59c3cec 100644
 --- a/src/main.rs
@@ -19800,3 +21555,63 @@ index c889b9f..59c3cec 100644
              let context = CommandContext::new(session_id, cli.trace, cli.trace_strict)
                  .map_err(pre_dispatch_error)?
                  .with_headed(cli.interaction.headed)
+diff --git a/src/tests/batch_seen_set_tests.rs b/src/tests/batch_seen_set_tests.rs
+index d7780c3..5094e49 100644
+--- a/src/tests/batch_seen_set_tests.rs
++++ b/src/tests/batch_seen_set_tests.rs
+@@ -54,6 +54,7 @@ impl agent_desktop_core::SystemOps for SeenSetBatchAdapter {
+         let call = self.calls.fetch_add(1, Ordering::SeqCst);
+         let windows = if call == 1 {
+             vec![WindowInfo {
++                native_owner: None,
+                 id: "w-seen".into(),
+                 title: "Seen".into(),
+                 app: "Fixture".into(),
+diff --git a/src/tests/conformance.rs b/src/tests/conformance.rs
+index 5ceb0c6..15b5b63 100644
+--- a/src/tests/conformance.rs
++++ b/src/tests/conformance.rs
+@@ -185,6 +185,7 @@ fn entry(bounds: Rect) -> RefEntry {
+             available_actions: vec![capability::CLICK.into()],
+         },
+         source: RefSource {
++            native_owner: None,
+             source_app: None,
+             source_window_id: None,
+             source_window_title: None,
+diff --git a/src/visual_debug/capture.rs b/src/visual_debug/capture.rs
+index d849196..42818f4 100644
+--- a/src/visual_debug/capture.rs
++++ b/src/visual_debug/capture.rs
+@@ -26,6 +26,7 @@ pub(super) fn window_for_entry(
+     }
+     Ok(adapter.resolve_window_strict(
+         &WindowInfo {
++            native_owner: entry.source.native_owner.clone(),
+             id,
+             title: entry.source.source_window_title.clone().unwrap_or_default(),
+             app: entry.source.source_app.clone().unwrap_or_default(),
+diff --git a/src/visual_debug/capture_tests.rs b/src/visual_debug/capture_tests.rs
+index d84ee18..56c545a 100644
+--- a/src/visual_debug/capture_tests.rs
++++ b/src/visual_debug/capture_tests.rs
+@@ -72,6 +72,7 @@ impl SystemOps for CaptureAdapter {
+
+ fn window() -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: "w-test".into(),
+         title: "Test".into(),
+         app: "Fixture".into(),
+diff --git a/tests/conformance/window_identity_contract.rs b/tests/conformance/window_identity_contract.rs
+index 0c30795..067e4c3 100644
+--- a/tests/conformance/window_identity_contract.rs
++++ b/tests/conformance/window_identity_contract.rs
+@@ -51,6 +51,7 @@ impl SystemOps for WindowIdentityAdapter {
+
+ fn untitled(id: &str, pid: u32) -> WindowInfo {
+     WindowInfo {
++        native_owner: None,
+         id: id.into(),
+         title: "Untitled".into(),
+         app: "TextEdit".into(),

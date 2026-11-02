@@ -210,8 +210,18 @@ around their provider calls. Focused-caret callers carry the original process
 generation; a system-wide lookup establishes a fresh native identity before
 reading the focused element. The exact CoreGraphics decoder borrows its single
 expected generation without creating a map. The portable error-flow test and
-macOS metadata-only compilation do not establish native behavior. macOS pixel
-capture, focus, semantic and physical input boundaries remain separate work.
+macOS metadata-only compilation do not establish native behavior. The macOS
+pixel, focus, semantic and physical input paths still require native proof.
+
+For exact macOS window captures, the driver transports the host's original
+window identity and the engine compares it before capture. The screenshot
+subprocess boundary checks Stop and requalifies that window immediately before
+spawn; errors after a possible spawn retain an unsafe disposition. AX action
+and attribute mutations check Stop and requalify the bound element at their
+native call boundary, including focus, renderer activation, menu and selection
+paths. Verification after an effect preserves its delivery disposition.
+The portable subprocess proof and Rust metadata checks do not establish macOS
+runtime behavior. Physical input and native qualification remain open.
 
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:

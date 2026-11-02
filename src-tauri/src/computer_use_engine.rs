@@ -342,8 +342,10 @@ impl EngineAdapter {
                     "screenshot".into(),
                     "--window-id".into(),
                     window.id().into(),
+                    "--clovy-target-json".into(),
+                    window.raw.to_string(),
                 ],
-                false,
+                true,
             )
             .await?;
         if screenshot["ok"] != true {
