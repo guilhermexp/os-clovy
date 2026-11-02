@@ -197,6 +197,10 @@ decoding window names or titles. AX window and focus reads carry that captured
 generation and verify the AX element owner before reading its content. Strict
 resolution and the title fallback repeat qualification against the original
 generation; other macOS read, capture and input surfaces remain separate work.
+Tree observation and reference resolution now qualify the original root
+generation before selecting a surface, including after resolution retry waits.
+This does not yet bind candidate or retained AX-handle identity and does not
+establish protection for tree, live-value, selection, caret or input reads.
 
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:

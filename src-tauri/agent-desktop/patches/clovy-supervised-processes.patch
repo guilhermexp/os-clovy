@@ -6447,11 +6447,79 @@ index c8c2cf7..917288e 100644
          id: "w-100".into(),
          title: String::new(),
          app: "TextEdit".into(),
+diff --git a/crates/macos/src/tree/adapter.rs b/crates/macos/src/tree/adapter.rs
+index 7dee59c..06963d5 100644
+--- a/crates/macos/src/tree/adapter.rs
++++ b/crates/macos/src/tree/adapter.rs
+@@ -88,11 +88,13 @@ impl ObservationOps for MacOSAdapter {
+         deadline: Deadline,
+     ) -> Result<Vec<SurfaceInfo>, AdapterError> {
+         let identity = crate::system::process::process_identity::require_core(&process)?;
++        crate::system::private_browser_guard::require_pid(identity.pid(), Some(&process.instance))?;
+         let surfaces = crate::tree::surface_inventory::list_surfaces_for_pid(
+             identity.pid(),
+             crate::tree::locator_deadline::from_operation(deadline)?,
+         )?;
+         crate::system::process::process_identity::require_core(&process)?;
++        crate::system::private_browser_guard::require_pid(identity.pid(), Some(&process.instance))?;
+         Ok(surfaces)
+     }
+
 diff --git a/crates/macos/src/tree/query/mod.rs b/crates/macos/src/tree/query/mod.rs
-index ecc4e7c..6ec3b35 100644
+index ecc4e7c..3a002f8 100644
 --- a/crates/macos/src/tree/query/mod.rs
 +++ b/crates/macos/src/tree/query/mod.rs
-@@ -275,6 +275,7 @@ mod tests {
+@@ -99,7 +99,22 @@ fn resolve_root(
+     match root {
+         ObservationRoot::Window(window) => {
+             let pid = crate::system::process::process_identity::to_pid_t(window.pid)?;
++            let instance = window
++                .process_instance
++                .as_deref()
++                .filter(|value| !value.is_empty())
++                .ok_or_else(|| {
++                    AdapterError::stale_ref_because("Window root has no process generation")
++                })?;
++            crate::system::private_browser_guard::require_pid(pid, Some(instance))?;
++            crate::tree::locator_deadline::remaining(deadline)?;
+             let element = resolve_window_surface(window, request.surface, deadline)?;
++            let owner = crate::tree::properties::ax_ipc::pid(&element, deadline).map_err(|_| {
++                AdapterError::stale_ref_because("Accessibility root owner is unavailable")
++            })?;
++            crate::system::private_browser_guard::require_pid(pid, Some(instance))?;
++            crate::system::private_browser_guard::require_pid(owner, None)?;
++            crate::tree::locator_deadline::remaining(deadline)?;
+             let context =
+                 crate::tree::TreeBuildContext::for_pid_with_deadline(pid, true, deadline)?
+                     .child_context(window.bounds);
+@@ -130,6 +145,8 @@ fn resolve_root(
+                     "root_ref": root_ref,
+                 }))
+             })?;
++            verify_entry_process(entry)?;
++            crate::tree::locator_deadline::remaining(deadline)?;
+             let context =
+                 crate::tree::TreeBuildContext::for_pid_with_deadline(pid, true, deadline)?
+                     .child_context(crate::tree::element_bounds::ancestor_viewport(
+@@ -153,16 +170,7 @@ fn verify_entry_process(entry: &agent_desktop_core::RefEntry) -> Result<(), Adap
+         AdapterError::stale_ref_because("Live locator root has no process instance identity")
+     })?;
+     let pid = crate::system::process::process_identity::to_pid_t(entry.process.pid)?;
+-    match crate::system::process::process_identity::matches_instance(pid, instance) {
+-        Ok(true) => Ok(()),
+-        Ok(false) => Err(AdapterError::stale_ref_because(
+-            "Live locator root process instance is no longer running",
+-        )),
+-        Err(error) if error.code == ErrorCode::InvalidArgs => Err(AdapterError::stale_ref_because(
+-            "Live locator root has a malformed process instance identity",
+-        )),
+-        Err(error) => Err(error),
+-    }
++    crate::system::private_browser_guard::require_pid(pid, Some(instance)).map(|_| ())
+ }
+
+ fn resolve_window_surface(
+@@ -275,6 +283,7 @@ mod tests {
                  available_actions: Vec::new(),
              },
              source: RefSource {
@@ -6459,6 +6527,45 @@ index ecc4e7c..6ec3b35 100644
                  source_app: Some("Fixture".into()),
                  source_window_id: None,
                  source_window_title: None,
+diff --git a/crates/macos/src/tree/resolve/mod.rs b/crates/macos/src/tree/resolve/mod.rs
+index 9cf4e8b..c16c32a 100644
+--- a/crates/macos/src/tree/resolve/mod.rs
++++ b/crates/macos/src/tree/resolve/mod.rs
+@@ -55,22 +55,15 @@ fn verify_process_instance(entry: &RefEntry) -> Result<(), AdapterError> {
+         ));
+     };
+     let pid = crate::system::process::process_identity::to_pid_t(entry.process.pid)?;
+-    match crate::system::process::process_identity::matches_instance(pid, instance) {
+-        Ok(true) => Ok(()),
+-        Ok(false) => Err(AdapterError::stale_ref_because(
+-            "Saved target belongs to a process instance that is no longer running",
+-        )),
+-        Err(error) if error.code == ErrorCode::InvalidArgs => Err(AdapterError::stale_ref_because(
+-            "Saved target carries a malformed process instance identity",
+-        )),
+-        Err(error) => Err(error),
+-    }
++    crate::system::private_browser_guard::require_pid(pid, Some(instance)).map(|_| ())
+ }
+
+ #[cfg(target_os = "macos")]
+ fn resolve_once(entry: &RefEntry, deadline: Instant) -> Result<NativeHandle, AdapterError> {
+     let started = Instant::now();
+     crate::tree::locator_deadline::remaining(deadline)?;
++    verify_process_instance(entry)?;
++    crate::tree::locator_deadline::remaining(deadline)?;
+     let mut read_context = ResolveReadContext::new(deadline);
+     if can_use_path_fast_path(entry) {
+         let roots = match candidate_roots(entry, &mut read_context) {
+@@ -141,6 +134,8 @@ fn resolve_locator_anchor_once(
+ ) -> Result<NativeHandle, AdapterError> {
+     let started = Instant::now();
+     crate::tree::locator_deadline::remaining(deadline)?;
++    verify_process_instance(entry)?;
++    crate::tree::locator_deadline::remaining(deadline)?;
+     let mut read_context = ResolveReadContext::new(deadline);
+     if !can_use_locator_anchor_path(entry) {
+         return finish_resolution(
 diff --git a/crates/macos/src/tree/resolve/resolve_tests.rs b/crates/macos/src/tree/resolve/resolve_tests.rs
 index 34c968e..be1ff8f 100644
 --- a/crates/macos/src/tree/resolve/resolve_tests.rs
