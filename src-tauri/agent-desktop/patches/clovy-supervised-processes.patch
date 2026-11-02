@@ -4415,6 +4415,21 @@ index 2066fbc..37bb426 100644
              id: "w-1.1-p".into(),
              title: "frame".into(),
              app: "fixture".into(),
+diff --git a/crates/macos/src/actions/chain/chain_disclosure_steps.rs b/crates/macos/src/actions/chain/chain_disclosure_steps.rs
+index a5589ff..4c80398 100644
+--- a/crates/macos/src/actions/chain/chain_disclosure_steps.rs
++++ b/crates/macos/src/actions/chain/chain_disclosure_steps.rs
+@@ -133,9 +133,7 @@ mod imp {
+             return Ok(None);
+         }
+         let value = crate::tree::properties::attributes::copy_value_typed_result(element, deadline)
+-            .map_err(|error| {
+-                crate::tree::query::read_error::semantic_read(error, "disclosure.value")
+-            })?;
++            .map_err(|error| error.into_adapter("disclosure.value"))?;
+         Ok(crate::tree::state_reader::expanded_state(
+             role.as_deref(),
+             None,
 diff --git a/crates/macos/src/actions/chain/chain_menu_steps.rs b/crates/macos/src/actions/chain/chain_menu_steps.rs
 index bc0a543..64a00a7 100644
 --- a/crates/macos/src/actions/chain/chain_menu_steps.rs
@@ -4505,6 +4520,53 @@ index bc0a543..64a00a7 100644
  }
 
  fn select_containing_item(element: &AXElement, deadline: Deadline) -> Result<bool, AdapterError> {
+diff --git a/crates/macos/src/actions/chain/chain_value_write.rs b/crates/macos/src/actions/chain/chain_value_write.rs
+index 860c488..c24e5be 100644
+--- a/crates/macos/src/actions/chain/chain_value_write.rs
++++ b/crates/macos/src/actions/chain/chain_value_write.rs
+@@ -21,7 +21,9 @@ mod imp {
+             if error.disposition != agent_desktop_core::DeliverySemantics::uncertain() {
+                 return Err(error);
+             }
+-            let observed = crate::tree::copy_value_typed(element, deadline);
++            let observed = crate::tree::copy_value_typed(element, deadline).map_err(|failure| {
++                failure.with_disposition(agent_desktop_core::DeliverySemantics::uncertain())
++            })?;
+             let role = ax_helpers::element_role(element, deadline).ok().flatten();
+             let verified = chain_verify::dynamic_write_had_effect(
+                 attribute,
+@@ -40,7 +42,8 @@ mod imp {
+         prepare(element, deadline).map_err(|error| delivery.annotate(error))?;
+         let role = ax_helpers::element_role(element, deadline)
+             .map_err(|error| delivery.annotate(error))?;
+-        let observed = crate::tree::copy_value_typed(element, deadline);
++        let observed = crate::tree::copy_value_typed(element, deadline)
++            .map_err(|error| delivery.annotate(error))?;
+         Ok(DeliveryOutcome::from_delivery(
+             true,
+             chain_verify::dynamic_write_had_effect(
+@@ -210,7 +213,7 @@ mod imp {
+         deadline: Deadline,
+     ) -> Result<Option<(f64, String)>, AdapterError> {
+         prepare(element, deadline)?;
+-        Ok(crate::tree::copy_value_typed(element, deadline)
++        Ok(crate::tree::copy_value_typed(element, deadline)?
+             .and_then(|value| finite_target(&value).map(|number| (number, value))))
+     }
+
+diff --git a/crates/macos/src/actions/extras.rs b/crates/macos/src/actions/extras.rs
+index 3f1b878..8e74fa5 100644
+--- a/crates/macos/src/actions/extras.rs
++++ b/crates/macos/src/actions/extras.rs
+@@ -86,7 +86,7 @@ fn verify_value(
+     let local_end = std::time::Instant::now() + std::time::Duration::from_millis(600);
+     loop {
+         prepare(element, deadline)?;
+-        if crate::tree::copy_value_typed(element, deadline).as_deref() == Some(expected) {
++        if crate::tree::copy_value_typed(element, deadline)?.as_deref() == Some(expected) {
+             return Ok(true);
+         }
+         if deadline.is_expired() {
 diff --git a/crates/macos/src/actions/post_state_tests.rs b/crates/macos/src/actions/post_state_tests.rs
 index 754aeb4..c83d1d7 100644
 --- a/crates/macos/src/actions/post_state_tests.rs
@@ -4559,10 +4621,10 @@ index d50e797..fd77cc8 100644
              let raw = core_foundation_sys::array::CFArrayCreate(
                  std::ptr::null(),
 diff --git a/crates/macos/src/actions/select/select_menu.rs b/crates/macos/src/actions/select/select_menu.rs
-index aea6431..10f30e5 100644
+index aea6431..7e5a98b 100644
 --- a/crates/macos/src/actions/select/select_menu.rs
 +++ b/crates/macos/src/actions/select/select_menu.rs
-@@ -13,7 +13,7 @@ pub(crate) fn select_from_menu(
+@@ -13,14 +13,14 @@ pub(crate) fn select_from_menu(
  ) -> Result<bool, AdapterError> {
      let pid = require_pid(element, deadline)?;
      let identity = require_identity(pid)?;
@@ -4571,6 +4633,14 @@ index aea6431..10f30e5 100644
          return Err(AdapterError::new(
              ErrorCode::ActionFailed,
              "Select refused to reuse a menu that was already open",
+         )
+         .with_suggestion("Dismiss the open menu and retry select."));
+     }
+-    let exposes_value = crate::tree::copy_value_typed(element, deadline).is_some();
++    let exposes_value = crate::tree::copy_value_typed(element, deadline)?.is_some();
+     let delivered = open_menu(element, deadline)?;
+     if !delivered {
+         return Err(AdapterError::new(
 @@ -29,7 +29,7 @@ pub(crate) fn select_from_menu(
          )
          .with_suggestion("Use click to open the control, then snapshot the menu."));
@@ -4580,6 +4650,15 @@ index aea6431..10f30e5 100644
      match result {
          Ok(_) if exposes_value => {
              verify_selected_value(element, value, deadline).map_err(after_menu_delivery)
+@@ -50,7 +50,7 @@ fn verify_selected_value(
+     let local_end = std::time::Instant::now() + std::time::Duration::from_millis(600);
+     loop {
+         prepare(element, deadline)?;
+-        if crate::tree::copy_value_typed(element, deadline)
++        if crate::tree::copy_value_typed(element, deadline)?
+             .as_deref()
+             .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+         {
 @@ -110,6 +110,7 @@ fn open_menu(element: &AXElement, deadline: Deadline) -> Result<bool, AdapterErr
  fn select_open_menu_item(
      pid: i32,
@@ -4687,6 +4766,23 @@ index b9a966c..9558f2c 100644
          },
          crate::tree::properties::capabilities::same_element,
      )
+diff --git a/crates/macos/src/actions/toggle_state.rs b/crates/macos/src/actions/toggle_state.rs
+index 61ec349..dca073a 100644
+--- a/crates/macos/src/actions/toggle_state.rs
++++ b/crates/macos/src/actions/toggle_state.rs
+@@ -313,6 +313,12 @@ fn read_value(el: &AXElement, deadline: Deadline) -> Result<Option<String>, Adap
+         return Err(deadline.timeout_error());
+     }
+     result.map_err(|error| {
++        let error = match error {
++            crate::tree::properties::text_attributes::ValueReadError::Authority(error) => {
++                return error;
++            }
++            crate::tree::properties::text_attributes::ValueReadError::Native(error) => error,
++        };
+         let code = if error == kAXErrorAPIDisabled {
+             ErrorCode::PermDenied
+         } else if error == kAXErrorCannotComplete {
 diff --git a/crates/macos/src/actions/type_text.rs b/crates/macos/src/actions/type_text.rs
 index 1f8a933..a283355 100644
 --- a/crates/macos/src/actions/type_text.rs
@@ -8853,10 +8949,10 @@ index 316930c..05c8e5e 100644
  }
 
 diff --git a/crates/macos/src/tree/properties/text_attributes.rs b/crates/macos/src/tree/properties/text_attributes.rs
-index ebe335e..2edb068 100644
+index ebe335e..864a439 100644
 --- a/crates/macos/src/tree/properties/text_attributes.rs
 +++ b/crates/macos/src/tree/properties/text_attributes.rs
-@@ -1,5 +1,17 @@
+@@ -1,5 +1,26 @@
 +pub(crate) enum ValueReadError {
 +    Native(i32),
 +    Authority(agent_desktop_core::AdapterError),
@@ -8868,27 +8964,47 @@ index ebe335e..2edb068 100644
 +    }
 +}
 +
++impl ValueReadError {
++    pub(crate) fn into_adapter(self, phase: &str) -> agent_desktop_core::AdapterError {
++        match self {
++            Self::Native(error) => crate::tree::query::read_error::semantic_read(error, phase),
++            Self::Authority(error) => error,
++        }
++    }
++}
++
  #[cfg(target_os = "macos")]
  mod imp {
 +    use super::ValueReadError;
      use crate::tree::{AXElement, properties::bounded_string::BoundedString};
      use accessibility_sys::{kAXErrorSuccess, kAXValueAttribute};
      use core_foundation::{
-@@ -72,7 +84,12 @@ mod imp {
+@@ -61,20 +82,20 @@ mod imp {
+     pub(crate) fn copy_value_typed(
+         el: &AXElement,
+         deadline: impl crate::tree::properties::ax_ipc::AxDeadline,
+-    ) -> Option<String> {
+-        copy_value_typed_result(el, deadline).ok().flatten()
++    ) -> Result<Option<String>, agent_desktop_core::AdapterError> {
++        copy_value_typed_result(el, deadline).map_err(|error| error.into_adapter("value"))
+     }
+
+     pub(crate) fn copy_value_typed_result(
+         el: &AXElement,
+         deadline: impl crate::tree::properties::ax_ipc::AxDeadline,
+-    ) -> Result<Option<String>, i32> {
++    ) -> Result<Option<String>, ValueReadError> {
          let mut usage = crate::tree::observation_usage::ObservationUsage::new(
              agent_desktop_core::ObservationBudget::default(),
          );
--        match copy_value_typed_bounded_result(el, deadline, &mut usage)? {
-+        match copy_value_typed_bounded_result(el, deadline, &mut usage).map_err(
-+            |error| match error {
-+                ValueReadError::Native(error) => error,
-+                ValueReadError::Authority(_) => MALFORMED_AX_VALUE,
-+            },
-+        )? {
+         match copy_value_typed_bounded_result(el, deadline, &mut usage)? {
              Some(value) if value.complete => Ok(Some(value.value)),
-             Some(_) => Err(TEXT_TRUNCATED),
+-            Some(_) => Err(TEXT_TRUNCATED),
++            Some(_) => Err(ValueReadError::Native(TEXT_TRUNCATED)),
              None => Ok(None),
-@@ -83,30 +100,43 @@ mod imp {
+         }
+     }
+@@ -83,30 +104,43 @@ mod imp {
          el: &AXElement,
          deadline: impl crate::tree::properties::ax_ipc::AxDeadline,
          usage: &mut crate::tree::observation_usage::ObservationUsage,
@@ -8938,7 +9054,7 @@ index ebe335e..2edb068 100644
              };
          }
          if value.is_null() {
-@@ -116,7 +146,7 @@ mod imp {
+@@ -116,7 +150,7 @@ mod imp {
          if let Some(text) = value.downcast::<CFString>() {
              return BoundedString::from_cf(&text, usage)
                  .map(Some)
@@ -8947,7 +9063,7 @@ index ebe335e..2edb068 100644
          }
          if let Some(boolean) = value.downcast::<CFBoolean>() {
              return Ok(Some(BoundedString::from_owned(
-@@ -128,7 +158,7 @@ mod imp {
+@@ -128,7 +162,7 @@ mod imp {
              let text = crate::tree::properties::node_attribute_decode::number_text(&number);
              return Ok(text.map(|text| BoundedString::from_owned(text, usage)));
          }
@@ -8956,7 +9072,7 @@ index ebe335e..2edb068 100644
      }
 
      fn is_absent_error(error: i32) -> bool {
-@@ -144,6 +174,7 @@ mod imp {
+@@ -144,6 +178,7 @@ mod imp {
 
  #[cfg(not(target_os = "macos"))]
  mod imp {
@@ -8964,7 +9080,25 @@ index ebe335e..2edb068 100644
      use crate::tree::{AXElement, properties::bounded_string::BoundedString};
 
      pub(crate) fn copy_string_attr_result(
-@@ -181,7 +212,7 @@ mod imp {
+@@ -166,14 +201,14 @@ mod imp {
+     pub(crate) fn copy_value_typed(
+         _el: &AXElement,
+         _deadline: impl crate::tree::properties::ax_ipc::AxDeadline,
+-    ) -> Option<String> {
+-        None
++    ) -> Result<Option<String>, agent_desktop_core::AdapterError> {
++        Ok(None)
+     }
+
+     pub(crate) fn copy_value_typed_result(
+         _el: &AXElement,
+         _deadline: impl crate::tree::properties::ax_ipc::AxDeadline,
+-    ) -> Result<Option<String>, i32> {
++    ) -> Result<Option<String>, ValueReadError> {
+         Ok(None)
+     }
+
+@@ -181,7 +216,7 @@ mod imp {
          _el: &AXElement,
          _deadline: impl crate::tree::properties::ax_ipc::AxDeadline,
          _usage: &mut crate::tree::observation_usage::ObservationUsage,
