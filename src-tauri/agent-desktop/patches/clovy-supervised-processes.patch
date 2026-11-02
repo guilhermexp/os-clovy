@@ -5323,6 +5323,39 @@ index d03382d..f1488df 100644
  mod physical_target;
  pub(crate) mod post_state;
  pub(crate) mod scroll;
+diff --git a/crates/macos/src/actions/physical_click.rs b/crates/macos/src/actions/physical_click.rs
+index 095c868..6f70436 100644
+--- a/crates/macos/src/actions/physical_click.rs
++++ b/crates/macos/src/actions/physical_click.rs
+@@ -46,8 +46,14 @@ pub(crate) fn click_via_bounds(
+         y = point.y,
+         "AX action failed, falling back to CGEvent click"
+     );
+-    let mut verify_target = || prepared.verify_pointer(element, &point, deadline);
+-    crate::input::mouse::synthesize_mouse_after(
++    prepared.verify_pointer(element, &point, deadline)?;
++    #[cfg(target_os = "macos")]
++    return crate::input::mouse::scoped::send(
++        crate::input::mouse::scoped::Target::Element {
++            window: prepared.window(),
++            element,
++        },
++        element.source_window_id()?,
+         MouseEvent {
+             kind: MouseEventKind::Click { count: click.count },
+             point: point.clone(),
+@@ -55,8 +61,9 @@ pub(crate) fn click_via_bounds(
+             modifiers: Vec::new(),
+         },
+         deadline,
+-        &mut verify_target,
+-    )
++    );
++    #[cfg(not(target_os = "macos"))]
++    Err(AdapterError::not_supported("physical click"))
+ }
+
+ fn delivery_point(
 diff --git a/crates/macos/src/actions/physical_keyboard.rs b/crates/macos/src/actions/physical_keyboard.rs
 index 8fa71be..7b9506c 100644
 --- a/crates/macos/src/actions/physical_keyboard.rs
@@ -5695,19 +5728,60 @@ index 8fa71be..7b9506c 100644
 +    crate::tree::properties::attributes::set_messaging_timeout(element, deadline)
  }
 diff --git a/crates/macos/src/actions/physical_target.rs b/crates/macos/src/actions/physical_target.rs
-index ff01b41..e0c1fe6 100644
+index ff01b41..c4cfd11 100644
 --- a/crates/macos/src/actions/physical_target.rs
 +++ b/crates/macos/src/actions/physical_target.rs
-@@ -24,7 +24,7 @@ impl PreparedPhysicalTarget {
-                 )
-             })?;
-         let window = target_window(element, deadline)?;
+@@ -8,23 +8,33 @@ pub(crate) struct PreparedPhysicalTarget {
+ }
+
+ impl PreparedPhysicalTarget {
++    #[cfg(target_os = "macos")]
++    pub(crate) fn window(&self) -> &AXElement {
++        &self.window
++    }
+     pub(crate) fn prepare(element: &AXElement, deadline: Deadline) -> Result<Self, AdapterError> {
+-        let pid =
+-            crate::system::app::app_ops::pid_from_element(element, deadline).ok_or_else(|| {
+-                AdapterError::new(
+-                    ErrorCode::StaleRef,
+-                    "Physical input target no longer has an owning application",
+-                )
+-            })?;
+-        let identity = crate::system::process::process_identity::ProcessIdentity::capture(pid)?
+-            .ok_or_else(|| {
+-                AdapterError::new(
+-                    ErrorCode::StaleRef,
+-                    "Physical input target process exited before input preparation",
+-                )
+-            })?;
+-        let window = target_window(element, deadline)?;
 -        crate::system::focus::verify_app_focused(pid, deadline)?;
++        let identity =
++            crate::system::process::process_identity::require_core(element.owner_identity()?)?;
++        let root = element.root_identity()?;
++        let original = agent_desktop_core::WindowInfo {
++            id: element.source_window_id()?.to_owned(),
++            title: String::new(),
++            app: String::new(),
++            pid: root.pid,
++            process_instance: Some(root.instance.clone()),
++            native_owner: Some(root.clone()),
++            bounds: None,
++            state: Default::default(),
++        };
++        let window =
++            crate::system::window::window_resolve::window_element_for_info(&original, deadline)?;
++        let current = target_window(element, deadline)?;
++        if !crate::tree::same_element(&window, &current) {
++            return Err(AdapterError::stale_ref_because(
++                "Original pointer window changed",
++            ));
++        }
 +        crate::system::focus::verify_app_focused(element, deadline)?;
          crate::system::focus::verify_window_main(&window, deadline)?;
          Ok(Self { identity, window })
      }
-@@ -35,7 +35,7 @@ impl PreparedPhysicalTarget {
+@@ -35,7 +45,7 @@ impl PreparedPhysicalTarget {
          point: &Point,
          deadline: Deadline,
      ) -> Result<(), AdapterError> {
@@ -5716,7 +5790,7 @@ index ff01b41..e0c1fe6 100644
          crate::system::focus::verify_window_main(&self.window, deadline)?;
          match crate::tree::hit_test::hit_test_ax_element(element, point.clone(), deadline)? {
              agent_desktop_core::adapter::hit_test::HitTestResult::ReachesTarget => {}
-@@ -74,27 +74,16 @@ impl PreparedPhysicalTarget {
+@@ -74,27 +84,16 @@ impl PreparedPhysicalTarget {
  }
 
  fn target_window(element: &AXElement, deadline: Deadline) -> Result<AXElement, AdapterError> {
@@ -5791,6 +5865,42 @@ index 754aeb4..c83d1d7 100644
      let bounds = Rect {
          x: 0.0,
          y: 0.0,
+diff --git a/crates/macos/src/actions/scroll.rs b/crates/macos/src/actions/scroll.rs
+index d564d8d..fe43915 100644
+--- a/crates/macos/src/actions/scroll.rs
++++ b/crates/macos/src/actions/scroll.rs
+@@ -272,12 +272,26 @@ fn physical_wheel(
+         y: bounds.y + bounds.height / 2.0,
+     };
+     prepared.verify_pointer(target, &point, deadline)?;
+-    crate::input::mouse::mouse_scroll::synthesize_scroll_at(
+-        point,
+-        (vertical, horizontal),
+-        &[],
++    #[cfg(target_os = "macos")]
++    return crate::input::mouse::scoped::send(
++        crate::input::mouse::scoped::Target::Element {
++            window: prepared.window(),
++            element: target,
++        },
++        target.source_window_id()?,
++        agent_desktop_core::MouseEvent {
++            point,
++            kind: agent_desktop_core::MouseEventKind::Wheel {
++                delta_x: f64::from(horizontal),
++                delta_y: f64::from(vertical),
++            },
++            button: agent_desktop_core::MouseButton::Left,
++            modifiers: Vec::new(),
++        },
+         deadline,
+-    )
++    );
++    #[cfg(not(target_os = "macos"))]
++    Err(AdapterError::not_supported("physical scroll"))
+ }
+
+ fn wheel_delta(direction: &Direction, amount: u32) -> (i32, i32) {
 diff --git a/crates/macos/src/actions/scroll_read.rs b/crates/macos/src/actions/scroll_read.rs
 index 60e3a22..8cbc62d 100644
 --- a/crates/macos/src/actions/scroll_read.rs
@@ -6363,6 +6473,42 @@ index 1f8a933..a283355 100644
              observed.replace(Some((attribute.to_owned(), value.to_owned())));
              Ok(())
          })
+diff --git a/crates/macos/src/input/adapter.rs b/crates/macos/src/input/adapter.rs
+index 7bb8e04..39b3dbf 100644
+--- a/crates/macos/src/input/adapter.rs
++++ b/crates/macos/src/input/adapter.rs
+@@ -6,6 +6,31 @@ use agent_desktop_core::{
+ use crate::adapter::MacOSAdapter;
+
+ impl InputOps for MacOSAdapter {
++    #[cfg(target_os = "macos")]
++    fn mouse_event_for_window(
++        &self,
++        window: &agent_desktop_core::WindowInfo,
++        event: MouseEvent,
++        lease: &InteractionLease,
++    ) -> Result<OperationReport, AdapterError> {
++        if window.id.is_empty() {
++            return Err(AdapterError::stale_ref_because(
++                "Original pointer window is unavailable",
++            ));
++        }
++        let bound = crate::system::window::window_resolve::window_element_for_info(
++            window,
++            lease.deadline(),
++        )?;
++        let report = OperationReport::pointer_dispatched(&event, false);
++        crate::input::mouse::scoped::send(
++            crate::input::mouse::scoped::Target::Window(&bound),
++            &window.id,
++            event,
++            lease.deadline(),
++        )?;
++        Ok(report)
++    }
+     fn mouse_event(
+         &self,
+         event: MouseEvent,
 diff --git a/crates/macos/src/input/keyboard/keyboard_event.rs b/crates/macos/src/input/keyboard/keyboard_event.rs
 index e0296ef..94ac39d 100644
 --- a/crates/macos/src/input/keyboard/keyboard_event.rs
@@ -6790,9 +6936,36 @@ index 80a3bd4..68f3027 100644
      Err(AdapterError::not_supported("synthesize_text"))
  }
 diff --git a/crates/macos/src/input/mouse/mod.rs b/crates/macos/src/input/mouse/mod.rs
-index ec255cd..94ce9ad 100644
+index ec255cd..be92ca8 100644
 --- a/crates/macos/src/input/mouse/mod.rs
 +++ b/crates/macos/src/input/mouse/mod.rs
+@@ -231,7 +231,7 @@ mod imp {
+         ensure_budget(deadline, *delivery)
+     }
+
+-    fn to_cg_button(button: &MouseButton) -> CGMouseButton {
++    pub(crate) fn to_cg_button(button: &MouseButton) -> CGMouseButton {
+         match button {
+             MouseButton::Left => CGMouseButton::Left,
+             MouseButton::Right => CGMouseButton::Right,
+@@ -239,7 +239,7 @@ mod imp {
+         }
+     }
+
+-    fn down_type(button: &MouseButton) -> CGEventType {
++    pub(crate) fn down_type(button: &MouseButton) -> CGEventType {
+         match button {
+             MouseButton::Left => CGEventType::LeftMouseDown,
+             MouseButton::Right => CGEventType::RightMouseDown,
+@@ -247,7 +247,7 @@ mod imp {
+         }
+     }
+
+-    fn up_type(button: &MouseButton) -> CGEventType {
++    pub(crate) fn up_type(button: &MouseButton) -> CGEventType {
+         match button {
+             MouseButton::Left => CGEventType::LeftMouseUp,
+             MouseButton::Right => CGEventType::RightMouseUp,
 @@ -260,14 +260,16 @@ mod imp {
          duration: std::time::Duration,
          delivery: crate::actions::DeliveryTracker,
@@ -6824,6 +6997,58 @@ index ec255cd..94ce9ad 100644
          if !deadline.is_expired() {
              return Ok(());
          }
+@@ -294,20 +297,12 @@ mod imp {
+         Err(AdapterError::not_supported("mouse_event"))
+     }
+
+-    pub(crate) fn synthesize_mouse_after(
+-        _event: MouseEvent,
+-        _deadline: Deadline,
+-        _verify_target: &mut dyn FnMut() -> Result<(), AdapterError>,
+-    ) -> Result<(), AdapterError> {
+-        Err(AdapterError::not_supported("mouse_event"))
+-    }
+-
+     pub fn synthesize_drag(_params: DragParams, _deadline: Deadline) -> Result<(), AdapterError> {
+         Err(AdapterError::not_supported("drag"))
+     }
+ }
+
+-pub(crate) use imp::{synthesize_mouse, synthesize_mouse_after};
++pub(crate) use imp::synthesize_mouse;
+
+ #[cfg(target_os = "macos")]
+ pub(crate) use crate::input::mouse::mouse_drag::synthesize_drag;
+@@ -317,15 +312,16 @@ pub(crate) use imp::synthesize_drag;
+
+ #[cfg(target_os = "macos")]
+ pub(crate) use imp::{
+-    create_event_with_source, ensure_budget, event_flags, event_source, post_event_with_source,
+-    sleep_bounded, validate_point,
++    create_event_with_source, down_type, ensure_budget, event_flags, event_source,
++    post_event_with_source, sleep_bounded, to_cg_button, up_type, validate_point,
++    wheel_lines_to_i32,
+ };
+
+ #[cfg(all(test, target_os = "macos", feature = "interactive-tests"))]
+-pub(crate) use imp::{create_event, standalone_state_error, wheel_lines_to_i32};
++pub(crate) use imp::{create_event, standalone_state_error};
+
+ #[cfg(all(test, target_os = "macos", not(feature = "interactive-tests")))]
+-pub(crate) use imp::{standalone_state_error, wheel_lines_to_i32};
++pub(crate) use imp::standalone_state_error;
+
+ #[cfg(target_os = "macos")]
+ pub(super) mod mouse_drag;
+@@ -333,6 +329,8 @@ pub(super) mod mouse_drag;
+ pub(super) mod mouse_drag_state;
+ pub(crate) mod mouse_move;
+ pub(crate) mod mouse_scroll;
++#[cfg(target_os = "macos")]
++pub(crate) mod scoped;
+ #[cfg(all(test, target_os = "macos"))]
+ #[path = "mouse_tests.rs"]
+ mod tests;
 diff --git a/crates/macos/src/input/mouse/mouse_drag.rs b/crates/macos/src/input/mouse/mouse_drag.rs
 index 4198836..d577021 100644
 --- a/crates/macos/src/input/mouse/mouse_drag.rs
@@ -6945,6 +7170,744 @@ index 4198836..d577021 100644
              from: Point { x: 0.0, y: 0.0 },
              to: Point { x: 10.0, y: 10.0 },
              duration_ms: Some(1),
+diff --git a/crates/macos/src/input/mouse/mouse_scroll.rs b/crates/macos/src/input/mouse/mouse_scroll.rs
+index 6242bba..5e8986e 100644
+--- a/crates/macos/src/input/mouse/mouse_scroll.rs
++++ b/crates/macos/src/input/mouse/mouse_scroll.rs
+@@ -56,7 +56,7 @@ pub(crate) fn synthesize_scroll_at(
+     Err(AdapterError::not_supported("scroll"))
+ }
+
+-fn scroll_chunks(delta: (i32, i32)) -> Result<Vec<(i32, i32)>, AdapterError> {
++pub(crate) fn scroll_chunks(delta: (i32, i32)) -> Result<Vec<(i32, i32)>, AdapterError> {
+     let (mut dy, mut dx) = delta;
+     if dy == 0 && dx == 0 {
+         return Err(AdapterError::new(
+diff --git a/crates/macos/src/input/mouse/scoped.rs b/crates/macos/src/input/mouse/scoped.rs
+new file mode 100644
+index 0000000..8884471
+--- /dev/null
++++ b/crates/macos/src/input/mouse/scoped.rs
+@@ -0,0 +1,719 @@
++use crate::tree::AXElement;
++use agent_desktop_core::{AdapterError, Deadline, MouseEvent, MouseEventKind, Point};
++use core_graphics::event::{
++    CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, EventField, ScrollEventUnit,
++};
++use core_graphics::geometry::CGPoint;
++
++#[derive(Clone, Copy)]
++pub(crate) enum Target<'a> {
++    Window(&'a AXElement),
++    Element {
++        window: &'a AXElement,
++        element: &'a AXElement,
++    },
++}
++
++impl Target<'_> {
++    fn window(&self) -> &AXElement {
++        match self {
++            Self::Window(window) | Self::Element { window, .. } => window,
++        }
++    }
++}
++
++struct Receiver<'a> {
++    target: Target<'a>,
++    window_number: i64,
++    screen_height: f64,
++    class: *mut std::ffi::c_void,
++    selector: *mut std::ffi::c_void,
++}
++
++impl<'a> Receiver<'a> {
++    fn new(target: Target<'a>, id: &str) -> Result<Self, AdapterError> {
++        let window_number = crate::system::window::window_resolve::parse_window_number(id)
++            .ok_or_else(|| {
++                AdapterError::stale_ref_because("Original pointer window is unavailable")
++            })?;
++        unsafe extern "C" {
++            fn objc_getClass(name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
++            fn sel_registerName(name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
++        }
++        let class = unsafe { objc_getClass(c"NSWindow".as_ptr()) };
++        let selector = unsafe {
++            sel_registerName(c"windowNumberAtPoint:belowWindowWithWindowNumber:".as_ptr())
++        };
++        let screen_height = core_graphics::display::CGDisplay::main()
++            .bounds()
++            .size
++            .height;
++        if class.is_null()
++            || selector.is_null()
++            || !screen_height.is_finite()
++            || screen_height <= 0.0
++        {
++            return Err(AdapterError::stale_ref_because(
++                "Pointer receiver is unavailable",
++            ));
++        }
++        Ok(Self {
++            target,
++            window_number,
++            screen_height,
++            class,
++            selector,
++        })
++    }
++
++    fn native_window_number(&self, point: &Point) -> Option<i64> {
++        unsafe extern "C" {
++            fn objc_msgSend(
++                receiver: *mut std::ffi::c_void,
++                selector: *mut std::ffi::c_void,
++                ...
++            ) -> *mut std::ffi::c_void;
++        }
++        let call: unsafe extern "C" fn(
++            *mut std::ffi::c_void,
++            *mut std::ffi::c_void,
++            CGPoint,
++            isize,
++        ) -> isize = unsafe { std::mem::transmute(objc_msgSend as *const ()) };
++        let appkit = CGPoint::new(point.x, self.screen_height - point.y);
++        let number = unsafe { call(self.class, self.selector, appkit, 0) };
++        (number > 0).then_some(number as i64)
++    }
++
++    fn native_window_at(&self, point: &Point) -> bool {
++        self.native_window_number(point) == Some(self.window_number)
++    }
++
++    fn qualify(
++        &self,
++        point: &Point,
++        deadline: Deadline,
++        cursor_required: bool,
++    ) -> Result<Permit, AdapterError> {
++        let instant = crate::tree::locator_deadline::from_operation(deadline)?;
++        let window = self.target.window();
++        window.qualify(instant)?;
++        crate::system::focus::verify_app_focused(window, deadline).map_err(background_refusal)?;
++        crate::system::focus::verify_window_main(window, deadline).map_err(background_refusal)?;
++        let root_pid =
++            crate::system::process::process_identity::to_pid_t(window.root_identity()?.pid)?;
++        let mut app = crate::tree::element_for_pid(root_pid);
++        app.bind_child(window, instant)?;
++        crate::tree::properties::ax_ipc::prepare(&app, instant)?;
++        crate::tree::properties::ax_ipc::prepare(window, instant)?;
++        let main_attribute = core_foundation::string::CFString::new("AXMain");
++        let front_attribute = core_foundation::string::CFString::new("AXFrontmost");
++        let system =
++            AXElement::from_raw(unsafe { accessibility_sys::AXUIElementCreateSystemWide() });
++        crate::tree::properties::ax_ipc::prepare(&system, instant)?;
++        let pointer_source = crate::input::mouse::event_source()?;
++        // A move can also send exit events to the old receiver. Authenticate
++        // that process before allowing the pointer to leave it.
++        let previous = if cursor_required {
++            None
++        } else {
++            let location = CGEvent::new(pointer_source.clone())
++                .map_err(|()| AdapterError::internal("Pointer position unavailable"))?
++                .location();
++            let (error, previous_hit) = crate::tree::properties::ax_ipc::element_at_position(
++                &system,
++                (location.x as f32, location.y as f32),
++                instant,
++            );
++            if error != accessibility_sys::kAXErrorSuccess || previous_hit.is_null() {
++                if !previous_hit.is_null() {
++                    unsafe { core_foundation::base::CFRelease(previous_hit.cast()) };
++                }
++                return Err(AdapterError::stale_ref_because(
++                    "Previous pointer receiver is unavailable",
++                ));
++            }
++            let previous_hit = AXElement::from_raw(previous_hit);
++            let pid =
++                crate::tree::properties::ax_ipc::pid(&previous_hit, instant).map_err(|_| {
++                    AdapterError::stale_ref_because("Previous pointer owner is unavailable")
++                })?;
++            let token = crate::system::private_browser_guard::require_pid(pid, None)?;
++            let authority =
++                crate::system::private_browser_guard::NativeAuthority::capture(pid, &token)?;
++            let previous_point = Point {
++                x: location.x,
++                y: location.y,
++            };
++            let window_number = self.native_window_number(&previous_point).ok_or_else(|| {
++                AdapterError::stale_ref_because("Previous pointer window is unavailable")
++            })?;
++            let window_pid = crate::system::window::cg_window_exact::native_owner_for_window(
++                window_number,
++                instant,
++            )?;
++            let window_token = crate::system::private_browser_guard::require_pid(window_pid, None)?;
++            let window_authority = crate::system::private_browser_guard::NativeAuthority::capture(
++                window_pid,
++                &window_token,
++            )?;
++            Some(Previous {
++                location,
++                hit: previous_hit,
++                authority,
++                window_number,
++                window_pid,
++                window_authority,
++            })
++        };
++        let (error, hit) = crate::tree::properties::ax_ipc::element_at_position(
++            &system,
++            (point.x as f32, point.y as f32),
++            instant,
++        );
++        if error != accessibility_sys::kAXErrorSuccess || hit.is_null() {
++            if !hit.is_null() {
++                unsafe { core_foundation::base::CFRelease(hit.cast()) };
++            }
++            return Err(AdapterError::stale_ref_because(
++                "Pointer receiver is unavailable",
++            ));
++        }
++        let mut hit = AXElement::from_raw(hit);
++        hit.bind_child(window, instant)?;
++        let same_window = if crate::tree::same_element(window, &hit) {
++            true
++        } else {
++            crate::tree::surface_read::element(&hit, "AXWindow", instant)?
++                .is_some_and(|actual| crate::tree::same_element(window, &actual))
++        };
++        if !same_window || !self.native_window_at(point) {
++            return Err(AdapterError::stale_ref_because("Pointer receiver changed"));
++        }
++        if let Target::Element { element, .. } = self.target {
++            element.qualify(instant)?;
++            if !crate::tree::hit_test::reaches_bound_target(element, &hit, instant)? {
++                return Err(AdapterError::stale_ref_because(
++                    "Pointer no longer reaches the original element",
++                ));
++            }
++        }
++        let original = match self.target {
++            Target::Window(_) => Original::Window,
++            Target::Element { element, .. } => {
++                Original::Element(element.effect_authority(instant)?)
++            }
++        };
++        let window_authority = window.effect_authority(instant)?;
++        let hit_authority = hit.effect_authority(instant)?;
++        agent_desktop_core::commands::clovy_cancel::ensure()?;
++        if let Some(previous) = &previous {
++            let location = previous.location;
++            previous.authority.revalidate()?;
++            previous.window_authority.revalidate()?;
++            crate::system::window::cg_window_exact::revalidate_native_owner(
++                previous.window_number,
++                previous.window_pid,
++                instant,
++            )?;
++            let current = CGEvent::new(pointer_source.clone())
++                .map_err(|()| AdapterError::internal("Pointer position unavailable"))?
++                .location();
++            if (current.x - location.x).abs() > 0.5 || (current.y - location.y).abs() > 0.5 {
++                return Err(AdapterError::stale_ref_because(
++                    "Previous pointer position changed",
++                ));
++            }
++            let mut current_hit = std::ptr::null_mut();
++            let error = unsafe {
++                accessibility_sys::AXUIElementCopyElementAtPosition(
++                    system.raw(),
++                    location.x as f32,
++                    location.y as f32,
++                    &mut current_hit,
++                )
++            };
++            if error != accessibility_sys::kAXErrorSuccess || current_hit.is_null() {
++                if !current_hit.is_null() {
++                    unsafe { core_foundation::base::CFRelease(current_hit.cast()) };
++                }
++                return Err(AdapterError::stale_ref_because(
++                    "Previous pointer receiver changed",
++                ));
++            }
++            let current_hit = AXElement::from_raw(current_hit);
++            if !crate::tree::same_element(&previous.hit, &current_hit) {
++                return Err(AdapterError::stale_ref_because(
++                    "Previous pointer receiver changed",
++                ));
++            }
++            previous.authority.revalidate()?;
++        }
++        window_authority.revalidate(window, instant)?;
++        hit_authority.revalidate(&hit, instant)?;
++        if let (Target::Element { element, .. }, Original::Element(authority)) =
++            (self.target, &original)
++        {
++            authority.revalidate(element, instant)?;
++        }
++        if cursor_required {
++            let current = CGEvent::new(pointer_source.clone())
++                .map_err(|()| AdapterError::internal("Pointer position unavailable"))?
++                .location();
++            if (current.x - point.x).abs() > 0.5 || (current.y - point.y).abs() > 0.5 {
++                return Err(AdapterError::stale_ref_because("Pointer position changed"));
++            }
++        }
++        let mut current = std::ptr::null_mut();
++        let error = unsafe {
++            accessibility_sys::AXUIElementCopyElementAtPosition(
++                system.raw(),
++                point.x as f32,
++                point.y as f32,
++                &mut current,
++            )
++        };
++        if error != accessibility_sys::kAXErrorSuccess || current.is_null() {
++            if !current.is_null() {
++                unsafe { core_foundation::base::CFRelease(current.cast()) };
++            }
++            return Err(AdapterError::stale_ref_because("Pointer receiver changed"));
++        }
++        let current = AXElement::from_raw(current);
++        if !crate::tree::same_element(&hit, &current) {
++            return Err(AdapterError::stale_ref_because(
++                "Pointer receiver or capture changed",
++            ));
++        }
++        window_authority.revalidate(window, instant)?;
++        hit_authority.revalidate(&hit, instant)?;
++        if let (Target::Element { element, .. }, Original::Element(authority)) =
++            (self.target, &original)
++        {
++            authority.revalidate(element, instant)?;
++        }
++        if let Some(previous) = &previous {
++            let location = previous.location;
++            let mut current_hit = std::ptr::null_mut();
++            let error = unsafe {
++                accessibility_sys::AXUIElementCopyElementAtPosition(
++                    system.raw(),
++                    location.x as f32,
++                    location.y as f32,
++                    &mut current_hit,
++                )
++            };
++            if error != accessibility_sys::kAXErrorSuccess || current_hit.is_null() {
++                if !current_hit.is_null() {
++                    unsafe { core_foundation::base::CFRelease(current_hit.cast()) };
++                }
++                return Err(AdapterError::stale_ref_because(
++                    "Previous pointer receiver changed",
++                ));
++            }
++            let current_hit = AXElement::from_raw(current_hit);
++            if !crate::tree::same_element(&previous.hit, &current_hit) {
++                return Err(AdapterError::stale_ref_because(
++                    "Previous pointer receiver changed",
++                ));
++            }
++            previous.authority.revalidate()?;
++            previous.window_authority.revalidate()?;
++            crate::system::window::cg_window_exact::revalidate_native_owner(
++                previous.window_number,
++                previous.window_pid,
++                instant,
++            )?;
++        }
++        let expected_location = previous
++            .as_ref()
++            .map(|previous| previous.location)
++            .unwrap_or(CGPoint::new(point.x, point.y));
++        if !native_boolean(window, &main_attribute)
++            || !native_boolean(&app, &front_attribute)
++            || !native_boolean(window, &main_attribute)
++        {
++            return Err(AdapterError::stale_ref_because(
++                "Pointer receiver or capture changed",
++            ));
++        }
++        let mut final_hit = std::ptr::null_mut();
++        let error = unsafe {
++            accessibility_sys::AXUIElementCopyElementAtPosition(
++                system.raw(),
++                point.x as f32,
++                point.y as f32,
++                &mut final_hit,
++            )
++        };
++        if error != accessibility_sys::kAXErrorSuccess || final_hit.is_null() {
++            if !final_hit.is_null() {
++                unsafe { core_foundation::base::CFRelease(final_hit.cast()) };
++            }
++            return Err(AdapterError::stale_ref_because("Pointer receiver changed"));
++        }
++        let final_hit = AXElement::from_raw(final_hit);
++        if !crate::tree::same_element(&hit, &final_hit) {
++            return Err(AdapterError::stale_ref_because("Pointer receiver changed"));
++        }
++        window_authority.revalidate(window, instant)?;
++        hit_authority.revalidate(&hit, instant)?;
++        if let (Target::Element { element, .. }, Original::Element(authority)) =
++            (self.target, &original)
++        {
++            authority.revalidate(element, instant)?;
++        }
++        if let Some(previous) = &previous {
++            previous.authority.revalidate()?;
++            previous.window_authority.revalidate()?;
++            crate::system::window::cg_window_exact::revalidate_native_owner(
++                previous.window_number,
++                previous.window_pid,
++                instant,
++            )?;
++        }
++        let latest = CGEvent::new(pointer_source)
++            .map_err(|()| AdapterError::internal("Pointer position unavailable"))?
++            .location();
++        if (latest.x - expected_location.x).abs() > 0.5
++            || (latest.y - expected_location.y).abs() > 0.5
++            || previous.as_ref().is_some_and(|previous| {
++                self.native_window_number(&Point {
++                    x: previous.location.x,
++                    y: previous.location.y,
++                }) != Some(previous.window_number)
++            })
++            || !self.native_window_at(point)
++            || any_button_down()
++        {
++            return Err(AdapterError::stale_ref_because(
++                "Pointer position or capture changed",
++            ));
++        }
++        deadline.ensure_remaining()?;
++        Ok(Permit {
++            window: window_authority,
++            hit: hit_authority,
++            element: hit,
++            original,
++            _previous: previous,
++        })
++    }
++}
++
++struct Previous {
++    location: CGPoint,
++    hit: AXElement,
++    authority: crate::system::private_browser_guard::NativeAuthority,
++    window_number: i64,
++    window_pid: i32,
++    window_authority: crate::system::private_browser_guard::NativeAuthority,
++}
++
++fn background_refusal(error: AdapterError) -> AdapterError {
++    if error.code == agent_desktop_core::ErrorCode::ActionFailed
++        && error
++            .details
++            .as_ref()
++            .is_some_and(|details| details["physical_delivery_started"] == false)
++    {
++        AdapterError::not_supported("background physical pointer").with_suggestion(
++            "Bring the target window forward, or choose headed mode before retrying.",
++        )
++    } else {
++        error
++    }
++}
++
++fn native_boolean(element: &AXElement, attribute: &core_foundation::string::CFString) -> bool {
++    use core_foundation::base::TCFType;
++    let mut value = std::ptr::null();
++    let error = unsafe {
++        accessibility_sys::AXUIElementCopyAttributeValue(
++            element.raw(),
++            attribute.as_concrete_TypeRef(),
++            &mut value,
++        )
++    };
++    if value.is_null() {
++        return false;
++    }
++    let valid = error == accessibility_sys::kAXErrorSuccess
++        && unsafe {
++            core_foundation_sys::base::CFGetTypeID(value)
++                == core_foundation_sys::number::CFBooleanGetTypeID()
++                && core_foundation_sys::number::CFBooleanGetValue(value.cast())
++        };
++    unsafe { core_foundation::base::CFRelease(value) };
++    valid
++}
++
++struct Permit {
++    window: crate::tree::ax_element::NativeEffectAuthority,
++    hit: crate::tree::ax_element::NativeEffectAuthority,
++    element: AXElement,
++    original: Original,
++    _previous: Option<Previous>,
++}
++
++enum Original {
++    Window,
++    Element(crate::tree::ax_element::NativeEffectAuthority),
++}
++
++fn any_button_down() -> bool {
++    unsafe extern "C" {
++        fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
++    }
++    (0..32).any(|button| unsafe { CGEventSourceButtonState(0, button) })
++}
++
++pub(crate) fn send(
++    target: Target<'_>,
++    id: &str,
++    event: MouseEvent,
++    deadline: Deadline,
++) -> Result<(), AdapterError> {
++    use crate::input::mouse::{down_type, event_flags, to_cg_button, up_type};
++    crate::input::mouse::validate_point(&event.point)?;
++    let receiver = Receiver::new(target, id)?;
++    let scroll_chunks = match &event.kind {
++        MouseEventKind::Down | MouseEventKind::Up => {
++            return Err(AdapterError::not_supported("standalone mouse state"));
++        }
++        MouseEventKind::Click { count } => {
++            agent_desktop_core::validate_mouse_click_count(*count)?;
++            None
++        }
++        MouseEventKind::Wheel { delta_x, delta_y } => {
++            Some(crate::input::mouse::mouse_scroll::scroll_chunks((
++                crate::input::mouse::wheel_lines_to_i32(*delta_y)?,
++                crate::input::mouse::wheel_lines_to_i32(*delta_x)?,
++            ))?)
++        }
++        MouseEventKind::Move => None,
++    };
++    let source = core_graphics::event_source::CGEventSource::new(
++        core_graphics::event_source::CGEventSourceStateID::Private,
++    )
++    .map_err(|()| AdapterError::internal("Private pointer event source is unavailable"))?;
++    let button = to_cg_button(&event.button);
++    let flags: CGEventFlags = event_flags(&event.modifiers);
++    let point = CGPoint::new(event.point.x, event.point.y);
++    let mut delivery = crate::actions::DeliveryTracker::default();
++    let move_event = crate::input::mouse::create_event_with_source(
++        &source,
++        CGEventType::MouseMoved,
++        point,
++        button,
++        flags,
++    )?;
++    let _authority = receiver.qualify(&event.point, deadline, false)?;
++    move_event.post(CGEventTapLocation::HID);
++    delivery.mark_delivered();
++    let after_effect = |error| crate::actions::DeliveryTracker::uncertain(error);
++    if !matches!(event.kind, MouseEventKind::Move) {
++        crate::input::mouse::sleep_bounded(
++            deadline,
++            std::time::Duration::from_millis(10),
++            delivery,
++        )
++        .map_err(after_effect)?;
++    }
++    match event.kind {
++        MouseEventKind::Move => {
++            crate::input::mouse::ensure_budget(deadline, delivery).map_err(after_effect)
++        }
++        MouseEventKind::Down | MouseEventKind::Up => unreachable!(),
++        MouseEventKind::Click { count } => {
++            for index in 1..=count {
++                let down = crate::input::mouse::create_event_with_source(
++                    &source,
++                    down_type(&event.button),
++                    point,
++                    button,
++                    flags,
++                )
++                .map_err(after_effect)?;
++                let up = crate::input::mouse::create_event_with_source(
++                    &source,
++                    up_type(&event.button),
++                    point,
++                    button,
++                    flags,
++                )
++                .map_err(after_effect)?;
++                down.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, index as i64);
++                up.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, index as i64);
++                let own_state =
++                    i32::try_from(down.get_integer_value_field(EventField::EVENT_SOURCE_STATE_ID))
++                        .ok()
++                        .filter(|id| !matches!(*id, -1..=1));
++                let permit = receiver
++                    .qualify(&event.point, deadline, true)
++                    .map_err(after_effect)?;
++                down.post(CGEventTapLocation::HID);
++                let mut release = Release {
++                    event: Some(up),
++                    receiver: &receiver,
++                    point: &event.point,
++                    permit,
++                    button: button as u32,
++                    own_state,
++                    observed_down: own_state.is_some_and(|state| button_down(state, button as u32))
++                        && !button_down(1, button as u32),
++                };
++                crate::input::mouse::sleep_bounded(
++                    deadline,
++                    std::time::Duration::from_millis(10),
++                    delivery,
++                )
++                .map_err(after_effect)?;
++                if !release.finish() {
++                    return Err(after_effect(AdapterError::stale_ref_because(
++                        "Pointer release receiver changed",
++                    )));
++                }
++                crate::input::mouse::ensure_budget(deadline, delivery).map_err(after_effect)?;
++                if index < count {
++                    crate::input::mouse::sleep_bounded(
++                        deadline,
++                        std::time::Duration::from_millis(30),
++                        delivery,
++                    )
++                    .map_err(after_effect)?;
++                }
++            }
++            Ok(())
++        }
++        MouseEventKind::Wheel { .. } => {
++            for (dy, dx) in scroll_chunks.expect("wheel chunks were validated before delivery") {
++                let scroll =
++                    CGEvent::new_scroll_event(source.clone(), ScrollEventUnit::LINE, 2, dy, dx, 0)
++                        .map_err(|()| {
++                            after_effect(AdapterError::internal("Scroll event unavailable"))
++                        })?;
++                scroll.set_location(point);
++                scroll.set_flags(flags);
++                let _authority = receiver
++                    .qualify(&event.point, deadline, true)
++                    .map_err(after_effect)?;
++                scroll.post(CGEventTapLocation::HID);
++                crate::input::mouse::ensure_budget(deadline, delivery).map_err(after_effect)?;
++            }
++            Ok(())
++        }
++    }
++}
++
++struct Release<'a, 'b> {
++    event: Option<CGEvent>,
++    receiver: &'a Receiver<'b>,
++    point: &'a Point,
++    permit: Permit,
++    button: u32,
++    own_state: Option<i32>,
++    observed_down: bool,
++}
++impl Release<'_, '_> {
++    fn finish(&mut self) -> bool {
++        let Some(event) = self.event.take() else {
++            return true;
++        };
++        let instant = std::time::Instant::now() + std::time::Duration::from_secs(1);
++        if self
++            .permit
++            .window
++            .revalidate(self.receiver.target.window(), instant)
++            .is_err()
++            || self
++                .permit
++                .hit
++                .revalidate(&self.permit.element, instant)
++                .is_err()
++        {
++            return false;
++        }
++        if let (Target::Element { element, .. }, Original::Element(authority)) =
++            (self.receiver.target, &self.permit.original)
++        {
++            if authority.revalidate(element, instant).is_err() {
++                return false;
++            }
++        }
++        let system =
++            AXElement::from_raw(unsafe { accessibility_sys::AXUIElementCreateSystemWide() });
++        if crate::tree::properties::ax_ipc::prepare(&system, instant).is_err() {
++            return false;
++        }
++        let mut hit = std::ptr::null_mut();
++        let error = unsafe {
++            accessibility_sys::AXUIElementCopyElementAtPosition(
++                system.raw(),
++                self.point.x as f32,
++                self.point.y as f32,
++                &mut hit,
++            )
++        };
++        if error != accessibility_sys::kAXErrorSuccess || hit.is_null() {
++            if !hit.is_null() {
++                unsafe { core_foundation::base::CFRelease(hit.cast()) };
++            }
++            return false;
++        }
++        let hit = AXElement::from_raw(hit);
++        let position = crate::input::mouse::event_source()
++            .ok()
++            .and_then(|source| CGEvent::new(source).ok())
++            .map(|event| event.location());
++        if let (Target::Element { element, .. }, Original::Element(authority)) =
++            (self.receiver.target, &self.permit.original)
++        {
++            if authority.revalidate(element, instant).is_err() {
++                return false;
++            }
++        }
++        if !crate::tree::same_element(&hit, &self.permit.element)
++            || position.is_none_or(|p| {
++                (p.x - self.point.x).abs() > 0.5 || (p.y - self.point.y).abs() > 0.5
++            })
++            || self
++                .permit
++                .window
++                .revalidate(self.receiver.target.window(), instant)
++                .is_err()
++            || self
++                .permit
++                .hit
++                .revalidate(&self.permit.element, instant)
++                .is_err()
++            || !self.receiver.native_window_at(self.point)
++            || button_down(1, self.button)
++            || (0..32).any(|other| other != self.button && button_down(0, other))
++        {
++            return false;
++        }
++        event.post(CGEventTapLocation::HID);
++        if self.observed_down
++            && self
++                .own_state
++                .is_some_and(|state| !button_down(state, self.button))
++            && !button_down(1, self.button)
++        {
++            agent_desktop_core::commands::clovy_cancel::acknowledge_release(true);
++        }
++        true
++    }
++}
++
++fn button_down(state: i32, button: u32) -> bool {
++    unsafe extern "C" {
++        fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
++    }
++    unsafe { CGEventSourceButtonState(state, button) }
++}
++impl Drop for Release<'_, '_> {
++    fn drop(&mut self) {
++        self.finish();
++    }
++}
 diff --git a/crates/macos/src/lib.rs b/crates/macos/src/lib.rs
 index 3012d7f..7b7e14c 100644
 --- a/crates/macos/src/lib.rs
@@ -8393,7 +9356,7 @@ index 7fb2439..8a76e68 100644
 +    pub(crate) bundle_id_len: usize,
  }
 diff --git a/crates/macos/src/system/launch_completion.rs b/crates/macos/src/system/launch_completion.rs
-index 31d33fa..4b9859f 100644
+index 31d33fa..56736dc 100644
 --- a/crates/macos/src/system/launch_completion.rs
 +++ b/crates/macos/src/system/launch_completion.rs
 @@ -7,7 +7,12 @@ const MAX_ERROR_BYTES: usize = 64 * 1024;
@@ -8458,7 +9421,7 @@ index 31d33fa..4b9859f 100644
          let code = if result.error_kind == 1 {
              ErrorCode::AppNotFound
          } else {
-@@ -171,7 +207,144 @@ fn validate_result(
+@@ -171,7 +207,156 @@ fn validate_result(
              .with_details(serde_json::json!({ "pid": result.pid, "complete": false })),
          ));
      }
@@ -8488,20 +9451,32 @@ index 31d33fa..4b9859f 100644
 +        .map_err(|_| AdapterError::internal(format!("Native launch {field} is not UTF-8")))
 +}
 +pub(crate) fn kernel_executable(pid: i32) -> Result<String, AdapterError> {
-+    let mut buffer = vec![0u8; 4096];
++    with_kernel_executable(pid, |path| path.to_owned())
++}
++
++pub(crate) fn kernel_executable_matches(pid: i32, expected: &str) -> Result<bool, AdapterError> {
++    with_kernel_executable(pid, |path| path == expected)
++}
++
++fn with_kernel_executable<T>(pid: i32, read: impl FnOnce(&str) -> T) -> Result<T, AdapterError> {
++    let mut buffer = [0u8; 4096];
 +    let length =
 +        unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
-+    if length <= 0 || length as usize > buffer.len() {
++    if length <= 0 || length as usize >= buffer.len() {
 +        return Err(AdapterError::internal(
 +            "The launched executable path could not be verified",
 +        ));
 +    }
-+    buffer.truncate(length as usize);
-+    if buffer.last() == Some(&0) {
-+        buffer.pop();
++    let bytes = &buffer[..length as usize];
++    let bytes = bytes.strip_suffix(&[0]).unwrap_or(bytes);
++    if bytes.is_empty() || bytes.contains(&0) {
++        return Err(AdapterError::internal(
++            "The launched executable path is invalid",
++        ));
 +    }
-+    String::from_utf8(buffer)
-+        .map_err(|_| AdapterError::internal("The launched executable path is not UTF-8"))
++    let path = std::str::from_utf8(bytes)
++        .map_err(|_| AdapterError::internal("The launched executable path is not UTF-8"))?;
++    Ok(read(path))
 +}
 +fn verified_executable_path(native: &str, kernel: &str) -> Result<(), AdapterError> {
 +    if !std::path::Path::new(native).is_absolute()
@@ -8604,7 +9579,7 @@ index 31d33fa..4b9859f 100644
  }
 
  fn callback_error(
-@@ -234,6 +407,14 @@ unsafe extern "C" {
+@@ -234,6 +419,14 @@ unsafe extern "C" {
          ),
          release: unsafe extern "C" fn(*mut c_void),
      ) -> bool;
@@ -8619,7 +9594,7 @@ index 31d33fa..4b9859f 100644
      fn agent_desktop_running_application_is_live(application: *mut c_void, expected_pid: i32)
      -> u8;
  }
-@@ -248,7 +429,15 @@ mod tests {
+@@ -248,7 +441,15 @@ mod tests {
          let timeout = state.wait(Deadline::after(1).unwrap()).unwrap_err();
 
          assert_eq!(timeout.code, ErrorCode::Timeout);
@@ -8636,7 +9611,7 @@ index 31d33fa..4b9859f 100644
          assert_eq!(state.wait(Deadline::after(50).unwrap()).unwrap().0, 7);
      }
 
-@@ -270,3 +459,47 @@ mod tests {
+@@ -270,3 +471,47 @@ mod tests {
          }
      }
  }
@@ -8766,10 +9741,10 @@ index 030b252..fc29f77 100644
          .stderr(Stdio::null())
 diff --git a/crates/macos/src/system/private_browser_guard.rs b/crates/macos/src/system/private_browser_guard.rs
 new file mode 100644
-index 0000000..13451cb
+index 0000000..dd3b722
 --- /dev/null
 +++ b/crates/macos/src/system/private_browser_guard.rs
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,160 @@
 +//! Host-provided browser identity, evaluated afresh at each native boundary.
 +use agent_desktop_core::{AdapterError, ErrorCode};
 +use std::{
@@ -8827,8 +9802,9 @@ index 0000000..13451cb
 +    }
 +    let image = super::launch_completion::kernel_executable(pid).map_err(|_| denied())?;
 +    let owned = runtime()?.owns(Path::new(&image)).map_err(|_| denied())?;
-+    let current = super::launch_completion::kernel_executable(pid).map_err(|_| denied())?;
-+    if current != image || !identity.still_matches().map_err(|_| denied())? {
++    if !super::launch_completion::kernel_executable_matches(pid, &image).map_err(|_| denied())?
++        || !identity.still_matches().map_err(|_| denied())?
++    {
 +        return Err(AdapterError::stale_ref_because(
 +            "Window owner generation changed",
 +        ));
@@ -8857,7 +9833,8 @@ index 0000000..13451cb
 +        let image = super::launch_completion::kernel_executable(pid).map_err(|_| denied())?;
 +        require_pid(pid, Some(instance))?;
 +        if !identity.still_matches().map_err(|_| denied())?
-+            || super::launch_completion::kernel_executable(pid).map_err(|_| denied())? != image
++            || !super::launch_completion::kernel_executable_matches(pid, &image)
++                .map_err(|_| denied())?
 +        {
 +            return Err(AdapterError::stale_ref_because("Process identity changed"));
 +        }
@@ -8866,9 +9843,11 @@ index 0000000..13451cb
 +
 +    pub(crate) fn revalidate(&self) -> Result<(), AdapterError> {
 +        if !self.identity.still_matches().map_err(|_| denied())?
-+            || super::launch_completion::kernel_executable(self.identity.pid())
-+                .map_err(|_| denied())?
-+                != self.image
++            || !super::launch_completion::kernel_executable_matches(
++                self.identity.pid(),
++                &self.image,
++            )
++            .map_err(|_| denied())?
 +            || !self.identity.still_matches().map_err(|_| denied())?
 +        {
 +            return Err(AdapterError::stale_ref_because("Process identity changed"));
@@ -9515,7 +10494,7 @@ index d321848..a71071e 100644
  }
 
 diff --git a/crates/macos/src/system/window/cg_window_exact.rs b/crates/macos/src/system/window/cg_window_exact.rs
-index dce76cf..87a52bd 100644
+index dce76cf..1fb9a1b 100644
 --- a/crates/macos/src/system/window/cg_window_exact.rs
 +++ b/crates/macos/src/system/window/cg_window_exact.rs
 @@ -6,13 +6,26 @@ use super::cg_window::{WindowDictionary, WindowRecord, WindowRecordScope};
@@ -9546,31 +10525,46 @@ index dce76cf..87a52bd 100644
          )?;
          super::cg_window::capture_process_instances(&mut records, deadline)?;
          Ok(records)
-@@ -61,6 +74,29 @@ fn exact_window_dictionaries(window_number: i64) -> Result<Vec<WindowDictionary>
+@@ -61,6 +74,44 @@ fn exact_window_dictionaries(window_number: i64) -> Result<Vec<WindowDictionary>
      Ok(descriptions.iter().map(|record| record.clone()).collect())
  }
 
++pub(crate) fn native_owner_for_window(
++    window_number: i64,
++    deadline: Instant,
++) -> Result<i32, AdapterError> {
++    super::cg_window::ensure_before_deadline(deadline)?;
++    let dictionaries = exact_window_dictionaries(window_number)?;
++    let [dictionary] = dictionaries.as_slice() else {
++        return Err(AdapterError::stale_ref_because(
++            "Pointer window is unavailable or ambiguous",
++        ));
++    };
++    let number = super::cg_window::required_int_field(dictionary, "kCGWindowNumber")?;
++    let owner = super::cg_window::required_int_field(dictionary, "kCGWindowOwnerPID")?;
++    if number != window_number {
++        return Err(AdapterError::stale_ref_because("Pointer window changed"));
++    }
++    let pid = i32::try_from(owner)
++        .ok()
++        .filter(|pid| *pid > 0)
++        .ok_or_else(|| AdapterError::stale_ref_because("Pointer window owner is unavailable"))?;
++    super::cg_window::ensure_before_deadline(deadline)?;
++    Ok(pid)
++}
++
 +/// Recheck only native window identity after the last filesystem-backed Stop check.
 +pub(crate) fn revalidate_native_owner(
 +    window_number: i64,
 +    expected_pid: i32,
 +    deadline: Instant,
 +) -> Result<(), AdapterError> {
-+    super::cg_window::ensure_before_deadline(deadline)?;
-+    let dictionaries = exact_window_dictionaries(window_number)?;
-+    let [dictionary] = dictionaries.as_slice() else {
-+        return Err(AdapterError::stale_ref_because(
-+            "Exact window is unavailable or ambiguous",
-+        ));
-+    };
-+    let owner = super::cg_window::required_int_field(dictionary, "kCGWindowOwnerPID")?;
-+    let number = super::cg_window::required_int_field(dictionary, "kCGWindowNumber")?;
-+    if owner != i64::from(expected_pid) || number != window_number {
++    if native_owner_for_window(window_number, deadline)? != expected_pid {
 +        return Err(AdapterError::stale_ref_because(
 +            "Exact window owner changed",
 +        ));
 +    }
-+    super::cg_window::ensure_before_deadline(deadline)
++    Ok(())
 +}
 +
  fn exact_window_source_error(message: &str, window_number: i64) -> AdapterError {
@@ -10876,10 +11870,10 @@ index 7dee59c..f18085f 100644
 
      fn get_live_element(
 diff --git a/crates/macos/src/tree/ax_element.rs b/crates/macos/src/tree/ax_element.rs
-index a0fcaf4..d27a179 100644
+index a0fcaf4..c7ecad6 100644
 --- a/crates/macos/src/tree/ax_element.rs
 +++ b/crates/macos/src/tree/ax_element.rs
-@@ -1,68 +1,422 @@
+@@ -1,68 +1,433 @@
 +use agent_desktop_core::{AdapterError, NativeHandle, ProcessIdentity, RefEntry, WindowInfo};
 +use std::{sync::Arc, time::Instant};
 +
@@ -10981,6 +11975,17 @@ index a0fcaf4..d27a179 100644
 +                AdapterError::stale_ref_because("Accessibility root identity is unavailable")
 +            })
 +    }
++
++    #[cfg(target_os = "macos")]
++    pub(crate) fn source_window_id(&self) -> Result<&str, AdapterError> {
++        self.binding
++            .as_ref()
++            .and_then(|binding| binding.source_window.as_deref())
++            .filter(|id| !id.is_empty())
++            .ok_or_else(|| {
++                AdapterError::stale_ref_because("Original pointer window is unavailable")
++            })
++    }
 
 -    pub struct AXElement(pub(crate) AXUIElementRef);
 +    #[cfg(target_os = "macos")]
@@ -11050,7 +12055,7 @@ index a0fcaf4..d27a179 100644
 +            return Err(AdapterError::stale_ref_because(
 +                "Original process generation is unavailable",
 +            ));
-+        }
+         }
 +        let pid = crate::system::process::process_identity::from_pid_t(pid)?;
 +        self.bind_root(
 +            Arc::new(ProcessIdentity::new(pid, instance)),
@@ -11063,7 +12068,7 @@ index a0fcaf4..d27a179 100644
 +            return Err(AdapterError::stale_ref_because(
 +                "Accessibility element has no original identity",
 +            ));
-         }
++        }
 +        Ok(NativeHandle::new(self))
      }
 
@@ -11161,8 +12166,7 @@ index a0fcaf4..d27a179 100644
 +        }
 +        self.bind_entry(entry, deadline)
 +    }
-
--    pub struct AXElement(pub(crate) *const std::ffi::c_void);
++
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn same_owner(&self, other: &AXElement) -> Result<bool, AdapterError> {
 +        let left = self
@@ -11181,10 +12185,7 @@ index a0fcaf4..d27a179 100644
 +            && left.source_window == right.source_window
 +            && left.owner == right.owner)
 +    }
-
--    impl AXElement {
--        pub(crate) fn into_native_handle(self) -> NativeHandle {
--            NativeHandle::new(self)
++
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn owner_is_root(&self) -> Result<bool, AdapterError> {
 +        let binding = self
@@ -11193,7 +12194,8 @@ index a0fcaf4..d27a179 100644
 +            .ok_or_else(|| AdapterError::stale_ref_because("Candidate identity is unavailable"))?;
 +        Ok(binding.root == binding.owner)
 +    }
-+
+
+-    pub struct AXElement(pub(crate) *const std::ffi::c_void);
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn bind_window(
 +        &mut self,
@@ -11218,16 +12220,17 @@ index a0fcaf4..d27a179 100644
 +                ));
 +            }
 +            return self.qualify(deadline);
-         }
++        }
 +        self.bind_root(
 +            Arc::new(ProcessIdentity::new(window.pid, instance)),
 +            (!window.id.is_empty()).then(|| Arc::from(window.id.as_str())),
 +            deadline,
 +        )
-     }
++    }
 
--    impl Drop for AXElement {
--        fn drop(&mut self) {}
+-    impl AXElement {
+-        pub(crate) fn into_native_handle(self) -> NativeHandle {
+-            NativeHandle::new(self)
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn bind_child(
 +        &mut self,
@@ -11248,7 +12251,7 @@ index a0fcaf4..d27a179 100644
 +                self.binding = Some(Arc::clone(binding));
 +                return self.qualify(deadline);
 +            }
-+        }
+         }
 +        self.bind_root(
 +            Arc::clone(&binding.root),
 +            binding.source_window.clone(),
@@ -11256,9 +12259,8 @@ index a0fcaf4..d27a179 100644
 +        )
      }
 
--    impl Clone for AXElement {
--        fn clone(&self) -> Self {
--            AXElement(self.0)
+-    impl Drop for AXElement {
+-        fn drop(&mut self) {}
 +    #[cfg(target_os = "macos")]
 +    pub(crate) fn qualify(&self, deadline: Instant) -> Result<(), AdapterError> {
 +        let binding = self.binding.as_ref().ok_or_else(|| {
@@ -11282,7 +12284,7 @@ index a0fcaf4..d27a179 100644
 +                owner_pid,
 +                Some(&binding.owner.instance),
 +            )?;
-         }
++        }
 +        crate::tree::locator_deadline::remaining(deadline)?;
 +        if crate::tree::properties::ax_ipc::pid(self, deadline).ok() != Some(owner_pid) {
 +            return Err(AdapterError::stale_ref_because(
@@ -11292,9 +12294,11 @@ index a0fcaf4..d27a179 100644
 +        crate::tree::locator_deadline::remaining(deadline)?;
 +        Ok(())
      }
- }
++}
 
--pub(crate) use imp::AXElement;
+-    impl Clone for AXElement {
+-        fn clone(&self) -> Self {
+-            AXElement(self.0)
 +impl Clone for AXElement {
 +    fn clone(&self) -> Self {
 +        #[cfg(target_os = "macos")]
@@ -11306,10 +12310,11 @@ index a0fcaf4..d27a179 100644
 +        Self {
 +            raw: self.raw,
 +            binding: self.binding.clone(),
-+        }
-+    }
-+}
-+
+         }
+     }
+ }
+
+-pub(crate) use imp::AXElement;
 +impl Drop for AXElement {
 +    fn drop(&mut self) {
 +        #[cfg(target_os = "macos")]
@@ -11533,7 +12538,7 @@ index 24c96e2..336991f 100644
      }
  }
 diff --git a/crates/macos/src/tree/hit_test.rs b/crates/macos/src/tree/hit_test.rs
-index 1904a1a..c4a2547 100644
+index 1904a1a..49d40d2 100644
 --- a/crates/macos/src/tree/hit_test.rs
 +++ b/crates/macos/src/tree/hit_test.rs
 @@ -57,20 +57,23 @@ mod imp {
@@ -11566,7 +12571,7 @@ index 1904a1a..c4a2547 100644
      }
 
      fn hit_at_position(
-@@ -80,66 +83,69 @@ mod imp {
+@@ -80,66 +83,80 @@ mod imp {
      ) -> Option<AXElement> {
          let (error, hit) =
              crate::tree::properties::ax_ipc::element_at_position(root, ax_point(point), deadline);
@@ -11602,6 +12607,17 @@ index 1904a1a..c4a2547 100644
              _ => HitTestResult::Unknown,
 -        }
 +        })
++    }
++
++    pub(crate) fn reaches_bound_target(
++        target: &AXElement,
++        hit: &AXElement,
++        deadline: std::time::Instant,
++    ) -> Result<bool, AdapterError> {
++        Ok(matches!(
++            classify_hit(target, hit, deadline)?,
++            Some(HitClassification::ReachesTarget)
++        ))
      }
 
      fn classify_hit(
@@ -11657,7 +12673,7 @@ index 1904a1a..c4a2547 100644
          }
      }
 
-@@ -180,12 +186,12 @@ mod imp {
+@@ -180,12 +197,12 @@ mod imp {
          usage: &mut crate::tree::observation_usage::ObservationUsage,
          phase: &str,
      ) -> Result<Option<String>, AdapterError> {
@@ -11675,7 +12691,7 @@ index 1904a1a..c4a2547 100644
              Some(value) if value.complete => Ok(Some(value.value)),
              Some(_) => Err(AdapterError::new(
                  agent_desktop_core::ErrorCode::AppUnresponsive,
-@@ -205,26 +211,34 @@ mod imp {
+@@ -205,26 +222,34 @@ mod imp {
          expected: &AXElement,
          limit: usize,
          deadline: std::time::Instant,
@@ -11716,7 +12732,7 @@ index 1904a1a..c4a2547 100644
      }
 
      fn clipping_is_complete(
-@@ -264,6 +278,7 @@ mod imp {
+@@ -264,6 +289,7 @@ mod imp {
                  "hit_test.clip_role",
              ) {
                  Ok(role) => role,
@@ -11724,7 +12740,7 @@ index 1904a1a..c4a2547 100644
                  Err(_) => return Ok(None),
              };
              if ends_clipping_walk(role.as_deref()) {
-@@ -283,6 +298,7 @@ mod imp {
+@@ -283,6 +309,7 @@ mod imp {
              ) {
                  Ok(Some(parent)) => parent,
                  Ok(None) => return Ok(Some(visible)),
@@ -11732,6 +12748,15 @@ index 1904a1a..c4a2547 100644
                  Err(_) => return Ok(None),
              };
          }
+@@ -353,7 +380,7 @@ mod imp {
+ pub(crate) use imp::hit_test_impl;
+
+ #[cfg(target_os = "macos")]
+-pub(crate) use imp::{hit_test_ax_element, visible_bounds_ax_element};
++pub(crate) use imp::{hit_test_ax_element, reaches_bound_target, visible_bounds_ax_element};
+
+ #[cfg(all(test, target_os = "macos"))]
+ #[path = "hit_test_tests.rs"]
 diff --git a/crates/macos/src/tree/hit_test_tests.rs b/crates/macos/src/tree/hit_test_tests.rs
 index 462a63c..837f58d 100644
 --- a/crates/macos/src/tree/hit_test_tests.rs
@@ -11926,7 +12951,7 @@ index e01a4b2..10f0e24 100644
  };
 
 diff --git a/crates/macos/src/tree/properties/ax_ipc.rs b/crates/macos/src/tree/properties/ax_ipc.rs
-index 951b697..fa1cad8 100644
+index 951b697..dcfd550 100644
 --- a/crates/macos/src/tree/properties/ax_ipc.rs
 +++ b/crates/macos/src/tree/properties/ax_ipc.rs
 @@ -69,7 +69,9 @@ fn prepare_mutation(
@@ -12026,7 +13051,7 @@ index 951b697..fa1cad8 100644
          Err(error) => adapter_error_to_ax(&error),
      };
      (error, settable != 0)
-@@ -222,8 +229,85 @@ pub(crate) fn perform_action(
+@@ -222,8 +229,123 @@ pub(crate) fn perform_action(
      action: CFStringRef,
      deadline: impl AxDeadline,
  ) -> Result<i32, AdapterError> {
@@ -12063,7 +13088,6 @@ index 951b697..fa1cad8 100644
 +    let authority = element
 +        .effect_authority(instant)
 +        .map_err(pre_mutation_error)?;
-+    let timeout = prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
 +    let root = focused.root_identity().map_err(pre_mutation_error)?;
 +    let pid =
 +        crate::system::process::process_identity::to_pid_t(root.pid).map_err(pre_mutation_error)?;
@@ -12072,16 +13096,55 @@ index 951b697..fa1cad8 100644
 +        .map_err(pre_mutation_error)?;
 +    prepare(&app, deadline).map_err(pre_mutation_error)?;
 +    let focus_attribute = CFString::new("AXFocusedUIElement");
-+    let _scope = crate::actions::physical_keyboard::keyboard_window_authority(
++    let window_attribute = CFString::new("AXWindow");
++    let scope = crate::actions::physical_keyboard::keyboard_window_authority(
 +        focused,
 +        window,
 +        require_foreground,
 +        deadline,
 +    )
 +    .map_err(pre_mutation_error)?;
++    // The scoped reader can address the mutation element itself. Install the
++    // mutation timeout only after all readers have finished configuring AX.
++    let timeout = prepare_mutation(element, deadline).map_err(pre_mutation_error)?;
 +    authority
 +        .revalidate(element, instant)
 +        .map_err(pre_mutation_error)?;
++    scope
++        .0
++        .revalidate(focused, instant)
++        .map_err(pre_mutation_error)?;
++    scope
++        .1
++        .revalidate(window, instant)
++        .map_err(pre_mutation_error)?;
++    let mut window_value = std::ptr::null();
++    let window_error = unsafe {
++        AXUIElementCopyAttributeValue(
++            focused.raw(),
++            window_attribute.as_concrete_TypeRef(),
++            &mut window_value,
++        )
++    };
++    if window_error != kAXErrorSuccess {
++        if !window_value.is_null() {
++            unsafe { core_foundation::base::CFRelease(window_value) };
++        }
++        return Err(pre_mutation_error(AdapterError::stale_ref_because(
++            "Keyboard window could not be revalidated",
++        )));
++    }
++    let current_window = crate::tree::properties::ax_value::created_ax_element(window_value)
++        .ok_or_else(|| {
++            pre_mutation_error(AdapterError::stale_ref_because(
++                "Keyboard window is unavailable",
++            ))
++        })?;
++    if !crate::tree::same_element(window, &current_window) {
++        return Err(pre_mutation_error(AdapterError::stale_ref_because(
++            "Keyboard window changed",
++        )));
++    }
 +    let mut value = std::ptr::null();
 +    let error = unsafe {
 +        AXUIElementCopyAttributeValue(app.raw(), focus_attribute.as_concrete_TypeRef(), &mut value)
@@ -12114,7 +13177,7 @@ index 951b697..fa1cad8 100644
  }
 
  #[cfg(target_os = "macos")]
-@@ -233,8 +317,21 @@ pub(crate) fn set_attribute_value(
+@@ -233,8 +355,21 @@ pub(crate) fn set_attribute_value(
      value: CFTypeRef,
      deadline: impl AxDeadline,
  ) -> Result<i32, AdapterError> {
@@ -12138,7 +13201,7 @@ index 951b697..fa1cad8 100644
  }
 
  #[cfg(target_os = "macos")]
-@@ -246,7 +343,7 @@ pub(crate) fn element_at_position(
+@@ -246,7 +381,7 @@ pub(crate) fn element_at_position(
      let mut element = std::ptr::null_mut();
      let error = match prepare(system, deadline) {
          Ok(_) => unsafe {
@@ -12147,7 +13210,7 @@ index 951b697..fa1cad8 100644
          },
          Err(error) => adapter_error_to_ax(&error),
      };
-@@ -257,7 +354,7 @@ pub(crate) fn element_at_position(
+@@ -257,7 +392,7 @@ pub(crate) fn element_at_position(
  pub(crate) fn pid(element: &crate::tree::AXElement, deadline: impl AxDeadline) -> Result<i32, i32> {
      let mut pid = 0_i32;
      let error = match prepare(element, deadline) {

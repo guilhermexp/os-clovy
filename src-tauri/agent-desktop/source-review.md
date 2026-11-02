@@ -228,8 +228,8 @@ Retained AX objects also distinguish root, owner and source-window bindings;
 uncertain setter failures retain their original evidence if verification fails.
 PID-targeted reference keyboard and text posts recheck the bound focused target
 after event creation, and their owned key-up refuses a reused PID generation.
-This is a partial input checkpoint: scoped window pointer and drag and their
-receiver qualification remain open. The
+This is a partial input checkpoint: scoped window drag and its receiver
+qualification remain open. The
 metadata and portable error-flow checks do not establish native behavior.
 
 The AX effect boundary now retains filesystem-qualified process evidence,
@@ -246,6 +246,20 @@ qualifies the focused process and its owned release refuses a changed receiver
 or a physically held key. ACK requires observing the key down and then up.
 Errors after a possible physical post remain unsafe. Rust metadata and portable
 delivery-state tests do not establish native AX, screenshot or input behavior.
+
+Window-scoped pointer movement, clicks and wheel chunks, including physical
+reference fallback, carry the original window and bound element to each native
+post. The engine qualifies the destination and previous cursor receiver,
+checks Stop, and repeats native window, owner, accessibility, cursor and input
+state checks before dispatch. Background physical pointer input is refused
+before dispatch; no focus change is performed by this path. Click releases
+retain the original native evidence and use a private event source, with ACK
+only for an observed release in that source's state. The scoped keyboard AX
+mutation installs its mutation timeout after the readers have configured their
+timeouts and repeats native checks before the effect. Native image rechecks use
+the shared kernel path reader with a stack buffer. Darwin metadata and portable
+wheel-chunk tests establish neither native event routing nor ABI or input
+delivery. Drag and native validation remain open.
 
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:
