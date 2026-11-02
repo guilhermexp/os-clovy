@@ -5138,27 +5138,47 @@ index 3dd15a6..da6422e 100644
              Ok(()) => classify_success()?,
              Err(error) => classify_write("SetValue", RANGE_LABEL, &error)?,
 diff --git a/crates/windows/src/input/native_owner.rs b/crates/windows/src/input/native_owner.rs
-index 36e690e..150e159 100644
+index 36e690e..bcece98 100644
 --- a/crates/windows/src/input/native_owner.rs
 +++ b/crates/windows/src/input/native_owner.rs
-@@ -80,13 +80,43 @@ pub(crate) fn ensure_interactive_desktop() -> Result<(), AdapterError> {
+@@ -80,12 +80,61 @@ pub(crate) fn ensure_interactive_desktop() -> Result<(), AdapterError> {
      })?;
      observation.map(|_| ())
  }
 -pub(crate) fn before_semantic_effect() -> Result<(), AdapterError> {
-+pub(crate) fn before_window_effect() -> Result<(), AdapterError> {
++#[cfg(target_os = "windows")]
++pub(crate) fn before_window_effect(
++    window: &agent_desktop_core::WindowInfo,
++    deadline: agent_desktop_core::Deadline,
++    expected: &crate::private_browser_guard::QualifiedWindowProcesses,
++) -> Result<crate::private_browser_guard::QualifiedWindowProcesses, AdapterError> {
++    deadline.ensure_remaining()?;
      ensure_interactive_desktop()?;
++    let authority = crate::system::window::window_identity::qualify_window(window, deadline)?;
++    if authority.owner_pid() != expected.owner_pid()
++        || authority.owner_token() != expected.owner_token()
++    {
++        return Err(AdapterError::new(
++            ErrorCode::StaleRef,
++            "Window owner identity changed",
++        ));
++    }
++    deadline.ensure_remaining()?;
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
++    deadline.ensure_remaining()?;
      if agent_desktop_core::commands::clovy_cancel::supervised() {
          UIA_ATTEMPTED.store(true, Ordering::Release);
      }
-     Ok(())
- }
+-    Ok(())
++    Ok(authority)
++}
 +
 +#[cfg(target_os = "windows")]
 +pub(crate) fn before_semantic_effect(
 +    element: &crate::tree::element::UIAElement,
 +    deadline: agent_desktop_core::Deadline,
 +) -> Result<crate::tree::element::ElementAuthority, AdapterError> {
++    deadline.ensure_remaining()?;
 +    ensure_interactive_desktop()?;
 +    let prior = UIA_ATTEMPTED.load(Ordering::Acquire);
 +    let guard_result = (|| {
@@ -5182,10 +5202,9 @@ index 36e690e..150e159 100644
 +    })?;
 +    UIA_ATTEMPTED.store(true, Ordering::Release);
 +    Ok(authority)
-+}
+ }
  pub(crate) fn finish_action_result(
      result: Result<agent_desktop_core::ActionResult, AdapterError>,
- ) -> Result<agent_desktop_core::ActionResult, AdapterError> {
 diff --git a/crates/windows/src/lib.rs b/crates/windows/src/lib.rs
 index 44d3f2c..63dd5c2 100644
 --- a/crates/windows/src/lib.rs
@@ -5205,10 +5224,10 @@ index 44d3f2c..63dd5c2 100644
 
 diff --git a/crates/windows/src/private_browser_guard.rs b/crates/windows/src/private_browser_guard.rs
 new file mode 100644
-index 0000000..69a458b
+index 0000000..51ff529
 --- /dev/null
 +++ b/crates/windows/src/private_browser_guard.rs
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,214 @@
 +//! Private host configuration and per-use process image qualification.
 +use agent_desktop_core::{AdapterError, ErrorCode, ProcessId};
 +
@@ -5293,6 +5312,10 @@ index 0000000..69a458b
 +impl QualifiedWindowProcesses {
 +    pub(crate) fn owner_token(&self) -> &str {
 +        self._owner.as_ref().unwrap_or(&self._target).token()
++    }
++
++    pub(crate) fn owner_pid(&self) -> ProcessId {
++        self._owner.as_ref().unwrap_or(&self._target).pid()
 +    }
 +}
 +
@@ -5419,6 +5442,18 @@ index 0000000..69a458b
 +        _owner: owner,
 +    })
 +}
+diff --git a/crates/windows/src/system/adapter.rs b/crates/windows/src/system/adapter.rs
+index 3b55002..1b1c1a2 100644
+--- a/crates/windows/src/system/adapter.rs
++++ b/crates/windows/src/system/adapter.rs
+@@ -229,6 +229,7 @@ impl SystemOps for WindowsAdapter {
+     }
+
+     fn focus_window(&self, win: &WindowInfo, lease: &InteractionLease) -> Result<(), AdapterError> {
++        lease.deadline().ensure_remaining()?;
+         crate::input::native_owner::ensure_interactive_desktop()?;
+         let result = crate::system::window::window_activate::focus_window(win, lease);
+         crate::input::native_owner::finish_unit_result(result)
 diff --git a/crates/windows/src/system/capture/capture_backend.rs b/crates/windows/src/system/capture/capture_backend.rs
 index f33a96f..1803025 100644
 --- a/crates/windows/src/system/capture/capture_backend.rs
@@ -6109,36 +6144,249 @@ index d176588..3d558cd 100644
  use agent_desktop_core::ErrorCode;
 
 diff --git a/crates/windows/src/system/window/window_activate.rs b/crates/windows/src/system/window/window_activate.rs
-index 9d92805..373104b 100644
+index 9d92805..fb8b042 100644
 --- a/crates/windows/src/system/window/window_activate.rs
 +++ b/crates/windows/src/system/window/window_activate.rs
-@@ -225,7 +225,7 @@ fn restore_if_iconic(
+@@ -64,14 +64,47 @@ pub(crate) fn focus_window(win: &WindowInfo, lease: &InteractionLease) -> Result
+             "headed focus requires a process-instance token on the stored window",
+         )));
+     };
++    let authority =
++        super::window_identity::qualify_window(win, lease.deadline()).map_err(before_activation)?;
+     evidence.verify_stored().map_err(before_activation)?;
+     ensure_window_is_pumping(handle).map_err(before_activation)?;
+-    restore_if_iconic(handle, &evidence).map_err(before_activation)?;
+-    if is_owned_foreground(handle, &evidence) {
+-        return Ok(());
+-    }
+-    let strictly_higher = activation_target_is_strictly_higher(win.pid);
+-    raise_with_budget(handle, &evidence, lease, strictly_higher)
++    let mut attempted = false;
++    let result = (|| {
++        restore_if_iconic(
++            handle,
++            &evidence,
++            win,
++            lease.deadline(),
++            &authority,
++            &mut attempted,
++        )?;
++        let current = super::window_identity::qualify_window(win, lease.deadline())?;
++        if current.owner_pid() != authority.owner_pid()
++            || current.owner_token() != authority.owner_token()
++        {
++            return Err(recycled_before_foreground());
++        }
++        if is_owned_foreground(handle, &evidence) {
++            return Ok(());
++        }
++        let strictly_higher = activation_target_is_strictly_higher(win.pid);
++        raise_with_budget(
++            handle,
++            &evidence,
++            win,
++            lease,
++            strictly_higher,
++            &authority,
++            &mut attempted,
++        )
++    })();
++    result.map_err(|error| {
++        if attempted {
++            after_foreground_write_attempted(error)
++        } else {
++            before_activation(error)
++        }
++    })
+ }
+
+ fn before_activation(error: AdapterError) -> AdapterError {
+@@ -123,8 +156,11 @@ pub(crate) fn integrity_is_strictly_higher(
+ fn raise_with_budget(
+     handle: super::window_enum::WindowHandle,
+     evidence: &WindowIdentityEvidence<'_>,
++    win: &WindowInfo,
+     lease: &InteractionLease,
+     strictly_higher: bool,
++    authority: &crate::private_browser_guard::QualifiedWindowProcesses,
++    attempted: &mut bool,
+ ) -> Result<(), AdapterError> {
+     for attempt in 0..FOCUS_STEAL_BUDGET {
+         if attempt == 0 {
+@@ -145,7 +181,20 @@ fn raise_with_budget(
+         }
+         #[cfg(test)]
+         attempt_probe::begin_attempt(attempt);
+-        bring_to_foreground(handle, evidence)?;
++        bring_to_foreground(
++            handle,
++            evidence,
++            win,
++            lease.deadline(),
++            authority,
++            attempted,
++        )?;
++        let current = super::window_identity::qualify_window(win, lease.deadline())?;
++        if current.owner_pid() != authority.owner_pid()
++            || current.owner_token() != authority.owner_token()
++        {
++            return Err(recycled_before_foreground());
++        }
+         if is_owned_foreground(handle, evidence) {
+             return Ok(());
+         }
+@@ -165,7 +214,7 @@ fn raise_with_budget(
+ /// guards already use: not-delivered while nothing has gone out,
+ /// delivered-unverified once a physical write has.
+ fn after_foreground_write_attempted(error: AdapterError) -> AdapterError {
+-    error.with_disposition(DeliverySemantics::delivered_unverified())
++    error.with_disposition(DeliverySemantics::uncertain())
+ }
+
+ pub(crate) fn budget_exhausted(strictly_higher: bool) -> AdapterError {
+@@ -216,6 +265,10 @@ pub(crate) fn is_owned_foreground(
+ fn restore_if_iconic(
+     handle: super::window_enum::WindowHandle,
+     evidence: &WindowIdentityEvidence<'_>,
++    win: &WindowInfo,
++    deadline: agent_desktop_core::Deadline,
++    authority: &crate::private_browser_guard::QualifiedWindowProcesses,
++    attempted: &mut bool,
+ ) -> Result<(), AdapterError> {
+     use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, SW_RESTORE, ShowWindowAsync};
+     unsafe {
+@@ -225,7 +278,9 @@ fn restore_if_iconic(
          if !owned_for_write(evidence)? {
              return Err(recycled_before_foreground());
          }
 -        crate::input::native_owner::before_semantic_effect()?;
-+        crate::input::native_owner::before_window_effect()?;
++        let _authority =
++            crate::input::native_owner::before_window_effect(win, deadline, authority)?;
++        *attempted = true;
          if ShowWindowAsync(handle, SW_RESTORE) == 0 {
              return Err(before_activation(hresult::win32_last_error(
                  "ShowWindowAsync failed while restoring target",
-@@ -259,7 +259,7 @@ fn bring_to_foreground(
+@@ -241,6 +296,10 @@ fn restore_if_iconic(
+ fn restore_if_iconic(
+     _handle: super::window_enum::WindowHandle,
+     _evidence: &WindowIdentityEvidence<'_>,
++    _win: &WindowInfo,
++    _deadline: agent_desktop_core::Deadline,
++    _authority: &crate::private_browser_guard::QualifiedWindowProcesses,
++    _attempted: &mut bool,
+ ) -> Result<(), AdapterError> {
+     Ok(())
+ }
+@@ -249,6 +308,10 @@ fn restore_if_iconic(
+ fn bring_to_foreground(
+     handle: super::window_enum::WindowHandle,
+     evidence: &WindowIdentityEvidence<'_>,
++    win: &WindowInfo,
++    deadline: agent_desktop_core::Deadline,
++    authority: &crate::private_browser_guard::QualifiedWindowProcesses,
++    attempted: &mut bool,
+ ) -> Result<(), AdapterError> {
+     use windows_sys::Win32::UI::WindowsAndMessaging::{
+         IsWindowVisible, SW_SHOW, SetForegroundWindow, ShowWindowAsync,
+@@ -259,7 +322,9 @@ fn bring_to_foreground(
              return Err(recycled_before_foreground());
          }
          if IsWindowVisible(handle) == 0 {
 -            crate::input::native_owner::before_semantic_effect()?;
-+            crate::input::native_owner::before_window_effect()?;
++            let _authority =
++                crate::input::native_owner::before_window_effect(win, deadline, authority)?;
++            *attempted = true;
              if ShowWindowAsync(handle, SW_SHOW) == 0 {
                  return Err(before_activation(hresult::win32_last_error(
                      "ShowWindowAsync failed while showing target",
-@@ -269,7 +269,7 @@ fn bring_to_foreground(
+@@ -269,7 +334,9 @@ fn bring_to_foreground(
          if !owned_for_write(evidence)? {
              return Err(recycled_before_foreground());
          }
 -        crate::input::native_owner::before_semantic_effect()?;
-+        crate::input::native_owner::before_window_effect()?;
++        let _authority =
++            crate::input::native_owner::before_window_effect(win, deadline, authority)?;
++        *attempted = true;
          let _ = SetForegroundWindow(handle);
      }
      Ok(())
+@@ -279,6 +346,10 @@ fn bring_to_foreground(
+ fn bring_to_foreground(
+     _handle: super::window_enum::WindowHandle,
+     _evidence: &WindowIdentityEvidence<'_>,
++    _win: &WindowInfo,
++    _deadline: agent_desktop_core::Deadline,
++    _authority: &crate::private_browser_guard::QualifiedWindowProcesses,
++    _attempted: &mut bool,
+ ) -> Result<(), AdapterError> {
+     Err(AdapterError::not_supported("focus_window"))
+ }
+diff --git a/crates/windows/src/system/window/window_activate_tests.rs b/crates/windows/src/system/window/window_activate_tests.rs
+index 1756264..4c4afb0 100644
+--- a/crates/windows/src/system/window/window_activate_tests.rs
++++ b/crates/windows/src/system/window/window_activate_tests.rs
+@@ -119,10 +119,20 @@ fn restore_branch_fails_closed_on_recycled_ownership() {
+     let _stage = crate::tree::fixture::fixture_window::on_screen_stage();
+     let (target, _stealer, mut info) = staged_pair();
+     target.minimize();
++    let authority = super::super::window_identity::qualify_window(&info, lease().deadline())
++        .expect("fixture authority");
+     info.process_instance = Some("windows-proc-v1:0:0".into());
+     let handle = parse_handle(&info.id);
+     let evidence = WindowIdentityEvidence::from_info(handle, &info).expect("evidence");
+-    let error = restore_if_iconic(handle, &evidence).expect_err("recycled restore");
++    let error = restore_if_iconic(
++        handle,
++        &evidence,
++        &info,
++        lease().deadline(),
++        &authority,
++        &mut false,
++    )
++    .expect_err("recycled restore");
+     assert_eq!(error.code, ErrorCode::WindowNotFound);
+     assert_eq!(
+         error.disposition.delivery(),
+@@ -136,10 +146,20 @@ fn restore_branch_fails_closed_on_recycled_ownership() {
+ fn raise_branch_fails_closed_on_recycled_ownership() {
+     let _stage = crate::tree::fixture::fixture_window::on_screen_stage();
+     let (_target, _stealer, mut info) = staged_pair();
++    let authority = super::super::window_identity::qualify_window(&info, lease().deadline())
++        .expect("fixture authority");
+     info.process_instance = Some("windows-proc-v1:0:0".into());
+     let handle = parse_handle(&info.id);
+     let evidence = WindowIdentityEvidence::from_info(handle, &info).expect("evidence");
+-    let error = bring_to_foreground(handle, &evidence).expect_err("recycled raise");
++    let error = bring_to_foreground(
++        handle,
++        &evidence,
++        &info,
++        lease().deadline(),
++        &authority,
++        &mut false,
++    )
++    .expect_err("recycled raise");
+     assert_eq!(error.code, ErrorCode::WindowNotFound);
+     assert_eq!(
+         error.disposition.delivery(),
+@@ -193,7 +213,7 @@ fn strictly_higher_integrity_budget_exhaustion_is_perm_denied_never_action_faile
+
+ #[cfg(target_os = "windows")]
+ #[test]
+-fn focus_steal_budget_is_finite_and_fails_closed_not_delivered() {
++fn focus_steal_budget_is_finite_and_preserves_attempted_effect() {
+     let _stage = crate::tree::fixture::fixture_window::on_screen_stage();
+     let (target, stealer, info) = staged_pair();
+     raise_handle(stealer.handle());
+@@ -209,7 +229,7 @@ fn focus_steal_budget_is_finite_and_fails_closed_not_delivered() {
+     );
+     assert_eq!(
+         error.disposition.delivery(),
+-        DeliveryDisposition::NotDelivered
++        DeliveryDisposition::DeliveryUncertain
+     );
+     assert_eq!(
+         attempt_probe::count(),
 diff --git a/crates/windows/src/system/window/window_identity.rs b/crates/windows/src/system/window/window_identity.rs
 index 15125cc..a49c42f 100644
 --- a/crates/windows/src/system/window/window_identity.rs
