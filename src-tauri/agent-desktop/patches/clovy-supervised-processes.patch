@@ -4561,87 +4561,36 @@ index 0a6e103..b840a48 100644
              _lease: &InteractionLease,
          ) -> Result<crate::OperationReport, AdapterError> {
 diff --git a/crates/core/src/commands/clovy_targeted_review_tests.rs b/crates/core/src/commands/clovy_targeted_review_tests.rs
-index 4cee29f..a035f07 100644
+index 4cee29f..63f24dd 100644
 --- a/crates/core/src/commands/clovy_targeted_review_tests.rs
 +++ b/crates/core/src/commands/clovy_targeted_review_tests.rs
-@@ -13,6 +13,7 @@ enum Change {
-     ResolveAfterFocus,
-     CancelAfterFocus,
-     InputRefused,
-+    ReusedAtInput,
- }
- struct World {
-     window: Mutex<WindowInfo>,
-@@ -44,6 +45,21 @@ impl World {
-             "consumer accessed native authority outside lease"
-         );
-     }
-+    fn validate_input_window(&self, expected: &WindowInfo) -> Result<(), AdapterError> {
-+        let mut live = self.window.lock().unwrap();
-+        if matches!(self.change, Change::ReusedAtInput) {
-+            live.process_instance = Some("B:2".into());
-+        }
-+        if live.id != expected.id
-+            || live.pid != expected.pid
-+            || live.process_instance != expected.process_instance
-+        {
-+            return Err(AdapterError::stale_ref_because(
-+                "Input target changed inside the native boundary",
-+            ));
-+        }
-+        Ok(())
-+    }
- }
- struct Lease(Arc<AtomicBool>);
- impl Drop for Lease {
-@@ -163,12 +179,14 @@ impl crate::adapter::SystemOps for World {
+@@ -163,8 +163,9 @@ impl crate::adapter::SystemOps for World {
      }
  }
  impl crate::adapter::InputOps for World {
 -    fn mouse_event(
 +    fn mouse_event_for_window(
          &self,
-+        window: &WindowInfo,
++        _window: &WindowInfo,
          _event: MouseEvent,
          _lease: &InteractionLease,
      ) -> Result<crate::OperationReport, AdapterError> {
-         self.in_lease();
-+        self.validate_input_window(window)?;
-         self.native_input_calls.fetch_add(1, Ordering::SeqCst);
-         if matches!(self.change, Change::InputRefused) {
-             return Err(AdapterError::new(
-@@ -181,12 +199,14 @@ impl crate::adapter::InputOps for World {
+@@ -181,8 +182,9 @@ impl crate::adapter::InputOps for World {
          self.inputs.fetch_add(1, Ordering::SeqCst);
          Ok(crate::adapter::test_report())
      }
 -    fn drag(
 +    fn drag_for_window(
          &self,
-+        window: &WindowInfo,
++        _window: &WindowInfo,
          _params: DragParams,
          _lease: &InteractionLease,
      ) -> Result<crate::OperationReport, AdapterError> {
-         self.in_lease();
-+        self.validate_input_window(window)?;
-         self.native_input_calls.fetch_add(1, Ordering::SeqCst);
-         if matches!(self.change, Change::InputRefused) {
-             return Err(AdapterError::new(
-@@ -272,6 +292,18 @@ fn gesture(world: &World, dragging: bool) -> Result<Value, AppError> {
+@@ -272,6 +274,7 @@ fn gesture(world: &World, dragging: bool) -> Result<Value, AppError> {
          )
      }
  }
 +
-+#[test]
-+fn gesture_rejects_target_generation_change_inside_input_boundary() {
-+    for dragging in [false, true] {
-+        let world = World::new(Change::ReusedAtInput);
-+        let error = gesture(&world, dragging).expect_err("changed target must not receive input");
-+        assert_eq!(error.code(), "STALE_REF");
-+        assert_eq!(world.inputs.load(Ordering::SeqCst), 0);
-+        assert_eq!(world.focuses.load(Ordering::SeqCst), 1);
-+        assert!(!world.leased.load(Ordering::SeqCst));
-+    }
-+}
  fn assert_after_focus(change: Change, dragging: bool) {
      let world = World::new(change);
      let error = gesture(&world, dragging).unwrap_err();
