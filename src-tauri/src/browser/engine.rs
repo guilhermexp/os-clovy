@@ -243,6 +243,7 @@ pub struct AgentBrowserTransport {
 }
 impl AgentBrowserTransport {
     pub fn new(config: EngineConfig) -> Arc<Self> {
+        recover_reserved_profiles(&config);
         let transport = Arc::new(Self {
             config,
             slots: Mutex::new(HashMap::new()),
@@ -294,7 +295,31 @@ impl AgentBrowserTransport {
                 .temporary_root
                 .join(uuid::Uuid::new_v4().to_string())
         };
-        fs::create_dir_all(&profile).map_err(|_| failed())?;
+        if self.config.persistent {
+            fs::create_dir_all(&profile).map_err(|_| failed())?;
+        } else {
+            if !self.config.temporary_root.is_absolute() || roots_overlap(&self.config) {
+                return Err(failed());
+            }
+            for ancestor in self.config.temporary_root.ancestors() {
+                match plain_metadata(ancestor) {
+                    Ok(metadata) if metadata.is_dir() => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => return Err(failed()),
+                }
+            }
+            fs::create_dir_all(&self.config.temporary_root).map_err(|_| failed())?;
+            if roots_overlap(&self.config)
+                || self
+                    .config
+                    .temporary_root
+                    .ancestors()
+                    .any(|path| !plain_metadata(path).is_ok_and(|metadata| metadata.is_dir()))
+            {
+                return Err(failed());
+            }
+            fs::create_dir(&profile).map_err(|_| failed())?;
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -314,6 +339,9 @@ impl AgentBrowserTransport {
                 "Clovy's browser profile is in use by another task.",
             )
         })?;
+        if !self.config.persistent {
+            publish_reserved(&profile).map_err(|_| failed())?;
+        }
         slots.insert(
             id.into(),
             Arc::new(Slot {
@@ -433,6 +461,9 @@ impl AgentBrowserTransport {
             let mut process_guard = slot.process.lock().unwrap();
             if slot.cancelled.load(Ordering::SeqCst) {
                 return Err(closed());
+            }
+            if !slot.persistent {
+                mark_starting(&slot.profile).map_err(|_| failed())?;
             }
             #[cfg(windows)]
             let job = crate::process_group::windows_job::Job::new().map_err(|_| failed())?;
@@ -822,6 +853,370 @@ fn verify_bundle(config: &EngineConfig) -> Result<()> {
     Ok(())
 }
 
+const RESERVED_RECEIPT: &str = ".clovy-reserved.json";
+const STARTING_MARKER: &str = ".clovy-starting";
+
+fn plain_metadata(path: &std::path::Path) -> std::io::Result<fs::Metadata> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other("link is not an owned profile"));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err(std::io::Error::other(
+                "reparse point is not an owned profile",
+            ));
+        }
+    }
+    Ok(metadata)
+}
+
+fn open_existing_plain(path: &std::path::Path, write: bool) -> std::io::Result<File> {
+    if !plain_metadata(path)?.is_file() {
+        return Err(std::io::Error::other("expected a regular file"));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).write(write);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("expected a regular file"));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if file.metadata()?.file_attributes() & 0x400 != 0 {
+            return Err(std::io::Error::other("reparse point is not an owned file"));
+        }
+    }
+    Ok(file)
+}
+
+fn sync_profile_directory(profile: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    File::open(profile)?.sync_all()?;
+    #[cfg(windows)]
+    let _ = profile;
+    Ok(())
+}
+
+fn profile_object_identity(path: &std::path::Path) -> std::io::Result<[u64; 2]> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = plain_metadata(path)?;
+        Ok([metadata.dev(), metadata.ino()])
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+        use windows::Win32::{
+            Foundation::HANDLE,
+            Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION},
+        };
+        let metadata = plain_metadata(path)?;
+        if !metadata.is_dir() {
+            return Err(std::io::Error::other("expected a directory"));
+        }
+        let file = OpenOptions::new()
+            .access_mode(0)
+            .custom_flags(0x0200_0000 | 0x0020_0000)
+            .open(path)?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }
+            .map_err(std::io::Error::other)?;
+        if info.dwFileAttributes & 0x400 != 0 {
+            return Err(std::io::Error::other("reparse point"));
+        }
+        Ok([
+            info.dwVolumeSerialNumber as u64,
+            ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+        ])
+    }
+}
+
+fn open_file_identity(file: &File) -> std::io::Result<[u64; 2]> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        Ok([metadata.dev(), metadata.ino()])
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{
+            Foundation::HANDLE,
+            Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION},
+        };
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }
+            .map_err(std::io::Error::other)?;
+        if info.dwFileAttributes & 0x400 != 0 {
+            return Err(std::io::Error::other("reparse point"));
+        }
+        Ok([
+            info.dwVolumeSerialNumber as u64,
+            ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+        ])
+    }
+}
+
+fn same_open_file(file: &File, path: &std::path::Path) -> bool {
+    matches!((open_file_identity(file), open_existing_plain(path, false).and_then(|current| open_file_identity(&current))), (Ok(held), Ok(current)) if held == current)
+}
+
+fn create_receipt_file(path: &std::path::Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x8000_0000); // FILE_FLAG_WRITE_THROUGH
+    }
+    options.open(path)
+}
+
+fn publish_receipt_file(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+    replace: bool,
+) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let _ = replace;
+        fs::rename(source, destination)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::{
+            core::PCWSTR,
+            Win32::Storage::FileSystem::{
+                MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+            },
+        };
+        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        unsafe {
+            MoveFileExW(
+                PCWSTR(source.as_ptr()),
+                PCWSTR(destination.as_ptr()),
+                MOVEFILE_WRITE_THROUGH
+                    | if replace {
+                        MOVEFILE_REPLACE_EXISTING
+                    } else {
+                        Default::default()
+                    },
+            )
+        }
+        .map_err(std::io::Error::other)
+    }
+}
+
+fn marker_absent(profile: &std::path::Path) -> bool {
+    matches!(fs::symlink_metadata(profile.join(STARTING_MARKER)), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn publish_reserved(profile: &std::path::Path) -> std::io::Result<()> {
+    let name = profile
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| std::io::Error::other("invalid profile nonce"))?;
+    if uuid::Uuid::parse_str(name).ok().map(|id| id.to_string()) != Some(name.to_owned()) {
+        return Err(std::io::Error::other("invalid profile nonce"));
+    }
+    let temporary = profile.join(format!(".clovy-reserved-{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = create_receipt_file(&temporary)?;
+    let root = profile
+        .parent()
+        .ok_or_else(|| std::io::Error::other("missing profile root"))?;
+    serde_json::to_writer(
+        &mut file,
+        &json!({"version":1,"nonce":name,"ownerProcessId":std::process::id(),"phase":"Reserved", "rootIdentity":profile_object_identity(root)?, "profileIdentity":profile_object_identity(profile)?}),
+    )?;
+    file.sync_all()?;
+    drop(file);
+    publish_receipt_file(&temporary, &profile.join(RESERVED_RECEIPT), false)?;
+    sync_profile_directory(profile)?;
+    sync_profile_directory(root)
+}
+
+fn mark_starting(profile: &std::path::Path) -> std::io::Result<()> {
+    let receipt_path = profile.join(RESERVED_RECEIPT);
+    let mut receipt_file = open_existing_plain(&receipt_path, false)?;
+    let mut bytes = Vec::new();
+    (&mut receipt_file).take(4097).read_to_end(&mut bytes)?;
+    if bytes.len() > 4096 {
+        return Err(std::io::Error::other("invalid reservation"));
+    }
+    let mut receipt: Value = serde_json::from_slice(&bytes)?;
+    let name = profile
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| std::io::Error::other("invalid profile nonce"))?;
+    let root = profile
+        .parent()
+        .ok_or_else(|| std::io::Error::other("missing profile root"))?;
+    if receipt["version"] != 1
+        || receipt["nonce"] != name
+        || receipt["phase"] != "Reserved"
+        || receipt["ownerProcessId"] != std::process::id()
+        || receipt["rootIdentity"] != json!(profile_object_identity(root)?)
+        || receipt["profileIdentity"] != json!(profile_object_identity(profile)?)
+        || !same_open_file(&receipt_file, &receipt_path)
+    {
+        return Err(std::io::Error::other("invalid reservation"));
+    }
+    // Existence itself is conservative: even a crash during this write prevents
+    // Reserved recovery from treating a possibly spawned engine as unused.
+    let mut file = create_receipt_file(&profile.join(STARTING_MARKER))?;
+    file.write_all(b"Starting\n")?;
+    file.sync_all()?;
+    sync_profile_directory(profile)?;
+    receipt["phase"] = json!("Starting");
+    let temporary = profile.join(format!(".clovy-starting-{}.tmp", uuid::Uuid::new_v4()));
+    let mut updated = create_receipt_file(&temporary)?;
+    serde_json::to_writer(&mut updated, &receipt)?;
+    updated.sync_all()?;
+    drop(updated);
+    drop(receipt_file);
+    publish_receipt_file(&temporary, &receipt_path, true)?;
+    sync_profile_directory(profile)
+}
+
+fn process_definitely_absent(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        (unsafe { libc::kill(pid as i32, 0) }) < 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+    #[cfg(windows)]
+    {
+        use windows::Win32::{
+            Foundation::CloseHandle,
+            System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+        };
+        match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+            Ok(handle) => {
+                let _ = unsafe { CloseHandle(handle) };
+                false
+            }
+            Err(error) => error.code().0 == 0x80070057u32 as i32,
+        }
+    }
+}
+
+fn roots_overlap(config: &EngineConfig) -> bool {
+    let root = &config.temporary_root;
+    let persistent = &config.persistent_profile;
+    if persistent.starts_with(root) || root.starts_with(persistent) {
+        return true;
+    }
+    let root = match fs::canonicalize(root) {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    match fs::canonicalize(persistent) {
+        Ok(persistent) => persistent.starts_with(&root) || root.starts_with(&persistent),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A dangling symlink or an inaccessible path is not proof of separation.
+            !matches!(fs::symlink_metadata(persistent), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        }
+        Err(_) => true,
+    }
+}
+
+fn recover_reserved_profiles(config: &EngineConfig) {
+    let root = &config.temporary_root;
+    // Do not traverse a symlink or junction, including one in the root's ancestry.
+    if root.ancestors().any(|path| plain_metadata(path).is_err())
+        || !plain_metadata(root).is_ok_and(|metadata| metadata.is_dir())
+        || roots_overlap(config)
+    {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let profile = entry.path();
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if uuid::Uuid::parse_str(&name).ok().map(|id| id.to_string()) != Some(name.clone())
+            || !plain_metadata(&profile).is_ok_and(|metadata| metadata.is_dir())
+            || !marker_absent(&profile)
+        {
+            continue;
+        }
+        let Ok(lease) = open_existing_plain(&profile.join(".clovy-lease"), true) else {
+            continue;
+        };
+        if lock_profile(&lease).is_err() {
+            continue;
+        }
+        let Ok(mut receipt) = open_existing_plain(&profile.join(RESERVED_RECEIPT), false) else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        if (&mut receipt).take(4097).read_to_end(&mut bytes).is_err() || bytes.len() > 4096 {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        let Some(pid) = value["ownerProcessId"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+        else {
+            continue;
+        };
+        if value["version"] != 1
+            || value["nonce"] != name
+            || value["phase"] != "Reserved"
+            || profile_object_identity(root)
+                .ok()
+                .map(|identity| json!(identity))
+                != Some(value["rootIdentity"].clone())
+            || profile_object_identity(&profile)
+                .ok()
+                .map(|identity| json!(identity))
+                != Some(value["profileIdentity"].clone())
+            || !process_definitely_absent(pid)
+            || !marker_absent(&profile)
+            || !same_open_file(&lease, &profile.join(".clovy-lease"))
+            || !same_open_file(&receipt, &profile.join(RESERVED_RECEIPT))
+            || !plain_metadata(&profile).is_ok_and(|metadata| metadata.is_dir())
+            || !process_definitely_absent(pid)
+        {
+            continue;
+        }
+        // Retain the exclusive lease through deletion. Invalid, legacy, live,
+        // Starting and busy profiles are never removed by this sweep.
+        let _ = fs::remove_dir_all(&profile);
+    }
+}
+
 fn lock_profile(file: &File) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -964,6 +1359,105 @@ extern "C" {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reserved_recovery_preserves_live_busy_starting_legacy_and_links() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let config = EngineConfig::production(
+            root.path().join("unicode-á-😀/resources"),
+            root.path().join("unicode-á-😀/data"),
+            false,
+        );
+        fs::create_dir_all(&config.temporary_root).unwrap();
+        fs::create_dir_all(&config.persistent_profile).unwrap();
+        fs::write(config.persistent_profile.join("sentinel"), b"persistent").unwrap();
+        let external = root.path().join("external");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("sentinel"), b"external").unwrap();
+        let link = config.temporary_root.join(uuid::Uuid::new_v4().to_string());
+        symlink(&external, &link).unwrap();
+
+        let mut dead = Command::new("/bin/true").spawn().unwrap();
+        let dead_pid = dead.id();
+        assert!(dead.wait().unwrap().success());
+        assert!(process_definitely_absent(dead_pid));
+        let make = |dead_owner: bool| {
+            let profile = config.temporary_root.join(uuid::Uuid::new_v4().to_string());
+            fs::create_dir(&profile).unwrap();
+            File::create(profile.join(".clovy-lease")).unwrap();
+            publish_reserved(&profile).unwrap();
+            if dead_owner {
+                let path = profile.join(RESERVED_RECEIPT);
+                let mut receipt: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                receipt["ownerProcessId"] = json!(dead_pid);
+                fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+            }
+            profile
+        };
+        let eligible = make(true);
+        let live = make(false);
+        let busy = make(true);
+        let busy_lease = open_existing_plain(&busy.join(".clovy-lease"), true).unwrap();
+        lock_profile(&busy_lease).unwrap();
+        let starting = make(false);
+        mark_starting(&starting).unwrap();
+        let starting_receipt = starting.join(RESERVED_RECEIPT);
+        let mut starting_value: Value =
+            serde_json::from_slice(&fs::read(&starting_receipt).unwrap()).unwrap();
+        assert_eq!(starting_value["phase"], "Starting");
+        starting_value["ownerProcessId"] = json!(dead_pid);
+        fs::write(
+            starting_receipt,
+            serde_json::to_vec(&starting_value).unwrap(),
+        )
+        .unwrap();
+        let corrupt = make(true);
+        fs::write(corrupt.join(RESERVED_RECEIPT), b"not-json").unwrap();
+        let linked_receipt = make(true);
+        fs::remove_file(linked_receipt.join(RESERVED_RECEIPT)).unwrap();
+        symlink(
+            external.join("sentinel"),
+            linked_receipt.join(RESERVED_RECEIPT),
+        )
+        .unwrap();
+        let linked_lease = make(true);
+        fs::remove_file(linked_lease.join(".clovy-lease")).unwrap();
+        symlink(external.join("sentinel"), linked_lease.join(".clovy-lease")).unwrap();
+        let legacy = config.temporary_root.join(uuid::Uuid::new_v4().to_string());
+        fs::create_dir(&legacy).unwrap();
+        fs::write(legacy.join("sentinel"), b"legacy").unwrap();
+        let moved = make(true);
+        let alternate_root = root.path().join("alternate-root");
+        fs::create_dir(&alternate_root).unwrap();
+        let moved_destination = alternate_root.join(moved.file_name().unwrap());
+        fs::rename(moved, &moved_destination).unwrap();
+        let mut alternate_config = config.clone();
+        alternate_config.temporary_root = alternate_root;
+        let _alternate = AgentBrowserTransport::new(alternate_config);
+        assert!(moved_destination.is_dir());
+
+        let _transport = AgentBrowserTransport::new(config.clone());
+        assert!(!eligible.exists());
+        for profile in [
+            &live,
+            &busy,
+            &starting,
+            &corrupt,
+            &legacy,
+            &linked_receipt,
+            &linked_lease,
+        ] {
+            assert!(profile.is_dir());
+        }
+        assert_eq!(fs::read(external.join("sentinel")).unwrap(), b"external");
+        assert_eq!(
+            fs::read(config.persistent_profile.join("sentinel")).unwrap(),
+            b"persistent"
+        );
+        assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
+        drop(busy_lease);
+    }
     #[cfg(unix)]
     #[tokio::test]
     async fn process_group_is_reaped_before_releasing_its_authority() {
