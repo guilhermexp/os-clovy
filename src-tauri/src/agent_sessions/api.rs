@@ -816,11 +816,14 @@ async fn start_cli_run(
         .await
     }
     .await;
-    if let Err(error) = dispatched {
-        engines.release(start.run_id);
-        mark_dispatch_failed(repository, start.run_id, &error).await;
-        return Err(error);
-    }
+    crate::chat_engine::finish_cli_dispatch(
+        app,
+        repository,
+        start.session_id,
+        start.run_id,
+        dispatched,
+    )
+    .await?;
     Ok(run_json(repository.get_run(start.run_id).await?))
 }
 

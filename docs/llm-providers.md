@@ -387,6 +387,14 @@ argument: its installer ships `agy.exe`.
   to select the immutable database winner and claim its one publication in
   `run_config_json.clovyTerminalEvent`. Host and fallback publishers share
   this claim; emission uses the accepted sequence and winning terminal method.
+  A registered preparation that fails before its task is spawned also owes
+  that publication: the chat and routine callers pass its error through
+  `finish_cli_dispatch` before releasing the host registration. The ordinary
+  event sink and terminal arbiter publish the persisted winner, so a Stop
+  that already won stays cancelled and fallback publishers cannot duplicate it.
+  The executor checks cancellation after the final partition authorization
+  await, before either spawning the CLI or writing its prompt, on both success
+  and error from that query.
   This adds no protocol field or user configuration.
 - **End of the CLI.** The CLI's exit is watched alongside its stdout: when it
   exits, its process group is swept (MCP servers and helpers it started,

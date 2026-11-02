@@ -23,6 +23,8 @@ pub mod policy;
 mod red_tests;
 #[cfg(all(test, unix))]
 mod stop_admission_tests;
+#[cfg(all(test, unix))]
+mod stop_preparation_tests;
 #[cfg(test)]
 mod tests;
 pub mod turn;
@@ -241,6 +243,61 @@ pub async fn cancel_cli_run(
         broker.cancel_run(run_id).await;
     }
     running
+}
+
+/// A registered preparation that never spawned its task still owns a terminal
+/// publication. Keep the registration until the ordinary event sink has let
+/// the SQLite arbiter choose failure or the Stop that already won.
+pub(crate) async fn finish_dispatch<S: FrameSink>(
+    host: &ChatEngineHost,
+    sink: &S,
+    session_id: &str,
+    run_id: &str,
+    dispatched: Result<(), AppError>,
+) -> Result<(), AppError> {
+    if let Err(error) = dispatched {
+        sink.publish(RpcFrame {
+            jsonrpc: "2.0".into(),
+            protocol_version: crate::agent_sessions::protocol::PROTOCOL_VERSION,
+            session_id: session_id.into(),
+            run_id: run_id.into(),
+            sequence: 0,
+            id: None,
+            event_id: Some(uuid::Uuid::new_v4().to_string()),
+            method: Some("run.failed".into()),
+            params: Some(
+                serde_json::json!({"error": error.message, "code": error.code,
+                "category": "runtime", "retryable": true}),
+            ),
+            result: None,
+            error: None,
+        })
+        .await;
+        host.release(run_id);
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub(crate) async fn finish_cli_dispatch(
+    app: &AppHandle,
+    repository: &AgentRepository,
+    session_id: &str,
+    run_id: &str,
+    dispatched: Result<(), AppError>,
+) -> Result<(), AppError> {
+    let sink = AppSink {
+        app: app.clone(),
+        repository: repository.clone(),
+    };
+    finish_dispatch(
+        &app.state::<ChatEngineHost>(),
+        &sink,
+        session_id,
+        run_id,
+        dispatched,
+    )
+    .await
 }
 
 /// A message to run on a CLI engine.

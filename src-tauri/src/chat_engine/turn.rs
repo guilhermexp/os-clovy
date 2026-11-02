@@ -306,14 +306,21 @@ pub async fn execute_turn<S: FrameSink>(
     // Prompt/history preparation and CLI discovery can wait while the user
     // moves the conversation. Never send the prepared context to that CLI
     // under a different partition, even before its first MCP call.
-    if let Err(error) = crate::agent_sessions::run_partition::revalidate(
+    let partition = crate::agent_sessions::run_partition::revalidate(
         &repository.pool,
         &context.session_id,
         &context.run_id,
         &context.data_partition,
     )
-    .await
-    {
+    .await;
+    // This authorization query is the last asynchronous preparation before
+    // spawn and stdin. Stop can win after SQLite read an active snapshot,
+    // including when the query itself returns an error.
+    if *cancel.borrow() {
+        frames.emit("run.cancelled", json!({})).await;
+        return;
+    }
+    if let Err(error) = partition {
         frames.emit("run.failed", failure(&error.message)).await;
         return;
     }
@@ -437,6 +444,8 @@ async fn run_process<S: FrameSink>(
         Ok(spawned) => spawned,
         Err(error) => return TurnEnd::SpawnFailed(error.to_string()),
     };
+    #[cfg(test)]
+    testing::record_spawn(&context.run_id, child.id());
     if let (Some(input), Some(mut stdin)) = (invocation.stdin.clone(), child.stdin.take()) {
         tokio::spawn(async move {
             let _ = stdin.write_all(input.as_bytes()).await;
@@ -880,4 +889,45 @@ async fn excluded_retry_runs(
         }
     }
     Ok(excluded)
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::collections::HashMap;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock,
+    };
+
+    static SPAWNS: OnceLock<Mutex<HashMap<String, Arc<AtomicUsize>>>> = OnceLock::new();
+
+    pub(crate) fn watch_spawns(run_id: &str) -> Arc<AtomicUsize> {
+        let count = Arc::new(AtomicUsize::new(0));
+        SPAWNS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(run_id.to_owned(), count.clone());
+        count
+    }
+
+    pub(crate) fn clear_spawns(run_id: &str) {
+        SPAWNS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .remove(run_id);
+    }
+
+    pub(super) fn record_spawn(run_id: &str, pid: Option<u32>) {
+        if let Some(count) = SPAWNS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .get(run_id)
+        {
+            assert!(pid.is_some());
+            count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 }

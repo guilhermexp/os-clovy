@@ -1147,10 +1147,7 @@ async fn start_cli_claim(
         ticket,
     )
     .await;
-    if started.is_err() {
-        engines.release(run_id);
-    }
-    started
+    crate::chat_engine::finish_cli_dispatch(app, repository, session_id, run_id, started).await
 }
 
 /// Attach a created agent session/run to the already-durable claim. Keeping
