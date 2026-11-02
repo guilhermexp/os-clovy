@@ -392,6 +392,8 @@ argument: its installer ships `agy.exe`.
   `finish_cli_dispatch` before releasing the host registration. The ordinary
   event sink and terminal arbiter publish the persisted winner, so a Stop
   that already won stays cancelled and fallback publishers cannot duplicate it.
+  The routine's dispatch-failure fallback also preserves terminal history and
+  its routine summary when cancellation or completion already won.
   The executor checks cancellation after the final partition authorization
   await, before either spawning the CLI or writing its prompt, on both success
   and error from that query.

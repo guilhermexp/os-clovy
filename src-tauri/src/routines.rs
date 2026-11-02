@@ -978,10 +978,7 @@ pub async fn start_claim(
             }
         }
         let next_run_at = next_run_after_dispatch_failure(&claim, Utc::now());
-        let _ = query("UPDATE routine_runs SET status = 'failed', completed_at = ?, error_code = ?, error_message = ?, updated_at = ? WHERE id = ?")
-            .bind(crate::db::repositories::timestamp()).bind(&error.code).bind(&error.message).bind(crate::db::repositories::timestamp()).bind(&claim.routine_run_id).execute(pool).await;
-        let _ = query("UPDATE routines SET claim_token = NULL, claimed_at = NULL, next_run_at = COALESCE(?, next_run_at), last_run_at = ?, last_status = 'error', last_error = ?, updated_at = ? WHERE id = ? AND claim_token = ?")
-            .bind(next_run_at).bind(crate::db::repositories::timestamp()).bind(&error.message).bind(crate::db::repositories::timestamp()).bind(&claim.routine_id).bind(&claim.token).execute(pool).await;
+        record_dispatch_failure(pool, &claim, &error, next_run_at).await;
         return Err(error);
     }
     list_runs(pool, Some(&claim.routine_id))
@@ -989,6 +986,20 @@ pub async fn start_claim(
         .into_iter()
         .find(|run| run.id == claim.routine_run_id)
         .ok_or_else(|| AppError::new("routine_run_missing", "Routine run was not persisted."))
+}
+
+async fn record_dispatch_failure(
+    pool: &SqlitePool,
+    claim: &Claim,
+    error: &AppError,
+    next_run_at: Option<String>,
+) {
+    // A failed preparation may arrive after the event path already projected
+    // Stop. Preserve that winner in both the run history and routine summary.
+    let _ = query("UPDATE routine_runs SET status = 'failed', completed_at = ?, error_code = ?, error_message = ?, updated_at = ? WHERE id = ? AND status IN ('queued','running','waiting_for_user') AND NOT EXISTS (SELECT 1 FROM agent_runs WHERE agent_runs.id = routine_runs.agent_run_id AND agent_runs.status IN ('completed','cancelled','interrupted'))")
+        .bind(crate::db::repositories::timestamp()).bind(&error.code).bind(&error.message).bind(crate::db::repositories::timestamp()).bind(&claim.routine_run_id).execute(pool).await;
+    let _ = query("UPDATE routines SET claim_token = NULL, claimed_at = NULL, next_run_at = COALESCE(?, next_run_at), last_run_at = ?, last_status = 'error', last_error = ?, updated_at = ? WHERE id = ? AND claim_token = ? AND EXISTS (SELECT 1 FROM routine_runs rr WHERE rr.id = ? AND rr.routine_id = routines.id AND rr.status = 'failed')")
+        .bind(next_run_at).bind(crate::db::repositories::timestamp()).bind(&error.message).bind(crate::db::repositories::timestamp()).bind(&claim.routine_id).bind(&claim.token).bind(&claim.routine_run_id).execute(pool).await;
 }
 
 fn next_run_after_dispatch_failure(claim: &Claim, after: DateTime<Utc>) -> Option<String> {
@@ -3142,3 +3153,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "routine_dispatch_failure_tests.rs"]
+mod dispatch_failure_tests;
