@@ -14,6 +14,7 @@ import { getCurrentDataPartitionName } from "../lib/data-partition";
 import { invalidateAgentSessionDraft, isAgentSessionDeleted } from "../lib/agent-session-drafts";
 import { updateMenuBarSessionStatus } from "./app-effects/menu-bar-session-status";
 import type { UseAgentSessionSyncDependencies } from "./use-agent-session-sync-types";
+import { markSessionFolderEdited } from "./session-folder-edits";
 
 /** A copy of `next` for state, or the current set when the members match. */
 function nextSessionIds(next: ReadonlySet<string>) {
@@ -45,6 +46,7 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
     setAgentWaitingSessionIds,
     setAgentWorkingSessionIds,
     setSessionFolders,
+    sessionFolderEditsRef,
   } = dependencies;
 
   useEffect(() => {
@@ -157,6 +159,7 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
           void assignSessionToFolder(sessionId, pendingProject.folderId)
             .then(() => {
               if (isAgentSessionDeleted(sessionId)) return;
+              markSessionFolderEdited(sessionFolderEditsRef, sessionId);
               setSessionFolders((prev) => ({
                 ...prev,
                 [sessionId]: [pendingProject.folderId],
@@ -221,6 +224,7 @@ export function useAgentSessionSync(dependencies: UseAgentSessionSyncDependencie
         tabsRef.current = nextTabs;
         setTabs(nextTabs);
       }
+      markSessionFolderEdited(sessionFolderEditsRef, storedSessionId);
       setSessionFolders((current) => {
         if (!(storedSessionId in current)) return current;
         const next = { ...current };

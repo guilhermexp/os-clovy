@@ -91,6 +91,7 @@ export function useAppState() {
   // Stored session id -> project (folder) ids. Project assignments are tracked
   // separately from note state.
   const [sessionFolders, setSessionFolders] = useState<Record<string, string[]>>({});
+  const sessionFolderEditsRef = useRef(new Map<string, number>());
   // Stored session id -> completed_at ISO. Clovy-owned. See JUN-203.
   const [completedSessions, setCompletedSessions] = useState<Record<string, string>>({});
   // In-flight completion writes per stored session id, so rapid toggles for one
@@ -284,6 +285,7 @@ export function useAppState() {
     setAgentWaitingSessionIds,
     sessionFolders,
     setSessionFolders,
+    sessionFolderEditsRef,
     completedSessions,
     setCompletedSessions,
     sessionCompletionWritesRef,

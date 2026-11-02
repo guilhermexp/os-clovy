@@ -147,6 +147,7 @@ function useSurfaces(selected = "b") {
     setAgentWaitingSessionIds: setWaiting,
     setAgentWorkingSessionIds: setWorking,
     setSessionFolders,
+    sessionFolderEditsRef: useRef(new Map()),
   });
   useDataPartitionRefresh({
     currentDataPartitionName: "default",

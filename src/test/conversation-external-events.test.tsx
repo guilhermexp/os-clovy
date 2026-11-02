@@ -95,6 +95,7 @@ function Surface({
     setAgentWaitingSessionIds: vi.fn(),
     setAgentWorkingSessionIds: vi.fn(),
     setSessionFolders: vi.fn(),
+    sessionFolderEditsRef: { current: new Map() },
   }).current;
   useAgentSessionSync(deps);
   return workspace ? (

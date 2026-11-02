@@ -272,7 +272,17 @@ impl<D: GatewayDriver> GatewayTools<D> {
                     // transport resumes the original request, never submits
                     // the potentially mutating tools/call a second time.
                 }
-                Err(error) => return Err(mcp_call_error(error, &server_name, name)),
+                Err(error) => {
+                    if answer.is_some() {
+                        agent_mcp::retire_server_sessions(&policy.server_id).await;
+                        return Err(mcp_call_error(
+                            error.after_elicitation(),
+                            &server_name,
+                            name,
+                        ));
+                    }
+                    return Err(mcp_call_error(error, &server_name, name));
+                }
             }
         }
         agent_mcp::retire_server_sessions(&policy.server_id).await;

@@ -34,4 +34,5 @@ export type UseAgentSessionSyncDependencies = {
   setAgentWaitingSessionIds: React.Dispatch<React.SetStateAction<ReadonlySet<string>>>;
   setAgentWorkingSessionIds: React.Dispatch<React.SetStateAction<ReadonlySet<string>>>;
   setSessionFolders: React.Dispatch<React.SetStateAction<Record<string, string[]>>>;
+  sessionFolderEditsRef: import("./session-folder-edits").SessionFolderEdits;
 };

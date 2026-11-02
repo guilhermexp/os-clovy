@@ -107,11 +107,17 @@ export function useNoteProcessingEvents(dependencies: UseNoteProcessingEventsDep
                 ((payload.kind === "notes" && !!payload.id) ||
                   selectedNoteRef.current?.id === noteId) &&
                 noteRequests.get(noteId) === request &&
-                !deletedNoteIdsRef.current.has(noteId) &&
-                editVersion === noteSaveController.getEditVersion(noteId) &&
-                !noteSaveController.hasPending(noteId)
-              )
-                dispatch({ type: "noteUpdated", note });
+                !deletedNoteIdsRef.current.has(noteId)
+              ) {
+                if (
+                  editVersion === noteSaveController.getEditVersion(noteId) &&
+                  !noteSaveController.hasPending(noteId)
+                ) {
+                  dispatch({ type: "noteUpdated", note });
+                } else {
+                  dispatch({ type: "noteFoldersReconciled", noteId, folderIds: note.folderIds });
+                }
+              }
             }
             const editVersions = new Map(
               visibleNotesRef.current.map((note) => [

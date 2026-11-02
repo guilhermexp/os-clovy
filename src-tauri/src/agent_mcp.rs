@@ -52,6 +52,7 @@ mod diagnostics;
 pub use diagnostics::AgentMcpDiagnostic;
 #[path = "agent_mcp_http_credentials.rs"]
 mod http_credentials;
+use http_credentials::oauth_mode;
 
 // Last observed health is process-local. A stored OAuth grant is not a health
 // probe, and external CLI connections never enter this host-owned inventory.
@@ -1992,17 +1993,7 @@ async fn invoke_custom_mcp<S: McpSecretStore>(
     }
     .await;
     if elicitation_answer.is_some() {
-        match result {
-            Err(
-                error @ (AgentMcpError::ElicitationRequired(_)
-                | AgentMcpError::DeliveryUncertain(_)
-                | AgentMcpError::AfterDelivery { .. }),
-            ) => Err(error),
-            Err(cause) => Err(AgentMcpError::AfterDelivery {
-                cause: Box::new(cause),
-            }),
-            result => result,
-        }
+        result.map_err(AgentMcpError::after_elicitation)
     } else {
         result
     }
@@ -3831,16 +3822,28 @@ async fn update_mcp_definition<S: McpSecretStore>(
             "metadata must be an object".into(),
         )));
     }
-    let oauth_mode = |metadata: &Value| {
-        metadata.get("auth").and_then(Value::as_str) == Some("oauth")
-            || metadata.get("legacyAuth").and_then(Value::as_str) == Some("oauth")
-    };
     let requested_oauth = oauth_mode(&input.metadata);
     // Settings sends the whole metadata object. Unchecking OAuth explicitly
     // removes both markers; a stale toggle retains the current auth mode.
     let explicitly_removes_oauth =
         input.metadata.get("auth").is_none() && input.metadata.get("legacyAuth").is_none();
     let before = repository.get(&id).await.map_err(app_error)?;
+    if (requested_oauth || (oauth_mode(&before.metadata) && !explicitly_removes_oauth))
+        && input.secrets.as_ref().is_some_and(|bundle| {
+            bundle
+                .headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("authorization"))
+        })
+    {
+        return Err(command_mcp_error(
+            &before,
+            "connect",
+            AgentMcpError::InvalidDefinition(
+                "Authorization headers cannot be used with OAuth.".into(),
+            ),
+        ));
+    }
     if oauth_mode(&before.metadata)
         && !explicitly_removes_oauth
         && before.secret_ref.is_some()

@@ -39,6 +39,7 @@ function useSyncedSessionIds(overrides: Partial<Parameters<typeof useAgentSessio
     setAgentWaitingSessionIds: setWaiting,
     setAgentWorkingSessionIds: setWorking,
     setSessionFolders: vi.fn(),
+    sessionFolderEditsRef: ref(new Map()),
     ...overrides,
   });
   return { working, waiting };

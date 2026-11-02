@@ -9,7 +9,8 @@ export function useSessionMetadata(dependencies: UseSessionMetadataDependencies)
   const {
     appBlocked,
     bootstrapped,
-    sessionFolders,
+    currentDataPartitionName,
+    sessionFolderEditsRef,
     sessionCompletionTouchedRef,
     setCompletedSessions,
     setError,
@@ -18,12 +19,10 @@ export function useSessionMetadata(dependencies: UseSessionMetadataDependencies)
   const invalidatedCompletions = useRef(new Set<string>());
   const assignmentGeneration = useRef(0);
   const completionGeneration = useRef(0);
-  const foldersRef = useRef(sessionFolders);
-  foldersRef.current = sessionFolders;
 
   function applyAssignments(
     assignments: Awaited<ReturnType<typeof listSessionFolders>>,
-    baseline: Record<string, string[]>,
+    baseline: Map<string, number>,
     isCurrent: () => boolean,
   ) {
     const next: Record<string, string[]> = {};
@@ -34,8 +33,8 @@ export function useSessionMetadata(dependencies: UseSessionMetadataDependencies)
     setSessionFolders((previous) => {
       if (!isCurrent()) return previous;
       const merged = { ...next };
-      for (const id of new Set([...Object.keys(baseline), ...Object.keys(previous)])) {
-        if (JSON.stringify(baseline[id]) !== JSON.stringify(previous[id])) {
+      for (const [id, revision] of sessionFolderEditsRef.current) {
+        if (revision !== baseline.get(id)) {
           if (previous[id]) merged[id] = previous[id];
           else delete merged[id];
         }
@@ -46,7 +45,7 @@ export function useSessionMetadata(dependencies: UseSessionMetadataDependencies)
 
   async function refreshAssignments(isCurrent: () => boolean) {
     const generation = ++assignmentGeneration.current;
-    const baseline = foldersRef.current;
+    const baseline = new Map(sessionFolderEditsRef.current);
     try {
       const assignments = await listSessionFolders();
       if (!isCurrent() || generation !== assignmentGeneration.current) return;
@@ -105,7 +104,7 @@ export function useSessionMetadata(dependencies: UseSessionMetadataDependencies)
     const profile = getCurrentDataPartitionName();
     const assignmentSnapshot = assignmentGeneration.current;
     const completionSnapshot = completionGeneration.current;
-    const foldersSnapshot = foldersRef.current;
+    const foldersSnapshot = new Map(sessionFolderEditsRef.current);
     void listSessionFolders()
       .then((assignments) => {
         if (
@@ -177,5 +176,5 @@ export function useSessionMetadata(dependencies: UseSessionMetadataDependencies)
     return () => {
       cancelled = true;
     };
-  }, [appBlocked, bootstrapped]);
+  }, [appBlocked, bootstrapped, currentDataPartitionName]);
 }

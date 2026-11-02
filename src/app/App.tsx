@@ -215,6 +215,7 @@ export function App() {
     setAgentWaitingSessionIds,
     sessionFolders,
     setSessionFolders,
+    sessionFolderEditsRef,
     completedSessions,
     setCompletedSessions,
     sessionCompletionWritesRef,
@@ -868,7 +869,8 @@ export function App() {
   useSessionMetadata({
     appBlocked,
     bootstrapped,
-    sessionFolders,
+    currentDataPartitionName,
+    sessionFolderEditsRef,
     sessionCompletionTouchedRef,
     setCompletedSessions,
     setError,
@@ -906,6 +908,7 @@ export function App() {
     setAgentWaitingSessionIds,
     setAgentWorkingSessionIds,
     setSessionFolders,
+    sessionFolderEditsRef,
   });
 
   useEffect(() => {
@@ -1421,6 +1424,7 @@ export function App() {
     sessionCompletionTouchedRef,
     sessionCompletionWritesRef,
     sessionFolders,
+    sessionFolderEditsRef,
     setActiveAgentSession,
     setActiveView,
     setAgentOrigin,

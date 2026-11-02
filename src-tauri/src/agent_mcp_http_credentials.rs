@@ -1,6 +1,14 @@
 use std::collections::BTreeMap;
 use zeroize::Zeroize;
 
+pub(super) fn oauth_mode(metadata: &serde_json::Value) -> bool {
+    metadata.get("auth").and_then(serde_json::Value::as_str) == Some("oauth")
+        || metadata
+            .get("legacyAuth")
+            .and_then(serde_json::Value::as_str)
+            == Some("oauth")
+}
+
 pub(super) fn remove_authorization(headers: &mut BTreeMap<String, String>) {
     headers.retain(|name, value| {
         if name.eq_ignore_ascii_case("authorization") {
@@ -73,7 +81,7 @@ mod tests {
             reqwest::Client::new().get(format!("http://{address}/mcp")),
             &headers,
             &oauth,
-            true,
+            oauth_mode(&serde_json::json!({"legacyAuth":"oauth"})),
         )
         .send()
         .await

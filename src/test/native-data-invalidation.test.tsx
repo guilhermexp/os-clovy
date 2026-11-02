@@ -7,7 +7,10 @@ import { useNoteProcessingEvents } from "../app/use-note-processing-events";
 import { useSessionMetadata } from "../app/use-session-metadata";
 import { NoteEditor } from "../components/note-editor/NoteEditor";
 import type { ClovyDataChange } from "../lib/clovy-data-events";
-import { resetCurrentDataPartitionForTests } from "../lib/data-partition";
+import {
+  resetCurrentDataPartitionForTests,
+  setCurrentDataPartitionName,
+} from "../lib/data-partition";
 import {
   NOTE_PROCESSING_PROGRESS_EVENT,
   type LiveTranscriptEventDto,
@@ -99,9 +102,119 @@ beforeEach(() => {
   });
   mocks.listNotes.mockResolvedValue({ items: [note("new")], hasMore: false });
   mocks.listSessionFolders.mockResolvedValue([]);
+  mocks.listCompletedSessions.mockResolvedValue([]);
 });
 
 describe("native mutation invalidation", () => {
+  it("applies the newest assignment when an older queued native update is superseded", async () => {
+    type Folders = Record<string, string[]>;
+    const updates: React.SetStateAction<Folders>[] = [];
+    mocks.listSessionFolders.mockResolvedValue([{ sessionId: "a", folderId: "project" }]);
+    const { result } = renderHook(() => {
+      const [folders, setFolders] = useState<Folders>({});
+      useSessionMetadata({
+        appBlocked: false,
+        bootstrapped: false,
+        currentDataPartitionName: "default",
+        sessionFolderEditsRef: useRef(new Map()),
+        sessionCompletionTouchedRef: useRef(new Set()),
+        setCompletedSessions: () => {},
+        setSessionFolders: (update) => {
+          updates.push(update);
+        },
+        setError: () => {},
+      });
+      return { folders, setFolders };
+    });
+    await emit({ profile: "default", kind: "projects" });
+    await waitFor(() => expect(updates).toHaveLength(1));
+    await emit({ profile: "default", kind: "projects" });
+    await waitFor(() => expect(updates).toHaveLength(2));
+    act(() => {
+      for (const update of updates) result.current.setFolders(update);
+    });
+    expect(result.current.folders).toEqual({ a: ["project"] });
+  });
+  it.each([
+    "projects",
+    "conversations",
+  ] as const)("lets a later %s removal win over an unrendered native update while preserving a local edit", async (kind) => {
+    type Folders = Record<string, string[]>;
+    let pending: Folders = {};
+    let updates = 0;
+    const edits = { current: new Map<string, number>() };
+    const second = deferred<Array<{ sessionId: string; folderId: string }>>();
+    mocks.listSessionFolders
+      .mockResolvedValueOnce([{ sessionId: "a", folderId: "project" }])
+      .mockReturnValueOnce(second.promise);
+    const { result } = renderHook(() => {
+      const [folders, setFolders] = useState<Folders>({});
+      const touched = useRef(new Set<string>());
+      useSessionMetadata({
+        appBlocked: false,
+        bootstrapped: false,
+        currentDataPartitionName: "default",
+        sessionFolderEditsRef: edits,
+        sessionCompletionTouchedRef: touched,
+        setCompletedSessions: () => {},
+        setSessionFolders: (update) => {
+          pending = typeof update === "function" ? update(pending) : update;
+          updates++;
+        },
+        setError: () => {},
+      });
+      return { folders, setFolders };
+    });
+    await emit({ profile: "default", kind });
+    await waitFor(() => expect(updates).toBe(1));
+    await emit({ profile: "default", kind });
+    pending = { ...pending, local: ["local-project"] };
+    edits.current.set("local", 1);
+    await act(async () => second.resolve([]));
+    await waitFor(() => expect(updates).toBe(2));
+    act(() => result.current.setFolders(pending));
+    expect(result.current.folders).toEqual({ local: ["local-project"] });
+  });
+  it("reloads both session metadata snapshots after a partition change during startup", async () => {
+    const oldFolders = deferred<Array<{ sessionId: string; folderId: string }>>();
+    const oldCompleted = deferred<Array<{ sessionId: string; completedAt: string }>>();
+    mocks.listSessionFolders
+      .mockReturnValueOnce(oldFolders.promise)
+      .mockResolvedValueOnce([{ sessionId: "new", folderId: "project" }]);
+    mocks.listCompletedSessions
+      .mockReturnValueOnce(oldCompleted.promise)
+      .mockResolvedValueOnce([{ sessionId: "new", completedAt: stamp }]);
+    const { result, rerender } = renderHook(
+      ({ partition }) => {
+        const [completed, setCompletedSessions] = useState<Record<string, string>>({});
+        const [folders, setSessionFolders] = useState<Record<string, string[]>>({});
+        const touched = useRef(new Set<string>());
+        useSessionMetadata({
+          appBlocked: false,
+          bootstrapped: true,
+          currentDataPartitionName: partition,
+          sessionFolderEditsRef: useRef(new Map<string, number>()),
+          sessionCompletionTouchedRef: touched,
+          setCompletedSessions,
+          setSessionFolders,
+          setError: () => {},
+        });
+        return { completed, folders };
+      },
+      { initialProps: { partition: "default" } },
+    );
+    await waitFor(() => expect(mocks.listCompletedSessions).toHaveBeenCalledTimes(1));
+    act(() => setCurrentDataPartitionName("other"));
+    rerender({ partition: "other" });
+    await waitFor(() => expect(result.current.completed).toEqual({ new: stamp }));
+    expect(result.current.folders).toEqual({ new: ["project"] });
+    await act(async () => {
+      oldFolders.resolve([]);
+      oldCompleted.resolve([]);
+    });
+    expect(result.current.completed).toEqual({ new: stamp });
+    expect(result.current.folders).toEqual({ new: ["project"] });
+  });
   it("updates the open editor project chip on generic assignment and removal", async () => {
     function Surface() {
       const { state } = useNotes();
@@ -170,9 +283,6 @@ describe("native mutation invalidation", () => {
     });
     await act(async () => pending.resolve({ ...note("old"), folderIds: [] }));
     expect(result.current.state.selectedNote?.editedContent).toBe("local");
-    result.current.controller.discard("note");
-    mocks.getNote.mockResolvedValueOnce({ ...note("local"), folderIds: [] });
-    await emit({ profile: "default", kind: "notes" });
     await waitFor(() => expect(result.current.state.selectedNote?.folderIds).toEqual([]));
   });
 
@@ -191,21 +301,24 @@ describe("native mutation invalidation", () => {
       const [folders, setSessionFolders] = useState<Record<string, string[]>>({});
       const [, setError] = useState<string | null>(null);
       const touched = useRef(new Set<string>());
+      const edits = useRef(new Map<string, number>());
       useSessionMetadata({
         appBlocked: false,
         bootstrapped: true,
-        sessionFolders: folders,
+        currentDataPartitionName: "default",
+        sessionFolderEditsRef: edits,
         sessionCompletionTouchedRef: touched,
         setCompletedSessions,
         setSessionFolders,
         setError,
       });
-      return { completed, folders, setCompletedSessions, setSessionFolders, touched };
+      return { completed, folders, setCompletedSessions, setSessionFolders, touched, edits };
     });
     await waitFor(() => expect(mocks.listCompletedSessions).toHaveBeenCalledTimes(1));
     await emit({ profile: "default", kind: "conversations", id: "a" });
     act(() => {
       result.current.touched.current.add("local");
+      result.current.edits.current.set("local", 1);
       result.current.setCompletedSessions({ local: stamp });
       result.current.setSessionFolders({ local: ["local-project"] });
     });
@@ -313,13 +426,14 @@ describe("native mutation invalidation", () => {
     ]);
     const { result } = renderHook(() => {
       const [completed, setCompletedSessions] = useState<Record<string, string>>({});
-      const [folders, setSessionFolders] = useState<Record<string, string[]>>({});
+      const [, setSessionFolders] = useState<Record<string, string[]>>({});
       const [, setError] = useState<string | null>(null);
       const touched = useRef(new Set<string>());
       useSessionMetadata({
         appBlocked: false,
         bootstrapped: false,
-        sessionFolders: folders,
+        currentDataPartitionName: "default",
+        sessionFolderEditsRef: useRef(new Map<string, number>()),
         sessionCompletionTouchedRef: touched,
         setCompletedSessions,
         setSessionFolders,

@@ -25,6 +25,7 @@ export type NotesAction =
   | { type: "bootstrapLoaded"; payload: BootstrapResponse }
   | { type: "noteLoaded"; note: NoteDto }
   | { type: "noteUpdated"; note: NoteDto }
+  | { type: "noteFoldersReconciled"; noteId: string; folderIds: string[] }
   | {
       type: "notePatched";
       noteId: string;
@@ -96,6 +97,17 @@ export function notesReducer(state: NotesState, action: NotesAction): NotesState
     // regress an in-flight pipeline or reopen a terminal one.
     case "noteUpdated":
       return applyNoteUpdate(state, mergeNoteUpdate(state, action.note));
+    case "noteFoldersReconciled":
+      return {
+        ...state,
+        notes: state.notes.map((note) =>
+          note.id === action.noteId ? { ...note, folderIds: action.folderIds } : note,
+        ),
+        selectedNote:
+          state.selectedNote?.id === action.noteId
+            ? { ...state.selectedNote, folderIds: action.folderIds }
+            : state.selectedNote,
+      };
     case "notePatched":
       return applyNotePatch(state, action.noteId, action.patch);
     case "noteProcessingStageChanged":

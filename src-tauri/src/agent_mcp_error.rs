@@ -67,6 +67,17 @@ pub enum AgentMcpError {
 }
 
 impl AgentMcpError {
+    pub(crate) fn after_elicitation(self) -> Self {
+        match self {
+            error @ (Self::ElicitationRequired(_)
+            | Self::DeliveryUncertain(_)
+            | Self::AfterDelivery { .. }) => error,
+            cause => Self::AfterDelivery {
+                cause: Box::new(cause),
+            },
+        }
+    }
+
     pub(crate) fn code(&self) -> &'static str {
         match self {
             Self::AfterDelivery { cause } => cause.code(),

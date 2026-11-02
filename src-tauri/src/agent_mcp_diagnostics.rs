@@ -130,6 +130,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn continuation_failure_keeps_cause_and_cannot_be_retried() {
+        let initial = AgentMcpError::Unauthorized.diagnostic("Linear", Some("send"), "call");
+        assert_eq!(initial.retry_safe, None);
+        let resumed = AgentMcpError::Unauthorized.after_elicitation().diagnostic(
+            "Linear",
+            Some("send"),
+            "call",
+        );
+        assert_eq!(resumed.code, initial.code);
+        assert_eq!(resumed.remote_code, initial.remote_code);
+        assert_eq!(resumed.delivery.as_deref(), Some("unknown"));
+        assert_eq!(resumed.retry_safe, Some(false));
+        assert_eq!(resumed.action, "inspect_server_before_retry");
+        assert!(matches!(
+            AgentMcpError::DeliveryUncertain(Some(401)).after_elicitation(),
+            AgentMcpError::DeliveryUncertain(Some(401))
+        ));
+    }
+
+    #[test]
     fn post_delivery_diagnostic_preserves_cause_and_forbids_retry() {
         let error = AgentMcpError::AfterDelivery {
             cause: Box::new(AgentMcpError::Remote(-32601)),

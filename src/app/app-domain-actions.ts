@@ -15,6 +15,7 @@ import { messageFromError } from "../lib/errors";
 import { COMPLETED_DEMO_SESSION_PREFIX } from "../lib/completed-sessions-demo-ids";
 import { getCurrentDataPartitionName } from "../lib/data-partition";
 import type { CreateAppDomainActionsDependencies } from "./app-domain-actions-types";
+import { markSessionFolderEdited } from "./session-folder-edits";
 
 export function createAppDomainActions(dependencies: CreateAppDomainActionsDependencies) {
   const {
@@ -26,6 +27,7 @@ export function createAppDomainActions(dependencies: CreateAppDomainActionsDepen
     sessionCompletionTouchedRef,
     sessionCompletionWritesRef,
     sessionFolders,
+    sessionFolderEditsRef,
     setActiveAgentSession,
     setActiveView,
     setAgentOrigin,
@@ -41,6 +43,8 @@ export function createAppDomainActions(dependencies: CreateAppDomainActionsDepen
       // sessions but never deletes them — they stay in your library.
       await deleteFolder(folderId, false);
       dispatch({ type: "folderDeleted", folderId });
+      for (const sessionId of Object.keys(sessionFolders))
+        markSessionFolderEdited(sessionFolderEditsRef, sessionId);
       setSessionFolders((prev) => {
         const next: Record<string, string[]> = {};
         for (const [sessionId, folderIds] of Object.entries(prev)) {
@@ -116,6 +120,7 @@ export function createAppDomainActions(dependencies: CreateAppDomainActionsDepen
       if (!current.includes(folderId)) {
         await assignSessionToFolder(sessionId, folderId);
       }
+      markSessionFolderEdited(sessionFolderEditsRef, sessionId);
       setSessionFolders((prev) => ({ ...prev, [sessionId]: [folderId] }));
     } catch (err) {
       setError(messageFromError(err));
@@ -188,6 +193,7 @@ export function createAppDomainActions(dependencies: CreateAppDomainActionsDepen
   ) {
     try {
       await removeSessionFromFolder(sessionId, folderId);
+      markSessionFolderEdited(sessionFolderEditsRef, sessionId);
       setSessionFolders((prev) => {
         const next = { ...prev };
         const remaining = (next[sessionId] ?? []).filter((id) => id !== folderId);

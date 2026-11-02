@@ -491,6 +491,8 @@ identity/tokens, and changes to HTTP headers preserve the host-owned grant;
 changing its URL or transport requires disconnect first.
 OAuth transport uses the active grant for `Authorization`; a manual header
 with that name is removed on conversion and rejected for OAuth configurations.
+Invalid OAuth header updates are rejected before disconnecting or revoking the
+existing grant, and validated again after acquiring the lifecycle gate.
 Other configured headers and manual-credential servers keep their own rules.
 
 If a refresh returns rotated credentials after cancellation/disconnect, or the
@@ -581,7 +583,8 @@ The custom authority follows initialization, session waits and elicitation to
 the transport write boundary. Invalidation before dispatch sends no tool call;
 an already admitted call or lost elicitation session remains delivery-uncertain
 and is never replayed. Cancellation or a later approval failure does not erase
-that uncertainty. The final chat error string retains the safe numeric
+that uncertainty; the same rule applies when a managed Linear connection is
+lost before resuming an elicitation. The final chat error string retains the safe numeric
 remote code. OAuth callback errors retain only allowlisted provider codes:
 denied consent, client approval and provider failure remain distinct, while
 unknown codes and free-form descriptions are sanitized.

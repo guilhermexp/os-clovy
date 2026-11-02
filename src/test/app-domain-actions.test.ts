@@ -42,6 +42,7 @@ function dependencies(flush: ReturnType<typeof vi.fn>): CreateAppDomainActionsDe
     sessionCompletionTouchedRef: { current: new Set() },
     sessionCompletionWritesRef: { current: new Map() },
     sessionFolders: {},
+    sessionFolderEditsRef: { current: new Map() },
     setActiveAgentSession: vi.fn(),
     setActiveView: vi.fn(),
     setAgentOrigin: vi.fn(),
