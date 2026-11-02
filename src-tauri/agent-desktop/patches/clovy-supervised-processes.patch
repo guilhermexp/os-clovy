@@ -4281,6 +4281,95 @@ index 2066fbc..37bb426 100644
              id: "w-1.1-p".into(),
              title: "frame".into(),
              app: "fixture".into(),
+diff --git a/crates/macos/src/actions/select/select_menu.rs b/crates/macos/src/actions/select/select_menu.rs
+index aea6431..2b83c99 100644
+--- a/crates/macos/src/actions/select/select_menu.rs
++++ b/crates/macos/src/actions/select/select_menu.rs
+@@ -29,7 +29,7 @@ pub(crate) fn select_from_menu(
+         )
+         .with_suggestion("Use click to open the control, then snapshot the menu."));
+     }
+-    let result = select_open_menu_item(pid, identity, value, deadline);
++    let result = select_open_menu_item(pid, identity, element, value, deadline);
+     match result {
+         Ok(_) if exposes_value => {
+             verify_selected_value(element, value, deadline).map_err(after_menu_delivery)
+@@ -110,6 +110,7 @@ fn open_menu(element: &AXElement, deadline: Deadline) -> Result<bool, AdapterErr
+ fn select_open_menu_item(
+     pid: i32,
+     identity: crate::system::process::process_identity::ProcessIdentity,
++    original: &AXElement,
+     value: &str,
+     deadline: Deadline,
+ ) -> Result<bool, AdapterError> {
+@@ -120,16 +121,21 @@ fn select_open_menu_item(
+                 "The target process changed while selecting a menu item",
+             ));
+         }
+-        if let Some(menu) = menu_root(pid, deadline)?
+-            && let Some(candidate) =
++        if let Some(mut menu) = menu_root(pid, deadline)? {
++            menu.bind_child(
++                original,
++                crate::tree::locator_deadline::from_operation(deadline)?,
++            )?;
++            if let Some(candidate) =
+                 find_named_descendant(&menu, value, deadline, SelectSearch::MenuItem)?
+-        {
+-            let verified = activate_menu_item(&candidate, deadline)?;
+-            return if verified {
+-                Ok(true)
+-            } else {
+-                wait_for_menu_to_close(pid, deadline)
+-            };
++            {
++                let verified = activate_menu_item(&candidate, deadline)?;
++                return if verified {
++                    Ok(true)
++                } else {
++                    wait_for_menu_to_close(pid, deadline)
++                };
++            }
+         }
+         if deadline.is_expired() {
+             return Err(deadline.timeout_error().with_details(serde_json::json!({
+@@ -188,9 +194,12 @@ fn find_named_descendant(
+                 }
+             }
+         }
+-        let children = boundary_children(depth, search, || {
++        let mut children = boundary_children(depth, search, || {
+             crate::tree::surface_read::elements(&candidate, "AXChildren", instant)
+         })?;
++        for child in &mut children {
++            child.bind_child(&candidate, instant)?;
++        }
+         stack.extend(
+             children
+                 .into_iter()
+diff --git a/crates/macos/src/actions/select/select_name.rs b/crates/macos/src/actions/select/select_name.rs
+index b9a966c..9558f2c 100644
+--- a/crates/macos/src/actions/select/select_name.rs
++++ b/crates/macos/src/actions/select/select_name.rs
+@@ -16,10 +16,14 @@ pub(crate) fn collection_target(
+         root,
+         named,
+         |node| {
+-            Ok((
+-                crate::tree::surface_read::string(node, "AXRole", deadline)?,
+-                crate::tree::surface_read::element(node, "AXParent", deadline)?,
+-            ))
++            node.qualify(deadline)?;
++            let role = crate::tree::surface_read::string(node, "AXRole", deadline)?;
++            node.qualify(deadline)?;
++            let mut parent = crate::tree::surface_read::element(node, "AXParent", deadline)?;
++            if let Some(parent) = &mut parent {
++                parent.bind_child(node, deadline)?;
++            }
++            Ok((role, parent))
+         },
+         crate::tree::properties::capabilities::same_element,
+     )
 diff --git a/crates/macos/src/actions/type_text.rs b/crates/macos/src/actions/type_text.rs
 index 1f8a933..a283355 100644
 --- a/crates/macos/src/actions/type_text.rs
@@ -6465,14 +6554,521 @@ index 7dee59c..06963d5 100644
          Ok(surfaces)
      }
 
+diff --git a/crates/macos/src/tree/ax_element.rs b/crates/macos/src/tree/ax_element.rs
+index a0fcaf4..690872f 100644
+--- a/crates/macos/src/tree/ax_element.rs
++++ b/crates/macos/src/tree/ax_element.rs
+@@ -1,68 +1,288 @@
++use agent_desktop_core::{AdapterError, NativeHandle, ProcessIdentity, RefEntry, WindowInfo};
++use std::{ops::Deref, sync::Arc, time::Instant};
++
++#[derive(Clone)]
++pub(crate) struct Binding {
++    root: Arc<ProcessIdentity>,
++    owner: Arc<ProcessIdentity>,
++    source_window: Option<Arc<str>>,
++}
++
+ #[cfg(target_os = "macos")]
+-mod imp {
+-    use accessibility_sys::AXUIElementRef;
+-    use agent_desktop_core::NativeHandle;
+-    use core_foundation::base::{CFRelease, CFRetain, CFTypeRef};
++pub(crate) type RawElement = accessibility_sys::AXUIElementRef;
++#[cfg(not(target_os = "macos"))]
++pub(crate) type RawElement = *const std::ffi::c_void;
+
+-    pub struct AXElement(pub(crate) AXUIElementRef);
++pub(crate) struct AXElement {
++    inner: (RawElement, Option<Arc<Binding>>),
++}
+
+-    impl AXElement {
+-        pub(crate) fn into_native_handle(self) -> NativeHandle {
+-            NativeHandle::new(self)
++// A raw element is metadata-only until it is bound to an original identity.
++#[allow(non_snake_case)]
++pub(crate) fn AXElement(raw: RawElement) -> AXElement {
++    AXElement { inner: (raw, None) }
++}
++
++impl Deref for AXElement {
++    type Target = (RawElement, Option<Arc<Binding>>);
++    fn deref(&self) -> &Self::Target {
++        &self.inner
++    }
++}
++
++impl AXElement {
++    pub(crate) fn into_native_handle(self) -> Result<NativeHandle, AdapterError> {
++        if self.inner.1.is_none() {
++            return Err(AdapterError::stale_ref_because(
++                "Accessibility element has no original identity",
++            ));
+         }
++        Ok(NativeHandle::new(self))
+     }
+
+-    impl Drop for AXElement {
+-        fn drop(&mut self) {
+-            if !self.0.is_null() {
+-                unsafe { CFRelease(self.0 as CFTypeRef) }
++    #[cfg(target_os = "macos")]
++    fn bind_root(
++        &mut self,
++        root: Arc<ProcessIdentity>,
++        source_window: Option<Arc<str>>,
++        deadline: Instant,
++    ) -> Result<(), AdapterError> {
++        if let Some(binding) = &self.inner.1 {
++            if binding.root.as_ref() != root.as_ref() || binding.source_window != source_window {
++                return Err(AdapterError::stale_ref_because(
++                    "Accessibility root identity changed",
++                ));
+             }
++            return self.qualify(deadline);
+         }
++        crate::tree::locator_deadline::remaining(deadline)?;
++        let root_pid = crate::system::process::process_identity::to_pid_t(root.pid)?;
++        crate::system::private_browser_guard::require_pid(root_pid, Some(&root.instance))?;
++        let pid = crate::tree::properties::ax_ipc::pid(self, deadline)
++            .map_err(|_| AdapterError::stale_ref_because("Accessibility owner is unavailable"))?;
++        crate::tree::locator_deadline::remaining(deadline)?;
++        let owner = if pid == root_pid {
++            Arc::clone(&root)
++        } else {
++            let token = crate::system::private_browser_guard::require_pid(pid, None)?;
++            let pid = crate::system::process::process_identity::from_pid_t(pid)?;
++            Arc::new(ProcessIdentity::new(pid, token))
++        };
++        self.inner.1 = Some(Arc::new(Binding {
++            root,
++            owner,
++            source_window,
++        }));
++        self.qualify(deadline)
+     }
+
+-    impl Clone for AXElement {
+-        fn clone(&self) -> Self {
+-            if !self.0.is_null() {
+-                unsafe { CFRetain(self.0 as CFTypeRef) };
++    #[cfg(target_os = "macos")]
++    pub(crate) fn bind_entry(
++        &mut self,
++        entry: &RefEntry,
++        deadline: Instant,
++    ) -> Result<(), AdapterError> {
++        let instance = entry
++            .process
++            .process_instance
++            .as_deref()
++            .filter(|v| !v.is_empty())
++            .ok_or_else(|| {
++                AdapterError::stale_ref_because("Saved root has no process generation")
++            })?;
++        if let Some(binding) = &self.inner.1 {
++            if binding.root.pid != entry.process.pid
++                || binding.root.instance != instance
++                || binding.source_window.as_deref() != entry.source.source_window_id.as_deref()
++            {
++                return Err(AdapterError::stale_ref_because(
++                    "Saved accessibility root changed",
++                ));
+             }
+-            AXElement(self.0)
++            return self.qualify(deadline);
+         }
++        self.bind_root(
++            Arc::new(ProcessIdentity::new(entry.process.pid, instance)),
++            entry.source.source_window_id.as_deref().map(Arc::from),
++            deadline,
++        )
+     }
+-}
+
+-#[cfg(not(target_os = "macos"))]
+-mod imp {
+-    use agent_desktop_core::NativeHandle;
++    #[cfg(target_os = "macos")]
++    pub(crate) fn verify_entry(
++        &mut self,
++        entry: &RefEntry,
++        deadline: Instant,
++    ) -> Result<(), AdapterError> {
++        if self.inner.1.is_none() {
++            return Err(AdapterError::stale_ref_because(
++                "Retained accessibility identity is unavailable",
++            ));
++        }
++        self.bind_entry(entry, deadline)
++    }
+
+-    pub struct AXElement(pub(crate) *const std::ffi::c_void);
++    #[cfg(target_os = "macos")]
++    pub(crate) fn same_owner(&self, other: &AXElement) -> Result<bool, AdapterError> {
++        let left =
++            self.inner.1.as_ref().ok_or_else(|| {
++                AdapterError::stale_ref_because("Candidate identity is unavailable")
++            })?;
++        let right = other.inner.1.as_ref().ok_or_else(|| {
++            AdapterError::stale_ref_because("Saved candidate identity is unavailable")
++        })?;
++        if left.owner.pid == right.owner.pid && left.owner.instance != right.owner.instance {
++            return Err(AdapterError::stale_ref_because(
++                "Candidate process generation changed",
++            ));
++        }
++        Ok(left.root == right.root
++            && left.source_window == right.source_window
++            && left.owner == right.owner)
++    }
+
+-    impl AXElement {
+-        pub(crate) fn into_native_handle(self) -> NativeHandle {
+-            NativeHandle::new(self)
++    #[cfg(target_os = "macos")]
++    pub(crate) fn owner_is_root(&self) -> Result<bool, AdapterError> {
++        let binding =
++            self.inner.1.as_ref().ok_or_else(|| {
++                AdapterError::stale_ref_because("Candidate identity is unavailable")
++            })?;
++        Ok(binding.root == binding.owner)
++    }
++
++    #[cfg(target_os = "macos")]
++    pub(crate) fn bind_window(
++        &mut self,
++        window: &WindowInfo,
++        deadline: Instant,
++    ) -> Result<(), AdapterError> {
++        let instance = window
++            .process_instance
++            .as_deref()
++            .filter(|v| !v.is_empty())
++            .ok_or_else(|| {
++                AdapterError::stale_ref_because("Window root has no process generation")
++            })?;
++        if let Some(binding) = &self.inner.1 {
++            let source = (!window.id.is_empty()).then_some(window.id.as_str());
++            if binding.root.pid != window.pid
++                || binding.root.instance != instance
++                || binding.source_window.as_deref() != source
++            {
++                return Err(AdapterError::stale_ref_because(
++                    "Window accessibility root changed",
++                ));
++            }
++            return self.qualify(deadline);
++        }
++        self.bind_root(
++            Arc::new(ProcessIdentity::new(window.pid, instance)),
++            (!window.id.is_empty()).then(|| Arc::from(window.id.as_str())),
++            deadline,
++        )
++    }
++
++    #[cfg(target_os = "macos")]
++    pub(crate) fn bind_child(
++        &mut self,
++        parent: &AXElement,
++        deadline: Instant,
++    ) -> Result<(), AdapterError> {
++        parent.qualify(deadline)?;
++        let binding = parent.inner.1.as_ref().ok_or_else(|| {
++            AdapterError::stale_ref_because("Accessibility parent has no identity")
++        })?;
++        if self.inner.1.is_none() {
++            let pid = crate::tree::properties::ax_ipc::pid(self, deadline).map_err(|_| {
++                AdapterError::stale_ref_because("Accessibility owner is unavailable")
++            })?;
++            crate::tree::locator_deadline::remaining(deadline)?;
++            let owner_pid = crate::system::process::process_identity::to_pid_t(binding.owner.pid)?;
++            if pid == owner_pid {
++                self.inner.1 = Some(Arc::new(Binding {
++                    root: Arc::clone(&binding.root),
++                    owner: Arc::clone(&binding.owner),
++                    source_window: binding.source_window.clone(),
++                }));
++                return self.qualify(deadline);
++            }
+         }
++        self.bind_root(
++            Arc::clone(&binding.root),
++            binding.source_window.clone(),
++            deadline,
++        )
+     }
+
+-    impl Drop for AXElement {
+-        fn drop(&mut self) {}
++    #[cfg(target_os = "macos")]
++    pub(crate) fn qualify(&self, deadline: Instant) -> Result<(), AdapterError> {
++        let binding = self.inner.1.as_ref().ok_or_else(|| {
++            AdapterError::stale_ref_because("Accessibility element has no original identity")
++        })?;
++        crate::tree::locator_deadline::remaining(deadline)?;
++        let root_pid = crate::system::process::process_identity::to_pid_t(binding.root.pid)?;
++        let owner_pid = crate::system::process::process_identity::to_pid_t(binding.owner.pid)?;
++        crate::system::private_browser_guard::require_pid(root_pid, Some(&binding.root.instance))?;
++        crate::tree::locator_deadline::remaining(deadline)?;
++        let actual = crate::tree::properties::ax_ipc::pid(self, deadline)
++            .map_err(|_| AdapterError::stale_ref_because("Accessibility owner is unavailable"))?;
++        crate::tree::locator_deadline::remaining(deadline)?;
++        if actual != owner_pid {
++            return Err(AdapterError::stale_ref_because(
++                "Accessibility owner changed",
++            ));
++        }
++        if owner_pid != root_pid {
++            crate::system::private_browser_guard::require_pid(
++                owner_pid,
++                Some(&binding.owner.instance),
++            )?;
++        }
++        crate::tree::locator_deadline::remaining(deadline)?;
++        if crate::tree::properties::ax_ipc::pid(self, deadline).ok() != Some(owner_pid) {
++            return Err(AdapterError::stale_ref_because(
++                "Accessibility owner changed",
++            ));
++        }
++        crate::tree::locator_deadline::remaining(deadline)?;
++        Ok(())
+     }
++}
+
+-    impl Clone for AXElement {
+-        fn clone(&self) -> Self {
+-            AXElement(self.0)
++impl Clone for AXElement {
++    fn clone(&self) -> Self {
++        #[cfg(target_os = "macos")]
++        if !self.inner.0.is_null() {
++            unsafe {
++                core_foundation::base::CFRetain(self.inner.0 as core_foundation::base::CFTypeRef)
++            };
++        }
++        Self {
++            inner: (self.inner.0, self.inner.1.clone()),
+         }
+     }
+ }
+
+-pub(crate) use imp::AXElement;
++impl Drop for AXElement {
++    fn drop(&mut self) {
++        #[cfg(target_os = "macos")]
++        if !self.inner.0.is_null() {
++            unsafe {
++                core_foundation::base::CFRelease(self.inner.0 as core_foundation::base::CFTypeRef)
++            }
++        }
++    }
++}
+
+ #[cfg(test)]
+ mod tests {
+     use super::AXElement;
+
+     #[test]
+-    fn converts_to_an_owned_typed_native_handle() {
+-        let handle = AXElement(std::ptr::null_mut()).into_native_handle();
+-
+-        assert!(handle.downcast_ref::<AXElement>().is_some());
++    fn raw_element_cannot_become_a_native_handle() {
++        let Err(error) = AXElement(std::ptr::null_mut()).into_native_handle() else {
++            panic!("an unbound element cannot become a handle");
++        };
++        assert_eq!(error.code, agent_desktop_core::ErrorCode::StaleRef);
+     }
+ }
+diff --git a/crates/macos/src/tree/child_labels.rs b/crates/macos/src/tree/child_labels.rs
+index 2e3c4de..8538e60 100644
+--- a/crates/macos/src/tree/child_labels.rs
++++ b/crates/macos/src/tree/child_labels.rs
+@@ -57,6 +57,7 @@ fn label_from_children(
+     let capped = children.len() > MAX_LABEL_ELEMENTS;
+     let mut reads_complete = true;
+     for child in children.iter().take(MAX_LABEL_ELEMENTS) {
++        child.qualify(deadline)?;
+         let (role, role_complete) = timed_string(child, "AXRole", deadline, sinks)?;
+         reads_complete &= role_complete;
+         match role.as_deref() {
+@@ -86,7 +87,8 @@ fn label_from_children(
+                 reads_complete &= grandchildren.complete
+                     && !grandchildren.truncated()
+                     && !grandchildren.status.invalid_element;
+-                for grandchild in grandchildren.elements {
++                for mut grandchild in grandchildren.elements {
++                    grandchild.bind_child(child, deadline)?;
+                     let (role, role_complete) =
+                         timed_string(&grandchild, "AXRole", deadline, sinks)?;
+                     reads_complete &= role_complete;
+diff --git a/crates/macos/src/tree/hit_test.rs b/crates/macos/src/tree/hit_test.rs
+index 1904a1a..bdda584 100644
+--- a/crates/macos/src/tree/hit_test.rs
++++ b/crates/macos/src/tree/hit_test.rs
+@@ -61,16 +61,17 @@ mod imp {
+         if system.0.is_null() {
+             return Ok(HitTestResult::Unknown);
+         }
+-        let Some(hit) = hit_at_position(&system, &point, deadline) else {
++        let Some(mut hit) = hit_at_position(&system, &point, deadline) else {
+             return Ok(HitTestResult::Unknown);
+         };
++        hit.bind_child(target, deadline)?;
+         let Some(classification) = classify_hit(target, &hit, deadline) else {
+             return Ok(HitTestResult::Unknown);
+         };
+         if needs_application_retry(classification) {
+             return Ok(hit_test_in_application(target, &point, deadline));
+         }
+-        Ok(classification_result(classification, &hit, deadline))
++        classification_result(classification, &hit, deadline)
+     }
+
+     fn hit_at_position(
+@@ -133,13 +134,11 @@ mod imp {
+         classification: HitClassification,
+         hit: &AXElement,
+         deadline: std::time::Instant,
+-    ) -> HitTestResult {
++    ) -> Result<HitTestResult, AdapterError> {
+         match classification {
+-            HitClassification::ReachesTarget => HitTestResult::ReachesTarget,
+-            HitClassification::AncestorOfTarget => HitTestResult::Unknown,
+-            HitClassification::Unrelated => {
+-                intercepted_by(hit, deadline).unwrap_or(HitTestResult::Unknown)
+-            }
++            HitClassification::ReachesTarget => Ok(HitTestResult::ReachesTarget),
++            HitClassification::AncestorOfTarget => Ok(HitTestResult::Unknown),
++            HitClassification::Unrelated => intercepted_by(hit, deadline),
+         }
+     }
+
+diff --git a/crates/macos/src/tree/properties/node_attribute_fetch.rs b/crates/macos/src/tree/properties/node_attribute_fetch.rs
+index 316930c..276528d 100644
+--- a/crates/macos/src/tree/properties/node_attribute_fetch.rs
++++ b/crates/macos/src/tree/properties/node_attribute_fetch.rs
+@@ -31,23 +31,24 @@ mod imp {
+         requirements: EvidenceRequirements,
+         deadline: std::time::Instant,
+         usage: &mut crate::tree::observation_usage::ObservationUsage,
+-    ) -> NodeAttributeRead {
++    ) -> Result<NodeAttributeRead, agent_desktop_core::AdapterError> {
++        element.qualify(deadline)?;
+         let mask = crate::tree::properties::node_attribute_names::safe_attribute_mask(requirements);
+         let mut requested_count = u64::from(mask.count_ones());
+         if crate::tree::locator_deadline::remaining(deadline).is_err() {
+-            return failed_node_attribute_read(
++            return Ok(failed_node_attribute_read(
+                 accessibility_sys::kAXErrorCannotComplete,
+                 requested_count,
+                 true,
+                 1,
+-            );
++            ));
+         }
+         let (batch_error, batch_result) = copy_node_attribute_values(element, mask, deadline);
+         if batch_error != kAXErrorSuccess || batch_result.is_null() {
+             if !batch_result.is_null() {
+                 drop(created_cf_array(batch_result));
+             }
+-            return failed_node_attribute_read(
++            return Ok(failed_node_attribute_read(
+                 if batch_error == kAXErrorSuccess {
+                     kAXErrorFailure
+                 } else {
+@@ -56,13 +57,23 @@ mod imp {
+                 requested_count,
+                 false,
+                 1,
+-            );
++            ));
+         }
+         let Some(attributes) = created_cf_array(batch_result) else {
+-            return failed_node_attribute_read(kAXErrorFailure, requested_count, false, 1);
++            return Ok(failed_node_attribute_read(
++                kAXErrorFailure,
++                requested_count,
++                false,
++                1,
++            ));
+         };
+         if attributes.len() as u64 != requested_count {
+-            return failed_node_attribute_read(kAXErrorFailure, requested_count, false, 1);
++            return Ok(failed_node_attribute_read(
++                kAXErrorFailure,
++                requested_count,
++                false,
++                1,
++            ));
+         }
+         let mut batch_reads = 1;
+         let mut fallback_reads = 0;
+@@ -93,7 +104,8 @@ mod imp {
+                     None => status.record_slot_error(index, kAXErrorFailure),
+                 },
+                 17 => {
+-                    if let Some(label) = ax_value::retained_ax_element(&item) {
++                    if let Some(mut label) = ax_value::retained_ax_element(&item) {
++                        label.bind_child(element, deadline)?;
+                         match title_ui_element_text(&label, deadline, usage) {
+                             Ok(Some(value)) if value.complete => {
+                                 labelled_by_text = Some(value.value)
+@@ -152,6 +164,7 @@ mod imp {
+                 deadline_exhausted = true;
+                 status.record_slot_error(VALUE, accessibility_sys::kAXErrorCannotComplete);
+             } else {
++                element.qualify(deadline)?;
+                 let value_mask =
+                     crate::tree::properties::node_attribute_status::attribute_bit(VALUE);
+                 let (value_error, value_result) =
+@@ -237,7 +250,7 @@ mod imp {
+             identifier_field(AX_DOM_IDENTIFIER),
+         );
+         let mut get = |index: usize| texts[index].take();
+-        NodeAttributeRead {
++        Ok(NodeAttributeRead {
+             attrs: NodeAttrs {
+                 name_evidence: agent_desktop_core::NameEvidence {
+                     explicit_label: get(LABEL).or_else(|| {
+@@ -286,7 +299,7 @@ mod imp {
+                 deadline_exhausted,
+             },
+             status,
+-        }
++        })
+     }
+
+     fn failed_node_attribute_read(
+@@ -371,14 +384,14 @@ mod imp {
+         _requirements: agent_desktop_core::EvidenceRequirements,
+         _deadline: std::time::Instant,
+         _usage: &mut crate::tree::observation_usage::ObservationUsage,
+-    ) -> NodeAttributeRead {
+-        NodeAttributeRead {
++    ) -> Result<NodeAttributeRead, agent_desktop_core::AdapterError> {
++        Ok(NodeAttributeRead {
+             attrs: NodeAttrs::default(),
+             identifiers: NodeIdentifiers::default(),
+             metrics: crate::tree::properties::node_attribute_metrics::NodeAttributeMetrics::default(
+             ),
+             status: crate::tree::properties::node_attribute_status::NodeAttributeStatus::default(),
+-        }
++        })
+     }
+ }
+
 diff --git a/crates/macos/src/tree/query/mod.rs b/crates/macos/src/tree/query/mod.rs
-index ecc4e7c..3a002f8 100644
+index ecc4e7c..a5e75b9 100644
 --- a/crates/macos/src/tree/query/mod.rs
 +++ b/crates/macos/src/tree/query/mod.rs
-@@ -99,7 +99,22 @@ fn resolve_root(
+@@ -99,7 +99,17 @@ fn resolve_root(
      match root {
          ObservationRoot::Window(window) => {
              let pid = crate::system::process::process_identity::to_pid_t(window.pid)?;
+-            let element = resolve_window_surface(window, request.surface, deadline)?;
 +            let instance = window
 +                .process_instance
 +                .as_deref()
@@ -6482,26 +7078,31 @@ index ecc4e7c..3a002f8 100644
 +                })?;
 +            crate::system::private_browser_guard::require_pid(pid, Some(instance))?;
 +            crate::tree::locator_deadline::remaining(deadline)?;
-             let element = resolve_window_surface(window, request.surface, deadline)?;
-+            let owner = crate::tree::properties::ax_ipc::pid(&element, deadline).map_err(|_| {
-+                AdapterError::stale_ref_because("Accessibility root owner is unavailable")
-+            })?;
-+            crate::system::private_browser_guard::require_pid(pid, Some(instance))?;
-+            crate::system::private_browser_guard::require_pid(owner, None)?;
-+            crate::tree::locator_deadline::remaining(deadline)?;
++            let mut element = resolve_window_surface(window, request.surface, deadline)?;
++            element.bind_window(window, deadline)?;
              let context =
                  crate::tree::TreeBuildContext::for_pid_with_deadline(pid, true, deadline)?
                      .child_context(window.bounds);
-@@ -130,6 +145,8 @@ fn resolve_root(
+@@ -119,7 +129,7 @@ fn resolve_root(
+         } => {
+             verify_entry_process(entry)?;
+             let pid = crate::system::process::process_identity::to_pid_t(entry.process.pid)?;
+-            let element = handle.downcast_ref::<AXElement>().cloned().ok_or_else(|| {
++            let mut element = handle.downcast_ref::<AXElement>().cloned().ok_or_else(|| {
+                 AdapterError::new(
+                     ErrorCode::StaleRef,
+                     "Live locator root handle is null or no longer valid",
+@@ -130,6 +140,9 @@ fn resolve_root(
                      "root_ref": root_ref,
                  }))
              })?;
++            element.verify_entry(entry, deadline)?;
 +            verify_entry_process(entry)?;
 +            crate::tree::locator_deadline::remaining(deadline)?;
              let context =
                  crate::tree::TreeBuildContext::for_pid_with_deadline(pid, true, deadline)?
                      .child_context(crate::tree::element_bounds::ancestor_viewport(
-@@ -153,16 +170,7 @@ fn verify_entry_process(entry: &agent_desktop_core::RefEntry) -> Result<(), Adap
+@@ -153,16 +166,7 @@ fn verify_entry_process(entry: &agent_desktop_core::RefEntry) -> Result<(), Adap
          AdapterError::stale_ref_because("Live locator root has no process instance identity")
      })?;
      let pid = crate::system::process::process_identity::to_pid_t(entry.process.pid)?;
@@ -6519,7 +7120,7 @@ index ecc4e7c..3a002f8 100644
  }
 
  fn resolve_window_surface(
-@@ -275,6 +283,7 @@ mod tests {
+@@ -275,6 +279,7 @@ mod tests {
                  available_actions: Vec::new(),
              },
              source: RefSource {
@@ -6527,6 +7128,46 @@ index ecc4e7c..3a002f8 100644
                  source_app: Some("Fixture".into()),
                  source_window_id: None,
                  source_window_title: None,
+diff --git a/crates/macos/src/tree/query/node_read.rs b/crates/macos/src/tree/query/node_read.rs
+index 83e6d6e..c4a7c32 100644
+--- a/crates/macos/src/tree/query/node_read.rs
++++ b/crates/macos/src/tree/query/node_read.rs
+@@ -32,12 +32,14 @@ pub(crate) fn read_node(
+         child_plan,
+     } = context;
+     crate::tree::locator_deadline::remaining(deadline)?;
++    #[cfg(target_os = "macos")]
++    element.qualify(deadline)?;
+     let read = crate::tree::properties::element::fetch_node_attrs_with_status_for(
+         element,
+         requirements,
+         deadline,
+         usage,
+-    );
++    )?;
+     record_attribute_read(stats, &read.metrics, &read.status);
+     stats.semantic_reads.settable_reads += read.metrics.settable_reads;
+     stats.reads.health.deadline_exhausted += u64::from(read.metrics.deadline_exhausted);
+@@ -106,12 +108,18 @@ pub(crate) fn read_node(
+     let wants_child_label = (requirements.name || requirements.description)
+         && crate::tree::child_labels::should_read_child_label(&role, &attrs.name_evidence);
+     let budget = child_plan.max_elements(wrapper_candidate, wants_child_label);
+-    let child_read = crate::tree::query::child_read::read_children(
++    #[cfg(target_os = "macos")]
++    element.qualify(deadline)?;
++    let mut child_read = crate::tree::query::child_read::read_children(
+         element,
+         attrs.role.as_deref(),
+         budget,
+         deadline,
+     );
++    #[cfg(target_os = "macos")]
++    for child in &mut child_read.elements {
++        child.bind_child(element, deadline)?;
++    }
+     stats.reads.counts.child_reads += child_read.status.attempts;
+     stats.reads.health.cannot_complete += child_read.status.health.cannot_complete;
+     stats.reads.health.native_read_failures += child_read.status.health.native_read_failures;
 diff --git a/crates/macos/src/tree/resolve/mod.rs b/crates/macos/src/tree/resolve/mod.rs
 index 9cf4e8b..c16c32a 100644
 --- a/crates/macos/src/tree/resolve/mod.rs
@@ -6566,8 +7207,261 @@ index 9cf4e8b..c16c32a 100644
      let mut read_context = ResolveReadContext::new(deadline);
      if !can_use_locator_anchor_path(entry) {
          return finish_resolution(
+diff --git a/crates/macos/src/tree/resolve/resolve_classify.rs b/crates/macos/src/tree/resolve/resolve_classify.rs
+index 37420ba..4c24cfc 100644
+--- a/crates/macos/src/tree/resolve/resolve_classify.rs
++++ b/crates/macos/src/tree/resolve/resolve_classify.rs
+@@ -17,12 +17,14 @@ pub(in crate::tree) fn classify_candidates(
+         0 => Err(AdapterError::element_not_found("element")),
+         1 => {
+             let candidate = matches.remove(0);
++            candidate.qualify(deadline)?;
+             if candidate_is_sufficiently_verified(
+                 &candidate,
+                 entry,
+                 source_window_verified,
+                 deadline,
+             )? {
++                candidate.qualify(deadline)?;
+                 retained_handle(candidate)
+             } else {
+                 Err(AdapterError::element_not_found("element"))
+@@ -71,13 +73,19 @@ fn classify_ambiguous_candidates(
+     let mut bounds_matches = Vec::new();
+     if has_bounds_hash {
+         for candidate in &matches {
++            candidate.qualify(deadline)?;
+             if verified_bounds_match(candidate, entry, deadline)? {
++                candidate.qualify(deadline)?;
+                 bounds_matches.push(candidate.clone());
+             }
+         }
+     }
+     match classify_bounds_matches(bounds_matches.len(), has_bounds_hash) {
+-        BoundsMatchOutcome::Resolved => retained_handle(bounds_matches.remove(0)),
++        BoundsMatchOutcome::Resolved => {
++            let candidate = bounds_matches.remove(0);
++            candidate.qualify(deadline)?;
++            retained_handle(candidate)
++        }
+         BoundsMatchOutcome::Stale => Err(stale_ref_from_bounds_mismatch(entry, matches.len())),
+         BoundsMatchOutcome::Ambiguous => Err(ambiguous_target_error(&matches, entry)),
+     }
+@@ -155,12 +163,9 @@ fn text_len(value: Option<&str>) -> usize {
+ #[cfg(target_os = "macos")]
+ fn retained_handle(candidate: AXElement) -> Result<NativeHandle, AdapterError> {
+     if candidate.0.is_null() {
+-        #[cfg(test)]
+-        return Ok(NativeHandle::null());
+-        #[cfg(not(test))]
+         return Err(AdapterError::element_not_found("element"));
+     }
+-    Ok(candidate.into_native_handle())
++    candidate.into_native_handle()
+ }
+
+ #[cfg(target_os = "macos")]
+diff --git a/crates/macos/src/tree/resolve/resolve_roots.rs b/crates/macos/src/tree/resolve/resolve_roots.rs
+index 832bfe3..67adda5 100644
+--- a/crates/macos/src/tree/resolve/resolve_roots.rs
++++ b/crates/macos/src/tree/resolve/resolve_roots.rs
+@@ -19,7 +19,8 @@ pub(in crate::tree) fn candidate_roots(
+     let deadline = context.deadline;
+     crate::tree::locator_deadline::remaining(deadline)?;
+     let pid = crate::system::process::process_identity::to_pid_t(entry.process.pid)?;
+-    let application = element_for_pid(pid);
++    let mut application = element_for_pid(pid);
++    application.bind_entry(entry, deadline)?;
+     if entry.source.source_surface != SnapshotSurface::Window {
+         super::resolve_source_app::verify_source_application(&application, entry, context)?;
+         return source_surface_scoped_roots(&application, entry, context);
+@@ -54,6 +55,9 @@ pub(in crate::tree) fn candidate_roots(
+         &mut roots,
+         read_root_array(&application, "AXChildren", context)?,
+     );
++    for root in &mut roots {
++        root.bind_child(&application, deadline)?;
++    }
+     crate::tree::locator_deadline::remaining(deadline)?;
+     Ok(CandidateRoots {
+         roots,
+@@ -90,7 +94,8 @@ fn source_surface_scoped_roots(
+                             deadline,
+                         )
+                     })?;
+-                    let root = surface_or_bridge_error(root, error)?;
++                    let mut root = surface_or_bridge_error(root, error)?;
++                    root.bind_child(application, deadline)?;
+                     return Ok(CandidateRoots {
+                         scope_verified: true,
+                         roots: vec![root],
+@@ -116,7 +121,7 @@ fn source_surface_scoped_roots(
+         SnapshotSurface::Window => None,
+         _ => None,
+     };
+-    let Some(root) = root else {
++    let Some(mut root) = root else {
+         return Err(
+             AdapterError::element_not_found("saved source surface").with_details(
+                 serde_json::json!({
+@@ -128,6 +133,7 @@ fn source_surface_scoped_roots(
+             ),
+         );
+     };
++    root.bind_child(application, deadline)?;
+     Ok(CandidateRoots {
+         roots: vec![root],
+         scope_verified: true,
+@@ -206,6 +212,7 @@ fn window_by_number(
+     let mut match_count = 0_usize;
+     for window in windows {
+         crate::tree::locator_deadline::remaining(deadline)?;
++        window.qualify(deadline)?;
+         match crate::system::window::window_resolve::ax_window_id_with_deadline(window, deadline) {
+             Ok(Some(actual)) if actual == source_window_number => {
+                 match_count += 1;
+@@ -260,6 +267,7 @@ fn window_by_title(
+     let mut found = None;
+     for window in windows {
+         crate::tree::locator_deadline::remaining(context.deadline)?;
++        window.qualify(context.deadline)?;
+         if super::resolve_ax_read::read_string_with_usage(
+             window,
+             "AXTitle",
+@@ -322,12 +330,17 @@ fn read_root_array(
+     context: &mut ResolveReadContext,
+ ) -> Result<Option<Vec<AXElement>>, AdapterError> {
+     let max_elements = context.usage.child_capacity();
+-    let read = crate::tree::query::child_read::read_attribute_children(
++    element.qualify(context.deadline)?;
++    let mut read = crate::tree::query::child_read::read_attribute_children(
+         element,
+         attribute,
+         max_elements,
+         context.deadline,
+     );
++    element.qualify(context.deadline)?;
++    for child in &mut read.elements {
++        child.bind_child(element, context.deadline)?;
++    }
+     context.stats.reads.counts.child_reads += read.status.attempts;
+     context.stats.reads.health.cannot_complete += read.status.health.cannot_complete;
+     context.stats.reads.health.native_read_failures += read.status.health.native_read_failures;
+diff --git a/crates/macos/src/tree/resolve/resolve_search.rs b/crates/macos/src/tree/resolve/resolve_search.rs
+index bb5da0e..275d360 100644
+--- a/crates/macos/src/tree/resolve/resolve_search.rs
++++ b/crates/macos/src/tree/resolve/resolve_search.rs
+@@ -26,10 +26,16 @@ pub(in crate::tree) fn find_entry_by_path(
+     let mut incomplete = None;
+     for root in roots {
+         crate::tree::locator_deadline::remaining(read_context.deadline)?;
+-        let Some(candidate) = element_at_path(root, &entry.scope.path, read_context)? else {
++        let mut root = root.clone();
++        root.bind_entry(entry, read_context.deadline)?;
++        let Some(candidate) = element_at_path(&root, &entry.scope.path, read_context)? else {
+             continue;
+         };
++        if !super::retained::candidate_owner_matches(entry, &candidate, read_context.deadline)? {
++            continue;
++        }
+         let identity = candidate_identity(&candidate, entry, read_context)?;
++        candidate.qualify(read_context.deadline)?;
+         match identity {
+             IdentityMatch::Match => {
+                 push_unique(&mut matches, candidate);
+@@ -70,6 +76,7 @@ fn element_at_path(
+ ) -> Result<Option<AXElement>, AdapterError> {
+     walk_finite_path(root.clone(), path, |current, index| {
+         crate::tree::locator_deadline::remaining(context.deadline)?;
++        current.qualify(context.deadline)?;
+         if !context.usage.claim_node() {
+             context.stats.traversal.limits.node_hits += 1;
+             return Err(incomplete_traversal_error("path_node_budget", 0));
+@@ -77,6 +84,7 @@ fn element_at_path(
+         context.stats.reads.counts.attribute_batches += 1;
+         context.stats.reads.counts.attributes_requested += 1;
+         let role = super::resolve_ax_read::read_string(&current, "AXRole", context.deadline)?;
++        current.qualify(context.deadline)?;
+         let mut read = crate::tree::query::child_read::read_child_at(
+             &current,
+             role.as_deref(),
+@@ -94,7 +102,11 @@ fn element_at_path(
+         context
+             .usage
+             .claim_edges(usize::from(!read.elements.is_empty()));
+-        Ok(read.elements.pop())
++        let mut child = read.elements.pop();
++        if let Some(child) = &mut child {
++            child.bind_child(&current, context.deadline)?;
++        }
++        Ok(child)
+     })
+ }
+
+@@ -195,6 +207,14 @@ fn collect_elements_recursive(
+         return Ok(());
+     }
+     crate::tree::locator_deadline::remaining(context.read_context.deadline)?;
++    let mut bound = element.clone();
++    bound.bind_entry(context.entry, context.read_context.deadline)?;
++    let element = &bound;
++    let candidate_owner_matches = super::retained::candidate_owner_matches(
++        context.entry,
++        element,
++        context.read_context.deadline,
++    )?;
+     let pointer = element.0 as usize;
+     if !context.ancestors.insert(pointer) {
+         return Ok(());
+@@ -205,6 +225,7 @@ fn collect_elements_recursive(
+         identity_requirements(context.entry),
+         context.read_context,
+     )?;
++    element.qualify(context.read_context.deadline)?;
+     if read.invalid_element {
+         mark_incomplete(
+             context,
+@@ -214,13 +235,15 @@ fn collect_elements_recursive(
+         return Ok(());
+     }
+
+-    if native_identifier_reused_by_different_role(context.entry, &read.evidence) {
++    if candidate_owner_matches
++        && native_identifier_reused_by_different_role(context.entry, &read.evidence)
++    {
+         *context.identifier_role_reuse = true;
+     }
+
+     match read.evidence.role.known() {
+         Some(role) => {
+-            if role == &context.entry.identity.role {
++            if role == &context.entry.identity.role && candidate_owner_matches {
+                 match super::retained::candidate_match(element, context.entry, &read.evidence)? {
+                     IdentityMatch::Match => {
+                         push_unique(context.matches, element.clone());
+@@ -254,7 +277,9 @@ fn collect_elements_recursive(
+             mark_incomplete(context, incomplete_traversal_error("children", depth));
+         }
+         for child in &read.child_read.elements {
+-            collect_elements_recursive(child, depth.saturating_add(1), context)?;
++            let mut child = child.clone();
++            child.bind_child(element, context.read_context.deadline)?;
++            collect_elements_recursive(&child, depth.saturating_add(1), context)?;
+             if should_stop_collecting(context.matches.len(), context.entry) {
+                 break;
+             }
+@@ -271,7 +296,9 @@ fn candidate_identity(
+     entry: &RefEntry,
+     context: &mut ResolveReadContext,
+ ) -> Result<IdentityMatch, AdapterError> {
++    element.qualify(context.deadline)?;
+     let read = read_node(element, identity_requirements(entry), context)?;
++    element.qualify(context.deadline)?;
+     if read.invalid_element {
+         return Ok(IdentityMatch::Unknown);
+     }
 diff --git a/crates/macos/src/tree/resolve/resolve_tests.rs b/crates/macos/src/tree/resolve/resolve_tests.rs
-index 34c968e..be1ff8f 100644
+index 34c968e..2cc3aab 100644
 --- a/crates/macos/src/tree/resolve/resolve_tests.rs
 +++ b/crates/macos/src/tree/resolve/resolve_tests.rs
 @@ -43,6 +43,7 @@ pub(super) fn entry(
@@ -6578,6 +7472,122 @@ index 34c968e..be1ff8f 100644
              source_app: None,
              source_window_id: source_window_id.map(String::from),
              source_window_title: source_window_title.map(String::from),
+@@ -291,7 +292,7 @@ fn ambiguity_reports_bounded_candidate_summaries() {
+ }
+
+ #[test]
+-fn unique_scoped_candidate_resolves_even_after_bounds_move() {
++fn unbound_scoped_candidate_cannot_become_a_handle() {
+     let handle = classify_candidates(
+         vec![AXElement(std::ptr::null_mut())],
+         &entry(Some(42), Some("w-42"), None, None),
+@@ -299,7 +300,7 @@ fn unique_scoped_candidate_resolves_even_after_bounds_move() {
+         Instant::now() + Duration::from_secs(1),
+     );
+
+-    assert!(handle.is_ok());
++    assert_eq!(handle.err().unwrap().code, ErrorCode::StaleRef);
+ }
+
+ #[test]
+@@ -316,7 +317,7 @@ fn scoped_role_only_candidate_does_not_bypass_bounds_verification() {
+     .err()
+     .expect("window scope alone must not identify a role-only candidate");
+
+-    assert_eq!(error.code, ErrorCode::ElementNotFound);
++    assert_eq!(error.code, ErrorCode::StaleRef);
+ }
+
+ #[test]
+diff --git a/crates/macos/src/tree/resolve/resolve_tests_more.rs b/crates/macos/src/tree/resolve/resolve_tests_more.rs
+index ce46b85..4e76ace 100644
+--- a/crates/macos/src/tree/resolve/resolve_tests_more.rs
++++ b/crates/macos/src/tree/resolve/resolve_tests_more.rs
+@@ -47,7 +47,7 @@ fn identifier_kind_mismatch_is_not_an_exact_match() {
+ }
+
+ #[test]
+-fn duplicate_identity_candidates_are_stale_when_bounds_drift() {
++fn unbound_candidates_cannot_be_used_for_bounds_disambiguation() {
+     let error = classify_candidates(
+         vec![
+             AXElement(std::ptr::null_mut()),
+@@ -61,9 +61,6 @@ fn duplicate_identity_candidates_are_stale_when_bounds_drift() {
+     .expect("bounds mismatch against every candidate must be stale, not ambiguous");
+
+     assert_eq!(error.code, ErrorCode::StaleRef);
+-    let details = error.details.unwrap();
+-    assert_eq!(details["kind"], "bounds_mismatch");
+-    assert_eq!(details["candidate_count"], 2);
+ }
+
+ #[test]
+@@ -114,7 +111,7 @@ fn unscoped_candidate_requires_matching_bounds() {
+     .err()
+     .expect("unscoped candidate without matching bounds must fail");
+
+-    assert_eq!(error.code, ErrorCode::ElementNotFound);
++    assert_eq!(error.code, ErrorCode::StaleRef);
+ }
+
+ #[test]
+diff --git a/crates/macos/src/tree/resolve/retained.rs b/crates/macos/src/tree/resolve/retained.rs
+index cb0a56b..a40df4e 100644
+--- a/crates/macos/src/tree/resolve/retained.rs
++++ b/crates/macos/src/tree/resolve/retained.rs
+@@ -125,6 +125,34 @@ pub(crate) fn validate(token: Option<&str>) -> Result<(), AdapterError> {
+     }
+ }
+
++#[cfg(target_os = "macos")]
++pub(in crate::tree) fn candidate_owner_matches(
++    entry: &RefEntry,
++    candidate: &AXElement,
++    deadline: std::time::Instant,
++) -> Result<bool, AdapterError> {
++    candidate.qualify(deadline)?;
++    let Some(token) = entry.identity.retained_object.as_deref() else {
++        if candidate.owner_is_root()? {
++            return Ok(true);
++        }
++        return Err(AdapterError::stale_ref_because(
++            "Saved renderer identity is unavailable",
++        ));
++    };
++    let saved = STORE
++        .with(|slot| {
++            slot.borrow()
++                .as_ref()
++                .and_then(|store| store.element_for_token(token))
++        })
++        .ok_or_else(|| {
++            AdapterError::stale_ref_because("Saved candidate identity is unavailable")
++        })?;
++    saved.qualify(deadline)?;
++    candidate.same_owner(&saved)
++}
++
+ pub(crate) fn matches(token: &str, element: &AXElement) -> Result<bool, AdapterError> {
+     validate(Some(token))?;
+     Ok(STORE.with(|slot| {
+diff --git a/crates/macos/src/tree/resolve/retained_store.rs b/crates/macos/src/tree/resolve/retained_store.rs
+index 5295f95..75fecf1 100644
+--- a/crates/macos/src/tree/resolve/retained_store.rs
++++ b/crates/macos/src/tree/resolve/retained_store.rs
+@@ -67,6 +67,13 @@ mod tests {
+ }
+
+ impl RetainedStore {
++    pub(in crate::tree) fn element_for_token(&self, token: &str) -> Option<AXElement> {
++        self.buckets
++            .values()
++            .flatten()
++            .find(|(saved, _)| saved == token)
++            .map(|(_, element)| element.clone())
++    }
+     pub(in crate::tree) fn new(generation: String) -> Self {
+         Self {
+             generation,
 diff --git a/crates/macos/src/tree/resolve/retained_tests.rs b/crates/macos/src/tree/resolve/retained_tests.rs
 index 628db89..0598c99 100644
 --- a/crates/macos/src/tree/resolve/retained_tests.rs
