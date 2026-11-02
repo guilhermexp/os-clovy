@@ -326,7 +326,7 @@ unattended turn every `yes` and `clarification` answers
 | `load_skill` | vault and skills | every turn | no | `name`: instructions of one globally enabled skill; a disabled one is refused |
 | `list_skill_settings` | vault and skills | attended turns | no | Active, disabled and unavailable skill metadata, canonical identity, source and editability; effective `enabled`, saved/default `configuredEnabled`, `readable`, typed `error`. |
 | `read_skill` | vault and skills | attended turns | no | `name`: inspect content, including disabled skills, without executing it. |
-| `update_skill` | vault and skills | attended turns | yes | `name`, `content` up to 512 KiB; managed root only, canonical symlink guard. Global skills stay read-only. |
+| `update_skill` | vault and skills | attended turns | yes | `name`, `content` up to 512 KiB; managed root only, atomic replacement anchored to the selected directory handle. Global skills stay read-only. |
 | `enable_skill` | vault and skills | attended turns | yes | `name`: enable the canonical skill identity. |
 | `disable_skill` | vault and skills | attended turns | yes | `name`: disable it without deleting files or backups. |
 | `get_activity_settings` | activity | every turn | no | Installation settings/status; available even with capture off, no activation. |

@@ -11,6 +11,7 @@ pub mod repository;
 pub(crate) mod retirement;
 pub(crate) mod skill_catalog;
 pub(crate) mod skill_identity;
+mod skill_writer;
 pub mod skills;
 pub(crate) mod terminal;
 

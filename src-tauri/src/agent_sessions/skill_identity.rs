@@ -360,10 +360,8 @@ pub fn read_skill_content(path: &Path) -> io::Result<String> {
     String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-/// Atomic replacement uses a canonical destination parent, never a path whose
-/// skill directory may be a symlink outside the managed root.
+/// Atomic replacement remains anchored to the approved directory object.
 pub fn update_managed_skill(root: &Path, skill_id: &str, content: &str) -> io::Result<()> {
-    use io::Write;
     if !valid_skill_id(skill_id) || content.len() > MAX_SKILL_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -381,19 +379,9 @@ pub fn update_managed_skill(root: &Path, skill_id: &str, content: &str) -> io::R
             "Managed skill was not found.",
         ));
     }
-    let parent = canonical_root.join(id);
-    match fs::symlink_metadata(&parent) {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&parent)?,
-        Err(error) => return Err(error),
-    }
-    let parent = parent.canonicalize()?;
-    if !parent.starts_with(&canonical_root) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Skill directory is outside managed storage.",
-        ));
-    }
+    let directory = super::skill_writer::AnchoredSkillDirectory::open(&canonical_root, id)?;
+    #[cfg(test)]
+    super::skill_writer::after_bind();
     let content = skill_content_for_id(content, id);
     if content.len() > MAX_SKILL_BYTES {
         return Err(io::Error::new(
@@ -401,36 +389,7 @@ pub fn update_managed_skill(root: &Path, skill_id: &str, content: &str) -> io::R
             "Skill content exceeds 512 KiB.",
         ));
     }
-    // create_new prevents following a pre-existing temporary symlink.
-    let mut temporary = None;
-    for index in 0..128 {
-        let candidate = parent.join(format!(".SKILL.{}.{index}.tmp", std::process::id()));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
-            Ok(file) => {
-                temporary = Some((candidate, file));
-                break;
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    let (temporary, mut file) = temporary
-        .ok_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "Skill storage is busy."))?;
-    let result = file
-        .write_all(content.as_bytes())
-        .and_then(|_| file.sync_all())
-        .and_then(|_| {
-            drop(file);
-            fs::rename(&temporary, parent.join("SKILL.md"))
-        });
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    }
-    result
+    directory.replace(&content)
 }
 
 #[cfg(test)]
