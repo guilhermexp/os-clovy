@@ -257,6 +257,17 @@ mod native {
         }
         Ok(result)
     }
+    fn discard_temporary(file: &File) {
+        let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+        let _ = unsafe {
+            SetFileInformationByHandle(
+                HANDLE(file.as_raw_handle()),
+                FileDispositionInfo,
+                ptr::from_ref(&disposition).cast(),
+                std::mem::size_of_val(&disposition) as u32,
+            )
+        };
+    }
     fn root_handle(path: &Path, create_child: bool) -> io::Result<File> {
         std::fs::OpenOptions::new()
             .access_mode(0x001000a1 | if create_child { 4 } else { 0 })
@@ -318,8 +329,19 @@ mod native {
             ));
         }
         let file = unsafe { File::from_raw_handle(handle) };
-        let info = information(&file)?;
+        let info = match information(&file) {
+            Ok(info) => info,
+            Err(error) => {
+                if !directory {
+                    discard_temporary(&file);
+                }
+                return Err(error);
+            }
+        };
         if (info.dwFileAttributes & 0x10 != 0) != directory {
+            if !directory {
+                discard_temporary(&file);
+            }
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Unexpected skill file type",
@@ -400,17 +422,7 @@ mod native {
                         }
                     });
                 if result.is_err() {
-                    let disposition = FILE_DISPOSITION_INFO {
-                        DeleteFile: true.into(),
-                    };
-                    let _ = unsafe {
-                        SetFileInformationByHandle(
-                            HANDLE(file.as_raw_handle()),
-                            FileDispositionInfo,
-                            ptr::from_ref(&disposition).cast(),
-                            std::mem::size_of_val(&disposition) as u32,
-                        )
-                    };
+                    discard_temporary(&file);
                 }
                 return result;
             }
