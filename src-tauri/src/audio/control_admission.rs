@@ -162,7 +162,8 @@ mod tests {
         start_native_capture(&active, &handshake, None, || {
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         let mut active = active.lock().unwrap();
         let mut state = handshake.lock().unwrap();
         publish_capture_start(&mut state, active.is_some(), None).unwrap();

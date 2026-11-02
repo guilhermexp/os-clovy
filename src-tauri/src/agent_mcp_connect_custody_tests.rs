@@ -608,7 +608,7 @@ async fn c5_missing_revocation_endpoint_retains_actual_candidate_and_primary() {
     retire_server_sessions(&server.id).await;
 }
 #[tokio::test]
-async fn c5_failed_candidate_put_compensates_or_preserves_unknown_issuance_on_restart() {
+async fn c5_failed_candidate_put_keeps_custody_across_repository_reopen() {
     for revoke_fails in [false, true] {
         let fixture = CustodyHttp::start(false, false, false, false).await;
         fixture
@@ -640,12 +640,94 @@ async fn c5_failed_candidate_put_compensates_or_preserves_unknown_issuance_on_re
             assert!(disconnected
                 .server
                 .metadata
-                .get("oauthRevocationHistory")
+                .get("oauthConnectAttempts")
                 .and_then(Value::as_array)
                 .is_some_and(|entries| !entries.is_empty()));
+            fixture.wire.revoke_fails.store(false, Ordering::SeqCst);
+            store.1.store(false, Ordering::SeqCst);
+            let retried = disconnect_oauth(&reopened, &store, &server.id)
+                .await
+                .unwrap();
+            assert_eq!(retried.remote_revoked, Some(true));
+            assert_eq!(fixture.token_posts(), 1);
+            assert_eq!(fixture.fresh_revokes(), 3);
         }
         retire_server_sessions(&server.id).await;
     }
+}
+
+#[tokio::test]
+async fn failed_candidate_storage_remains_in_custody_until_disconnect_revokes_it() {
+    let fixture = CustodyHttp::start(false, false, false, false).await;
+    fixture.wire.revoke_fails.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let (repository, store, server, primary) =
+        custody_setup(&fixture, &temp.path().join("retained.sqlite")).await;
+    let other_fixture = CustodyHttp::start(false, false, false, false).await;
+    let (other_repository, other_store, other_server, other_primary) =
+        custody_setup(&other_fixture, &temp.path().join("other-partition.sqlite")).await;
+    store.1.store(true, Ordering::SeqCst);
+    assert!(
+        custody_connect(&repository, &store, &server, Duration::from_secs(10))
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.token_posts(), 1);
+    assert_eq!(fixture.fresh_revokes(), 1);
+    assert_eq!(store.get("primary-R0-ref").unwrap(), Some(primary));
+    store.1.store(false, Ordering::SeqCst);
+    fixture.wire.revoke_fails.store(false, Ordering::SeqCst);
+    let disconnected = disconnect_oauth(&repository, &store, &server.id)
+        .await
+        .unwrap();
+    assert_eq!(disconnected.remote_revoked, Some(true));
+    assert_eq!(fixture.token_posts(), 1);
+    assert_eq!(fixture.fresh_revokes(), 2);
+    assert_eq!(other_fixture.fresh_revokes(), 0);
+    assert_eq!(
+        other_store.get("primary-R0-ref").unwrap(),
+        Some(other_primary)
+    );
+    assert!(
+        other_repository
+            .get(&other_server.id)
+            .await
+            .unwrap()
+            .enabled
+    );
+    retire_server_sessions(&other_server.id).await;
+    retire_server_sessions(&server.id).await;
+}
+
+#[tokio::test]
+async fn failed_cleanup_journal_does_not_discard_the_received_grant() {
+    let fixture = CustodyHttp::start(false, false, false, false).await;
+    fixture.wire.revoke_fails.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let (repository, store, server, _) =
+        custody_setup(&fixture, &temp.path().join("journal-failure.sqlite")).await;
+    query("CREATE TRIGGER fail_candidate_journal BEFORE UPDATE ON agent_mcp_servers WHEN instr(NEW.metadata_json, 'revocation_failed') > 0 BEGIN SELECT RAISE(ABORT, 'synthetic journal failure'); END")
+        .execute(&repository.pool).await.unwrap();
+    store.1.store(true, Ordering::SeqCst);
+    assert!(
+        custody_connect(&repository, &store, &server, Duration::from_secs(10))
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.fresh_revokes(), 1);
+    query("DROP TRIGGER fail_candidate_journal")
+        .execute(&repository.pool)
+        .await
+        .unwrap();
+    store.1.store(false, Ordering::SeqCst);
+    fixture.wire.revoke_fails.store(false, Ordering::SeqCst);
+    let disconnected = disconnect_oauth(&repository, &store, &server.id)
+        .await
+        .unwrap();
+    assert_eq!(disconnected.remote_revoked, Some(true));
+    assert_eq!(fixture.token_posts(), 1);
+    assert_eq!(fixture.fresh_revokes(), 2);
+    retire_server_sessions(&server.id).await;
 }
 #[tokio::test]
 async fn c5_process_interruption_after_received_candidate_recovers_exact_grant_before_delete() {
@@ -1461,28 +1543,37 @@ async fn c6_error_owner_cannot_hide_a_later_admitted_operation_from_cancel() {
         .await
     });
     fixture.wire.catalog_seen.notified().await;
-    // Pause actual transport retirement after A's real catalog error and
-    // compensation. B can still authorize, but cannot dispatch a catalog.
-    let sessions = MCP_SESSIONS.get().unwrap().lock().await;
+    // Pause only this server's first retirement after A's real compensation.
+    let retirement = Arc::new(RetireTestGate {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        claimed: std::sync::atomic::AtomicBool::new(false),
+    });
+    RETIRE_TEST_GATES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(server.id.clone(), retirement.clone());
     fixture.wire.catalog_release.notify_one();
-    timeout(Duration::from_secs(2), async {
-        loop {
-            let current = repository.get(&server.id).await.unwrap();
-            if current
-                .metadata
-                .get("oauthConnectAttempts")
-                .and_then(Value::as_array)
-                .map_or(true, |entries| entries.is_empty())
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    timeout(Duration::from_secs(2), retirement.entered.notified())
+        .await
+        .unwrap();
     assert_eq!(fixture.fresh_revokes(), 1);
     assert!(!a.is_finished());
+    let other_fixture = CustodyHttp::start(false, false, false, false).await;
+    let (other_repository, other_store, other_server, _) =
+        custody_setup(&other_fixture, &temp.path().join("independent.sqlite")).await;
+    let other = test_mcp_definition(&other_repository, &other_store, &other_server.id);
+    tokio::pin!(other);
+    let (other_result, ()) = tokio::join!(other, async {
+        timeout(
+            Duration::from_secs(2),
+            other_fixture.wire.catalog_seen.notified(),
+        )
+        .await
+        .unwrap();
+    });
+    assert!(!other_result.unwrap().is_empty());
     let worker_repository = repository.clone();
     let worker_store = store.clone();
     let worker_server = server.clone();
@@ -1496,22 +1587,9 @@ async fn c6_error_owner_cannot_hide_a_later_admitted_operation_from_cancel() {
         )
         .await
     });
-    timeout(Duration::from_secs(2), async {
-        loop {
-            let current = repository.get(&server.id).await.unwrap();
-            if current
-                .metadata
-                .get("oauthConnectAttempts")
-                .and_then(Value::as_array)
-                .is_some_and(|entries| entries.iter().any(|entry| entry["phase"] == "received"))
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    timeout(Duration::from_secs(2), fixture.wire.catalog_seen.notified())
+        .await
+        .unwrap();
     let lifecycle = oauth_lifecycle(&server.id);
     assert_eq!(
         lifecycle.operation_id.lock().unwrap().as_deref(),
@@ -1520,7 +1598,7 @@ async fn c6_error_owner_cannot_hide_a_later_admitted_operation_from_cancel() {
     let epoch_before_cancel = lifecycle.epoch.load(Ordering::SeqCst);
     cancel_oauth_operation(server.id.clone(), Some("c6-admitted-B".into())).await;
     assert_ne!(lifecycle.epoch.load(Ordering::SeqCst), epoch_before_cancel);
-    drop(sessions);
+    retirement.release.notify_one();
     assert!(a.await.unwrap().is_err());
     assert!(b.await.unwrap().is_err());
     assert_eq!(fixture.token_posts(), 2);
@@ -1531,6 +1609,13 @@ async fn c6_error_owner_cannot_hide_a_later_admitted_operation_from_cancel() {
     let completed_epoch = lifecycle.epoch.load(Ordering::SeqCst);
     cancel_oauth_operation(server.id.clone(), Some("c6-admitted-B".into())).await;
     assert_eq!(lifecycle.epoch.load(Ordering::SeqCst), completed_epoch);
+    RETIRE_TEST_GATES
+        .get()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .remove(&server.id);
+    retire_server_sessions(&other_server.id).await;
     retire_server_sessions(&server.id).await;
 }
 

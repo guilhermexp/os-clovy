@@ -43,8 +43,17 @@ use oauth::*;
 #[path = "agent_mcp_oauth_attempts.rs"]
 mod oauth_attempts;
 use oauth_attempts::*;
+#[path = "agent_mcp_partition.rs"]
+mod partition;
+#[path = "agent_mcp_partition_file.rs"]
+mod partition_file;
+#[path = "agent_mcp_secret.rs"]
+mod secret;
+pub use secret::McpSecretBundle;
 #[path = "agent_mcp_oauth_history.rs"]
 mod oauth_history;
+#[path = "agent_mcp_volatile_custody.rs"]
+mod volatile_custody;
 use oauth_history::*;
 
 #[path = "agent_mcp_diagnostics.rs"]
@@ -533,47 +542,6 @@ impl McpServerDefinition {
             ));
         }
         Ok(())
-    }
-}
-
-/// Values held only in keychain. `env` is supplied to a stdio process and
-/// `headers` only to the configured HTTP origin. Neither is serialized with a
-/// [`McpServerDefinition`] or placed in runtime tool descriptors.
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct McpSecretBundle {
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    #[serde(default)]
-    pub headers: BTreeMap<String, String>,
-    /// Legacy OAuth client configuration is retained only for recovery.
-    /// The Clovy-owned runtime does not consume it until a first-party OAuth
-    /// flow can replace the retired Hermes token cache safely.
-    #[serde(default)]
-    pub oauth: BTreeMap<String, String>,
-}
-
-impl std::fmt::Debug for McpSecretBundle {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("McpSecretBundle")
-            .field("env_keys", &self.env.keys().collect::<Vec<_>>())
-            .field("header_keys", &self.headers.keys().collect::<Vec<_>>())
-            .field("oauth_keys", &self.oauth.keys().collect::<Vec<_>>())
-            .finish()
-    }
-}
-
-impl Drop for McpSecretBundle {
-    fn drop(&mut self) {
-        for value in self.env.values_mut() {
-            value.zeroize();
-        }
-        for value in self.headers.values_mut() {
-            value.zeroize();
-        }
-        for value in self.oauth.values_mut() {
-            value.zeroize();
-        }
     }
 }
 
@@ -3209,7 +3177,31 @@ pub async fn shutdown_sessions() {
     }
 }
 
+#[cfg(test)]
+struct RetireTestGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    claimed: std::sync::atomic::AtomicBool,
+}
+#[cfg(test)]
+static RETIRE_TEST_GATES: OnceLock<Mutex<HashMap<String, Arc<RetireTestGate>>>> = OnceLock::new();
+
 pub(crate) async fn retire_server_sessions(server_id: &str) {
+    #[cfg(test)]
+    {
+        let gate = RETIRE_TEST_GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .get(server_id)
+            .cloned();
+        if let Some(gate) = gate {
+            if !gate.claimed.swap(true, Ordering::SeqCst) {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
+        }
+    }
     let Some(sessions) = MCP_SESSIONS.get() else {
         return;
     };

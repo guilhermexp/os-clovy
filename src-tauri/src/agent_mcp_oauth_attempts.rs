@@ -1,29 +1,10 @@
 //! Operation-owned custody between code exchange and primary activation.
 //! Metadata contains references and outcomes only; OAuth material stays in the store.
+use super::partition::CandidatePartition;
+use super::volatile_custody::{
+    retain_candidate, update_volatile_candidate, volatile_candidate, ConnectAttempt, ConnectPhase,
+};
 use super::*;
-
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum ConnectPhase {
-    Authorizing,
-    ExchangePending,
-    Received,
-    RevocationFailed,
-    RevokedButLocalCleanupPending,
-}
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ConnectAttempt {
-    id: String,
-    secret_ref: String,
-    // Candidate attempts capture policy authority at issuance; superseded
-    // entries carry the old primary's stable grant-generation revision.
-    revision: Option<String>,
-    epoch: u64,
-    phase: ConnectPhase,
-    #[serde(default)]
-    superseded: bool,
-}
 #[derive(Clone)]
 pub(super) struct OAuthAttemptContext {
     repository: AgentMcpRepository,
@@ -32,9 +13,11 @@ pub(super) struct OAuthAttemptContext {
     lifecycle: Arc<OAuthLifecycle>,
     admitted: Arc<std::sync::atomic::AtomicBool>,
     definitive_refusal: Arc<std::sync::atomic::AtomicBool>,
+    partition: Arc<CandidatePartition>,
 }
 static LIVE_CONNECT_ATTEMPTS: OnceLock<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> =
     OnceLock::new();
+
 tokio::task_local! { static OAUTH_CONNECT_ATTEMPT: OAuthAttemptContext; }
 pub(super) struct OAuthAttemptOwner(OAuthAttemptContext);
 impl Drop for OAuthAttemptOwner {
@@ -119,6 +102,7 @@ pub(super) async fn reserve_oauth_attempt(
         lifecycle,
         admitted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         definitive_refusal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        partition: Arc::new(CandidatePartition::new(&repository.pool).await),
     };
     LIVE_CONNECT_ATTEMPTS
         .get_or_init(Default::default)
@@ -204,7 +188,16 @@ pub(super) fn put_oauth_candidate<S: McpSecretStore>(
     context: &OAuthAttemptContext,
     bundle: &McpSecretBundle,
 ) -> Result<(), AgentMcpError> {
-    store.put(&context.attempt.secret_ref, bundle)
+    let result = store.put(&context.attempt.secret_ref, bundle);
+    if result.is_err() {
+        retain_candidate(
+            &context.partition,
+            &context.server_id,
+            &context.attempt,
+            bundle,
+        );
+    }
+    result
 }
 pub(super) fn current_oauth_attempt() -> Option<OAuthAttemptContext> {
     OAUTH_CONNECT_ATTEMPT.try_with(Clone::clone).ok()
@@ -267,17 +260,27 @@ async fn settle_attempt<S: McpSecretStore>(
     received: Option<&McpSecretBundle>,
     live: bool,
 ) -> Result<AttemptCleanup, AgentMcpError> {
+    let partition = CandidatePartition::new(&repository.pool).await;
+    let retained = volatile_candidate(&partition, &server.id, attempt)?;
+    let retained_confirmed = retained.as_ref().is_some_and(|(_, confirmed)| *confirmed);
     let bundle = match received {
         Some(bundle) => Some(bundle.clone()),
-        None => store.get(&attempt.secret_ref)?,
+        None => match retained {
+            Some((bundle, _)) => Some(bundle),
+            None => store.get(&attempt.secret_ref)?,
+        },
     };
     let mut entries = attempts(server)?;
     let Some(position) = entries.iter().position(|entry| entry.id == attempt.id) else {
         return Ok(AttemptCleanup::default());
     };
     if let Some(bundle) = bundle {
-        let confirmed = attempt.phase == ConnectPhase::RevokedButLocalCleanupPending
+        let confirmed = retained_confirmed
+            || attempt.phase == ConnectPhase::RevokedButLocalCleanupPending
             || revoke_oauth_bundle(&bundle.oauth).await == Some(true);
+        if confirmed {
+            update_volatile_candidate(&partition, &server.id, attempt, false);
+        }
         entries[position].phase = if confirmed {
             ConnectPhase::RevokedButLocalCleanupPending
         } else {
@@ -287,13 +290,16 @@ async fn settle_attempt<S: McpSecretStore>(
         if !confirmed {
             // A failed initial put may be transient. Retain this exact bundle;
             // never reauthorize or repeat a code/token request.
-            let _ = store.put(&attempt.secret_ref, &bundle);
+            if store.put(&attempt.secret_ref, &bundle).is_ok() {
+                update_volatile_candidate(&partition, &server.id, attempt, true);
+            }
             return Ok(AttemptCleanup {
                 remote_uncertain: true,
                 remote_confirmed: false,
                 local_pending: true,
             });
         }
+        update_volatile_candidate(&partition, &server.id, attempt, true);
         if store.delete(&attempt.secret_ref).is_err() {
             return Ok(AttemptCleanup {
                 remote_uncertain: false,
