@@ -1516,7 +1516,16 @@ mod lifecycle_tests {
         )
         .unwrap();
         first.terminate("conversation-a");
-        second.reserve("new-run").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match second.reserve("new-run") {
+                Ok(()) => break,
+                Err(error) if error.code == "browser_profile_busy" && Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("Profile lease did not become available: {error:?}"),
+            }
+        }
         assert_eq!(
             fs::read(config.persistent_profile.join("synthetic-login-state")).unwrap(),
             b"retained"
