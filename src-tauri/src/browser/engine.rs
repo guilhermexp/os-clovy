@@ -764,7 +764,7 @@ fn verify_bundle(config: &EngineConfig) -> Result<()> {
     // A debug binary must also reject resources built from an older private
     // guard/wire revision of the same upstream commit, even outside the normal
     // dev preparation hook. Release signing then protects the matching tree.
-    let inputs: [(&str, &[u8]); 6] = [
+    let inputs: [(&str, &[u8]); 8] = [
         (
             "0001-no-reference-recovery.patch",
             include_bytes!("../../../scripts/agent-browser/0001-no-reference-recovery.patch"),
@@ -1027,6 +1027,58 @@ mod lifecycle_tests {
             fs::read(config.persistent_profile.join("synthetic-login-state")).unwrap(),
             b"retained"
         );
+        second.shutdown();
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn profile_lease_stays_busy_until_the_owned_group_exits() {
+        use std::os::unix::process::CommandExt;
+        let root = tempfile::tempdir().unwrap();
+        let config = EngineConfig::production(
+            root.path().join("resources"),
+            root.path().join("data"),
+            true,
+        );
+        let first = AgentBrowserTransport::new(config.clone());
+        let second = AgentBrowserTransport::new(config);
+        first.reserve("owner").unwrap();
+        let marker = root.path().join("descendant");
+        let child = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "sleep 30 & printf '%s' \"$!\" > \"$1\"; wait",
+                "fixture",
+            ])
+            .arg(&marker)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = child.id() as i32;
+        *first.slot("owner").unwrap().process.lock().unwrap() = Some(Process { child });
+        for _ in 0..100 {
+            if marker.is_file() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(marker.is_file());
+        assert!(!unix_group_exited(group));
+        assert_eq!(
+            second.reserve("next").unwrap_err().code,
+            "browser_profile_busy"
+        );
+        first.terminate_with_grace("owner", Duration::ZERO);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match second.reserve("next") {
+                Ok(()) => break,
+                Err(error) if error.code == "browser_profile_busy" && Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("Profile was not released after Stop: {error:?}"),
+            }
+        }
+        assert!(unix_group_exited(group), "lease released before group exit");
         second.shutdown();
     }
     #[tokio::test]
