@@ -161,7 +161,9 @@ the original foreground and focused process generations and qualify them at
 each send; exact-window and ref paths also requalify their original target.
 Owned key-up cleanup is separate from new input. Mouse modifier sends qualify
 the actual keyboard receiver but do not yet carry the original pointer target
-through the mouse adapter. Mouse sends and native acceptance remain pending.
+through the mouse adapter. A drag abort releases its own button without moving
+the pointer, and errors after attempted pointer movement are unsafe to retry.
+Mouse sends and native acceptance remain pending.
 
 This qualification authenticates the chosen content by its pinned Git object
 and SHA-256 inputs. It does not assert a verified upstream author signature:

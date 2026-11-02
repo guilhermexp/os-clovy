@@ -4622,6 +4622,79 @@ index c116c7e..84c0fbd 100644
          match element.0.set_focus() {
              Ok(()) => classify_success(),
              Err(error) => classify_mutation(SET_FOCUS_OP, SET_FOCUS_API, &failure_of(&error)),
+diff --git a/crates/windows/src/actions/input_envelope_parity_tests.rs b/crates/windows/src/actions/input_envelope_parity_tests.rs
+index 1433017..9a39ad8 100644
+--- a/crates/windows/src/actions/input_envelope_parity_tests.rs
++++ b/crates/windows/src/actions/input_envelope_parity_tests.rs
+@@ -7,8 +7,8 @@ use crate::input::elevation::evaluate_integrity_gate;
+ use crate::input::keyboard::reject_standalone_key_state;
+ use crate::input::mouse::standalone_state_error;
+ use crate::input::{
+-    DragReleaseGuard, KeyReleaseGuard, NormalizedPoint, ensure_chunk_budget,
+-    keyboard_send_fake_sink as key_sink, mouse_send_fake_sink as mouse_sink, preflight_text,
++    DragReleaseGuard, KeyReleaseGuard, ensure_chunk_budget, keyboard_send_fake_sink as key_sink,
++    mouse_send_fake_sink as mouse_sink, preflight_text,
+ };
+ use crate::system::fixture::test_time::deadline;
+ use agent_desktop_core::{
+@@ -218,18 +218,14 @@ fn focus_lost_before_delivery_wire_shape() {
+
+ #[test]
+ fn drag_abort_error_wire_matches_macos_structure() {
+-    let mut guard = DragReleaseGuard::new(NormalizedPoint {
+-        x: 111,
+-        y: 222,
+-        virtual_desktop: false,
+-    });
++    let mut guard = DragReleaseGuard::new();
+     guard.arm();
+     for _ in 0..4 {
+         guard.mark_delivered();
+     }
+     let error = guard.enrich_error(AdapterError::timeout("deadline"));
+
+-    assert_disposition_wire(&error, DeliverySemantics::delivered_unverified());
++    assert_disposition_wire(&error, DeliverySemantics::uncertain());
+     assert_details_keys(
+         &error,
+         &[
+@@ -244,11 +240,7 @@ fn drag_abort_error_wire_matches_macos_structure() {
+
+ #[test]
+ fn drag_pre_injection_error_wire_is_not_delivered() {
+-    let guard = DragReleaseGuard::new(NormalizedPoint {
+-        x: 1,
+-        y: 2,
+-        virtual_desktop: false,
+-    });
++    let guard = DragReleaseGuard::new();
+     let error = guard.enrich_error(AdapterError::internal("pre-post failure"));
+
+     assert_disposition_wire(&error, DeliverySemantics::not_delivered());
+@@ -264,7 +256,7 @@ fn chord_abort_error_wire_matches_macos_structure() {
+     guard.note_pressed(0x11);
+     let error = guard.enrich_error(AdapterError::timeout("deadline"));
+
+-    assert_disposition_wire(&error, DeliverySemantics::delivered_unverified());
++    assert_disposition_wire(&error, DeliverySemantics::uncertain());
+     assert_details_keys(
+         &error,
+         &[
+@@ -295,12 +287,12 @@ fn text_preflight_abort_wire_is_not_delivered_with_chunk_accounting() {
+ }
+
+ #[test]
+-fn text_mid_chunk_abort_wire_is_delivered_unverified_with_chunk_accounting() {
++fn text_mid_chunk_abort_wire_is_uncertain_with_chunk_accounting() {
+     let deadline = Deadline::after(1).unwrap();
+     std::thread::sleep(Duration::from_millis(15));
+     let error = ensure_chunk_budget(deadline, 5, 2).expect_err("expired");
+
+-    assert_disposition_wire(&error, DeliverySemantics::delivered_unverified());
++    assert_disposition_wire(&error, DeliverySemantics::uncertain());
+     assert_details_keys(&error, &["delivered_chunks", "total_chunks"]);
+     assert_eq!(error_wire(&error)["disposition"]["retry"], "unsafe");
+     assert_no_forbidden_detail_keys(&error);
 diff --git a/crates/windows/src/actions/physical_keyboard.rs b/crates/windows/src/actions/physical_keyboard.rs
 index 24f7bda..a47bbc1 100644
 --- a/crates/windows/src/actions/physical_keyboard.rs
@@ -4699,7 +4772,7 @@ index 24f7bda..a47bbc1 100644
  }
 
 diff --git a/crates/windows/src/actions/physical_keyboard_tests.rs b/crates/windows/src/actions/physical_keyboard_tests.rs
-index f937e4d..e1d7f86 100644
+index f937e4d..4c3619f 100644
 --- a/crates/windows/src/actions/physical_keyboard_tests.rs
 +++ b/crates/windows/src/actions/physical_keyboard_tests.rs
 @@ -46,7 +46,7 @@ fn type_text_with_focus_ready_synthesizes() {
@@ -4711,7 +4784,51 @@ index f937e4d..e1d7f86 100644
 
      assert_eq!(step.label(), "SendInput.press_key");
      assert_eq!(step.mechanism(), Some(StepMechanism::PhysicalSynthetic));
-@@ -73,7 +73,8 @@ fn press_key_global_synthesizes_without_focus_gate() {
+@@ -54,26 +54,39 @@ fn press_key_element_gate_synthesizes_when_focus_ready() {
+ }
+
+ #[test]
+-fn press_key_global_synthesizes_without_focus_gate() {
+-    key_sink::reset();
+-
+-    let result = press_key_global(&combo(), deadline(5_000)).expect("global press");
+-
+-    assert_eq!(result.action, "press");
+-    assert_eq!(result.steps.len(), 1);
+-    assert_eq!(result.steps[0].label(), "SendInput.press_key");
+-    assert_eq!(
+-        result.steps[0].mechanism(),
+-        Some(StepMechanism::PhysicalSynthetic)
+-    );
+-    assert!(!key_sink::recorded().is_empty());
++fn press_key_global_rejects_missing_private_context() {
++    const CHILD: &str = "CLOVY_TEST_GLOBAL_PRESS_NO_CONTEXT";
++    if std::env::var_os(CHILD).is_some() {
++        key_sink::reset();
++        let error = press_key_global(&combo(), deadline(5_000))
++            .expect_err("missing authority must refuse input");
++        assert!(matches!(
++            error.code,
++            ErrorCode::PolicyDenied | ErrorCode::ActionFailed
++        ));
++        assert!(key_sink::recorded().is_empty());
++        std::process::exit(73);
++    }
++    let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
++        .args([
++            "--exact",
++            "actions::physical_keyboard::tests::press_key_global_rejects_missing_private_context",
++            "--nocapture",
++        ])
++        .env(CHILD, "1")
++        .env_remove("CLOVY_COMPUTER_USE_BROWSER_NAMESPACE")
++        .env_remove("CLOVY_COMPUTER_USE_BROWSER_IMAGE")
++        .status()
++        .expect("isolated test process");
++    assert_eq!(status.code(), Some(73));
+ }
+
+ #[test]
  fn press_key_lost_focus_fails_not_delivered_with_zero_injection() {
      key_sink::reset();
 
@@ -5434,6 +5551,180 @@ index 3dd15a6..da6422e 100644
          let delivered = match pattern.set_value(target) {
              Ok(()) => classify_success()?,
              Err(error) => classify_write("SetValue", RANGE_LABEL, &error)?,
+diff --git a/crates/windows/src/input/drag.rs b/crates/windows/src/input/drag.rs
+index 864b596..22c71b9 100644
+--- a/crates/windows/src/input/drag.rs
++++ b/crates/windows/src/input/drag.rs
+@@ -5,7 +5,7 @@
+ //! guard, enforced upstream. The release guard arms immediately before the
+ //! mouse-down and disarms only after the final release posts at the
+ //! destination; on any abort in between, the guard's `Drop` posts
+-//! corrective input at the origin (`drag_state.rs`). `SendInput`'s return
++//! a button release without moving the pointer (`drag_state.rs`). `SendInput`'s return
+ //! value is never treated as delivery evidence (A9-3), so every post here
+ //! is fire-and-forget.
+
+@@ -66,11 +66,12 @@ fn drag_sequence(params: DragParams, deadline: Deadline) -> Result<(), AdapterEr
+     agent_desktop_core::commands::clovy_cancel::ensure()?;
+     deadline.ensure_remaining()?;
+     post_mouse_inputs(&[move_input(origin)]);
+-    agent_desktop_core::commands::clovy_cancel::ensure()?;
+-    deadline.ensure_remaining()?;
+-    sleep_bounded(deadline, Duration::from_millis(PICKUP_DELAY_MS))?;
++    agent_desktop_core::commands::clovy_cancel::ensure()
++        .and_then(|_| deadline.ensure_remaining())
++        .and_then(|_| sleep_bounded(deadline, Duration::from_millis(PICKUP_DELAY_MS)))
++        .map_err(|error| error.with_disposition(DeliverySemantics::uncertain()))?;
+
+-    let mut guard = DragReleaseGuard::new(origin);
++    let mut guard = DragReleaseGuard::new();
+     guard.arm();
+     post_mouse_inputs(&[button_input(MOUSEEVENTF_LEFTDOWN)]);
+     guard.mark_delivered();
+diff --git a/crates/windows/src/input/drag_state.rs b/crates/windows/src/input/drag_state.rs
+index add1b3d..4f4ee24 100644
+--- a/crates/windows/src/input/drag_state.rs
++++ b/crates/windows/src/input/drag_state.rs
+@@ -3,32 +3,26 @@
+ //! A `MouseInputEvent` batch is plain data - unlike macOS's `CGEvent`-backed
+ //! guard, constructing the corrective batch here cannot fail. The guard
+ //! arms immediately before the first committed injection (mouse-down) and
+-//! disarms only after the final release posts; its `Drop` is the sole place
+-//! that posts corrective input, and it always targets the **origin**, never
+-//! the destination.
++//! disarms only after the final release posts; its `Drop` releases only the
++//! button armed by this operation and does not move the cursor.
+ //! Cleanup is best-effort like every other post here: `SendInput`'s return
+ //! value is never treated as delivery evidence (A9-3), so an abort reports
+ //! `emergency_release_posted` without claiming the OS acknowledged it.
+
+ use agent_desktop_core::AdapterError;
+
+-use crate::input::mouse::mouse_coord::NormalizedPoint;
+-use crate::input::mouse::mouse_send::{
+-    MOUSEEVENTF_LEFTUP, button_input, move_input, post_mouse_inputs,
+-};
++use crate::input::mouse::mouse_send::{MOUSEEVENTF_LEFTUP, button_input, post_mouse_inputs};
+ use crate::input::release_state::ReleaseState;
+
+ const SUGGESTION: &str = "Inspect the source and destination before retrying; the emergency release was posted without an OS acknowledgement";
+
+ pub(crate) struct DragReleaseGuard {
+-    origin: NormalizedPoint,
+     state: ReleaseState,
+ }
+
+ impl DragReleaseGuard {
+-    pub(crate) fn new(origin: NormalizedPoint) -> Self {
++    pub(crate) fn new() -> Self {
+         Self {
+-            origin,
+             state: ReleaseState::default(),
+         }
+     }
+@@ -50,7 +44,12 @@ impl DragReleaseGuard {
+     }
+
+     pub(crate) fn enrich_error(&self, error: AdapterError) -> AdapterError {
+-        self.state.enrich_error(error, SUGGESTION)
++        let error = self.state.enrich_error(error, SUGGESTION);
++        if self.state.delivered_units() > 0 {
++            error.with_disposition(agent_desktop_core::DeliverySemantics::uncertain())
++        } else {
++            error
++        }
+     }
+ }
+
+@@ -59,7 +58,7 @@ impl Drop for DragReleaseGuard {
+         if !self.should_release() {
+             return;
+         }
+-        post_mouse_inputs(&[move_input(self.origin), button_input(MOUSEEVENTF_LEFTUP)]);
++        post_mouse_inputs(&[button_input(MOUSEEVENTF_LEFTUP)]);
+     }
+ }
+
+diff --git a/crates/windows/src/input/drag_state_tests.rs b/crates/windows/src/input/drag_state_tests.rs
+index 91604a3..be5b20d 100644
+--- a/crates/windows/src/input/drag_state_tests.rs
++++ b/crates/windows/src/input/drag_state_tests.rs
+@@ -1,19 +1,10 @@
+ use super::*;
+-use crate::input::mouse::mouse_send::MOUSEEVENTF_MOVE;
+ use crate::input::mouse::mouse_send::mouse_send_fake_sink as sink;
+ use agent_desktop_core::DeliverySemantics;
+
+-fn origin() -> NormalizedPoint {
+-    NormalizedPoint {
+-        x: 111,
+-        y: 222,
+-        virtual_desktop: false,
+-    }
+-}
+-
+ #[test]
+ fn never_armed_guard_reports_not_delivered_and_no_release() {
+-    let guard = DragReleaseGuard::new(origin());
++    let guard = DragReleaseGuard::new();
+     let error = guard.enrich_error(AdapterError::internal("pre-post failure"));
+
+     assert_eq!(error.disposition, DeliverySemantics::not_delivered());
+@@ -21,15 +12,15 @@ fn never_armed_guard_reports_not_delivered_and_no_release() {
+ }
+
+ #[test]
+-fn armed_guard_with_deliveries_reports_delivered_unverified_and_emergency_release() {
+-    let mut guard = DragReleaseGuard::new(origin());
++fn armed_guard_with_posts_reports_uncertain_and_emergency_release() {
++    let mut guard = DragReleaseGuard::new();
+     guard.arm();
+     for _ in 0..4 {
+         guard.mark_delivered();
+     }
+     let error = guard.enrich_error(AdapterError::timeout("deadline"));
+
+-    assert_eq!(error.disposition, DeliverySemantics::delivered_unverified());
++    assert_eq!(error.disposition, DeliverySemantics::uncertain());
+     let details = error.details.expect("enriched details");
+     assert_eq!(details["delivered_events"], 4);
+     assert_eq!(details["emergency_release_posted"], true);
+@@ -40,7 +31,7 @@ fn armed_guard_with_deliveries_reports_delivered_unverified_and_emergency_releas
+ fn disarmed_guard_posts_nothing_on_drop() {
+     sink::reset();
+     {
+-        let mut guard = DragReleaseGuard::new(origin());
++        let mut guard = DragReleaseGuard::new();
+         guard.arm();
+         guard.mark_delivered();
+         guard.disarm();
+@@ -53,18 +44,19 @@ fn disarmed_guard_posts_nothing_on_drop() {
+ }
+
+ #[test]
+-fn armed_guard_posts_corrective_move_and_release_at_origin_on_drop() {
++fn armed_guard_releases_without_moving_on_drop() {
+     sink::reset();
+     {
+-        let mut guard = DragReleaseGuard::new(origin());
++        let mut guard = DragReleaseGuard::new();
+         guard.arm();
+         guard.mark_delivered();
+     }
+
+     let recorded = sink::recorded();
+-    assert_eq!(recorded.len(), 2, "move-back to origin, then release");
+-    assert_eq!(recorded[0].dx, origin().x);
+-    assert_eq!(recorded[0].dy, origin().y);
+-    assert_eq!(recorded[0].flags & MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE);
+-    assert_eq!(recorded[1].flags, MOUSEEVENTF_LEFTUP);
++    assert_eq!(
++        recorded.len(),
++        1,
++        "release only the button armed by this drag"
++    );
++    assert_eq!(recorded[0].flags, MOUSEEVENTF_LEFTUP);
+ }
 diff --git a/crates/windows/src/input/keyboard/keyboard_event.rs b/crates/windows/src/input/keyboard/keyboard_event.rs
 index fa38e1c..a9b2db2 100644
 --- a/crates/windows/src/input/keyboard/keyboard_event.rs
@@ -5808,11 +6099,72 @@ index 30078da..2414d46 100644
  ) -> Result<(), AdapterError> {
      crate::input::keyboard::keyboard_text::synthesize_text(text, deadline, verify_target)
  }
+diff --git a/crates/windows/src/input/mod.rs b/crates/windows/src/input/mod.rs
+index e22d94a..6b7536c 100644
+--- a/crates/windows/src/input/mod.rs
++++ b/crates/windows/src/input/mod.rs
+@@ -48,6 +48,4 @@ pub(crate) use keyboard::keyboard_send::keyboard_send_fake_sink;
+ #[cfg(all(test, target_os = "windows"))]
+ pub(crate) use keyboard::keyboard_text::{ensure_chunk_budget, preflight_text};
+ #[cfg(all(test, target_os = "windows"))]
+-pub(crate) use mouse::mouse_coord::NormalizedPoint;
+-#[cfg(all(test, target_os = "windows"))]
+ pub(crate) use mouse::mouse_send::mouse_send_fake_sink;
+diff --git a/crates/windows/src/input/mouse/mod.rs b/crates/windows/src/input/mouse/mod.rs
+index 2d79916..eb928a2 100644
+--- a/crates/windows/src/input/mouse/mod.rs
++++ b/crates/windows/src/input/mouse/mod.rs
+@@ -125,17 +125,23 @@ fn post_click_sequence(
+     let mut sequence = ReleaseState::default();
+     for click_index in 0..count {
+         if let Err(error) = ensure_input_budget(deadline) {
+-            return Err(sequence.enrich_error(error, CLICK_SUGGESTION));
++            return Err(sequence
++                .enrich_error(error, CLICK_SUGGESTION)
++                .with_disposition(agent_desktop_core::DeliverySemantics::uncertain()));
+         }
+         let mut guard = ClickReleaseGuard::new(up_flag);
+         let outcome = click_once(down_flag, up_flag, &mut guard, &mut sequence, deadline);
+         if let Err(error) = outcome {
+-            return Err(sequence.enrich_error(error, CLICK_SUGGESTION));
++            return Err(sequence
++                .enrich_error(error, CLICK_SUGGESTION)
++                .with_disposition(agent_desktop_core::DeliverySemantics::uncertain()));
+         }
+         if click_index + 1 < count
+             && let Err(error) = sleep_bounded(deadline, CLICK_GAP_DELAY)
+         {
+-            return Err(sequence.enrich_error(error, CLICK_SUGGESTION));
++            return Err(sequence
++                .enrich_error(error, CLICK_SUGGESTION)
++                .with_disposition(agent_desktop_core::DeliverySemantics::uncertain()));
+         }
+     }
+     Ok(())
+@@ -179,10 +185,16 @@ fn dispatch_wheel(
+     let normalized = mouse_coord::normalize_point(&event.point);
+     ensure_input_budget(deadline)?;
+     post_mouse_inputs(&[move_input(normalized)]);
+-    let mut modifiers = press_modifiers_checked(&event.modifiers, deadline)?;
++    let mut modifiers = press_modifiers_checked(&event.modifiers, deadline).map_err(|error| {
++        error.with_disposition(agent_desktop_core::DeliverySemantics::uncertain())
++    })?;
+     let result = post_wheel_chunks(y_chunks, x_chunks, deadline);
+     modifiers.release();
+-    result.map_err(|error| modifiers.enrich_error(error))
++    result.map_err(|error| {
++        modifiers
++            .enrich_error(error)
++            .with_disposition(agent_desktop_core::DeliverySemantics::uncertain())
++    })
+ }
+
+ /// A large delta is split across several events, so a deadline crossed
 diff --git a/crates/windows/src/input/mouse/mouse_modifier.rs b/crates/windows/src/input/mouse/mouse_modifier.rs
-index 66391b9..0f31a8e 100644
+index 66391b9..e13b594 100644
 --- a/crates/windows/src/input/mouse/mouse_modifier.rs
 +++ b/crates/windows/src/input/mouse/mouse_modifier.rs
-@@ -16,13 +16,12 @@
+@@ -16,21 +16,18 @@
  use agent_desktop_core::{AdapterError, Deadline, Modifier};
 
  use crate::input::keyboard::keyboard_event::{key_input, modifier_vk};
@@ -5827,7 +6179,17 @@ index 66391b9..0f31a8e 100644
  }
 
  impl ModifierGuard {
-@@ -41,7 +40,7 @@ impl ModifierGuard {
+     pub(crate) fn enrich_error(&self, error: AdapterError) -> AdapterError {
+-        if self.delivered
+-            && error.disposition == agent_desktop_core::DeliverySemantics::not_delivered()
+-        {
+-            error.with_disposition(agent_desktop_core::DeliverySemantics::delivered_unverified())
++        if self.delivered {
++            error.with_disposition(agent_desktop_core::DeliverySemantics::uncertain())
+         } else {
+             error
+         }
+@@ -41,7 +38,7 @@ impl ModifierGuard {
          }
          self.released = true;
          for vk in self.held.iter().rev().copied() {
@@ -5836,7 +6198,7 @@ index 66391b9..0f31a8e 100644
          }
      }
  }
-@@ -56,53 +55,51 @@ impl Drop for ModifierGuard {
+@@ -56,53 +53,51 @@ impl Drop for ModifierGuard {
  pub(crate) fn press_modifiers(modifiers: &[Modifier]) -> ModifierGuard {
      let held: Vec<u16> = modifiers.iter().map(modifier_vk).collect();
      for &vk in &held {
@@ -5911,6 +6273,30 @@ index 66391b9..0f31a8e 100644
      }
      Ok(guard)
  }
+diff --git a/crates/windows/src/input/mouse/mouse_tests.rs b/crates/windows/src/input/mouse/mouse_tests.rs
+index f41fc40..66f402d 100644
+--- a/crates/windows/src/input/mouse/mouse_tests.rs
++++ b/crates/windows/src/input/mouse/mouse_tests.rs
+@@ -189,7 +189,7 @@ fn an_expired_deadline_mid_click_posts_corrective_up_with_enrichment() {
+     assert_eq!(error.code, ErrorCode::Timeout);
+     assert_eq!(
+         error.disposition.delivery(),
+-        DeliveryDisposition::DeliveredUnverified
++        DeliveryDisposition::DeliveryUncertain
+     );
+     let details = error.details.expect("abort-after-down enrichment");
+     assert_eq!(details["delivered_events"], 1);
+@@ -307,8 +307,8 @@ fn a_multi_click_that_times_out_after_the_first_cycle_reports_cumulative_deliver
+
+     assert_eq!(
+         error.disposition.delivery(),
+-        DeliveryDisposition::DeliveredUnverified,
+-        "input landed, so the caller must not be told it is safe to repeat"
++        DeliveryDisposition::DeliveryUncertain,
++        "input was attempted, so the caller must not be told it is safe to repeat"
+     );
+     let delivered = error.details.expect("delivery evidence")["delivered_events"]
+         .as_u64()
 diff --git a/crates/windows/src/input/native_owner.rs b/crates/windows/src/input/native_owner.rs
 index 36e690e..e849a52 100644
 --- a/crates/windows/src/input/native_owner.rs
