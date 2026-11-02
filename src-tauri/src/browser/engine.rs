@@ -1,6 +1,7 @@
 //! Private agent-browser client. The stdio pipes are inherited capabilities;
 //! no command socket, CDP port, global CLI or user browser is involved.
 #[path = "../../../scripts/agent-browser/private-host/clovy_browser_grant.rs"]
+#[allow(dead_code)] // The same module also contains the host-side ownership admission.
 mod clovy_browser_grant;
 #[path = "../../../scripts/agent-browser/private-host/clovy_browser_process_identity.rs"]
 mod clovy_browser_process_identity;
@@ -9,7 +10,9 @@ use super::{
     proxy::PinningProxy,
 };
 use clovy_browser_grant::{
-    open_existing_plain, plain_metadata, profile_object_identity, same_open_file, Grant,
+    create_receipt_file, lock_profile, open_existing_plain, plain_metadata,
+    profile_object_identity, publish_receipt_file, same_open_file, sync_profile_directory, Grant,
+    Owned,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -70,6 +73,32 @@ fn failed() -> EngineError {
         "browser_start_failed",
         "Clovy could not start its browser. Prepare or reinstall the bundled browser resources.",
     )
+}
+
+fn verify_host_ready(
+    value: &Value,
+    token: &str,
+    grant: &Grant,
+    persistent: bool,
+    child_pid: u32,
+    child_birth: u64,
+    job_name: Option<&str>,
+) -> Result<()> {
+    if value["protocol"] != 1 || value["token"].as_str() != Some(token) {
+        return Err(failed());
+    }
+    if persistent {
+        if value.get("owned").is_some() {
+            return Err(failed());
+        }
+    } else {
+        let owned: Owned = serde_json::from_value(value.get("owned").cloned().ok_or_else(failed)?)
+            .map_err(|_| failed())?;
+        grant
+            .verify_owned(&owned, child_pid, child_birth, job_name)
+            .map_err(|_| failed())?;
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -464,7 +493,7 @@ impl AgentBrowserTransport {
             command.creation_flags(0x00000004 | 0x08000000);
         }
         // This mutex covers only spawn/publication, never CDP or wire I/O.
-        let (stdin, stdout, grant) = {
+        let (stdin, stdout, grant, child_pid, child_birth, job_name) = {
             let mut process_guard = slot.process.lock().unwrap();
             if slot.cancelled.load(Ordering::SeqCst) {
                 return Err(closed());
@@ -474,7 +503,15 @@ impl AgentBrowserTransport {
             }
             let grant = Grant::new(&slot.profile, slot.persistent).map_err(|_| failed())?;
             #[cfg(windows)]
-            let job = crate::process_group::windows_job::Job::new().map_err(|_| failed())?;
+            let job_name = (!slot.persistent).then(|| grant.browser_job_name());
+            #[cfg(not(windows))]
+            let job_name: Option<String> = None;
+            #[cfg(windows)]
+            let job = match job_name.as_deref() {
+                Some(name) => crate::process_group::windows_job::Job::new_named(name),
+                None => crate::process_group::windows_job::Job::new(),
+            }
+            .map_err(|_| failed())?;
             let mut child = command.spawn().map_err(|_| failed())?;
             #[cfg(windows)]
             {
@@ -491,14 +528,31 @@ impl AgentBrowserTransport {
                     return Err(failed());
                 }
             }
-            let stdin = child.stdin.take().ok_or_else(failed)?;
-            let stdout = child.stdout.take().ok_or_else(failed)?;
+            let child_pid = child.id();
+            let child_birth = match clovy_browser_process_identity::process_birth(child_pid) {
+                Ok(birth) => birth,
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(failed());
+                }
+            };
+            let Some(stdin) = child.stdin.take() else {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(failed());
+            };
+            let Some(stdout) = child.stdout.take() else {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(failed());
+            };
             *process_guard = Some(Process {
                 child,
                 #[cfg(windows)]
                 job,
             });
-            (stdin, stdout, grant)
+            (stdin, stdout, grant, child_pid, child_birth, job_name)
         };
         let (sender, mut receiver) = mpsc::unbounded_channel::<Request>();
         *slot.sender.lock().unwrap() = Some(sender);
@@ -513,17 +567,36 @@ impl AgentBrowserTransport {
         std::thread::spawn(move || {
             let mut stdin = stdin;
             let mut stdout = BufReader::new(stdout);
-            let ready = write_line(
-                &mut stdin,
-                &json!({"protocol":1,"token":token,"grant":grant}),
-            )
-            .and_then(|_| read_line(&mut stdout));
-            let ready = ready.and_then(|value| {
-                if value["protocol"] == 1 && value["token"].as_str() == Some(&token) {
+            let handoff = if persistent {
+                Ok(())
+            } else {
+                weak.upgrade().ok_or_else(closed).and_then(|slot| {
+                    if slot.cancelled.load(Ordering::SeqCst) {
+                        return Err(closed());
+                    }
+                    let lease = slot.lease.lock().unwrap().take().ok_or_else(closed)?;
+                    drop(lease);
                     Ok(())
-                } else {
-                    Err(failed())
-                }
+                })
+            };
+            let ready = handoff
+                .and_then(|()| {
+                    write_line(
+                        &mut stdin,
+                        &json!({"protocol":1,"token":token,"grant":grant,"jobName":job_name}),
+                    )
+                })
+                .and_then(|_| read_line(&mut stdout));
+            let ready = ready.and_then(|value| {
+                verify_host_ready(
+                    &value,
+                    &token,
+                    &grant,
+                    persistent,
+                    child_pid,
+                    child_birth,
+                    job_name.as_deref(),
+                )
             });
             let okay = ready.is_ok();
             let _ = ready_tx.send(ready);
@@ -877,66 +950,6 @@ fn verify_bundle(config: &EngineConfig) -> Result<()> {
 const RESERVED_RECEIPT: &str = ".clovy-reserved.json";
 const STARTING_MARKER: &str = ".clovy-starting";
 
-fn sync_profile_directory(profile: &std::path::Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    File::open(profile)?.sync_all()?;
-    #[cfg(windows)]
-    let _ = profile;
-    Ok(())
-}
-
-fn create_receipt_file(path: &std::path::Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(0x8000_0000); // FILE_FLAG_WRITE_THROUGH
-    }
-    options.open(path)
-}
-
-fn publish_receipt_file(
-    source: &std::path::Path,
-    destination: &std::path::Path,
-    replace: bool,
-) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        let _ = replace;
-        fs::rename(source, destination)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::{
-            core::PCWSTR,
-            Win32::Storage::FileSystem::{
-                MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-            },
-        };
-        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-        let destination: Vec<u16> = destination
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
-        unsafe {
-            MoveFileExW(
-                PCWSTR(source.as_ptr()),
-                PCWSTR(destination.as_ptr()),
-                MOVEFILE_WRITE_THROUGH
-                    | if replace {
-                        MOVEFILE_REPLACE_EXISTING
-                    } else {
-                        Default::default()
-                    },
-            )
-        }
-        .map_err(std::io::Error::other)
-    }
-}
-
 fn marker_absent(profile: &std::path::Path) -> bool {
     matches!(fs::symlink_metadata(profile.join(STARTING_MARKER)), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
@@ -1127,40 +1140,6 @@ fn recover_reserved_profiles(config: &EngineConfig) {
     }
 }
 
-fn lock_profile(file: &File) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        // The descriptor stays open until all supervised processes exit.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        use windows::Win32::{
-            Foundation::HANDLE,
-            Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY},
-            System::IO::OVERLAPPED,
-        };
-        let mut overlapped = OVERLAPPED::default();
-        unsafe {
-            LockFileEx(
-                HANDLE(file.as_raw_handle()),
-                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                None,
-                u32::MAX,
-                u32::MAX,
-                &mut overlapped,
-            )
-        }
-        .map_err(std::io::Error::other)
-    }
-}
-
 #[cfg(unix)]
 fn unix_group_exited(group: i32) -> bool {
     // Zombies have already exited and cannot use the profile. Waiting for an
@@ -1269,11 +1248,163 @@ extern "C" {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a separately built real private host"]
+    fn real_parent_crash_preserves_starting_and_owned_authority() {
+        use std::os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::process::CommandExt,
+        };
+        const MARKER: &str = "CLOVY_CRASH_STATE=";
+        if let Some(root) = std::env::var_os("CLOVY_CRASH_TEST_ROOT") {
+            let root = PathBuf::from(root);
+            let mode = std::env::var("CLOVY_CRASH_TEST_MODE").unwrap();
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let _enter = runtime.enter();
+            let config = EngineConfig::production(root.join("resources"), root.join("data"), false);
+            let transport = AgentBrowserTransport::new(config);
+            transport.reserve("crash-owner").unwrap();
+            let slot = transport.slot("crash-owner").unwrap();
+            mark_starting(&slot.profile).unwrap();
+            let grant = Grant::new(&slot.profile, false).unwrap();
+            let mut host =
+                Command::new(std::env::var_os("CLOVY_BROWSER_HOST_TEST_BINARY").unwrap())
+                    .env_clear()
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .process_group(0)
+                    .spawn()
+                    .unwrap();
+            let pid = host.id();
+            let birth = clovy_browser_process_identity::process_birth(pid).unwrap();
+            let token = "b".repeat(64);
+            if mode != "owned" {
+                assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGSTOP) }, 0);
+                let mut status = 0;
+                assert_eq!(
+                    unsafe { libc::waitpid(pid as i32, &mut status, libc::WUNTRACED) },
+                    pid as i32
+                );
+                assert!(libc::WIFSTOPPED(status));
+            }
+            if mode == "sent" || mode == "owned" {
+                if mode == "owned" {
+                    drop(slot.lease.lock().unwrap().take().unwrap());
+                }
+                let input = host.stdin.as_mut().unwrap();
+                serde_json::to_writer(
+                    &mut *input,
+                    &json!({"protocol":1,"token":token,"grant":grant}),
+                )
+                .unwrap();
+                input.write_all(b"\n").unwrap();
+                input.flush().unwrap();
+            }
+            if mode == "owned" {
+                let mut output = BufReader::new(host.stdout.take().unwrap());
+                let mut line = String::new();
+                assert!(output.read_line(&mut line).unwrap() > 0);
+                let ack: Value = serde_json::from_str(&line).unwrap();
+                let owned: Owned = serde_json::from_value(ack["owned"].clone()).unwrap();
+                grant.verify_owned(&owned, pid, birth, None).unwrap();
+            }
+            println!(
+                "{MARKER}{}",
+                json!({"profile":slot.profile,"hostPid":pid,"mode":mode})
+            );
+            std::io::stdout().flush().unwrap();
+            let mut byte = [0u8];
+            std::io::stdin().read_exact(&mut byte).unwrap();
+            std::process::exit(0); // Simulate the controlling process dying without Drop.
+        }
+        for mode in ["before", "sent", "owned"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut parent=Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","engine::lifecycle_tests::real_parent_crash_preserves_starting_and_owned_authority","--ignored","--nocapture"])
+                .env("CLOVY_CRASH_TEST_ROOT",root.path()).env("CLOVY_CRASH_TEST_MODE",mode)
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+            let mut output = BufReader::new(parent.stdout.take().unwrap());
+            let state: Value = loop {
+                let mut line = String::new();
+                assert!(
+                    output.read_line(&mut line).unwrap() > 0,
+                    "fixture exited before barrier"
+                );
+                if let Some((_, value)) = line.split_once(MARKER) {
+                    break serde_json::from_str(value.trim()).unwrap();
+                }
+            };
+            let host_pid = state["hostPid"].as_u64().unwrap() as i32;
+            let profile = PathBuf::from(state["profile"].as_str().unwrap());
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, host_pid, 0) } as i32;
+            assert!(
+                fd >= 0,
+                "pidfd_open failed: {}",
+                std::io::Error::last_os_error()
+            );
+            let pidfd = unsafe { File::from_raw_fd(fd) };
+            parent.stdin.as_mut().unwrap().write_all(b"x").unwrap();
+            assert!(parent.wait().unwrap().success());
+            if mode != "owned" {
+                let result = unsafe {
+                    libc::syscall(
+                        libc::SYS_pidfd_send_signal,
+                        pidfd.as_raw_fd(),
+                        libc::SIGCONT,
+                        0,
+                        0,
+                    )
+                };
+                if result != 0 {
+                    let error = std::io::Error::last_os_error();
+                    assert_eq!(
+                        error.raw_os_error(),
+                        Some(libc::ESRCH),
+                        "pidfd SIGCONT failed: {error}"
+                    );
+                }
+            }
+            let mut pollfd = libc::pollfd {
+                fd: pidfd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            assert_eq!(
+                unsafe { libc::poll(&mut pollfd, 1, 5000) },
+                1,
+                "host did not exit"
+            );
+            let receipt: Value =
+                serde_json::from_slice(&fs::read(profile.join(RESERVED_RECEIPT)).unwrap()).unwrap();
+            assert_eq!(
+                receipt["phase"],
+                if mode == "owned" { "Owned" } else { "Starting" }
+            );
+            let lease = open_existing_plain(&profile.join(".clovy-lease"), true).unwrap();
+            lock_profile(&lease).unwrap();
+            drop(lease);
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let _enter = runtime.enter();
+            let config = EngineConfig::production(
+                root.path().join("resources"),
+                root.path().join("data"),
+                false,
+            );
+            let _next = AgentBrowserTransport::new(config);
+            assert!(
+                profile.is_dir(),
+                "uncertain profile must be preserved until capability GC"
+            );
+        }
+    }
     #[cfg(unix)]
     #[test]
     #[ignore = "requires a separately built real private host"]
     fn real_private_host_admits_only_bound_grants() {
         use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
         fn host() -> (Child, BufReader<std::process::ChildStdout>) {
             let binary = std::env::var_os("CLOVY_BROWSER_HOST_TEST_BINARY")
                 .expect("real host binary required");
@@ -1282,6 +1413,7 @@ mod lifecycle_tests {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
+                .process_group(0)
                 .spawn()
                 .unwrap();
             let output = BufReader::new(child.stdout.take().unwrap());
@@ -1332,7 +1464,8 @@ mod lifecycle_tests {
         transport.reserve("owned-fixture").unwrap();
         let slot = transport.slot("owned-fixture").unwrap();
         mark_starting(&slot.profile).unwrap();
-        let grant = serde_json::to_value(Grant::new(&slot.profile, false).unwrap()).unwrap();
+        let grant_value = Grant::new(&slot.profile, false).unwrap();
+        let grant = serde_json::to_value(&grant_value).unwrap();
         let token = "a".repeat(64);
         rejected(json!({"protocol":1,"token":token}));
         for field in [
@@ -1371,19 +1504,94 @@ mod lifecycle_tests {
         fs::remove_file(&linked.profile).unwrap();
         fs::rename(&moved, &linked.profile).unwrap();
         transport.terminate("link-fixture");
+        // While root owns the kernel lease, a valid grant must not be acknowledged.
+        rejected(json!({"protocol":1,"token":token,"grant":grant}));
         let (mut child, mut output) = host();
+        let host_pid = child.id();
+        let host_birth = clovy_browser_process_identity::process_birth(host_pid).unwrap();
+        drop(slot.lease.lock().unwrap().take().unwrap());
         send(
             &mut child,
             json!({"protocol":1,"token":token,"grant":grant}),
         );
+        let ack = line(&mut output).unwrap();
+        assert_eq!(ack["protocol"], 1);
+        assert_eq!(ack["token"], token);
+        let owned: Owned = serde_json::from_value(ack["owned"].clone()).unwrap();
+        verify_host_ready(
+            &ack,
+            &token,
+            &grant_value,
+            false,
+            host_pid,
+            host_birth,
+            None,
+        )
+        .unwrap();
+        assert!(verify_host_ready(
+            &json!({"protocol":1,"token":token}),
+            &token,
+            &grant_value,
+            false,
+            host_pid,
+            host_birth,
+            None
+        )
+        .is_err());
+        for field in [
+            "hostPid",
+            "hostBirth",
+            "nonce",
+            "group",
+            "profileIdentity",
+            "boot",
+        ] {
+            let mut altered = ack.clone();
+            altered["owned"][field] = match field {
+                "hostPid" => json!(host_pid ^ 1),
+                "hostBirth" => json!(host_birth ^ 1),
+                "group" => json!(host_pid ^ 1),
+                "profileIdentity" => json!([0, 0]),
+                _ => json!("invalid"),
+            };
+            assert!(
+                verify_host_ready(
+                    &altered,
+                    &token,
+                    &grant_value,
+                    false,
+                    host_pid,
+                    host_birth,
+                    None
+                )
+                .is_err(),
+                "altered {field} was accepted"
+            );
+        }
+        grant_value
+            .verify_owned(&owned, host_pid, host_birth, None)
+            .unwrap();
         assert_eq!(
-            line(&mut output).unwrap(),
-            json!({"protocol":1,"token":token})
+            serde_json::from_slice::<Value>(
+                &fs::read(slot.profile.join(RESERVED_RECEIPT)).unwrap()
+            )
+            .unwrap()["phase"],
+            "Owned"
         );
+        let mut wrong_pid = owned.clone();
+        wrong_pid.host_pid ^= 1;
+        assert!(grant_value
+            .verify_owned(&wrong_pid, host_pid, host_birth, None)
+            .is_err());
+        let mut wrong_birth = owned.clone();
+        wrong_birth.host_birth ^= 1;
+        assert!(grant_value
+            .verify_owned(&wrong_birth, host_pid, host_birth, None)
+            .is_err());
         let competing = open_existing_plain(&slot.profile.join(".clovy-lease"), true).unwrap();
         assert!(
             lock_profile(&competing).is_err(),
-            "root must retain the lease"
+            "host must hold the lease after the root releases it"
         );
         for (id, profile, persistent) in [
             (1, root.path().join("other"), false),
@@ -1413,6 +1621,45 @@ mod lifecycle_tests {
         send(&mut child, json!({"id":4,"action":"shutdown"}));
         assert_eq!(line(&mut output).unwrap()["id"], 4);
         assert!(child.wait().unwrap().success());
+        lock_profile(&competing).expect("lease remains held after host exit");
+        drop(competing);
+        transport.terminate("owned-fixture");
+        transport.reserve("eof-fixture").unwrap();
+        let eof_slot = transport.slot("eof-fixture").unwrap();
+        mark_starting(&eof_slot.profile).unwrap();
+        let eof_grant = Grant::new(&eof_slot.profile, false).unwrap();
+        let (mut eof_child, mut eof_output) = host();
+        let eof_pid = eof_child.id();
+        let eof_birth = clovy_browser_process_identity::process_birth(eof_pid).unwrap();
+        drop(eof_slot.lease.lock().unwrap().take().unwrap());
+        send(
+            &mut eof_child,
+            json!({"protocol":1,"token":token,"grant":eof_grant}),
+        );
+        let eof_ack = line(&mut eof_output).unwrap();
+        let eof_owned: Owned = serde_json::from_value(eof_ack["owned"].clone()).unwrap();
+        eof_grant
+            .verify_owned(&eof_owned, eof_pid, eof_birth, None)
+            .unwrap();
+        let eof_competing =
+            open_existing_plain(&eof_slot.profile.join(".clovy-lease"), true).unwrap();
+        assert!(lock_profile(&eof_competing).is_err());
+        // A real, inert member of the host's group keeps the host's lease
+        // alive after EOF, even after the direct browser process has closed.
+        let mut member = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(eof_pid as i32)
+            .spawn()
+            .unwrap();
+        drop(eof_child.stdin.take());
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(eof_child.try_wait().unwrap().is_none());
+        assert!(lock_profile(&eof_competing).is_err());
+        member.kill().unwrap();
+        member.wait().unwrap();
+        assert!(eof_child.wait().unwrap().success());
+        lock_profile(&eof_competing).expect("lease remains held after host EOF");
+        drop(eof_competing);
         transport.shutdown();
         let persistent_config = EngineConfig::production(
             root.path().join("resources"),

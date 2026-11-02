@@ -138,7 +138,9 @@ pub(crate) mod windows_job {
     use std::io;
     use windows::core::PCWSTR;
     use windows::Win32::{
-        Foundation::{CloseHandle, HANDLE},
+        Foundation::{
+            CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, HANDLE, WIN32_ERROR,
+        },
         System::{
             Diagnostics::ToolHelp::{
                 CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
@@ -170,10 +172,30 @@ pub(crate) mod windows_job {
     impl Job {
         /// A new, empty kill-on-close job.
         pub fn new() -> io::Result<Self> {
+            Self::create(PCWSTR::null(), false)
+        }
+
+        /// Browser-only named job. An existing object must never be adopted.
+        pub(crate) fn new_named(name: &str) -> io::Result<Self> {
+            use std::os::windows::ffi::OsStrExt;
+            let wide: Vec<u16> = std::ffi::OsStr::new(name)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+            Self::create(PCWSTR(wide.as_ptr()), true)
+        }
+
+        fn create(name: PCWSTR, reject_existing: bool) -> io::Result<Self> {
             // SAFETY: the job handle is closed by `Drop`, also on the error
             // path below.
             unsafe {
-                let job = Job(CreateJobObjectW(None, PCWSTR::null())?.0 as isize);
+                if reject_existing {
+                    SetLastError(WIN32_ERROR(0));
+                }
+                let job = Job(CreateJobObjectW(None, name)?.0 as isize);
+                if reject_existing && GetLastError() == ERROR_ALREADY_EXISTS {
+                    return Err(io::Error::other("browser job already exists"));
+                }
                 let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
                 limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
                 SetInformationJobObject(

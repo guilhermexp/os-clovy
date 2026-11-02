@@ -9,11 +9,14 @@ The parent clears the environment and supplies the first stdin line
 `{"protocol":1,"token":"<32 random bytes encoded as 64 lowercase hex characters>","grant":{...}}`.
 The grant binds the profile, modality, nonce, root/profile file identities and
 the parent PID and native birth. Before acknowledging, the host validates the
-grant and the live parent; an anonymous grant also requires the matching
-durable `Starting` receipt. `start` must use the exact granted path and mode,
-and the host revalidates before a launch or relaunch. The parent continues to
-hold the profile lease: this admission step does not transfer the lease or
-publish `Owned`. The host echoes the token over the inherited private stdout pipe. It opens
+grant and the live parent. For an anonymous profile the parent releases its
+lease immediately before `Hello`; the host acquires the existing kernel lease,
+revalidates `Starting`, and durably publishes its process and group or Job
+identity as `Owned` before acknowledging. The parent verifies that identity
+against the spawned child and receipt before sending `start`. Persistent
+profiles retain the parent lease. `start` must use the exact granted path and
+mode, and the host revalidates before a launch or relaunch. The host echoes the
+token over the inherited private stdout pipe. It opens
 no socket, discovery service, debugger port, provider plugin or streaming server.
 The authentication capability is possession of the inherited private pipes;
 the token correlates the child, and is never an argument or environment value.
@@ -106,8 +109,9 @@ are reread before emission. Unsupported text shadows, filters, reflections,
 transforms, strokes or emphasis that cannot be bounded fail closed rather than
 producing an image. Every scheduler restoration is attempted on every path;
 failure closes the browser and returns a terminal unknown result so the parent
-invalidates the task. The parent owns profile leases, lifecycle cancellation, grants, approvals,
-network policy, artifacts and resume authorization.
+invalidates the task. The parent owns lifecycle cancellation, grants, approvals,
+network policy, artifacts and resume authorization. The parent holds persistent
+profile leases; an admitted host holds its anonymous profile lease.
 
 Native macOS and Windows acceptance remains separate from the synthetic Linux
 fixture. `private-host-smoke.py` accepts the exact host and Chrome paths and

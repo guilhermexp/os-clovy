@@ -42,6 +42,8 @@ struct Hello {
     token: String,
     protocol: u32,
     grant: clovy_browser_grant::Grant,
+    #[serde(rename = "jobName")]
+    job_name: Option<String>,
 }
 #[derive(Deserialize)]
 struct Request {
@@ -365,9 +367,13 @@ struct Host {
     tabs: HashMap<u32, (u32, String)>,
     next_tab: u32,
     refs: HashMap<String, PrivateReference>,
+    owned: Option<clovy_browser_grant::OwnedLease>,
 }
 impl Host {
-    fn new(grant: clovy_browser_grant::Grant) -> Self {
+    fn new(
+        grant: clovy_browser_grant::Grant,
+        owned: Option<clovy_browser_grant::OwnedLease>,
+    ) -> Self {
         Self {
             grant,
             browser: None,
@@ -377,6 +383,14 @@ impl Host {
             tabs: HashMap::new(),
             next_tab: 1,
             refs: HashMap::new(),
+            owned,
+        }
+    }
+    fn valid_grant(&self) -> bool {
+        match (&self.owned, self.grant.persistent) {
+            (Some(owned), false) => owned.validate(&self.grant).is_ok(),
+            (None, true) => self.grant.validate().is_ok(),
+            _ => false,
         }
     }
     fn browser(&mut self) -> Result<&mut BrowserManager, String> {
@@ -433,7 +447,7 @@ impl Host {
         let (c, p, port, persistent, headed) = self.launch.clone().ok_or("not_started")?;
         if self.grant.persistent != persistent
             || self.grant.profile.as_os_str() != std::ffi::OsStr::new(&p)
-            || self.grant.validate().is_err()
+            || !self.valid_grant()
         {
             return Err("grant_mismatch".into());
         }
@@ -643,7 +657,7 @@ impl Host {
             } => {
                 if self.grant.persistent != persistent
                     || self.grant.profile.as_os_str() != std::ffi::OsStr::new(&profile_path)
-                    || self.grant.validate().is_err()
+                    || !self.valid_grant()
                 {
                     return Err("grant_mismatch".into());
                 }
@@ -1584,8 +1598,25 @@ async fn run() -> Result<(), String> {
         return Err("invalid_handshake".into());
     }
     hello.grant.validate().map_err(|_| "invalid_grant")?;
-    output(&json!({"protocol":1,"token":hello.token}))?;
-    let mut host = Host::new(hello.grant);
+    let owned = if hello.grant.persistent {
+        if hello.job_name.is_some() {
+            return Err("invalid_grant".into());
+        }
+        None
+    } else {
+        Some(
+            hello
+                .grant
+                .acquire_owned(hello.job_name.as_deref())
+                .map_err(|_| "invalid_grant")?,
+        )
+    };
+    if let Some(owned) = &owned {
+        output(&json!({"protocol":1,"token":hello.token,"owned":owned.identity}))?;
+    } else {
+        output(&json!({"protocol":1,"token":hello.token}))?;
+    }
+    let mut host = Host::new(hello.grant, owned);
     #[cfg(unix)]
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|_| "signal_unavailable")?;

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -123,6 +123,105 @@ pub(crate) fn same_open_file(file: &File, path: &Path) -> bool {
     matches!((open_file_identity(file), open_existing_plain(path, false).and_then(|current| open_file_identity(&current))), (Ok(held), Ok(current)) if held == current)
 }
 
+pub(crate) fn lock_profile(file: &File) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        #[repr(C)]
+        struct Overlapped {
+            internal: usize,
+            internal_high: usize,
+            offset: u32,
+            offset_high: u32,
+            event: *mut std::ffi::c_void,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn LockFileEx(
+                file: *mut std::ffi::c_void,
+                flags: u32,
+                reserved: u32,
+                low: u32,
+                high: u32,
+                overlapped: *mut Overlapped,
+            ) -> i32;
+        }
+        let mut overlap: Overlapped = unsafe { std::mem::zeroed() };
+        if unsafe { LockFileEx(file.as_raw_handle(), 3, 0, u32::MAX, u32::MAX, &mut overlap) } == 0
+        {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+pub(crate) fn sync_profile_directory(profile: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    File::open(profile)?.sync_all()?;
+    #[cfg(windows)]
+    let _ = profile;
+    Ok(())
+}
+
+pub(crate) fn create_receipt_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x8000_0000);
+    }
+    options.open(path)
+}
+
+pub(crate) fn publish_receipt_file(
+    source: &Path,
+    destination: &Path,
+    replace: bool,
+) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let _ = replace;
+        fs::rename(source, destination)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn MoveFileExW(source: *const u16, destination: *const u16, flags: u32) -> i32;
+        }
+        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        if unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                0x8 | if replace { 1 } else { 0 },
+            )
+        } == 0
+        {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 fn grant_directory_identity(path: &Path, persistent: bool) -> io::Result<[u64; 2]> {
     if persistent {
         profile_object_identity(&fs::canonicalize(path)?)
@@ -145,7 +244,260 @@ pub(crate) struct Grant {
     pub(crate) persistent: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Owned {
+    version: u32,
+    nonce: String,
+    root_identity: [u64; 2],
+    profile_identity: [u64; 2],
+    parent_pid: u32,
+    parent_birth: u64,
+    pub(crate) host_pid: u32,
+    pub(crate) host_birth: u64,
+    group: Option<u32>,
+    job: Option<String>,
+    boot: Option<String>,
+}
+
+pub(crate) struct OwnedLease {
+    pub(crate) identity: Owned,
+    #[cfg(windows)]
+    job: OwnedJob,
+    lease: File,
+}
+
+// Keep the lease after closing the direct browser process until its remaining
+// group or Job members have exited. Unknown observations are not proof of exit.
+impl Drop for OwnedLease {
+    fn drop(&mut self) {
+        while !self.other_processes_exited() {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+}
+
+impl OwnedLease {
+    #[cfg(target_os = "linux")]
+    fn other_processes_exited(&self) -> bool {
+        let Ok(entries) = fs::read_dir("/proc") else {
+            return false;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { return false };
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|v| v.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if pid == self.identity.host_pid {
+                continue;
+            }
+            let stat = match fs::read_to_string(entry.path().join("stat")) {
+                Ok(stat) => stat,
+                Err(_) => {
+                    let observed = unsafe { libc::getpgid(pid as i32) };
+                    if observed == self.identity.group.unwrap_or_default() as i32
+                        || (observed < 0
+                            && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH))
+                    {
+                        return false;
+                    }
+                    continue;
+                }
+            };
+            let Some((_, fields)) = stat.rsplit_once(')') else {
+                return false;
+            };
+            let mut fields = fields.split_whitespace();
+            let (Some(state), Some(_parent), Some(group)) = (
+                fields.next(),
+                fields.next(),
+                fields.next().and_then(|v| v.parse::<u32>().ok()),
+            ) else {
+                return false;
+            };
+            if Some(group) == self.identity.group && !matches!(state, "Z" | "X") {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[cfg(target_os = "macos")]
+    fn other_processes_exited(&self) -> bool {
+        #[link(name = "proc")]
+        extern "C" {
+            fn proc_listpgrppids(
+                group: libc::pid_t,
+                buffer: *mut libc::c_void,
+                size: libc::c_int,
+            ) -> libc::c_int;
+            fn proc_pidinfo(
+                pid: libc::c_int,
+                flavor: libc::c_int,
+                arg: u64,
+                buffer: *mut libc::c_void,
+                size: libc::c_int,
+            ) -> libc::c_int;
+        }
+        let mut pids = [0i32; 4096];
+        let group = self.identity.group.unwrap_or_default() as i32;
+        let count = unsafe {
+            proc_listpgrppids(
+                group,
+                pids.as_mut_ptr().cast(),
+                std::mem::size_of_val(&pids) as i32,
+            )
+        };
+        if count <= 0 || count as usize >= pids.len() {
+            return false;
+        }
+        for pid in pids.into_iter().take(count as usize) {
+            if pid == self.identity.host_pid as i32 {
+                continue;
+            }
+            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of_val(&info) as i32;
+            if unsafe {
+                proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDTBSDINFO,
+                    0,
+                    std::ptr::from_mut(&mut info).cast(),
+                    size,
+                )
+            } != size
+            {
+                let observed = unsafe { libc::getpgid(pid) };
+                if observed == group
+                    || (observed < 0
+                        && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH))
+                {
+                    return false;
+                }
+                continue;
+            }
+            if info.pbi_pgid == group as u32 && info.pbi_status != libc::SZOMB {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[cfg(windows)]
+    fn other_processes_exited(&self) -> bool {
+        #[repr(C)]
+        struct Accounting {
+            times: [i64; 4],
+            faults: u32,
+            processes: u32,
+            active: u32,
+            terminated: u32,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn QueryInformationJobObject(
+                job: *mut std::ffi::c_void,
+                class: u32,
+                data: *mut std::ffi::c_void,
+                length: u32,
+                returned: *mut u32,
+            ) -> i32;
+        }
+        let mut data: Accounting = unsafe { std::mem::zeroed() };
+        unsafe {
+            QueryInformationJobObject(
+                self.job.0,
+                1,
+                std::ptr::from_mut(&mut data).cast(),
+                std::mem::size_of_val(&data) as u32,
+                std::ptr::null_mut(),
+            ) != 0
+                && data.active == 1
+        }
+    }
+}
+
+#[cfg(windows)]
+struct OwnedJob(*mut std::ffi::c_void);
+#[cfg(windows)]
+impl OwnedJob {
+    fn validate(&self) -> io::Result<()> {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn IsProcessInJob(
+                process: *mut std::ffi::c_void,
+                job: *mut std::ffi::c_void,
+                result: *mut i32,
+            ) -> i32;
+            fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        }
+        let mut member = 0;
+        if unsafe { IsProcessInJob(GetCurrentProcess(), self.0, &mut member) } == 0 || member == 0 {
+            return Err(io::Error::other("host is outside the granted job"));
+        }
+        Ok(())
+    }
+}
+#[cfg(windows)]
+impl Drop for OwnedJob {
+    fn drop(&mut self) {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+        }
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+fn boot_identity() -> io::Result<Option<String>> {
+    #[cfg(target_os = "linux")]
+    {
+        let value = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+        let value = value.trim();
+        let id = uuid::Uuid::parse_str(value).map_err(io::Error::other)?;
+        let mut buffer = uuid::Uuid::encode_buffer();
+        if &*id.hyphenated().encode_lower(&mut buffer) != value {
+            return Err(io::Error::other("invalid boot identity"));
+        }
+        Ok(Some(value.to_owned()))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(None)
+    }
+}
+
+#[cfg(windows)]
+fn open_own_job(name: &str) -> io::Result<OwnedJob> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenJobObjectW(access: u32, inherit: i32, name: *const u16) -> *mut std::ffi::c_void;
+    }
+    let wide: Vec<u16> = std::ffi::OsStr::new(name)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let handle = unsafe { OpenJobObjectW(0x0004, 0, wide.as_ptr()) }; // JOB_OBJECT_QUERY
+    if handle.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let job = OwnedJob(handle);
+    job.validate()?;
+    Ok(job)
+}
+
 impl Grant {
+    #[cfg(windows)]
+    pub(crate) fn browser_job_name(&self) -> String {
+        format!("Local\\ClovyBrowser-{}", self.nonce)
+    }
     pub(crate) fn new(profile: &Path, persistent: bool) -> io::Result<Self> {
         let root = profile
             .parent()
@@ -179,13 +531,18 @@ impl Grant {
     }
 
     pub(crate) fn validate(&self) -> io::Result<()> {
+        self.validate_phase(None)
+    }
+
+    fn validate_phase(&self, expected: Option<&Owned>) -> io::Result<()> {
+        let canonical_nonce = uuid::Uuid::parse_str(&self.nonce).is_ok_and(|id| {
+            let mut buffer = uuid::Uuid::encode_buffer();
+            &*id.hyphenated().encode_lower(&mut buffer) == self.nonce.as_str()
+        });
         if self.version != 1
             || !self.profile.is_absolute()
             || self.profile.parent() != Some(self.root.as_path())
-            || uuid::Uuid::parse_str(&self.nonce)
-                .ok()
-                .map(|v| v.to_string())
-                != Some(self.nonce.clone())
+            || !canonical_nonce
             || (!self.persistent
                 && self
                     .root
@@ -210,12 +567,18 @@ impl Grant {
             }
             let value: Value = serde_json::from_slice(&bytes)?;
             if value["version"] != 1
-                || value["phase"] != "Starting"
+                || value["phase"]
+                    != if expected.is_some() {
+                        "Owned"
+                    } else {
+                        "Starting"
+                    }
                 || value["nonce"] != self.nonce
                 || value["ownerProcessId"] != self.parent_pid
                 || value["ownerBirth"] != self.parent_birth
                 || value["rootIdentity"] != json!(self.root_identity)
                 || value["profileIdentity"] != json!(self.profile_identity)
+                || expected.is_some_and(|owned| value["owned"] != json!(owned))
             {
                 return Err(io::Error::other("invalid browser grant"));
             }
@@ -227,6 +590,8 @@ impl Grant {
             {
                 return Err(io::Error::other("invalid browser grant"));
             }
+        } else if expected.is_some() {
+            return Err(io::Error::other("persistent profiles have no Owned grant"));
         }
         if grant_directory_identity(&self.root, self.persistent)? != self.root_identity
             || grant_directory_identity(&self.profile, self.persistent)? != self.profile_identity
@@ -235,5 +600,139 @@ impl Grant {
             return Err(io::Error::other("invalid browser grant"));
         }
         Ok(())
+    }
+
+    pub(crate) fn acquire_owned(&self, job_name: Option<&str>) -> io::Result<OwnedLease> {
+        if self.persistent {
+            return Err(io::Error::other("persistent lease stays with root"));
+        }
+        self.validate()?;
+        let lease_path = self.profile.join(".clovy-lease");
+        let lease = open_existing_plain(&lease_path, true)?;
+        lock_profile(&lease)?;
+        if !same_open_file(&lease, &lease_path) {
+            return Err(io::Error::other("lease changed"));
+        }
+        self.validate()?;
+        let host_pid = std::process::id();
+        #[cfg(unix)]
+        let group = {
+            let group = unsafe { libc::getpgrp() };
+            if group <= 0 || group as u32 != host_pid || job_name.is_some() {
+                return Err(io::Error::other("invalid browser process group"));
+            }
+            Some(group as u32)
+        };
+        #[cfg(windows)]
+        let group = None;
+        #[cfg(windows)]
+        let job = {
+            let name = job_name.ok_or_else(|| io::Error::other("missing browser job"))?;
+            if name != self.browser_job_name() {
+                return Err(io::Error::other("invalid browser job"));
+            }
+            open_own_job(name)?
+        };
+        let owned = Owned {
+            version: 1,
+            nonce: self.nonce.clone(),
+            root_identity: self.root_identity,
+            profile_identity: self.profile_identity,
+            parent_pid: self.parent_pid,
+            parent_birth: self.parent_birth,
+            host_pid,
+            host_birth: process_birth(host_pid)?,
+            group,
+            job: job_name.map(str::to_owned),
+            boot: boot_identity()?,
+        };
+        let receipt_path = self.profile.join(".clovy-reserved.json");
+        let mut source = open_existing_plain(&receipt_path, false)?;
+        let mut bytes = Vec::new();
+        (&mut source).take(4097).read_to_end(&mut bytes)?;
+        if bytes.len() > 4096 || !same_open_file(&source, &receipt_path) {
+            return Err(io::Error::other("receipt changed"));
+        }
+        let mut receipt: Value = serde_json::from_slice(&bytes)?;
+        if receipt["phase"] != "Starting" {
+            return Err(io::Error::other("invalid receipt phase"));
+        }
+        self.validate()?;
+        if !same_open_file(&source, &receipt_path) {
+            return Err(io::Error::other("receipt changed"));
+        }
+        receipt["phase"] = json!("Owned");
+        receipt["owned"] = json!(&owned);
+        let temporary = self
+            .profile
+            .join(format!(".clovy-owned-{}.tmp", uuid::Uuid::new_v4()));
+        let mut file = create_receipt_file(&temporary)?;
+        serde_json::to_writer(&mut file, &receipt)?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        drop(source);
+        publish_receipt_file(&temporary, &receipt_path, true)?;
+        sync_profile_directory(&self.profile)?;
+        self.validate_phase(Some(&owned))?;
+        Ok(OwnedLease {
+            identity: owned,
+            lease,
+            #[cfg(windows)]
+            job,
+        })
+    }
+
+    pub(crate) fn verify_owned(
+        &self,
+        owned: &Owned,
+        child_pid: u32,
+        child_birth: u64,
+        job_name: Option<&str>,
+    ) -> io::Result<()> {
+        if self.persistent
+            || owned.version != 1
+            || owned.nonce != self.nonce
+            || owned.root_identity != self.root_identity
+            || owned.profile_identity != self.profile_identity
+            || owned.parent_pid != self.parent_pid
+            || owned.parent_birth != self.parent_birth
+            || owned.host_pid != child_pid
+            || owned.host_birth != child_birth
+            || process_birth(child_pid)? != child_birth
+            || owned.boot != boot_identity()?
+            || owned.job.as_deref() != job_name
+        {
+            return Err(io::Error::other("invalid Owned acknowledgement"));
+        }
+        #[cfg(unix)]
+        if owned.group != Some(child_pid)
+            || unsafe { libc::getpgid(child_pid as i32) } != child_pid as i32
+        {
+            return Err(io::Error::other("invalid Owned group"));
+        }
+        #[cfg(windows)]
+        if owned.group.is_some() || job_name != Some(self.browser_job_name().as_str()) {
+            return Err(io::Error::other("invalid Owned job"));
+        }
+        self.validate_phase(Some(owned))
+    }
+}
+
+impl OwnedLease {
+    pub(crate) fn validate(&self, grant: &Grant) -> io::Result<()> {
+        if self.identity.host_pid != std::process::id()
+            || process_birth(self.identity.host_pid)? != self.identity.host_birth
+            || !same_open_file(&self.lease, &grant.profile.join(".clovy-lease"))
+        {
+            return Err(io::Error::other("ownership changed"));
+        }
+        #[cfg(unix)]
+        if unsafe { libc::getpgrp() } != self.identity.host_pid as i32 {
+            return Err(io::Error::other("ownership group changed"));
+        }
+        #[cfg(windows)]
+        self.job.validate()?;
+        grant.validate_phase(Some(&self.identity))
     }
 }
