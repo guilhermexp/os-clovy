@@ -18,6 +18,12 @@ The handle remains open through filesystem classification and the guarded
 title read. Hosted frames retain both process handles; a window owned by its
 target process needs only one qualification. Image lookup uses a small buffer
 and retries with the Windows path limit only when the first buffer is too small.
+Exact-window capture carries the stored window and owner generations into the
+capture backends. WGC requalifies around session start and frame acquisition;
+the PrintWindow worker requalifies after its responsiveness probe and retains
+the process handles through each pixel read. A failed WGC window attempt is
+terminal; the window path does not use the display BitBlt capture. These are
+source changes and cross-compilation evidence, not Windows runtime acceptance.
 Windows UIA descendants, capture, input and other native guards, macOS guards,
 a newly prepared engine, and native acceptance remain pending. This partial
 change does not qualify an existing engine artifact.

@@ -4503,10 +4503,10 @@ index 44d3f2c..63dd5c2 100644
 
 diff --git a/crates/windows/src/private_browser_guard.rs b/crates/windows/src/private_browser_guard.rs
 new file mode 100644
-index 0000000..1cae589
+index 0000000..0fc6dcb
 --- /dev/null
 +++ b/crates/windows/src/private_browser_guard.rs
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,158 @@
 +//! Private host configuration and per-use process image qualification.
 +use agent_desktop_core::{AdapterError, ErrorCode, ProcessId};
 +
@@ -4554,6 +4554,12 @@ index 0000000..1cae589
 +    #[cfg(target_os = "windows")]
 +    _handle: ProcessHandle,
 +    token: String,
++}
++
++impl QualifiedProcess {
++    pub(crate) fn token(&self) -> &str {
++        &self.token
++    }
 +}
 +
 +#[cfg(target_os = "windows")]
@@ -4659,6 +4665,685 @@ index 0000000..1cae589
 +        _owner: owner,
 +    })
 +}
+diff --git a/crates/windows/src/system/capture/capture_backend.rs b/crates/windows/src/system/capture/capture_backend.rs
+index f33a96f..a76ad80 100644
+--- a/crates/windows/src/system/capture/capture_backend.rs
++++ b/crates/windows/src/system/capture/capture_backend.rs
+@@ -1,15 +1,12 @@
+ //! Capture backend seam: support predicate, modern entry, and precedence.
+ //!
+ //! Production prefers Modern (`Windows.Graphics.Capture`) when
+-//! [`modern_is_supported`] is true, and falls back to Legacy on unsupported
+-//! or modern failure. Tests force unavailable or fail-after-available through
+-//! [`test_hooks`].
++//! [`modern_is_supported`] is true. Window capture uses Legacy only when
++//! Modern is unsupported; display capture keeps its existing precedence.
+
+ use std::time::Duration;
+
+-#[cfg(test)]
+-use agent_desktop_core::ErrorCode;
+-use agent_desktop_core::{AdapterError, Deadline, ImageBuffer};
++use agent_desktop_core::{AdapterError, Deadline, ErrorCode, ImageBuffer, ProcessId, WindowInfo};
+
+ use super::capture_display::capture_display_at;
+ use super::capture_modern;
+@@ -20,10 +17,78 @@ use crate::system::window::window_enum::WindowHandle;
+ /// degradation must not starve the fallback of its deadline).
+ const LEGACY_DEADLINE_FLOOR: Duration = Duration::from_millis(200);
+
+-#[derive(Clone, Copy, Debug)]
++#[derive(Clone, Debug)]
++pub(crate) struct WindowCaptureTarget {
++    pub(crate) window: WindowInfo,
++    pub(crate) owner: ProcessId,
++    pub(crate) owner_token: String,
++}
++
++impl WindowCaptureTarget {
++    pub(crate) fn handle(&self) -> WindowHandle {
++        crate::system::window::window_ops::parse_handle(&self.window.id)
++    }
++
++    pub(crate) fn qualify(
++        &self,
++        deadline: Deadline,
++    ) -> Result<WindowCaptureAuthority, AdapterError> {
++        use crate::system::window::window_identity::{WindowIdentityEvidence, live_window_owner};
++        deadline.ensure_remaining()?;
++        agent_desktop_core::commands::clovy_cancel::ensure()?;
++        let handle = self.handle();
++        let evidence =
++            WindowIdentityEvidence::from_info(handle, &self.window).ok_or_else(|| {
++                AdapterError::new(ErrorCode::StaleRef, "Window generation is unavailable")
++            })?;
++        if live_window_owner(handle) != Some(self.owner) {
++            return Err(AdapterError::new(
++                ErrorCode::StaleRef,
++                "Window owner changed",
++            ));
++        }
++        let target = crate::private_browser_guard::qualify_expected(
++            evidence.pid,
++            evidence.process_instance,
++        )?;
++        let owner = if self.owner == evidence.pid {
++            if self.owner_token != evidence.process_instance {
++                return Err(AdapterError::new(
++                    ErrorCode::StaleRef,
++                    "Window owner changed",
++                ));
++            }
++            None
++        } else {
++            Some(crate::private_browser_guard::qualify_expected(
++                self.owner,
++                &self.owner_token,
++            )?)
++        };
++        if live_window_owner(handle) != Some(self.owner) || !evidence.owns_handle_now()? {
++            return Err(AdapterError::new(
++                ErrorCode::StaleRef,
++                "Window owner changed",
++            ));
++        }
++        agent_desktop_core::commands::clovy_cancel::ensure()?;
++        deadline.ensure_remaining()?;
++        Ok(WindowCaptureAuthority {
++            _target: target,
++            _owner: owner,
++        })
++    }
++}
++
++pub(crate) struct WindowCaptureAuthority {
++    _target: crate::private_browser_guard::QualifiedProcess,
++    _owner: Option<crate::private_browser_guard::QualifiedProcess>,
++}
++
++#[derive(Clone, Debug)]
+ pub(crate) enum CaptureSubject {
+     Window {
+-        handle: WindowHandle,
++        target: WindowCaptureTarget,
+         scale_factor: f64,
+     },
+     Display {
+@@ -65,9 +130,9 @@ pub(crate) fn capture_modern(
+     }
+     match subject {
+         CaptureSubject::Window {
+-            handle,
++            target,
+             scale_factor,
+-        } => capture_modern::capture_window(handle, scale_factor, deadline),
++        } => capture_modern::capture_window(&target, scale_factor, deadline),
+         CaptureSubject::Display { index } => capture_modern::capture_display(index, deadline),
+     }
+ }
+@@ -78,28 +143,32 @@ pub(crate) fn capture_legacy(
+ ) -> Result<ImageBuffer, AdapterError> {
+     match subject {
+         CaptureSubject::Window {
+-            handle,
++            target,
+             scale_factor,
+-        } => {
+-            let handle = handle as usize;
+-            super::native_call::capture(deadline, "window-capture", move || {
+-                capture_window(handle as WindowHandle, scale_factor, deadline)
+-            })
+-        }
++        } => super::native_call::capture(deadline, "window-capture", move || {
++            capture_window(&target, scale_factor, deadline)
++        }),
+         CaptureSubject::Display { index } => capture_display_at(index, deadline),
+     }
+ }
+
+-/// Prefer Modern when supported; fall back to Legacy on unsupported or failure.
++/// Window failures after a Modern attempt are terminal; display precedence is unchanged.
+ pub(crate) fn capture_with_precedence(
+     subject: CaptureSubject,
+     deadline: Deadline,
+ ) -> Result<ImageBuffer, AdapterError> {
+     deadline.ensure_remaining()?;
++    if matches!(subject, CaptureSubject::Window { .. }) {
++        return if modern_is_supported() {
++            capture_modern(subject, deadline)
++        } else {
++            capture_legacy(subject, deadline)
++        };
++    }
+     let mut modern_failure = None;
+     if modern_is_supported() {
+         let modern_deadline = modern_deadline_slice(deadline);
+-        match capture_modern(subject, modern_deadline) {
++        match capture_modern(subject.clone(), modern_deadline) {
+             Ok(image) => return Ok(image),
+             Err(error) => {
+                 tracing::debug!(
+diff --git a/crates/windows/src/system/capture/capture_live_breadth_tests.rs b/crates/windows/src/system/capture/capture_live_breadth_tests.rs
+index 01ba760..4978d30 100644
+--- a/crates/windows/src/system/capture/capture_live_breadth_tests.rs
++++ b/crates/windows/src/system/capture/capture_live_breadth_tests.rs
+@@ -68,7 +68,11 @@ fn live_legacy_pattern_fixture_matches_and_invert_fails_when_stageable() {
+     let class_name = fixture.class_name().to_owned();
+
+     let image = backend_hooks::with_force_unsupported(|| {
+-        capture_window(handle as _, 1.0, deadline(10_000))
++        capture_window(
++            &crate::system::capture::capture_test_support::window_target(handle),
++            1.0,
++            deadline(10_000),
++        )
+     })
+     .expect("legacy PrintWindow of the pattern fixture");
+     let (bgra, width, _height) =
+@@ -100,9 +104,12 @@ fn live_modern_pattern_fixture_matches_when_supported_and_stageable() {
+     let handle = fixture.handle();
+     let class_name = fixture.class_name().to_owned();
+
+-    let image =
+-        crate::system::capture::capture_modern::capture_window(handle as _, 1.0, deadline(10_000))
+-            .expect("WGC window capture of the pattern fixture");
++    let image = crate::system::capture::capture_modern::capture_window(
++        &crate::system::capture::capture_test_support::window_target(handle),
++        1.0,
++        deadline(10_000),
++    )
++    .expect("WGC window capture of the pattern fixture");
+     let (bgra, width, _height) =
+         decode_png_to_bgra(&image.data, deadline(10_000)).expect("decode captured PNG");
+     assert_pattern_samples(&bgra, width, &fixture);
+diff --git a/crates/windows/src/system/capture/capture_modern.rs b/crates/windows/src/system/capture/capture_modern.rs
+index 246fda5..e9cc8d1 100644
+--- a/crates/windows/src/system/capture/capture_modern.rs
++++ b/crates/windows/src/system/capture/capture_modern.rs
+@@ -2,7 +2,7 @@
+ //!
+ //! Availability is `GraphicsCaptureSession::IsSupported` only — never a build
+ //! number (A22-1). One frame is taken against the caller's deadline; expiry is
+-//! a backend failure so precedence can fall back to Legacy.
++//! a backend failure; a window attempt does not fall back after it starts.
+
+ use std::time::Duration;
+
+@@ -16,6 +16,7 @@ use windows::Win32::Foundation::HWND;
+ use windows::Win32::Graphics::Gdi::HMONITOR;
+ use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
+
++use super::capture_backend::WindowCaptureTarget;
+ use super::capture_d3d::{self, CaptureDevice, resource_balance};
+ use super::png_codec::encode_bgra_to_png;
+ use crate::system::display::display_at;
+@@ -29,14 +30,15 @@ pub(crate) fn modern_is_supported() -> bool {
+ }
+
+ pub(crate) fn capture_window(
+-    handle: WindowHandle,
++    target: &WindowCaptureTarget,
+     scale_factor: f64,
+     deadline: Deadline,
+ ) -> Result<ImageBuffer, AdapterError> {
+     deadline.ensure_remaining()?;
+     ensure_supported()?;
+-    let item = item_for_window(handle)?;
+-    capture_item(item, scale_factor, deadline)
++    let _authority = target.qualify(deadline)?;
++    let item = item_for_window(target.handle())?;
++    capture_item(item, scale_factor, deadline, Some(target))
+ }
+
+ pub(crate) fn capture_display(
+@@ -48,7 +50,7 @@ pub(crate) fn capture_display(
+     let display = display_at(index, deadline)?;
+     let monitor = monitor_handle_from_id(&display.id)?;
+     let item = item_for_monitor(monitor)?;
+-    capture_item(item, display.scale, deadline)
++    capture_item(item, display.scale, deadline, None)
+ }
+
+ fn ensure_supported() -> Result<(), AdapterError> {
+@@ -66,6 +68,7 @@ fn capture_item(
+     item: GraphicsCaptureItem,
+     scale_factor: f64,
+     deadline: Deadline,
++    target: Option<&WindowCaptureTarget>,
+ ) -> Result<ImageBuffer, AdapterError> {
+     deadline.ensure_remaining()?;
+     let size = item
+@@ -84,6 +87,7 @@ fn capture_item(
+     let session = SessionGuard::create(&pool, &item)?;
+     let _ = session.0.SetIsCursorCaptureEnabled(false);
+     let _ = session.0.SetIsBorderRequired(false);
++    let _start_authority = target.map(|target| target.qualify(deadline)).transpose()?;
+     session
+         .0
+         .StartCapture()
+@@ -97,7 +101,8 @@ fn capture_item(
+         ));
+     }
+
+-    let frame = wait_for_frame(&pool, deadline)?;
++    let frame = wait_for_frame(&pool, deadline, target)?;
++    let _frame_authority = target.map(|target| target.qualify(deadline)).transpose()?;
+     let content = frame
+         .0
+         .ContentSize()
+@@ -125,13 +130,18 @@ fn capture_item(
+     })
+ }
+
+-fn wait_for_frame(pool: &PoolGuard, deadline: Deadline) -> Result<FrameGuard, AdapterError> {
++fn wait_for_frame(
++    pool: &PoolGuard,
++    deadline: Deadline,
++    target: Option<&WindowCaptureTarget>,
++) -> Result<FrameGuard, AdapterError> {
+     #[cfg(test)]
+     if let Some(budget) = hold_frames::budget() {
+         return hold_frames_until(deadline, budget);
+     }
+     loop {
+         deadline.ensure_remaining()?;
++        let _authority = target.map(|target| target.qualify(deadline)).transpose()?;
+         match pool.0.TryGetNextFrame() {
+             Ok(frame) => return Ok(FrameGuard::new(frame)),
+             Err(_) => {
+diff --git a/crates/windows/src/system/capture/capture_modern_tests.rs b/crates/windows/src/system/capture/capture_modern_tests.rs
+index 450c140..56c4138 100644
+--- a/crates/windows/src/system/capture/capture_modern_tests.rs
++++ b/crates/windows/src/system/capture/capture_modern_tests.rs
+@@ -13,6 +13,7 @@ use windows::Graphics::Capture::GraphicsCaptureSession;
+
+ use crate::system::fixture::test_time::deadline;
+
++use crate::system::capture::capture_test_support::window_target;
+ use crate::system::capture::capture_test_support::{live_graphics_capture_lock, sample_rgb};
+
+ const HELD_FRAME_BUDGET_MS: usize = 50;
+@@ -63,7 +64,7 @@ fn unsupported_host_reports_unavailable_without_capture_api() {
+     }
+     resource_balance::reset();
+     let fixture = LocalPatternFixture::create().expect("pattern fixture starts");
+-    let error = capture_window(fixture.handle() as _, 1.0, deadline(10_000))
++    let error = capture_window(&window_target(fixture.handle()), 1.0, deadline(10_000))
+         .expect_err("unsupported host must refuse before capture work");
+     assert_eq!(error.code, ErrorCode::ActionNotSupported);
+     assert_eq!(
+@@ -90,7 +91,7 @@ fn pattern_fixture_window_capture_matches_when_supported() {
+     let paint_wait = deadline(PATTERN_PAINT_WAIT_MS);
+     let mut samples = [[0u8; 3]; 4];
+     loop {
+-        let image = capture_window(fixture.handle() as _, 1.0, deadline(10_000))
++        let image = capture_window(&window_target(fixture.handle()), 1.0, deadline(10_000))
+             .expect("WGC window capture of the pattern fixture succeeds");
+         let (bgra, width, height) =
+             decode_png_to_bgra(&image.data, deadline(10_000)).expect("decode captured PNG");
+@@ -145,7 +146,7 @@ fn monitor_capture_returns_monitor_dimensions_when_supported() {
+ }
+
+ #[test]
+-fn frame_wait_deadline_expiry_falls_back_to_legacy() {
++fn frame_wait_deadline_expiry_is_terminal_for_window_capture() {
+     let _capture = live_graphics_capture_lock();
+     bootstrap();
+     if skip_if_interop_unavailable("frame-wait deadline expiry") {
+@@ -153,7 +154,7 @@ fn frame_wait_deadline_expiry_falls_back_to_legacy() {
+     }
+     let fixture = LocalPatternFixture::create().expect("pattern fixture");
+     let modern_error = hold_frames::with(HELD_FRAME_BUDGET_MS, || {
+-        capture_window(fixture.handle() as _, 1.0, deadline(10_000))
++        capture_window(&window_target(fixture.handle()), 1.0, deadline(10_000))
+     })
+     .expect_err("holding frames past the frame-wait budget must fail the modern backend");
+     assert_eq!(modern_error.code, ErrorCode::Timeout);
+@@ -167,21 +168,21 @@ fn frame_wait_deadline_expiry_falls_back_to_legacy() {
+         "the Timeout must come from the frame-wait budget, not from the caller's deadline"
+     );
+
+-    let image = hold_frames::with(HELD_FRAME_BUDGET_MS, || {
++    let error = hold_frames::with(HELD_FRAME_BUDGET_MS, || {
+         capture_backend::capture_with_precedence(
+             CaptureSubject::Window {
+-                handle: fixture.handle() as _,
++                target: window_target(fixture.handle()),
+                 scale_factor: 1.0,
+             },
+             deadline(10_000),
+         )
+     })
+-    .expect("precedence must still succeed via Legacy after a modern timeout");
+-    assert!(!image.data.is_empty());
++    .expect_err("an attempted modern capture must not fall back after timeout");
++    assert_eq!(error.code, ErrorCode::Timeout);
+ }
+
+ #[test]
+-fn interop_failure_is_backend_failure_that_precedence_recovers() {
++fn interop_failure_is_terminal_for_window_capture() {
+     let _capture = live_graphics_capture_lock();
+     bootstrap();
+     if !modern_is_supported() {
+@@ -195,18 +196,18 @@ fn interop_failure_is_backend_failure_that_precedence_recovers() {
+         return;
+     }
+     let fixture = LocalPatternFixture::create().expect("pattern fixture");
+-    let modern_error = capture_window(fixture.handle() as _, 1.0, deadline(10_000))
++    let modern_error = capture_window(&window_target(fixture.handle()), 1.0, deadline(10_000))
+         .expect_err("missing interop must fail the modern backend");
+     assert_ne!(modern_error.code, ErrorCode::Timeout);
+-    let image = capture_backend::capture_with_precedence(
++    let error = capture_backend::capture_with_precedence(
+         CaptureSubject::Window {
+-            handle: fixture.handle() as _,
++            target: window_target(fixture.handle()),
+             scale_factor: 1.0,
+         },
+         deadline(10_000),
+     )
+-    .expect("Legacy must recover when modern interop is missing");
+-    assert!(!image.data.is_empty());
++    .expect_err("an unavailable modern interop attempt is terminal");
++    assert_eq!(error.code, modern_error.code);
+ }
+
+ #[test]
+@@ -218,9 +219,9 @@ fn resources_balance_across_success_deadline_and_forced_failure() {
+     }
+     resource_balance::reset();
+     let fixture = LocalPatternFixture::create().expect("pattern fixture");
+-    let handle = fixture.handle() as _;
++    let target = window_target(fixture.handle());
+
+-    let _ = capture_window(handle, 1.0, deadline(10_000)).expect("success path");
++    let _ = capture_window(&target, 1.0, deadline(10_000)).expect("success path");
+     assert_eq!(
+         resource_balance::live(),
+         0,
+@@ -228,7 +229,7 @@ fn resources_balance_across_success_deadline_and_forced_failure() {
+     );
+
+     let timeout = hold_frames::with(HELD_FRAME_BUDGET_MS, || {
+-        capture_window(handle, 1.0, deadline(10_000))
++        capture_window(&target, 1.0, deadline(10_000))
+     })
+     .expect_err("held frames past the frame-wait budget");
+     assert_eq!(timeout.code, ErrorCode::Timeout);
+@@ -238,7 +239,7 @@ fn resources_balance_across_success_deadline_and_forced_failure() {
+         "deadline abort must release every tracked resource"
+     );
+
+-    let forced = fail_after_start::with(|| capture_window(handle, 1.0, deadline(10_000)))
++    let forced = fail_after_start::with(|| capture_window(&target, 1.0, deadline(10_000)))
+         .expect_err("forced failure after session start");
+     assert_eq!(forced.code, ErrorCode::ActionFailed);
+     assert_eq!(
+diff --git a/crates/windows/src/system/capture/capture_test_support.rs b/crates/windows/src/system/capture/capture_test_support.rs
+index 1a390e7..8535e93 100644
+--- a/crates/windows/src/system/capture/capture_test_support.rs
++++ b/crates/windows/src/system/capture/capture_test_support.rs
+@@ -143,3 +143,27 @@ pub(crate) fn with_restored_clipboard(body: impl FnOnce()) {
+         std::panic::resume_unwind(panic);
+     }
+ }
++/// A live fixture's exact process generation; the private runtime paths must
++/// be supplied by the test runner, just as for an actual engine process.
++pub(crate) fn window_target(handle: isize) -> super::capture_backend::WindowCaptureTarget {
++    use agent_desktop_core::{WindowInfo, WindowState};
++    let hwnd = handle as crate::system::window::window_enum::WindowHandle;
++    let pid = crate::system::window::window_identity::live_window_owner(hwnd)
++        .expect("fixture window has an owner");
++    let token = crate::system::process_identity::token_for_pid(pid)
++        .expect("fixture generation is readable")
++        .expect("fixture process is live");
++    super::capture_backend::WindowCaptureTarget {
++        window: WindowInfo {
++            id: format!("w-{handle}"),
++            title: String::new(),
++            app: String::new(),
++            pid,
++            process_instance: Some(token.clone()),
++            bounds: None,
++            state: WindowState::default(),
++        },
++        owner: pid,
++        owner_token: token,
++    }
++}
+diff --git a/crates/windows/src/system/capture/capture_window.rs b/crates/windows/src/system/capture/capture_window.rs
+index 5a619c5..b797b6f 100644
+--- a/crates/windows/src/system/capture/capture_window.rs
++++ b/crates/windows/src/system/capture/capture_window.rs
+@@ -10,6 +10,7 @@
+
+ use agent_desktop_core::{AdapterError, Deadline, ErrorCode, ImageBuffer, ImageFormat};
+
++use super::capture_backend::WindowCaptureTarget;
+ pub(crate) use super::gdi_surface::gdi_balance;
+ use super::gdi_surface::{self, GdiDcPair};
+ use super::png_codec::encode_bgra_to_png;
+@@ -39,16 +40,18 @@ const MINIMIZED_ORIGIN_SENTINEL: i32 = -32_000;
+ /// Requires the caller to have already verified window identity. Performs the
+ /// pump-liveness pre-probe immediately before the native capture call.
+ pub(crate) fn capture_window(
+-    handle: WindowHandle,
++    target: &WindowCaptureTarget,
+     scale_factor: f64,
+     deadline: Deadline,
+ ) -> Result<ImageBuffer, AdapterError> {
++    let handle = target.handle();
+     deadline.ensure_remaining()?;
++    let _start_authority = target.qualify(deadline)?;
+     ensure_handle_alive(handle)?;
+     ensure_window_is_pumping(handle)?;
+     deadline.ensure_remaining()?;
+     let (width, height) = window_capture_size(handle)?;
+-    let pixels = print_window_bgra(handle, width, height)?;
++    let pixels = print_window_bgra(target, width, height, deadline)?;
+     let stride = width
+         .checked_mul(4)
+         .ok_or_else(|| AdapterError::internal("window capture stride overflowed"))?;
+@@ -124,9 +127,10 @@ fn window_capture_size(handle: WindowHandle) -> Result<(u32, u32), AdapterError>
+ /// empty buffer (common for WS_POPUP windows outside DWM redirection), retry
+ /// with bare flags so WM_PRINTCLIENT can paint the DC.
+ fn print_window_bgra(
+-    handle: WindowHandle,
++    target: &WindowCaptureTarget,
+     width: u32,
+     height: u32,
++    deadline: Deadline,
+ ) -> Result<Vec<u8>, AdapterError> {
+     #[cfg(test)]
+     if fail_after_alloc::is_active() {
+@@ -136,11 +140,11 @@ fn print_window_bgra(
+             "forced capture failure after GDI allocation",
+         ));
+     }
+-    let full = capture_with_flags(handle, width, height, PW_RENDERFULLCONTENT)?;
++    let full = capture_with_flags(target, width, height, PW_RENDERFULLCONTENT, deadline)?;
+     if !frame_appears_empty(&full) && !fail_after_fullcontent_is_active() {
+         return Ok(full);
+     }
+-    capture_with_flags(handle, width, height, 0)
++    capture_with_flags(target, width, height, 0, deadline)
+ }
+
+ #[cfg(not(test))]
+@@ -154,17 +158,19 @@ fn fail_after_fullcontent_is_active() -> bool {
+ }
+
+ fn capture_with_flags(
+-    handle: WindowHandle,
++    target: &WindowCaptureTarget,
+     width: u32,
+     height: u32,
+     flags: u32,
++    deadline: Deadline,
+ ) -> Result<Vec<u8>, AdapterError> {
+     #[cfg(test)]
+     if flags == 0 {
+         bare_retry_observed::mark();
+     }
+     let surface = CaptureSurface::create(width as i32, height as i32)?;
+-    if unsafe { PrintWindow(handle, surface.dc_pair.memory_dc, flags) } == 0 {
++    let _authority = target.qualify(deadline)?;
++    if unsafe { PrintWindow(target.handle(), surface.dc_pair.memory_dc, flags) } == 0 {
+         return Err(win32_last_error("PrintWindow failed"));
+     }
+     surface.read_bgra()
+diff --git a/crates/windows/src/system/capture/capture_window_tests.rs b/crates/windows/src/system/capture/capture_window_tests.rs
+index 6b976ef..58e4327 100644
+--- a/crates/windows/src/system/capture/capture_window_tests.rs
++++ b/crates/windows/src/system/capture/capture_window_tests.rs
+@@ -10,13 +10,14 @@ use crate::system::fixture::test_time::deadline;
+
+ use crate::system::capture::capture_test_support::live_graphics_capture_lock;
+ use crate::system::capture::capture_test_support::sample_rgb;
++use crate::system::capture::capture_test_support::window_target;
+
+ #[test]
+ fn pattern_fixture_capture_matches_sampled_colours() {
+     let _capture = live_graphics_capture_lock();
+     bootstrap();
+     let fixture = LocalPatternFixture::create().expect("pattern fixture starts");
+-    let image = capture_window(fixture.handle() as _, 1.0, deadline(10_000))
++    let image = capture_window(&window_target(fixture.handle()), 1.0, deadline(10_000))
+         .expect("PrintWindow capture of the pattern fixture succeeds");
+
+     let (bgra, width, height) =
+@@ -41,7 +42,7 @@ fn stalled_fixture_returns_app_unresponsive_without_hanging() {
+     bootstrap();
+     let stalled = StalledFixture::create().expect("stalled fixture starts");
+     let started = std::time::Instant::now();
+-    let error = capture_window(stalled.handle() as _, 1.0, deadline(10_000))
++    let error = capture_window(&window_target(stalled.handle()), 1.0, deadline(10_000))
+         .expect_err("a non-pumping window must be refused before PrintWindow");
+     assert_eq!(error.code, ErrorCode::AppUnresponsive);
+     assert!(
+@@ -60,13 +61,14 @@ fn destroyed_handle_is_not_reported_unresponsive() {
+     bootstrap();
+     let fixture = LocalPatternFixture::create().expect("pattern fixture starts");
+     let handle = fixture.handle();
++    let target = window_target(handle);
+     drop(fixture);
+     assert!(
+         !crate::tree::automation::window_exists(handle),
+         "fixture drop must destroy the window before the capture call"
+     );
+
+-    let error = capture_window(handle as _, 1.0, deadline(10_000))
++    let error = capture_window(&target, 1.0, deadline(10_000))
+         .expect_err("a destroyed handle must fail closed");
+     assert_ne!(
+         error.code,
+@@ -106,7 +108,7 @@ fn minimized_windows_are_rejected_before_bitmap_alloc() {
+     std::thread::sleep(Duration::from_millis(50));
+
+     let before = gdi_balance::live();
+-    let error = capture_window(handle, 1.0, deadline(10_000))
++    let error = capture_window(&window_target(handle as isize), 1.0, deadline(10_000))
+         .expect_err("minimized windows are rejected before PrintWindow");
+     assert_eq!(error.code, ErrorCode::InvalidArgs);
+     assert_eq!(
+@@ -132,9 +134,8 @@ fn gdi_objects_balance_across_success_deadline_and_forced_failure() {
+     bootstrap();
+     gdi_balance::reset();
+     let fixture = LocalPatternFixture::create().expect("pattern fixture starts");
+-    let handle = fixture.handle() as _;
+-
+-    let _ = capture_window(handle, 1.0, deadline(10_000)).expect("success path");
++    let target = window_target(fixture.handle());
++    let _ = capture_window(&target, 1.0, deadline(10_000)).expect("success path");
+     assert_eq!(
+         gdi_balance::live(),
+         0,
+@@ -143,7 +144,7 @@ fn gdi_objects_balance_across_success_deadline_and_forced_failure() {
+
+     let expired = Deadline::after(1).expect("tiny deadline");
+     std::thread::sleep(Duration::from_millis(5));
+-    let timeout = capture_window(handle, 1.0, expired).expect_err("expired deadline");
++    let timeout = capture_window(&target, 1.0, expired).expect_err("expired deadline");
+     assert_eq!(timeout.code, ErrorCode::Timeout);
+     assert_eq!(
+         gdi_balance::live(),
+@@ -151,7 +152,7 @@ fn gdi_objects_balance_across_success_deadline_and_forced_failure() {
+         "early deadline abort allocates nothing"
+     );
+
+-    let forced = fail_after_alloc::with(|| capture_window(handle, 1.0, deadline(10_000)))
++    let forced = fail_after_alloc::with(|| capture_window(&target, 1.0, deadline(10_000)))
+         .expect_err("forced failure after allocation");
+     assert_eq!(forced.code, ErrorCode::ActionFailed);
+     assert_eq!(
+@@ -168,7 +169,7 @@ fn printwindow_retries_with_bare_flags_when_fullcontent_path_is_skipped() {
+     let fixture = LocalPatternFixture::create().expect("pattern fixture starts");
+     bare_retry_observed::reset();
+     let image = fail_after_fullcontent::with(|| {
+-        capture_window(fixture.handle() as _, 1.0, deadline(10_000))
++        capture_window(&window_target(fixture.handle()), 1.0, deadline(10_000))
+     })
+     .expect("bare PrintWindow retry must succeed on the pattern fixture");
+     assert!(
+diff --git a/crates/windows/src/system/capture/screenshot.rs b/crates/windows/src/system/capture/screenshot.rs
+index 75b4c76..4309a44 100644
+--- a/crates/windows/src/system/capture/screenshot.rs
++++ b/crates/windows/src/system/capture/screenshot.rs
+@@ -5,7 +5,7 @@ use agent_desktop_core::{
+     ScreenshotTarget, WindowInfo,
+ };
+
+-use super::capture_backend::{CaptureSubject, capture_with_precedence};
++use super::capture_backend::{CaptureSubject, WindowCaptureTarget, capture_with_precedence};
+ use crate::system::display::{
+     capture_selection, display_at, scale_for_bounds, verify_display_identity,
+ };
+@@ -94,9 +94,43 @@ pub(crate) fn capture_window(
+     }
+     let scale = scale_for_bounds(verified.bounds, deadline)?;
+     deadline.ensure_remaining()?;
++    let owner =
++        crate::system::window::window_identity::live_window_owner(handle).ok_or_else(|| {
++            AdapterError::new(ErrorCode::WindowNotFound, "Window owner is unavailable")
++        })?;
++    let evidence = crate::system::window::window_identity::WindowIdentityEvidence::from_info(
++        handle, &verified,
++    )
++    .ok_or_else(|| AdapterError::new(ErrorCode::StaleRef, "Window generation is unavailable"))?;
++    let _authority = crate::private_browser_guard::qualify_window_processes(
++        owner,
++        evidence.pid,
++        evidence.process_instance,
++    )?;
++    let owner_token = if owner == evidence.pid {
++        evidence.process_instance.to_owned()
++    } else {
++        crate::private_browser_guard::qualify(owner)?
++            .token()
++            .to_owned()
++    };
++    if crate::system::window::window_identity::live_window_owner(handle) != Some(owner)
++        || !evidence.owns_handle_now()?
++    {
++        return Err(AdapterError::new(
++            ErrorCode::WindowNotFound,
++            "Window owner changed",
++        ));
++    }
++    agent_desktop_core::commands::clovy_cancel::ensure()?;
++    deadline.ensure_remaining()?;
+     let captured = capture_with_precedence(
+         CaptureSubject::Window {
+-            handle,
++            target: WindowCaptureTarget {
++                window: verified.clone(),
++                owner,
++                owner_token,
++            },
+             scale_factor: scale,
+         },
+         deadline,
 diff --git a/crates/windows/src/system/window/window_ops.rs b/crates/windows/src/system/window/window_ops.rs
 index ca7efde..c04c64c 100644
 --- a/crates/windows/src/system/window/window_ops.rs
