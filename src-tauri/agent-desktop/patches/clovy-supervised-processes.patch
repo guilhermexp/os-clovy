@@ -4885,6 +4885,81 @@ index 1433017..9a39ad8 100644
      assert_details_keys(&error, &["delivered_chunks", "total_chunks"]);
      assert_eq!(error_wire(&error)["disposition"]["retry"], "unsafe");
      assert_no_forbidden_detail_keys(&error);
+diff --git a/crates/windows/src/actions/physical_click.rs b/crates/windows/src/actions/physical_click.rs
+index 6562052..31b6529 100644
+--- a/crates/windows/src/actions/physical_click.rs
++++ b/crates/windows/src/actions/physical_click.rs
+@@ -11,6 +11,7 @@ use crate::actions::physical_target::{
+     delivery_point, ensure_click_delivery_ready, ensure_headed_click_policy,
+     focus_lost_before_delivery, read_click_bounds,
+ };
++#[cfg(test)]
+ use crate::input::mouse::synthesize_mouse;
+ use crate::tree::element::UIAElement;
+
+@@ -26,6 +27,7 @@ pub(crate) struct ClickSpec {
+ /// Preflight-established delivery gate: the target's live bounds and
+ /// whether its window was confirmed foreground before physical input
+ /// commits.
++#[cfg(test)]
+ pub(crate) struct ClickGate {
+     pub(crate) bounds: agent_desktop_core::Rect,
+     pub(crate) foreground_ready: bool,
+@@ -95,19 +97,46 @@ pub(crate) fn physical_click_steps(
+     ensure_headed_click_policy(policy)?;
+     deadline.ensure_remaining()?;
+     let foreground_ready = ensure_click_delivery_ready(element, deadline)?;
++    let _authority = crate::tree::element::qualify_verified(element, deadline)?;
+     let bounds = read_click_bounds(element)?;
+-    click_from_gate(
+-        ClickGate {
+-            bounds,
+-            foreground_ready,
++    if !foreground_ready {
++        return Err(focus_lost_before_delivery());
++    }
++    let point = delivery_point(bounds, verified_point)?;
++    point.validate()?;
++    let payload = element.1.as_ref().ok_or_else(focus_lost_before_delivery)?;
++    let id = payload
++        .root_window_id
++        .clone()
++        .ok_or_else(|| AdapterError::stale_ref_because("The original ref window is unavailable"))?;
++    let window = agent_desktop_core::WindowInfo {
++        id,
++        title: String::new(),
++        app: String::new(),
++        pid: agent_desktop_core::ProcessId::new(payload.root_pid),
++        process_instance: Some(payload.root_token.clone()),
++        bounds: None,
++        state: Default::default(),
++    };
++    crate::input::mouse::synthesize_mouse_for_ref(
++        &window,
++        element,
++        MouseEvent {
++            kind: MouseEventKind::Click { count: spec.count },
++            point,
++            button: spec.button,
++            modifiers: Vec::new(),
+         },
+-        verified_point,
+-        spec,
+         deadline,
+-    )
+-    .map(|step| vec![step])
++    )?;
++    Ok(vec![
++        ActionStep::succeeded(CLICK_LABEL)
++            .with_mechanism(StepMechanism::PhysicalSynthetic)
++            .with_verified(false),
++    ])
+ }
+
++#[cfg(test)]
+ pub(crate) fn click_from_gate(
+     gate: ClickGate,
+     verified_point: Option<&Point>,
 diff --git a/crates/windows/src/actions/physical_keyboard.rs b/crates/windows/src/actions/physical_keyboard.rs
 index 24f7bda..a47bbc1 100644
 --- a/crates/windows/src/actions/physical_keyboard.rs
@@ -5026,7 +5101,7 @@ index f937e4d..8a8a71d 100644
      assert_eq!(error.code, ErrorCode::ActionFailed);
      assert_eq!(
 diff --git a/crates/windows/src/actions/physical_target.rs b/crates/windows/src/actions/physical_target.rs
-index 37447ec..78da396 100644
+index 37447ec..9d71ac6 100644
 --- a/crates/windows/src/actions/physical_target.rs
 +++ b/crates/windows/src/actions/physical_target.rs
 @@ -59,7 +59,7 @@ pub(crate) fn ensure_click_delivery_ready(
@@ -5038,7 +5113,7 @@ index 37447ec..78da396 100644
      ensure_elevation_allows(element)?;
      target_window_is_foreground(element, deadline)
  }
-@@ -69,11 +69,171 @@ pub(crate) fn ensure_keyboard_delivery_ready(
+@@ -69,11 +69,183 @@ pub(crate) fn ensure_keyboard_delivery_ready(
      deadline: Deadline,
  ) -> Result<bool, AdapterError> {
      deadline.ensure_remaining()?;
@@ -5205,6 +5280,18 @@ index 37447ec..78da396 100644
 +        agent_desktop_core::commands::clovy_cancel::ensure()?;
 +        deadline.ensure_remaining()?;
 +        Ok((foreground, focus))
++    }
++
++    pub(crate) fn check_native_quick(&self, deadline: Deadline) -> Result<(), AdapterError> {
++        let owner = crate::system::window::window_identity::live_window_owner;
++        if keyboard_windows()? != (self.foreground, self.focus)
++            || owner(self.foreground as _) != Some(self.foreground_process.pid())
++            || owner(self.focus as _) != Some(self.focus_process.pid())
++        {
++            return Err(focus_lost_before_delivery());
++        }
++        agent_desktop_core::commands::clovy_cancel::ensure()?;
++        deadline.ensure_remaining()
 +    }
 +}
 +
@@ -5781,7 +5868,7 @@ index 9151716..53ee73b 100644
          &self,
          event: MouseEvent,
 diff --git a/crates/windows/src/input/drag.rs b/crates/windows/src/input/drag.rs
-index 864b596..e2fec0e 100644
+index 864b596..a7e0e47 100644
 --- a/crates/windows/src/input/drag.rs
 +++ b/crates/windows/src/input/drag.rs
 @@ -5,7 +5,7 @@
@@ -5793,7 +5880,7 @@ index 864b596..e2fec0e 100644
  //! value is never treated as delivery evidence (A9-3), so every post here
  //! is fire-and-forget.
 
-@@ -47,6 +47,76 @@ pub(crate) fn synthesize_drag(params: DragParams, deadline: Deadline) -> Result<
+@@ -47,6 +47,85 @@ pub(crate) fn synthesize_drag(params: DragParams, deadline: Deadline) -> Result<
      let result = drag_with_modifiers(params, deadline);
      owner.finish(result)
  }
@@ -5816,11 +5903,6 @@ index 864b596..e2fec0e 100644
 +    keys.push(1);
 +    let owner = crate::input::native_owner::NativeOwner::begin(keys)?;
 +    let result = (|| {
-+        let mut modifiers = crate::input::mouse::mouse_modifier::press_modifiers_for_window(
-+            &params.modifiers,
-+            deadline,
-+            &scope,
-+        )?;
 +        let result = (|| {
 +            let duration_ms = params.duration_ms.unwrap_or(DEFAULT_DURATION_MS);
 +            let drop_delay_ms = params.drop_delay_ms.unwrap_or(DEFAULT_DROP_DELAY_MS);
@@ -5828,49 +5910,63 @@ index 864b596..e2fec0e 100644
 +            let step_delay = Duration::from_secs_f64(duration_ms as f64 / steps as f64 / 1_000.0);
 +            let origin = mouse_coord::normalize_point(&params.from);
 +            let destination = mouse_coord::normalize_point(&params.to);
-+            scope.post(&[move_input(origin)])?;
++            scope.post_at(&[move_input(origin)], &params.from)?;
 +            sleep_bounded(deadline, Duration::from_millis(PICKUP_DELAY_MS))
 +                .map_err(|e| e.with_disposition(DeliverySemantics::uncertain()))?;
-+            let mut guard = DragReleaseGuard::new();
-+            scope
-+                .post_arming(&[button_input(MOUSEEVENTF_LEFTDOWN)], || guard.arm())
-+                .map_err(|e| e.with_disposition(DeliverySemantics::uncertain()))?;
-+            guard.mark_delivered();
-+            let outcome = (|| {
-+                sleep_bounded(deadline, Duration::from_millis(PICKUP_DELAY_MS))?;
-+                for index in 1..=steps {
-+                    let point = interpolate(&params.from, &params.to, index as f64 / steps as f64);
-+                    scope.post(&[move_input(mouse_coord::normalize_point(&point))])?;
-+                    guard.mark_delivered();
-+                    sleep_bounded(deadline, step_delay)?;
-+                }
-+                let mut remaining = drop_delay_ms;
-+                while remaining > 0 {
-+                    scope.post(&[move_input(destination)])?;
-+                    guard.mark_delivered();
-+                    let tick = remaining.min(DWELL_TICK_MS);
-+                    sleep_bounded(deadline, Duration::from_millis(tick))?;
-+                    remaining -= tick;
-+                }
-+                scope.post(&[move_input(destination)])?;
++            let mut modifiers = crate::input::mouse::mouse_modifier::press_modifiers_for_window(
++                &params.modifiers,
++                deadline,
++                &scope,
++                &params.from,
++            )
++            .map_err(|e| e.with_disposition(DeliverySemantics::uncertain()))?;
++            let result = (|| {
++                let mut guard = DragReleaseGuard::new();
++                scope
++                    .post_arming_cursor(&[button_input(MOUSEEVENTF_LEFTDOWN)], &params.from, || {
++                        guard.arm()
++                    })
++                    .map_err(|e| e.with_disposition(DeliverySemantics::uncertain()))?;
 +                guard.mark_delivered();
-+                post_mouse_inputs(&[button_input(MOUSEEVENTF_LEFTUP)]);
-+                guard.mark_delivered();
-+                guard.disarm();
-+                agent_desktop_core::commands::clovy_cancel::ensure()?;
-+                deadline.ensure_remaining()
++                let outcome = (|| {
++                    sleep_bounded(deadline, Duration::from_millis(PICKUP_DELAY_MS))?;
++                    for index in 1..=steps {
++                        let point =
++                            interpolate(&params.from, &params.to, index as f64 / steps as f64);
++                        scope
++                            .post_at(&[move_input(mouse_coord::normalize_point(&point))], &point)?;
++                        guard.mark_delivered();
++                        sleep_bounded(deadline, step_delay)?;
++                    }
++                    let mut remaining = drop_delay_ms;
++                    while remaining > 0 {
++                        scope.post_at(&[move_input(destination)], &params.to)?;
++                        guard.mark_delivered();
++                        let tick = remaining.min(DWELL_TICK_MS);
++                        sleep_bounded(deadline, Duration::from_millis(tick))?;
++                        remaining -= tick;
++                    }
++                    scope.post_at(&[move_input(destination)], &params.to)?;
++                    guard.mark_delivered();
++                    post_mouse_inputs(&[button_input(MOUSEEVENTF_LEFTUP)]);
++                    guard.mark_delivered();
++                    guard.disarm();
++                    agent_desktop_core::commands::clovy_cancel::ensure()?;
++                    deadline.ensure_remaining()
++                })();
++                outcome.map_err(|e| guard.enrich_error(e))
 +            })();
-+            outcome.map_err(|e| guard.enrich_error(e))
++            modifiers.release();
++            result.map_err(|e| modifiers.enrich_error(e))
 +        })();
-+        modifiers.release();
-+        result.map_err(|e| modifiers.enrich_error(e))
++        result
 +    })();
 +    owner.finish(result)
 +}
  fn drag_with_modifiers(params: DragParams, deadline: Deadline) -> Result<(), AdapterError> {
      let mut modifiers =
          crate::input::mouse::mouse_modifier::press_modifiers_checked(&params.modifiers, deadline)?;
-@@ -66,11 +136,12 @@ fn drag_sequence(params: DragParams, deadline: Deadline) -> Result<(), AdapterEr
+@@ -66,11 +145,12 @@ fn drag_sequence(params: DragParams, deadline: Deadline) -> Result<(), AdapterEr
      agent_desktop_core::commands::clovy_cancel::ensure()?;
      deadline.ensure_remaining()?;
      post_mouse_inputs(&[move_input(origin)]);
@@ -6417,7 +6513,7 @@ index e22d94a..6b7536c 100644
 -#[cfg(all(test, target_os = "windows"))]
  pub(crate) use mouse::mouse_send::mouse_send_fake_sink;
 diff --git a/crates/windows/src/input/mouse/mod.rs b/crates/windows/src/input/mouse/mod.rs
-index 2d79916..cfd9b2d 100644
+index 2d79916..e759319 100644
 --- a/crates/windows/src/input/mouse/mod.rs
 +++ b/crates/windows/src/input/mouse/mod.rs
 @@ -30,6 +30,9 @@ use crate::input::mouse::mouse_send::{
@@ -6430,7 +6526,7 @@ index 2d79916..cfd9b2d 100644
  const WHEEL_DELTA: i32 = 120;
  const WHEEL_SUGGESTION: &str =
      "Re-read the target's scroll position before retrying; part of the requested scroll landed";
-@@ -60,6 +63,100 @@ pub(crate) fn synthesize_mouse(event: MouseEvent, deadline: Deadline) -> Result<
+@@ -60,6 +63,131 @@ pub(crate) fn synthesize_mouse(event: MouseEvent, deadline: Deadline) -> Result<
      let result = synthesize_mouse_inner(event, deadline);
      owner.finish(result)
  }
@@ -6441,8 +6537,29 @@ index 2d79916..cfd9b2d 100644
 +    event: MouseEvent,
 +    deadline: Deadline,
 +) -> Result<(), AdapterError> {
-+    use agent_desktop_core::DeliverySemantics;
 +    use window_scope::WindowScope;
++    let scope = WindowScope::new(window, deadline)?;
++    synthesize_mouse_in_scope(&scope, event, deadline)
++}
++
++#[cfg(target_os = "windows")]
++pub(crate) fn synthesize_mouse_for_ref(
++    window: &agent_desktop_core::WindowInfo,
++    element: &crate::tree::element::UIAElement,
++    event: MouseEvent,
++    deadline: Deadline,
++) -> Result<(), AdapterError> {
++    let scope = window_scope::WindowScope::for_ref(window, element, deadline)?;
++    synthesize_mouse_in_scope(&scope, event, deadline)
++}
++
++#[cfg(target_os = "windows")]
++fn synthesize_mouse_in_scope(
++    scope: &window_scope::WindowScope<'_>,
++    event: MouseEvent,
++    deadline: Deadline,
++) -> Result<(), AdapterError> {
++    use agent_desktop_core::DeliverySemantics;
 +    event.point.validate()?;
 +    if let MouseEventKind::Click { count } = event.kind {
 +        validate_mouse_click_count(count)?;
@@ -6450,7 +6567,6 @@ index 2d79916..cfd9b2d 100644
 +    if matches!(event.kind, MouseEventKind::Down | MouseEventKind::Up) {
 +        return Err(standalone_state_error());
 +    }
-+    let scope = WindowScope::new(window, deadline)?;
 +    let mut keys = event
 +        .modifiers
 +        .iter()
@@ -6467,17 +6583,24 @@ index 2d79916..cfd9b2d 100644
 +    let result = (|| {
 +        let normalized = mouse_coord::normalize_point(&event.point);
 +        match event.kind {
-+            MouseEventKind::Move => scope.post(&[move_input(normalized)]),
++            MouseEventKind::Move => scope.post_at(&[move_input(normalized)], &event.point),
 +            MouseEventKind::Click { count } => {
-+                let mut modifiers =
-+                    mouse_modifier::press_modifiers_for_window(&event.modifiers, deadline, &scope)?;
++                scope.post_at(&[move_input(normalized)], &event.point)?;
++                let mut modifiers = mouse_modifier::press_modifiers_for_window(
++                    &event.modifiers,
++                    deadline,
++                    &scope,
++                    &event.point,
++                )
++                .map_err(|e| e.with_disposition(DeliverySemantics::uncertain()))?;
 +                let result = (|| {
-+                    scope.post(&[move_input(normalized)])?;
 +                    let (down, up) = button_flags(&event.button);
 +                    for index in 0..count {
 +                        let mut release = ClickReleaseGuard::new(up);
 +                        scope
-+                            .post_arming(&[button_input(down)], || release.arm())
++                            .post_arming_cursor(&[button_input(down)], &event.point, || {
++                                release.arm()
++                            })
 +                            .map_err(|e| e.with_disposition(DeliverySemantics::uncertain()))?;
 +                        sleep_bounded(deadline, CLICK_HOLD_DELAY)
 +                            .map_err(|e| e.with_disposition(DeliverySemantics::uncertain()))?;
@@ -6502,15 +6625,19 @@ index 2d79916..cfd9b2d 100644
 +                        "Wheel delta must be non-zero",
 +                    ));
 +                }
-+                scope.post(&[move_input(normalized)])?;
-+                let mut modifiers =
-+                    mouse_modifier::press_modifiers_for_window(&event.modifiers, deadline, &scope)
-+                        .map_err(|e| e.with_disposition(DeliverySemantics::uncertain()))?;
++                scope.post_at(&[move_input(normalized)], &event.point)?;
++                let mut modifiers = mouse_modifier::press_modifiers_for_window(
++                    &event.modifiers,
++                    deadline,
++                    &scope,
++                    &event.point,
++                )
++                .map_err(|e| e.with_disposition(DeliverySemantics::uncertain()))?;
 +                let result = (|| {
 +                    for (flag, chunks) in [(MOUSEEVENTF_WHEEL, y), (MOUSEEVENTF_HWHEEL, x)] {
 +                        for lines in chunks {
 +                            scope
-+                                .post(&[wheel_input(flag, lines)])
++                                .post_cursor(&[wheel_input(flag, lines)], &event.point)
 +                                .map_err(|e| e.with_disposition(DeliverySemantics::uncertain()))?;
 +                        }
 +                    }
@@ -6531,7 +6658,7 @@ index 2d79916..cfd9b2d 100644
  fn synthesize_mouse_inner(event: MouseEvent, deadline: Deadline) -> Result<(), AdapterError> {
      ensure_input_budget(deadline)?;
      event.point.validate()?;
-@@ -125,17 +222,23 @@ fn post_click_sequence(
+@@ -125,17 +253,23 @@ fn post_click_sequence(
      let mut sequence = ReleaseState::default();
      for click_index in 0..count {
          if let Err(error) = ensure_input_budget(deadline) {
@@ -6558,7 +6685,7 @@ index 2d79916..cfd9b2d 100644
          }
      }
      Ok(())
-@@ -179,10 +282,16 @@ fn dispatch_wheel(
+@@ -179,10 +313,16 @@ fn dispatch_wheel(
      let normalized = mouse_coord::normalize_point(&event.point);
      ensure_input_budget(deadline)?;
      post_mouse_inputs(&[move_input(normalized)]);
@@ -6578,7 +6705,7 @@ index 2d79916..cfd9b2d 100644
 
  /// A large delta is split across several events, so a deadline crossed
 diff --git a/crates/windows/src/input/mouse/mouse_modifier.rs b/crates/windows/src/input/mouse/mouse_modifier.rs
-index 66391b9..cead4ab 100644
+index 66391b9..43a9108 100644
 --- a/crates/windows/src/input/mouse/mouse_modifier.rs
 +++ b/crates/windows/src/input/mouse/mouse_modifier.rs
 @@ -16,21 +16,18 @@
@@ -6615,7 +6742,7 @@ index 66391b9..cead4ab 100644
          }
      }
  }
-@@ -56,53 +53,73 @@ impl Drop for ModifierGuard {
+@@ -56,53 +53,75 @@ impl Drop for ModifierGuard {
  pub(crate) fn press_modifiers(modifiers: &[Modifier]) -> ModifierGuard {
      let held: Vec<u16> = modifiers.iter().map(modifier_vk).collect();
      for &vk in &held {
@@ -6665,6 +6792,7 @@ index 66391b9..cead4ab 100644
 +    modifiers: &[Modifier],
 +    deadline: Deadline,
 +    scope: &super::window_scope::WindowScope<'_>,
++    point: &agent_desktop_core::Point,
 +) -> Result<ModifierGuard, AdapterError> {
 +    if modifiers.is_empty() {
 +        return Ok(ModifierGuard {
@@ -6675,10 +6803,11 @@ index 66391b9..cead4ab 100644
 +    }
 +    let receiver = crate::actions::physical_target::KeyboardReceiver::capture_native(deadline)?;
 +    hold_keys_checked(modifiers.iter().map(modifier_vk), || {
-+        let target = scope.qualify()?;
-+        let receiver = receiver.qualify_native(deadline)?;
++        let receiver_authority = receiver.qualify_native(deadline)?;
++        let target = scope.qualify_cursor(point)?;
++        receiver.check_native_quick(deadline)?;
 +        scope.check_foreground()?;
-+        Ok((target, receiver))
++        Ok((target, receiver_authority))
 +    })
 +}
 +fn hold_keys_checked<G>(
@@ -6738,20 +6867,113 @@ index f41fc40..66f402d 100644
          .as_u64()
 diff --git a/crates/windows/src/input/mouse/window_scope.rs b/crates/windows/src/input/mouse/window_scope.rs
 new file mode 100644
-index 0000000..3b057fa
+index 0000000..ca843f3
 --- /dev/null
 +++ b/crates/windows/src/input/mouse/window_scope.rs
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,301 @@
 +use super::mouse_send::{MouseInputEvent, post_mouse_inputs};
 +use crate::private_browser_guard::QualifiedWindowProcesses;
-+use agent_desktop_core::{AdapterError, Deadline, ErrorCode, WindowInfo};
++use agent_desktop_core::{AdapterError, Deadline, ErrorCode, Point, ProcessId, WindowInfo};
++use windows_sys::Win32::Foundation::{HWND, POINT};
++use windows_sys::Win32::UI::WindowsAndMessaging::{
++    GA_ROOT, GUITHREADINFO, GetAncestor, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo,
++    GetWindowThreadProcessId, WindowFromPoint,
++};
++
++#[derive(PartialEq, Eq)]
++struct NativeReceivers {
++    hit: isize,
++    hit_pid: ProcessId,
++    foreground_capture: isize,
++    hit_capture: isize,
++    foreground_capture_pid: Option<ProcessId>,
++    hit_capture_pid: Option<ProcessId>,
++}
++
++fn refused() -> AdapterError {
++    AdapterError::new(
++        ErrorCode::StaleRef,
++        "Pointer receiver is unavailable or changed",
++    )
++}
++
++fn capture_for_thread(thread: u32) -> Result<HWND, AdapterError> {
++    let mut info = GUITHREADINFO {
++        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
++        ..Default::default()
++    };
++    if thread == 0 || unsafe { GetGUIThreadInfo(thread, &mut info) } == 0 {
++        return Err(refused());
++    }
++    Ok(info.hwndCapture)
++}
++
++fn native_receivers(point: POINT, target: HWND) -> Result<NativeReceivers, AdapterError> {
++    let hit = unsafe { WindowFromPoint(point) };
++    let foreground = unsafe { GetForegroundWindow() };
++    if hit.is_null() || foreground != target || unsafe { GetAncestor(hit, GA_ROOT) } != target {
++        return Err(refused());
++    }
++    let owner = crate::system::window::window_identity::live_window_owner;
++    let hit_pid = owner(hit).ok_or_else(refused)?;
++    let foreground_thread = unsafe { GetWindowThreadProcessId(foreground, std::ptr::null_mut()) };
++    let hit_thread = unsafe { GetWindowThreadProcessId(hit, std::ptr::null_mut()) };
++    let foreground_capture = capture_for_thread(foreground_thread)?;
++    let hit_capture = if hit_thread == foreground_thread {
++        foreground_capture
++    } else {
++        capture_for_thread(hit_thread)?
++    };
++    let capture_pid = |handle: HWND| -> Result<Option<ProcessId>, AdapterError> {
++        if handle.is_null() {
++            return Ok(None);
++        }
++        if unsafe { GetAncestor(handle, GA_ROOT) } != target {
++            return Err(refused());
++        }
++        Ok(Some(owner(handle).ok_or_else(refused)?))
++    };
++    Ok(NativeReceivers {
++        hit: hit as isize,
++        hit_pid,
++        foreground_capture: foreground_capture as isize,
++        hit_capture: hit_capture as isize,
++        foreground_capture_pid: capture_pid(foreground_capture)?,
++        hit_capture_pid: capture_pid(hit_capture)?,
++    })
++}
++
++fn cursor_position() -> Result<POINT, AdapterError> {
++    let mut point = POINT { x: 0, y: 0 };
++    if unsafe { GetCursorPos(&mut point) } == 0 {
++        return Err(refused());
++    }
++    Ok(point)
++}
 +
 +/// The host-supplied window and the owner generation captured for this single
 +/// operation. It is never populated from model arguments or a later lookup.
 +pub(crate) struct WindowScope<'a> {
 +    window: &'a WindowInfo,
++    source: ScopeSource<'a>,
 +    expected: QualifiedWindowProcesses,
 +    deadline: Deadline,
++}
++
++#[derive(Clone, Copy)]
++enum ScopeSource<'a> {
++    Window,
++    Ref(&'a crate::tree::element::UIAElement),
++}
++
++pub(crate) enum ScopeAuthority {
++    Window {
++        _window: QualifiedWindowProcesses,
++    },
++    Ref {
++        _window: QualifiedWindowProcesses,
++        _element: crate::tree::element::ElementAuthority,
++    },
 +}
 +
 +impl<'a> WindowScope<'a> {
@@ -6759,12 +6981,28 @@ index 0000000..3b057fa
 +        let expected = crate::system::window::window_identity::qualify_window(window, deadline)?;
 +        Ok(Self {
 +            window,
++            source: ScopeSource::Window,
 +            expected,
 +            deadline,
 +        })
 +    }
 +
-+    pub(crate) fn qualify(&self) -> Result<QualifiedWindowProcesses, AdapterError> {
++    pub(crate) fn for_ref(
++        window: &'a WindowInfo,
++        element: &'a crate::tree::element::UIAElement,
++        deadline: Deadline,
++    ) -> Result<Self, AdapterError> {
++        let _authority = crate::tree::element::qualify_verified(element, deadline)?;
++        let expected = crate::system::window::window_identity::qualify_window(window, deadline)?;
++        Ok(Self {
++            window,
++            source: ScopeSource::Ref(element),
++            expected,
++            deadline,
++        })
++    }
++
++    pub(crate) fn qualify(&self) -> Result<ScopeAuthority, AdapterError> {
 +        self.deadline.ensure_remaining()?;
 +        crate::input::native_owner::ensure_interactive_desktop()?;
 +        let current =
@@ -6777,8 +7015,15 @@ index 0000000..3b057fa
 +                "Window owner identity changed",
 +            ));
 +        }
++        let authority = match self.source {
++            ScopeSource::Window => ScopeAuthority::Window { _window: current },
++            ScopeSource::Ref(element) => ScopeAuthority::Ref {
++                _window: current,
++                _element: crate::tree::element::qualify_verified(element, self.deadline)?,
++            },
++        };
 +        self.check_foreground()?;
-+        Ok(current)
++        Ok(authority)
 +    }
 +
 +    pub(crate) fn check_foreground(&self) -> Result<(), AdapterError> {
@@ -6796,18 +7041,132 @@ index 0000000..3b057fa
 +        Ok(())
 +    }
 +
-+    pub(crate) fn post(&self, events: &[MouseInputEvent]) -> Result<(), AdapterError> {
-+        let _authority = self.qualify()?;
++    fn receiver(
++        &self,
++        point: POINT,
++        current_cursor: bool,
++    ) -> Result<
++        (
++            ScopeAuthority,
++            ScopeAuthority,
++            Vec<crate::private_browser_guard::QualifiedProcess>,
++        ),
++        AdapterError,
++    > {
++        let window = self.qualify()?;
++        let target = crate::system::window::window_ops::parse_handle(&self.window.id);
++        let before = native_receivers(point, target)?;
++        let mut qualified = Vec::new();
++        for pid in [
++            Some(before.hit_pid),
++            before.foreground_capture_pid,
++            before.hit_capture_pid,
++        ]
++        .into_iter()
++        .flatten()
++        {
++            if qualified
++                .iter()
++                .any(|process: &crate::private_browser_guard::QualifiedProcess| {
++                    process.pid() == pid
++                })
++            {
++                continue;
++            }
++            let token = if pid == self.expected.target_pid() {
++                self.expected.target_token()
++            } else if pid == self.expected.owner_pid() {
++                self.expected.owner_token()
++            } else {
++                return Err(refused());
++            };
++            self.deadline.ensure_remaining()?;
++            qualified.push(crate::private_browser_guard::qualify_expected(pid, token)?);
++        }
++        self.deadline.ensure_remaining()?;
++        let last = self.qualify()?;
++        if current_cursor {
++            let actual = cursor_position()?;
++            if actual.x != point.x || actual.y != point.y {
++                return Err(refused());
++            }
++        }
++        if native_receivers(point, target)? != before {
++            return Err(refused());
++        }
++        self.check_foreground()?;
++        Ok((window, last, qualified))
++    }
++
++    pub(crate) fn post_at(
++        &self,
++        events: &[MouseInputEvent],
++        point: &Point,
++    ) -> Result<(), AdapterError> {
++        point.validate()?;
++        if point.x < f64::from(i32::MIN)
++            || point.x > f64::from(i32::MAX)
++            || point.y < f64::from(i32::MIN)
++            || point.y > f64::from(i32::MAX)
++        {
++            return Err(refused());
++        }
++        let physical = POINT {
++            x: point.x.round() as i32,
++            y: point.y.round() as i32,
++        };
++        let _authority = self.receiver(physical, false)?;
 +        post_mouse_inputs(events);
 +        Ok(())
 +    }
 +
-+    pub(crate) fn post_arming(
++    pub(crate) fn qualify_cursor(
++        &self,
++        expected: &Point,
++    ) -> Result<
++        (
++            ScopeAuthority,
++            ScopeAuthority,
++            Vec<crate::private_browser_guard::QualifiedProcess>,
++        ),
++        AdapterError,
++    > {
++        expected.validate()?;
++        if expected.x < f64::from(i32::MIN)
++            || expected.x > f64::from(i32::MAX)
++            || expected.y < f64::from(i32::MIN)
++            || expected.y > f64::from(i32::MAX)
++        {
++            return Err(refused());
++        }
++        let point = cursor_position()?;
++        let desired_x = expected.x.round() as i32;
++        let desired_y = expected.y.round() as i32;
++        if (i64::from(point.x) - i64::from(desired_x)).abs() > 1
++            || (i64::from(point.y) - i64::from(desired_y)).abs() > 1
++        {
++            return Err(refused());
++        }
++        self.receiver(point, true)
++    }
++
++    pub(crate) fn post_cursor(
 +        &self,
 +        events: &[MouseInputEvent],
++        expected: &Point,
++    ) -> Result<(), AdapterError> {
++        let _authority = self.qualify_cursor(expected)?;
++        post_mouse_inputs(events);
++        Ok(())
++    }
++
++    pub(crate) fn post_arming_cursor(
++        &self,
++        events: &[MouseInputEvent],
++        expected: &Point,
 +        arm: impl FnOnce(),
 +    ) -> Result<(), AdapterError> {
-+        let _authority = self.qualify()?;
++        let _authority = self.qualify_cursor(expected)?;
 +        arm();
 +        post_mouse_inputs(events);
 +        Ok(())
@@ -6899,10 +7258,10 @@ index 44d3f2c..63dd5c2 100644
 
 diff --git a/crates/windows/src/private_browser_guard.rs b/crates/windows/src/private_browser_guard.rs
 new file mode 100644
-index 0000000..51ff529
+index 0000000..756d0f9
 --- /dev/null
 +++ b/crates/windows/src/private_browser_guard.rs
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,222 @@
 +//! Private host configuration and per-use process image qualification.
 +use agent_desktop_core::{AdapterError, ErrorCode, ProcessId};
 +
@@ -6985,6 +7344,14 @@ index 0000000..51ff529
 +}
 +
 +impl QualifiedWindowProcesses {
++    pub(crate) fn target_pid(&self) -> ProcessId {
++        self._target.pid()
++    }
++
++    pub(crate) fn target_token(&self) -> &str {
++        self._target.token()
++    }
++
 +    pub(crate) fn owner_token(&self) -> &str {
 +        self._owner.as_ref().unwrap_or(&self._target).token()
 +    }
@@ -8383,19 +8750,20 @@ index 6a629ce..e18f647 100644
      Ok(WindowInfo {
          id: expected.id.clone(),
 diff --git a/crates/windows/src/tree/element.rs b/crates/windows/src/tree/element.rs
-index 473e0cc..201b8a1 100644
+index 473e0cc..11d1a20 100644
 --- a/crates/windows/src/tree/element.rs
 +++ b/crates/windows/src/tree/element.rs
-@@ -9,6 +9,8 @@ use agent_desktop_core::{AdapterError, ErrorCode, NativeHandle};
+@@ -9,6 +9,9 @@ use agent_desktop_core::{AdapterError, ErrorCode, NativeHandle};
  pub(crate) struct ProcessPayload {
      pub(crate) pid: u32,
      pub(crate) token: String,
 +    pub(crate) root_pid: u32,
 +    pub(crate) root_token: String,
++    pub(crate) root_window_id: Option<String>,
  }
 
  #[cfg(target_os = "windows")]
-@@ -72,8 +74,22 @@ impl UIAElement {
+@@ -72,8 +75,23 @@ impl UIAElement {
 
      /// Stamps the verified process identity onto the element so the live-read
      /// path can corroborate liveness against it before answering.
@@ -8415,12 +8783,13 @@ index 473e0cc..201b8a1 100644
 +                token,
 +                root_pid,
 +                root_token,
++                root_window_id: None,
 +            }),
 +        )
      }
 
      /// The verified process identity, if this element resolved through the
-@@ -83,6 +99,123 @@ impl UIAElement {
+@@ -83,6 +101,123 @@ impl UIAElement {
              .as_ref()
              .map(|payload| (payload.pid, payload.token.as_str()))
      }
@@ -9268,7 +9637,7 @@ index 67cfc47..19cf46f 100644
          result.is_ok(),
          "a live fixture root must pass the liveness gate: {result:?}"
 diff --git a/crates/windows/src/tree/resolve/mod.rs b/crates/windows/src/tree/resolve/mod.rs
-index 123d6fd..395fee9 100644
+index 123d6fd..0d546d5 100644
 --- a/crates/windows/src/tree/resolve/mod.rs
 +++ b/crates/windows/src/tree/resolve/mod.rs
 @@ -77,7 +77,7 @@ fn resolve_attempt(entry: &RefEntry, deadline: Deadline) -> Result<NativeHandle,
@@ -9313,7 +9682,7 @@ index 123d6fd..395fee9 100644
          }
          SearchVerdict::Ambiguous => Err(ambiguous_target_error(entry, searched.len())),
      }
-@@ -216,21 +219,26 @@ fn classify_search(
+@@ -216,21 +219,29 @@ fn classify_search(
      }
  }
 
@@ -9325,7 +9694,8 @@ index 123d6fd..395fee9 100644
 +/// independently verified root generation for subsequent live reads.
  #[cfg(target_os = "windows")]
  pub(crate) fn into_verified_handle(
-     element: super::element::UIAElement,
+-    element: super::element::UIAElement,
++    mut element: super::element::UIAElement,
      entry: &RefEntry,
 -) -> NativeHandle {
 -    element
@@ -9347,11 +9717,14 @@ index 123d6fd..395fee9 100644
 +    }
 +    let _authority = crate::tree::element::qualify_verified(&element, deadline)?;
 +    deadline.ensure_remaining()?;
++    if let Some(payload) = element.1.as_mut() {
++        payload.root_window_id = entry.source.source_window_id.clone();
++    }
 +    Ok(element.into_native_handle())
  }
 
  #[cfg(target_os = "windows")]
-@@ -332,6 +340,7 @@ pub(crate) fn resolve_window_root(
+@@ -332,6 +343,7 @@ pub(crate) fn resolve_window_root(
          bounds: None,
          state: Default::default(),
      };
@@ -9359,7 +9732,7 @@ index 123d6fd..395fee9 100644
      crate::system::window::window_identity::WindowIdentityEvidence::from_info(
          crate::system::window::window_ops::parse_handle(&window.id),
          &window,
-@@ -340,10 +349,23 @@ pub(crate) fn resolve_window_root(
+@@ -340,10 +352,23 @@ pub(crate) fn resolve_window_root(
      .verify_stored()
      .map_err(|_| verify_stored_failure_error(entry, deadline))?;
 

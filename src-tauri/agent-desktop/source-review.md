@@ -164,8 +164,13 @@ Owned key-up cleanup is separate from new input. The private targeted mouse and
 drag paths now pass the original window into Windows input and requalify it,
 including its captured native owner, at each send and modifier key-down. A drag
 abort releases its own button without moving the pointer, and errors after
-attempted pointer movement are unsafe to retry. Qualification of the actual
-pointer receiver at each point and native acceptance remain pending. Scoped
+attempted pointer movement are unsafe to retry. Windows targeted input now
+checks the point window, current cursor for button and wheel sends, and GUI
+capture reported by the foreground and point-window threads. It qualifies the
+receiver against the retained target or owner process generations and repeats
+native observations before posting. Ref clicks carry the ref's stored window
+identity into that scope. A capture held by another GUI thread has not been
+ruled out; native receiver and capture behavior remain unqualified. Scoped
 mouse and drag still fail unsupported on platforms without an override.
 
 This qualification authenticates the chosen content by its pinned Git object
