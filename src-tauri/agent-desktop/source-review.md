@@ -36,9 +36,10 @@ Live UIA qualification observes the existing deadline before and after its
 native and filesystem checks. Window tree discovery now obtains child and
 sibling elements without content-prefetch; each node's process and root
 provenance are qualified before its element-scoped cache or live read. A
-qualification error propagates through the walk and resolver. Related-element
-reads such as LabeledBy still need their own guard; this source is not yet
-qualified for tree traversal as a whole.
+qualification error propagates through the walk and resolver. LabeledBy now
+qualifies its related element separately before reading security state or name,
+and propagates identity or policy failures. Native UIA acceptance and the
+remaining input/action boundaries are still pending.
 Windows UIA descendants, capture, input and other native guards, macOS guards,
 a newly prepared engine, and native acceptance remain pending. This partial
 change does not qualify an existing engine artifact.

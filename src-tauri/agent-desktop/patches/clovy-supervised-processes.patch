@@ -4572,8 +4572,22 @@ index 0e46949..a1ab089 100644
          let (x, y) = if horizontal {
              (percent, -1.0)
          } else {
+diff --git a/crates/windows/src/actions/select.rs b/crates/windows/src/actions/select.rs
+index bc54346..ea54d7f 100644
+--- a/crates/windows/src/actions/select.rs
++++ b/crates/windows/src/actions/select.rs
+@@ -82,7 +82,8 @@ mod imp {
+         value: &str,
+         deadline: Deadline,
+     ) -> Result<Vec<ActionStep>, AdapterError> {
+-        let self_match = selection_item_available(element) && name_matches(element, value);
++        let self_match =
++            selection_item_available(element) && name_matches(element, value, deadline)?;
+         let needs_expand = is_collapsed_container(element);
+         let expanded = Cell::new(false);
+         let mut expand = || {
 diff --git a/crates/windows/src/actions/select_search.rs b/crates/windows/src/actions/select_search.rs
-index f1cda56..6e38fcf 100644
+index f1cda56..14b1511 100644
 --- a/crates/windows/src/actions/select_search.rs
 +++ b/crates/windows/src/actions/select_search.rs
 @@ -81,7 +81,8 @@ mod imp {
@@ -4606,7 +4620,7 @@ index f1cda56..6e38fcf 100644
 +            deadline.ensure_remaining()?;
 +            let _candidate_after_read =
 +                crate::tree::element::qualify_verified(&candidate, deadline)?;
-+            if available && name_matches(&candidate, value) {
++            if available && name_matches(&candidate, value, deadline)? {
 +                deadline.ensure_remaining()?;
 +                let _candidate_after_name =
 +                    crate::tree::element::qualify_verified(&candidate, deadline)?;
@@ -4622,6 +4636,77 @@ index f1cda56..6e38fcf 100644
 +        }
          Ok(found)
      }
+
+@@ -157,28 +179,47 @@ mod imp {
+         read_one(element, TreeProperty::SelectionItemAvailable).flag() == Some(true)
+     }
+
+-    pub(crate) fn name_matches(element: &UIAElement, value: &str) -> bool {
++    pub(crate) fn name_matches(
++        element: &UIAElement,
++        value: &str,
++        deadline: Deadline,
++    ) -> Result<bool, AdapterError> {
+         let properties = ElementProperties::from_reads(vec![
+-            (TreeProperty::Name, read_one(element, TreeProperty::Name)),
++            (
++                TreeProperty::Name,
++                qualified_read(element, TreeProperty::Name, deadline)?,
++            ),
+             (
+                 TreeProperty::FullDescription,
+-                read_one(element, TreeProperty::FullDescription),
++                qualified_read(element, TreeProperty::FullDescription, deadline)?,
+             ),
+             (
+                 TreeProperty::HelpText,
+-                read_one(element, TreeProperty::HelpText),
++                qualified_read(element, TreeProperty::HelpText, deadline)?,
+             ),
+             (
+                 TreeProperty::IsPassword,
+-                read_one(element, TreeProperty::IsPassword),
++                qualified_read(element, TreeProperty::IsPassword, deadline)?,
+             ),
+         ]);
+-        let label = read_label(element, false);
++        let label = read_label(element, false, deadline)?;
+         let (name, _) = name_fields(&properties, &label);
+-        matches!(
++        Ok(matches!(
+             name,
+             LocatorField::Known(text) if text.eq_ignore_ascii_case(value)
+-        )
++        ))
++    }
++
++    fn qualified_read(
++        element: &UIAElement,
++        property: TreeProperty,
++        deadline: Deadline,
++    ) -> Result<crate::tree::properties::PropertyOutcome, AdapterError> {
++        let _authority = crate::tree::element::qualify_verified(element, deadline)?;
++        let value = read_one(element, property);
++        deadline.ensure_remaining()?;
++        let _after = crate::tree::element::qualify_verified(element, deadline)?;
++        Ok(value)
+     }
+
+     fn push_children(
+@@ -256,8 +297,12 @@ mod imp {
+         false
+     }
+
+-    pub(crate) fn name_matches(_element: &UIAElement, _value: &str) -> bool {
+-        false
++    pub(crate) fn name_matches(
++        _element: &UIAElement,
++        _value: &str,
++        _deadline: Deadline,
++    ) -> Result<bool, AdapterError> {
++        Err(AdapterError::not_supported("name_matches"))
+     }
+ }
 
 diff --git a/crates/windows/src/lib.rs b/crates/windows/src/lib.rs
 index 44d3f2c..63dd5c2 100644
@@ -5844,6 +5929,78 @@ index 473e0cc..e9eeb75 100644
  }
 
  /// Borrows the UI Automation element carried by a core `NativeHandle`.
+diff --git a/crates/windows/src/tree/hit_test/hit_test_corroborate.rs b/crates/windows/src/tree/hit_test/hit_test_corroborate.rs
+index 6435527..42fca78 100644
+--- a/crates/windows/src/tree/hit_test/hit_test_corroborate.rs
++++ b/crates/windows/src/tree/hit_test/hit_test_corroborate.rs
+@@ -246,14 +246,20 @@ fn process_id_of(element: &UIAElement) -> Option<u32> {
+ /// required evidence read failed (bounds unread), so the caller demotes to
+ /// `Unknown`. A spent budget skips the label relation the way the live
+ /// element read does — `Failed`, never `Unlabelled`, since nothing was asked.
+-pub(crate) fn occluder_evidence(hit: &UIAElement, deadline: Deadline) -> Option<HitTestResult> {
++pub(crate) fn occluder_evidence(
++    hit: &UIAElement,
++    deadline: Deadline,
++) -> Result<Option<HitTestResult>, agent_desktop_core::AdapterError> {
++    let _authority = crate::tree::element::qualify_current(hit, deadline)?;
+     let properties = read_occluder_properties(hit, deadline);
++    deadline.ensure_remaining()?;
+     let label = if deadline.is_expired() {
+         LabelOutcome::Failed
+     } else {
+-        read_label(hit, false)
++        read_label(hit, false, deadline)?
+     };
+-    occluder_from_properties(&properties, label)
++    deadline.ensure_remaining()?;
++    Ok(occluder_from_properties(&properties, label))
+ }
+
+ /// Builds `InterceptedBy` from a prepared property set (tests pin withholding
+@@ -310,14 +316,14 @@ fn occluder_role(properties: &ElementProperties) -> String {
+ pub(crate) fn corroborate_interception(
+     context: &InterceptionContext<'_>,
+     demote_for_viewport: bool,
+-) -> HitTestResult {
++) -> Result<HitTestResult, agent_desktop_core::AdapterError> {
+     let Ok(hit_root) = element_root_hwnd(context.hit, context.walker, context.deadline) else {
+-        return super::classify::result_for_incomplete_walk();
++        return Ok(super::classify::result_for_incomplete_walk());
+     };
+     let win32_root = window_from_point_root(&context.point);
+     let win32_owner_pid = win32_root.and_then(pid_of_hwnd);
+     if context.deadline.is_expired() {
+-        return HitTestResult::Unknown;
++        return Ok(HitTestResult::Unknown);
+     }
+     let widens = nonzero(hit_root).is_none();
+     let attribution = interception_attribution(
+@@ -334,9 +340,22 @@ pub(crate) fn corroborate_interception(
+             pid: win32_owner_pid,
+         },
+     );
+-    interception_outcome(attribution, demote_for_viewport, || {
+-        occluder_evidence(context.hit, context.deadline)
+-    })
++    let mut failure = None;
++    let result = interception_outcome(
++        attribution,
++        demote_for_viewport,
++        || match occluder_evidence(context.hit, context.deadline) {
++            Ok(evidence) => evidence,
++            Err(error) => {
++                failure = Some(error);
++                None
++            }
++        },
++    );
++    match failure {
++        Some(error) => Err(error),
++        None => Ok(result),
++    }
+ }
+
+ #[cfg(test)]
 diff --git a/crates/windows/src/tree/hit_test/hit_test_tests.rs b/crates/windows/src/tree/hit_test/hit_test_tests.rs
 index 8455283..2deecca 100644
 --- a/crates/windows/src/tree/hit_test/hit_test_tests.rs
@@ -5863,7 +6020,7 @@ index 8455283..2deecca 100644
      let error = hit_test_impl(
          &handle,
 diff --git a/crates/windows/src/tree/hit_test/mod.rs b/crates/windows/src/tree/hit_test/mod.rs
-index 7895215..fdea41f 100644
+index 7895215..82acb6a 100644
 --- a/crates/windows/src/tree/hit_test/mod.rs
 +++ b/crates/windows/src/tree/hit_test/mod.rs
 @@ -77,12 +77,12 @@ mod imp {
@@ -5881,8 +6038,91 @@ index 7895215..fdea41f 100644
          let Ok(walker) = client.get_raw_view_walker() else {
              return Ok(HitTestResult::Unknown);
          };
+@@ -93,7 +93,8 @@ mod imp {
+             return Ok(unknown);
+         }
+         deadline.ensure_remaining()?;
+-        judge_probe(probe_element_from_point(client, &point), |hit| {
++        let mut failure = None;
++        let result = judge_probe(probe_element_from_point(client, &point), |hit| {
+             let context = corroborate::InterceptionContext {
+                 target,
+                 target_root,
+@@ -102,15 +103,25 @@ mod imp {
+                 walker: &walker,
+                 deadline,
+             };
+-            judge_hit(&context, &bounds, client)
+-        })
++            match judge_hit(&context, &bounds, client) {
++                Ok(result) => result,
++                Err(error) => {
++                    failure = Some(error);
++                    HitTestResult::Unknown
++                }
++            }
++        })?;
++        match failure {
++            Some(error) => Err(error),
++            None => Ok(result),
++        }
+     }
+
+     fn judge_hit(
+         context: &corroborate::InterceptionContext<'_>,
+         bounds: &Rect,
+         client: &UIAutomation,
+-    ) -> HitTestResult {
++    ) -> Result<HitTestResult, AdapterError> {
+         let same = |left: &UIAElement, right: &UIAElement| {
+             walker_source::same_element(client, left, right)
+         };
+@@ -124,11 +135,22 @@ mod imp {
+         };
+         let Some(classification) = classify::classify_hit_with(context.target, context.hit, &walk)
+         else {
+-            return classify::result_for_incomplete_walk();
++            return Ok(classify::result_for_incomplete_walk());
+         };
+-        resolve_classification(classification, || {
+-            corroborate_with_viewport(context, bounds)
+-        })
++        let mut failure = None;
++        let result = resolve_classification(classification, || {
++            match corroborate_with_viewport(context, bounds) {
++                Ok(result) => result,
++                Err(error) => {
++                    failure = Some(error);
++                    HitTestResult::Unknown
++                }
++            }
++        });
++        match failure {
++            Some(error) => Err(error),
++            None => Ok(result),
++        }
+     }
+
+     /// The viewport climb is corroboration's input and nobody else's: it asks
+@@ -141,14 +163,14 @@ mod imp {
+     fn corroborate_with_viewport(
+         context: &corroborate::InterceptionContext<'_>,
+         bounds: &Rect,
+-    ) -> HitTestResult {
++    ) -> Result<HitTestResult, AdapterError> {
+         let viewport = match walker_source::nearest_scroll_viewport_bounds(
+             context.target,
+             context.walker,
+             context.deadline,
+         ) {
+             Ok(viewport) => viewport,
+-            Err(walker_source::BudgetExpired) => return classify::result_for_incomplete_walk(),
++            Err(walker_source::BudgetExpired) => return Ok(classify::result_for_incomplete_walk()),
+         };
+         let demote =
+             classify::should_demote_outside_viewport(&context.point, bounds, viewport.as_ref());
 diff --git a/crates/windows/src/tree/live_read.rs b/crates/windows/src/tree/live_read.rs
-index 18a45b9..fcedf97 100644
+index 18a45b9..23ccfdc 100644
 --- a/crates/windows/src/tree/live_read.rs
 +++ b/crates/windows/src/tree/live_read.rs
 @@ -51,7 +51,7 @@ mod imp {
@@ -5894,7 +6134,7 @@ index 18a45b9..fcedf97 100644
 
      /// The shared single-element live read.
      ///
-@@ -77,14 +77,21 @@ mod imp {
+@@ -77,16 +77,23 @@ mod imp {
          deadline: Deadline,
      ) -> Result<LiveRead, AdapterError> {
          let element = uia_element(handle)?;
@@ -5917,8 +6157,29 @@ index 18a45b9..fcedf97 100644
 -            corroborate_verified_process,
 +            |element| corroborate_verified_process(element, deadline),
              |element| read_live_bounded(element, deadline),
-             |element| read_label(element, false),
+-            |element| read_label(element, false),
++            |element| read_label(element, false, deadline),
          )
+     }
+
+@@ -120,7 +127,7 @@ mod imp {
+         owning_window_minimized: bool,
+         corroborate: impl Fn(&UIAElement) -> Result<(), AdapterError>,
+         read: impl Fn(&UIAElement) -> (ElementProperties, Vec<AdapterError>),
+-        read_label: impl Fn(&UIAElement) -> LabelOutcome,
++        read_label: impl Fn(&UIAElement) -> Result<LabelOutcome, AdapterError>,
+     ) -> Result<LiveRead, AdapterError> {
+         deadline.ensure_remaining()?;
+         corroborate(element)?;
+@@ -137,7 +144,7 @@ mod imp {
+         let label = if deadline.is_expired() {
+             LabelOutcome::Failed
+         } else {
+-            read_label(element)
++            read_label(element)?
+         };
+         let vocabulary = walk_vocabulary(&properties, &label);
+         let evidence = properties.locator_evidence(vocabulary);
 @@ -158,12 +165,11 @@ mod imp {
      /// OS rather than trusting the answer the pre-read call already gave,
      /// which is what lets the post-read call catch a process that died
@@ -6069,9 +6330,20 @@ index 9f99715..dfa161f 100644
          live_label,
      )
 diff --git a/crates/windows/src/tree/live_read_tests.rs b/crates/windows/src/tree/live_read_tests.rs
-index 8492555..ad008e1 100644
+index 8492555..4f10b80 100644
 --- a/crates/windows/src/tree/live_read_tests.rs
 +++ b/crates/windows/src/tree/live_read_tests.rs
+@@ -16,8 +16,8 @@ fn fixture_pid(fixture: &HostedFixture) -> u32 {
+
+ /// The production label read, in the shape `read_live_element_core` takes it.
+ /// Shared with `live_read_seam_tests.rs`, which counts calls through it.
+-pub(super) fn live_label(element: &UIAElement) -> LabelOutcome {
+-    read_label(element, false)
++pub(super) fn live_label(element: &UIAElement) -> Result<LabelOutcome, AdapterError> {
++    read_label(element, false, deadline())
+ }
+
+ pub(super) fn verified_handle(fixture: &HostedFixture) -> Result<NativeHandle, AdapterError> {
 @@ -28,7 +28,12 @@ pub(super) fn verified_handle(fixture: &HostedFixture) -> Result<NativeHandle, A
              .expect("a live fixture process has a token")
              .expect("a token reads for a live fixture");
@@ -6142,6 +6414,100 @@ index 8492555..ad008e1 100644
      if properties.is_secure() {
          let mut path = agent_desktop_core::refs::RefPath::default();
          path.extend_from_slice(prefix);
+diff --git a/crates/windows/src/tree/name_evidence.rs b/crates/windows/src/tree/name_evidence.rs
+index 9f4ce15..cdf954d 100644
+--- a/crates/windows/src/tree/name_evidence.rs
++++ b/crates/windows/src/tree/name_evidence.rs
+@@ -210,6 +210,7 @@ mod imp {
+     use super::{LabelOutcome, label_from_target, secure_from_read};
+     use crate::tree::element::UIAElement;
+     use crate::tree::properties::property_ids::{TreeProperty, uia_property};
++    use agent_desktop_core::{AdapterError, Deadline, ErrorCode};
+     use uiautomation::UIElement;
+     use uiautomation::variants::{Value, Variant};
+
+@@ -226,20 +227,62 @@ mod imp {
+     ///
+     /// The COM reads happen here; the policy on what they mean lives in
+     /// `label_from_target`, which this function only calls.
+-    pub fn read_label(element: &UIAElement, cached: bool) -> LabelOutcome {
++    pub fn read_label(
++        element: &UIAElement,
++        cached: bool,
++        deadline: Deadline,
++    ) -> Result<LabelOutcome, AdapterError> {
++        let source = crate::tree::element::qualify_current(element, deadline)?;
++        let source_pid = source.pid();
++        let source_token = source.token().to_owned();
++        let _source_expected = if element.1.is_some() {
++            Some(crate::tree::element::qualify_verified(element, deadline)?)
++        } else {
++            None
++        };
+         let property = uia_property(TreeProperty::LabeledBy);
+         let variant = if cached {
+             element.0.get_cached_property_value(property)
+         } else {
+             element.0.get_property_value(property)
+         };
++        verify_same(element, source_pid, &source_token, deadline)?;
+         let Ok(variant) = variant else {
+-            return LabelOutcome::Failed;
++            return Ok(LabelOutcome::Failed);
+         };
+         let Some(target) = element_of(&variant) else {
+-            return LabelOutcome::Unlabelled;
++            return Ok(LabelOutcome::Unlabelled);
+         };
+-        label_from_target(is_secure(&target), read_name(&target))
++        let target = UIAElement::from(target);
++        let target_authority = crate::tree::element::qualify_current(&target, deadline)?;
++        let pid = target_authority.pid();
++        let token = target_authority.token().to_owned();
++        let secure = is_secure(&target.0);
++        let _target_after_security = verify_same(&target, pid, &token, deadline)?;
++        let _source_after_security = verify_same(element, source_pid, &source_token, deadline)?;
++        if secure {
++            return Ok(LabelOutcome::Withheld);
++        }
++        let name = read_name(&target.0);
++        let _target_after_name = verify_same(&target, pid, &token, deadline)?;
++        let _source_after_name = verify_same(element, source_pid, &source_token, deadline)?;
++        Ok(label_from_target(false, name))
++    }
++
++    fn verify_same(
++        element: &UIAElement,
++        pid: agent_desktop_core::ProcessId,
++        token: &str,
++        deadline: Deadline,
++    ) -> Result<crate::private_browser_guard::QualifiedProcess, AdapterError> {
++        let authority = crate::tree::element::qualify_current(element, deadline)?;
++        if authority.pid() != pid || authority.token() != token {
++            return Err(AdapterError::new(
++                ErrorCode::StaleRef,
++                "Label identity changed",
++            ));
++        }
++        Ok(authority)
+     }
+
+     fn read_name(target: &UIElement) -> Result<String, ()> {
+@@ -275,8 +318,12 @@ pub use imp::read_label;
+ /// counterpart here; every element is simply unlabelled, which is the same
+ /// answer A15-1 measured on the Win32 proxy.
+ #[cfg(not(target_os = "windows"))]
+-pub fn read_label(_element: &super::element::UIAElement, _cached: bool) -> LabelOutcome {
+-    LabelOutcome::Unlabelled
++pub fn read_label(
++    _element: &super::element::UIAElement,
++    _cached: bool,
++    _deadline: agent_desktop_core::Deadline,
++) -> Result<LabelOutcome, agent_desktop_core::AdapterError> {
++    Ok(LabelOutcome::Unlabelled)
+ }
+
+ #[cfg(test)]
 diff --git a/crates/windows/src/tree/observe.rs b/crates/windows/src/tree/observe.rs
 index e4a6985..c41059e 100644
 --- a/crates/windows/src/tree/observe.rs
@@ -7734,7 +8100,7 @@ index 10b8e07..7a8463d 100644
 +    Ok(())
  }
 diff --git a/crates/windows/src/tree/walk/walker_source.rs b/crates/windows/src/tree/walk/walker_source.rs
-index 9feff85..e10da5a 100644
+index 9feff85..8004a3a 100644
 --- a/crates/windows/src/tree/walk/walker_source.rs
 +++ b/crates/windows/src/tree/walk/walker_source.rs
 @@ -9,7 +9,7 @@ mod imp {
@@ -7850,7 +8216,7 @@ index 9feff85..e10da5a 100644
          }
 
          fn identity(&self, node: &UIAElement) -> NodeKey {
-@@ -242,23 +246,121 @@ mod imp {
+@@ -242,23 +246,131 @@ mod imp {
          fn evidence(
              &self,
              node: &UIAElement,
@@ -7970,7 +8336,17 @@ index 9feff85..e10da5a 100644
 +                node_authority.token(),
 +            )?;
 +            self.deadline.ensure_remaining()?;
-+            let label = read_label(read_node, is_cached);
++            let label = read_label(read_node, is_cached, self.deadline)?;
++            self.deadline.ensure_remaining()?;
++            let _root_after_label = crate::private_browser_guard::qualify_expected(
++                agent_desktop_core::ProcessId::new(self.root_pid),
++                &self.root_token,
++            )?;
++            self.deadline.ensure_remaining()?;
++            let _node_after_label = crate::private_browser_guard::qualify_expected(
++                agent_desktop_core::ProcessId::new(pid),
++                node_authority.token(),
++            )?;
 +            self.deadline.ensure_remaining()?;
              let vocabulary = walk_vocabulary(&properties, &label);
 -            (
@@ -7983,7 +8359,7 @@ index 9feff85..e10da5a 100644
          }
 
          fn is_web_wrapper(
-@@ -286,7 +388,10 @@ mod imp {
+@@ -286,7 +398,10 @@ mod imp {
      pub struct UiaTreeSource;
 
      impl UiaTreeSource {
@@ -7995,7 +8371,7 @@ index 9feff85..e10da5a 100644
              Ok(Self)
          }
 
-@@ -317,16 +422,19 @@ mod imp {
+@@ -317,16 +432,19 @@ mod imp {
          fn evidence(
              &self,
              _node: &UIAElement,
@@ -8021,7 +8397,7 @@ index 9feff85..e10da5a 100644
          }
 
          fn is_web_wrapper(
-@@ -357,7 +465,7 @@ pub fn walk_uia_subtree(
+@@ -357,7 +475,7 @@ pub fn walk_uia_subtree(
      root_source: &ObservationRoot<'_>,
      budget: WalkBudget,
  ) -> Result<WalkOutcome, AdapterError> {
