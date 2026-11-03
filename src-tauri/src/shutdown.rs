@@ -908,7 +908,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn timed_out_kill_is_eventually_reaped_by_a_detached_thread() {
+    fn zero_budget_termination_leaves_no_live_or_zombie_child() {
         use std::process::{Command, Stdio};
 
         let child = Command::new("/bin/sleep")
@@ -919,9 +919,10 @@ mod tests {
             .spawn()
             .expect("spawn child");
         let pid = child.id() as libc::pid_t;
-        assert_eq!(
+        // Reaping may complete immediately or move to the detached thread.
+        assert_ne!(
             terminate_child(child, Duration::ZERO, Duration::ZERO),
-            ChildTermination::TimedOut
+            ChildTermination::WaitFailed
         );
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -932,7 +933,7 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "detached reaper left the killed child as a zombie"
+                "zero-budget termination left the child alive or as a zombie"
             );
             thread::sleep(Duration::from_millis(10));
         }

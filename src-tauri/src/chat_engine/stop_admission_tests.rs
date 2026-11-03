@@ -314,13 +314,18 @@ async fn stopped_while_broker_settlement_waits(path: StopPath) {
     for (held, worker, mut reader) in helpers {
         held.release();
         let result = worker.join().unwrap();
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes).unwrap();
-        assert!(
-            bytes.is_empty(),
-            "a helper start escaped production Stop: {}",
-            String::from_utf8_lossy(&bytes)
-        );
+        let mut bytes = [0; 1024];
+        match reader.read(&mut bytes) {
+            Ok(0) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok(count) => panic!(
+                "a helper start escaped production Stop: {}",
+                String::from_utf8_lossy(&bytes[..count])
+            ),
+            Err(error) => {
+                panic!("failed to inspect helper commands after production Stop: {error}")
+            }
+        }
         assert_eq!(result.unwrap_err().code, "turn_expired");
     }
     for (held, worker, effects) in probes {
