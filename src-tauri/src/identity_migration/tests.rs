@@ -609,7 +609,7 @@ async fn count_rows(path: &Path, table: &str) -> i64 {
 
 #[test]
 fn refuses_to_copy_while_the_old_app_is_running() {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, Read};
     use std::os::fd::OwnedFd;
     use std::os::unix::net::UnixStream;
     use std::process::{Child, Command, Stdio};
@@ -623,39 +623,68 @@ fn refuses_to_copy_while_the_old_app_is_running() {
         }
     }
 
+    const OLD_APP_SOURCE: &str = r#"
+#include <unistd.h>
+
+int main(void) {
+    const char ready[] = "migration-fixture-ready\n";
+    if (write(STDOUT_FILENO, ready, sizeof ready - 1) != (ssize_t)(sizeof ready - 1)) {
+        return 1;
+    }
+    char stop;
+    return read(STDIN_FILENO, &stop, 1) == 0 ? 0 : 2;
+}
+"#;
+
     let base = tempfile::tempdir().unwrap();
     let mut plan = dir_plan(base.path());
     old_profile(&plan.data.source);
     // A unique executable name short enough for the process-name detector.
     let name = format!("old{:08x}", rand::random::<u32>());
     let binary = base.path().join(&name);
-    std::fs::copy("/bin/cat", &binary).unwrap();
-    assert!(Command::new("/usr/bin/codesign")
-        .args(["--force", "--sign", "-"])
+    let source = base.path().join("old_app.c");
+    std::fs::write(&source, OLD_APP_SOURCE).unwrap();
+    let compiled = Command::new("/usr/bin/clang")
+        .args(["-std=c11", "-Wall", "-Wextra", "-Werror"])
+        .arg(&source)
+        .arg("-o")
         .arg(&binary)
         .output()
-        .unwrap()
-        .status
-        .success());
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "fixture compile failed: {}; stderr: {}",
+        compiled.status,
+        String::from_utf8_lossy(&compiled.stderr)
+    );
     let (mut control, child_io) = UnixStream::pair().unwrap();
     control
         .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    control
-        .set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     let mut old_app = OldApp(
         Command::new(&binary)
             .stdin(Stdio::from(OwnedFd::from(child_io.try_clone().unwrap())))
             .stdout(Stdio::from(OwnedFd::from(child_io)))
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap(),
     );
-    // Echoed I/O proves exec completed; keeping stdin open keeps cat alive.
-    control.write_all(b"migration-fixture-ready\n").unwrap();
+    // The child's marker proves exec completed; open stdin holds it alive.
     let mut ready = String::new();
-    BufReader::new(&mut control).read_line(&mut ready).unwrap();
-    assert_eq!(ready, "migration-fixture-ready\n");
+    let readiness = BufReader::new(&mut control).read_line(&mut ready);
+    if readiness.is_err() || ready != "migration-fixture-ready\n" {
+        let _ = old_app.0.kill();
+        let status = old_app.0.wait().unwrap();
+        let mut stderr = String::new();
+        old_app
+            .0
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        panic!("fixture readiness failed: {readiness:?}; marker: {ready:?}; child: {status}; stderr: {stderr}");
+    }
     assert!(old_app.0.try_wait().unwrap().is_none());
     // Use the guard's exact detector and require this child, not just any
     // process matching the name, before attempting migration.
