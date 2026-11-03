@@ -1582,7 +1582,69 @@ mod tests {
         assert!(!root.recover().unwrap().is_empty());
         assert!(temp.path().join(&nonce).is_dir());
         assert!(process_birth(descendant).is_ok());
+        #[cfg(target_os = "macos")]
+        let (exit_queue, mut exit_event) = {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let fd = unsafe { libc::kqueue() };
+            assert!(fd >= 0);
+            let queue = unsafe { File::from_raw_fd(fd) };
+            let event = libc::kevent {
+                ident: descendant as usize,
+                filter: libc::EVFILT_PROC,
+                flags: libc::EV_ADD | libc::EV_ENABLE | libc::EV_ONESHOT,
+                fflags: libc::NOTE_EXIT,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            };
+            // Register while alive so even an immediate exit is observed.
+            assert_eq!(
+                unsafe {
+                    libc::kevent(
+                        queue.as_raw_fd(),
+                        &event,
+                        1,
+                        std::ptr::null_mut(),
+                        0,
+                        std::ptr::null(),
+                    )
+                },
+                0
+            );
+            (queue, event)
+        };
         assert_eq!(unsafe { libc::kill(descendant as i32, libc::SIGKILL) }, 0);
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::AsRawFd;
+            let timeout = libc::timespec {
+                tv_sec: 5,
+                tv_nsec: 0,
+            };
+            assert_eq!(
+                unsafe {
+                    libc::kevent(
+                        exit_queue.as_raw_fd(),
+                        std::ptr::null(),
+                        0,
+                        &mut exit_event,
+                        1,
+                        &timeout,
+                    )
+                },
+                1
+            );
+            // Copy fields before assertions because Darwin's kevent may be packed.
+            let (ident, filter, flags, fflags) = (
+                exit_event.ident,
+                exit_event.filter,
+                exit_event.flags,
+                exit_event.fflags,
+            );
+            assert_eq!(flags & libc::EV_ERROR, 0);
+            assert_eq!(ident, descendant as usize);
+            assert_eq!(filter, libc::EVFILT_PROC);
+            assert_ne!(fflags & libc::NOTE_EXIT, 0);
+        }
         // pidfd observes precisely this descendant, including its unreaped exit.
         #[cfg(target_os = "linux")]
         {
