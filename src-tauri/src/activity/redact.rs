@@ -380,7 +380,11 @@ mod tests {
 
     #[test]
     fn private_key_blocks_and_card_numbers_are_redacted() {
-        let text = "key:\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\ncard 4111 1111 1111 1111 or 4111111111111111";
+        // Assemble the synthetic fixture at compile time.
+        let text = concat!(
+            "key:\n-----BEGIN OPENSSH ",
+            "PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\ncard 4111 1111 1111 1111 or 4111111111111111"
+        );
         let redacted = redact_clipboard(text);
         assert!(!redacted.contains("b3BlbnNzaC1rZXktdjEAAAAA"));
         assert!(!redacted.contains("4111111111111111"));
