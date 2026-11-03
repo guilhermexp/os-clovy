@@ -62,42 +62,6 @@ fn call_tool_error(name: &str, error: &crate::domain::types::AppError) -> Value 
     }
 }
 
-#[cfg(test)]
-mod diagnostic_tests {
-    use super::*;
-    use crate::{agent_mcp::AgentMcpError, domain::types::AppError};
-
-    #[test]
-    fn relay_retains_host_diagnostic_but_discards_arbitrary_details() {
-        let error = AgentMcpError::Remote(-32601)
-            .diagnostic("private", Some("lookup"), "call")
-            .into_app_error();
-        let result = app_tool_error(&error);
-        assert_eq!(result["isError"], true);
-        let diagnostic = &result["_meta"]["clovy"]["diagnostic"];
-        assert_eq!(diagnostic["server"], "private");
-        assert_eq!(diagnostic["remoteCode"], -32601);
-        assert_eq!(diagnostic["phase"], "call");
-        let mut unrelated = AppError::new("provider_failure", "Provider unavailable");
-        unrelated.details = Some(json!({"authorization": "fixture-private-payload"}));
-        let result = app_tool_error(&unrelated);
-        assert!(result.get("_meta").is_none());
-        assert!(!result.to_string().contains("fixture-private-payload"));
-        let result = call_tool_error("mcp_example_read", &unrelated);
-        assert!(!result.to_string().contains("fixture-private-payload"));
-
-        let mut native = AppError::new("turn_expired", "Turn expired");
-        native.details = Some(json!({"retrySafe": false}));
-        let result = call_tool_error("computer_use", &native);
-        assert_eq!(
-            result["structuredContent"]["error"]["details"]["retrySafe"],
-            false
-        );
-        let result = call_tool_error("mcp_example_read", &error);
-        assert_eq!(result["_meta"]["clovy"]["diagnostic"]["remoteCode"], -32601);
-    }
-}
-
 /// Answers one JSON-RPC message for a client with neither app nor turn;
 /// `None` for notifications and responses.
 pub async fn handle(data: &McpData, message: &Value) -> Option<Value> {
@@ -334,3 +298,39 @@ The catalog is authoritative for this connection. Routine toolsets restrict disc
 
 Reads above are local and do not activate capture, login, permissions or a feature. Native mutations and browser input use the approval broker's effective policy; clarification always requires an answer. Browser ownership, network and target guards also apply. Media generation/editing is the existing exception: direct provider usage can be charged without another broker card. Status is not authorization. Inspect error codes and delivery state; never resend an effect whose delivery is uncertain.
 "#;
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use crate::{agent_mcp::AgentMcpError, domain::types::AppError};
+
+    #[test]
+    fn relay_retains_host_diagnostic_but_discards_arbitrary_details() {
+        let error = AgentMcpError::Remote(-32601)
+            .diagnostic("private", Some("lookup"), "call")
+            .into_app_error();
+        let result = app_tool_error(&error);
+        assert_eq!(result["isError"], true);
+        let diagnostic = &result["_meta"]["clovy"]["diagnostic"];
+        assert_eq!(diagnostic["server"], "private");
+        assert_eq!(diagnostic["remoteCode"], -32601);
+        assert_eq!(diagnostic["phase"], "call");
+        let mut unrelated = AppError::new("provider_failure", "Provider unavailable");
+        unrelated.details = Some(json!({"authorization": "fixture-private-payload"}));
+        let result = app_tool_error(&unrelated);
+        assert!(result.get("_meta").is_none());
+        assert!(!result.to_string().contains("fixture-private-payload"));
+        let result = call_tool_error("mcp_example_read", &unrelated);
+        assert!(!result.to_string().contains("fixture-private-payload"));
+
+        let mut native = AppError::new("turn_expired", "Turn expired");
+        native.details = Some(json!({"retrySafe": false}));
+        let result = call_tool_error("computer_use", &native);
+        assert_eq!(
+            result["structuredContent"]["error"]["details"]["retrySafe"],
+            false
+        );
+        let result = call_tool_error("mcp_example_read", &error);
+        assert_eq!(result["_meta"]["clovy"]["diagnostic"]["remoteCode"], -32601);
+    }
+}

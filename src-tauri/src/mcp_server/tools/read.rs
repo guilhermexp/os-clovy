@@ -657,7 +657,7 @@ async fn list_memories(data: &McpData, arguments: &Value) -> Result<Value, AppEr
         memory
             .folder_id
             .as_ref()
-            .is_none_or(|id| enabled_projects.contains(id))
+            .map_or(true, |id| enabled_projects.contains(id))
     });
     let has_more = memories.len() > offset.saturating_add(limit);
     let items: Vec<Value> = memories

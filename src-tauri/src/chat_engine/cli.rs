@@ -1164,6 +1164,21 @@ fn cli_mcp_error(server: &str, tool: &str, error: &Value, fallback: &str) -> Str
     format!("MCP origin: {origin}; server: {server}; tool: {tool}; phase: call; code: mcp_tool_failed; remote code: {remote_code}; state: unavailable; action: {action}. {message}")
 }
 
+/// `shellToolCall` -> `shell`; MCP calls carry the tool's own name.
+fn cursor_tool_name(key: &str, call: &Value) -> String {
+    let base = key.trim_end_matches("ToolCall");
+    if base == "mcp" {
+        let args = &call["args"];
+        if let Some(tool) = str_at(args, "toolName").or_else(|| str_at(args, "name")) {
+            return match str_at(args, "providerIdentifier") {
+                Some(server) => format!("{server}.{tool}"),
+                None => tool.to_string(),
+            };
+        }
+    }
+    base.to_string()
+}
+
 #[cfg(test)]
 mod mcp_origin_tests {
     use super::*;
@@ -1404,19 +1419,4 @@ mod mcp_origin_tests {
         }
         assert!(!detail.contains("reconnect"));
     }
-}
-
-/// `shellToolCall` -> `shell`; MCP calls carry the tool's own name.
-fn cursor_tool_name(key: &str, call: &Value) -> String {
-    let base = key.trim_end_matches("ToolCall");
-    if base == "mcp" {
-        let args = &call["args"];
-        if let Some(tool) = str_at(args, "toolName").or_else(|| str_at(args, "name")) {
-            return match str_at(args, "providerIdentifier") {
-                Some(server) => format!("{server}.{tool}"),
-                None => tool.to_string(),
-            };
-        }
-    }
-    base.to_string()
 }

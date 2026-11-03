@@ -614,7 +614,7 @@ fn verify_required_tool_access(result: &serde_json::Value) -> Result<(), AppErro
             "Clovy could not verify which Notion tools are available for this workspace. Please try again.",
         )
     };
-    let result = result.as_object().ok_or_else(&malformed)?;
+    let result = result.as_object().ok_or_else(malformed)?;
     match result.get("isError") {
         None | Some(serde_json::Value::Bool(false)) => {}
         _ => return Err(malformed()),
@@ -622,7 +622,7 @@ fn verify_required_tool_access(result: &serde_json::Value) -> Result<(), AppErro
     let content = result
         .get("content")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(&malformed)?;
+        .ok_or_else(malformed)?;
     let mut access_map = None;
     for block in content {
         let Some(text) = block
@@ -647,7 +647,7 @@ fn verify_required_tool_access(result: &serde_json::Value) -> Result<(), AppErro
             return Err(malformed());
         }
     }
-    let access_map = access_map.ok_or_else(&malformed)?;
+    let access_map = access_map.ok_or_else(malformed)?;
     let mut unavailable = false;
     for (_, access_key) in NOTION_REQUIRED_TOOLS {
         let status = access_map
@@ -655,7 +655,7 @@ fn verify_required_tool_access(result: &serde_json::Value) -> Result<(), AppErro
             .and_then(serde_json::Value::as_object)
             .and_then(|entry| entry.get("status"))
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(&malformed)?;
+            .ok_or_else(malformed)?;
         match status {
             "available" | "limited_free_trial" => {}
             "upgrade_required" | "not_enabled" => unavailable = true,
@@ -2277,7 +2277,7 @@ fn validate_update_page_change(
         value
             .as_str()
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(&invalid)
+            .ok_or_else(invalid)
     });
     let command = command.transpose()?;
     let new_str = object.get("new_str");

@@ -1595,7 +1595,7 @@ mod tests {
             vec![(0, 1000), (2000, 3000)]
         );
         assert_eq!(discarded_turn_spans(&turn, &[]), vec![(0, 3000)]);
-        assert!(discarded_turn_spans(&turn, &[turn.clone()]).is_empty());
+        assert!(discarded_turn_spans(&turn, std::slice::from_ref(&turn)).is_empty());
     }
 
     #[test]

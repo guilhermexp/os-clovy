@@ -717,16 +717,24 @@ impl DictationTakeToken {
     }
 
     fn cancel(&self) -> bool {
-        if self
-            .inner
-            .state
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |state| {
-                matches!(state, DICTATION_TAKE_CAPTURING | DICTATION_TAKE_PROCESSING)
-                    .then_some(DICTATION_TAKE_CANCELLED)
-            })
-            .is_err()
-        {
-            return false;
+        loop {
+            let state = self.inner.state.load(Ordering::SeqCst);
+            if !matches!(state, DICTATION_TAKE_CAPTURING | DICTATION_TAKE_PROCESSING) {
+                return false;
+            }
+            if self
+                .inner
+                .state
+                .compare_exchange(
+                    state,
+                    DICTATION_TAKE_CANCELLED,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                break;
+            }
         }
         self.inner.cancellation.send_replace(true);
         // A cancelled take never delivers, and its transcription task returns
@@ -12744,6 +12752,120 @@ mod tests {
 
         assert!(state.cancel(Some("take-1")));
         assert!(take.try_begin_delivery().is_none());
+    }
+
+    #[test]
+    fn concurrent_take_cancellations_have_one_winner() {
+        for processing in [false, true] {
+            let id = format!("cancel-race-{}", uuid::Uuid::new_v4());
+            let gate = &crate::update_gate::UPDATE_GATE;
+            gate.begin_dictation_take(&id).unwrap();
+            let take = DictationTakeState::default().begin(id.clone());
+            if processing {
+                assert!(take.try_begin_processing());
+            }
+            let cancellation = take.inner.cancellation.subscribe();
+            let barrier = std::sync::Barrier::new(4);
+            let winners = std::thread::scope(|scope| {
+                let attempts: Vec<_> = (0..4)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            take.cancel()
+                        })
+                    })
+                    .collect();
+                attempts
+                    .into_iter()
+                    .map(|attempt| attempt.join().unwrap())
+                    .filter(|cancelled| *cancelled)
+                    .count()
+            });
+            assert_eq!(winners, 1);
+            assert_eq!(take.state(), DICTATION_TAKE_CANCELLED);
+            assert!(*cancellation.borrow());
+            assert!(!gate.has_dictation_take(&id));
+            assert!(!take.try_begin_processing());
+            assert!(take.try_begin_delivery().is_none());
+            assert!(!take.cancel());
+        }
+    }
+
+    #[test]
+    fn take_cancellation_races_processing_and_delivery_without_reopening_authority() {
+        for delivery in [false, true] {
+            for _ in 0..16 {
+                let id = format!("transition-race-{}", uuid::Uuid::new_v4());
+                let gate = &crate::update_gate::UPDATE_GATE;
+                gate.begin_dictation_take(&id).unwrap();
+                let take = DictationTakeState::default().begin(id.clone());
+                if delivery {
+                    assert!(take.try_begin_processing());
+                }
+                let cancellation = take.inner.cancellation.subscribe();
+                let barrier = std::sync::Barrier::new(2);
+                let (cancelled, transitioned) = std::thread::scope(|scope| {
+                    let cancel = scope.spawn(|| {
+                        barrier.wait();
+                        take.cancel()
+                    });
+                    let transition = scope.spawn(|| {
+                        barrier.wait();
+                        if delivery {
+                            take.try_begin_delivery().is_some()
+                        } else {
+                            take.try_begin_processing()
+                        }
+                    });
+                    (cancel.join().unwrap(), transition.join().unwrap())
+                });
+                if delivery {
+                    assert_ne!(cancelled, transitioned);
+                } else {
+                    // A Processing winner still leaves the take cancellable.
+                    assert!(cancelled);
+                }
+                assert_eq!(*cancellation.borrow(), cancelled);
+                assert_eq!(gate.has_dictation_take(&id), !cancelled);
+                assert_eq!(
+                    take.state(),
+                    if cancelled {
+                        DICTATION_TAKE_CANCELLED
+                    } else {
+                        DICTATION_TAKE_DELIVERING
+                    }
+                );
+                assert!(!take.cancel());
+                assert!(!take.try_begin_processing());
+                assert!(take.try_begin_delivery().is_none());
+                if !cancelled {
+                    // Only this synthetic paste still owns a gate entry.
+                    gate.end_dictation_take(&id);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_refuses_delivering_terminal_and_unknown_take_states() {
+        for phase in [
+            DICTATION_TAKE_DELIVERING,
+            DICTATION_TAKE_CANCELLED,
+            4,
+            u8::MAX,
+        ] {
+            let id = format!("cancel-refusal-{}", uuid::Uuid::new_v4());
+            let gate = &crate::update_gate::UPDATE_GATE;
+            gate.begin_dictation_take(&id).unwrap();
+            let take = DictationTakeState::default().begin(id.clone());
+            take.inner.state.store(phase, Ordering::SeqCst);
+            let cancellation = take.inner.cancellation.subscribe();
+            assert!(!take.cancel());
+            assert_eq!(take.state(), phase);
+            assert!(!*cancellation.borrow());
+            assert!(gate.has_dictation_take(&id));
+            gate.end_dictation_take(&id);
+        }
     }
 
     #[test]

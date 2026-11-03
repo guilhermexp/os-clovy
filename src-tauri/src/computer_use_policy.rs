@@ -103,7 +103,7 @@ pub(crate) fn windows_target_integrity_allowed(
 /// effective policy at the non-elevating CreateProcess boundary.
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn windows_compatibility_layers_allowed(value: Option<&str>) -> bool {
-    value.is_none_or(|value| {
+    value.map_or(true, |value| {
         value.split_whitespace().all(|token| {
             let token = token.trim_start_matches('~');
             token.is_empty()

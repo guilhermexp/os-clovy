@@ -59,7 +59,7 @@ impl ToolGroup for VaultSkillTools {
             let roots = crate::agent_sessions::skills::skill_roots(app);
             // Dropping the managed root after a path-resolution failure must
             // never promote the remaining global root to editable storage.
-            if roots.first().is_none_or(|(_, managed)| !managed) {
+            if roots.first().map_or(true, |(_, managed)| !managed) {
                 return Err(AppError::new(
                     "agent_skill_write_failed",
                     "Managed skill storage is unavailable.",
