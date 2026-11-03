@@ -1249,7 +1249,7 @@ fn launch_app_blocking(
         || path
             .file_name()
             .and_then(|file| file.to_str())
-            .is_none_or(crate::computer_use_policy::blocked_app)
+            .map_or(true, crate::computer_use_policy::blocked_app)
     {
         return Ok(
             json!({"version":"2.5","ok":false,"command":"launch","error":{"code":"computer_use_target_blocked","message":"Clovy cannot open this protected application through Computer use.","disposition":{"delivery":"not_delivered","retry":"safe"}}}),

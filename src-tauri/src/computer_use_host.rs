@@ -60,6 +60,7 @@ impl HostCancel {
 }
 
 pub struct CommandHost {
+    #[cfg(not(target_os = "macos"))]
     browser_runtime: Arc<crate::computer_use_owned_runtime::OwnedBrowserRuntime>,
     #[cfg(not(target_os = "macos"))]
     executable: PathBuf,
@@ -159,7 +160,6 @@ impl CommandHost {
                 group,
             }));
             Ok(Self {
-                browser_runtime,
                 home,
                 cancel,
                 child,

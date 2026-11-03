@@ -141,16 +141,16 @@ impl EngineAdapter {
             let Some(public_id) = public_window_id(id) else {
                 continue;
             };
-            if raw["pid"].as_i64().is_none_or(|p| p <= 0)
+            if raw["pid"].as_i64().map_or(true, |p| p <= 0)
                 || geometry(&raw["bounds"]).is_none()
-                || raw["process_instance"].as_str().is_none_or(str::is_empty)
+                || raw["process_instance"].as_str().map_or(true, str::is_empty)
                 || (cfg!(target_os = "windows")
                     && (raw["native_owner"]["pid"]
                         .as_u64()
-                        .is_none_or(|p| p == 0 || p > u32::MAX as u64)
+                        .map_or(true, |p| p == 0 || p > u32::MAX as u64)
                         || raw["native_owner"]["instance"]
                             .as_str()
-                            .is_none_or(str::is_empty)))
+                            .map_or(true, str::is_empty)))
             {
                 continue;
             }
@@ -207,7 +207,7 @@ impl EngineAdapter {
                 let selected: Vec<Value> = windows
                     .iter()
                     .enumerate()
-                    .filter(|(_, w)| args["pid"].as_i64().is_none_or(|p| p == w.pid()))
+                    .filter(|(_, w)| args["pid"].as_i64().map_or(true, |p| p == w.pid()))
                     .filter(|(_, w)| args["on_screen_only"] != true || w.raw["visible"] == true)
                     .map(|(z, w)| w.public(z))
                     .collect();
@@ -817,7 +817,7 @@ fn validate_value_action(name: &str, args: &Value, element: &Element) -> Result<
     let field = if name == "type_text" { "text" } else { "value" };
     if args[field]
         .as_str()
-        .is_none_or(|text| text.chars().count() > 10_000)
+        .map_or(true, |text| text.chars().count() > 10_000)
     {
         return Err(invalid_arguments());
     }
@@ -988,7 +988,7 @@ fn action_argv(
 }
 fn has_modifiers(args: &Value) -> bool {
     args.get("modifier")
-        .is_some_and(|value| value.as_array().is_none_or(|items| !items.is_empty()))
+        .is_some_and(|value| value.as_array().map_or(true, |items| !items.is_empty()))
 }
 fn modifiers(args: &Value, command: &mut Vec<String>) -> Result<(), Value> {
     let Some(value) = args.get("modifier") else {
