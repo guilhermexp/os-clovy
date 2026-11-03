@@ -54,13 +54,18 @@ impl Write for Output {
 }
 impl Output {
     pub(super) async fn response(&self) -> Value {
+        self.responses(1).await.remove(0)
+    }
+    async fn responses(&self, count: usize) -> Vec<Value> {
         tokio::time::timeout(Duration::from_secs(8), async {
             loop {
                 let bytes = self.0.lock().unwrap().clone();
-                if let Some(line) = bytes.split(|b| *b == b'\n').find(|line| !line.is_empty()) {
-                    if let Ok(value) = serde_json::from_slice(line) {
-                        return value;
-                    }
+                let messages: Vec<Value> = bytes
+                    .split(|b| *b == b'\n')
+                    .filter_map(|line| serde_json::from_slice(line).ok())
+                    .collect();
+                if messages.len() >= count {
+                    return messages;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -672,4 +677,169 @@ async fn real_partial_write_is_not_replayed_after_transport_failure() {
     fault.await.unwrap();
     drop(end);
     relay.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn independent_request_reconnects_after_partial_write_before_reader_drains() {
+    // EOF cannot mark the first connection dead until this test releases its
+    // local gate. The next stdin request therefore exposes the write path's
+    // own decision, independently of reader-thread scheduling.
+    struct AtEnd {
+        input: Input,
+        attempted: Option<tokio::sync::oneshot::Sender<()>>,
+        peer_done: Arc<tokio::sync::Notify>,
+    }
+    impl Read for AtEnd {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            self.input.read(bytes)
+        }
+    }
+    impl BufRead for AtEnd {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            if self.input.bytes.position() as usize == self.input.bytes.get_ref().len() {
+                if let Some(attempted) = self.attempted.take() {
+                    self.peer_done.notify_one();
+                    let _ = attempted.send(());
+                }
+            }
+            self.input.fill_buf()
+        }
+        fn consume(&mut self, count: usize) {
+            self.input.consume(count);
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let dir = channel_dir(root.path());
+    let handler: Handler = Arc::new(|_| Box::pin(async { None }));
+    let listener = Listener::start(&dir, handler).await.unwrap();
+    listener.stop_and_wait().await;
+    let socket = tokio::net::UnixListener::bind(socket_path(&dir)).unwrap();
+    let effects = root.path().join("independent-effects");
+    std::fs::write(&effects, b"").unwrap();
+    let target = effects.clone();
+    let peer_done = Arc::new(tokio::sync::Notify::new());
+    let done = peer_done.clone();
+    let peer = tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        let (stream, _) = socket.accept().await.unwrap();
+        let mut first = tokio::io::BufReader::new(stream);
+        let mut hello = String::new();
+        first.read_line(&mut hello).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&hello).unwrap()["clovyMcp"],
+            1
+        );
+        first
+            .get_mut()
+            .write_all(b"{\"clovyMcp\":1,\"ok\":true}\n")
+            .await
+            .unwrap();
+        let mut prefix = [0; 128];
+        first.read_exact(&mut prefix).await.unwrap();
+        assert!(!prefix.contains(&b'\n'));
+        drop(first);
+
+        let mut applied = Vec::new();
+        let accepted = tokio::select! {
+            biased;
+            accepted = socket.accept() => Some(accepted.unwrap().0),
+            _ = done.notified() => None,
+        };
+        if let Some(stream) = accepted {
+            let mut next = tokio::io::BufReader::new(stream);
+            hello.clear();
+            next.read_line(&mut hello).await.unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&hello).unwrap()["clovyMcp"],
+                1
+            );
+            next.get_mut()
+                .write_all(b"{\"clovyMcp\":1,\"ok\":true}\n")
+                .await
+                .unwrap();
+            loop {
+                let mut line = String::new();
+                if next.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+                let message: Value = serde_json::from_str(&line).unwrap();
+                let id = message["id"].clone();
+                // A real append and its receipt, rather than an echo peer.
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&target)
+                    .unwrap()
+                    .write_all(format!("{id}\n").as_bytes())
+                    .unwrap();
+                applied.push(id.clone());
+                let response = protocol::result_response(
+                    id.clone(),
+                    json!({"isError":false,"receipt":{"callId":id,"delivery":"delivered","effect":"applied","retrySafe":false}}),
+                );
+                next.get_mut()
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        }
+        applied
+    });
+    let output = Output::default();
+    let sink = output.clone();
+    let (end, wait) = std::sync::mpsc::channel();
+    let (attempted, attempts_done) = tokio::sync::oneshot::channel();
+    let (pause, resume) = stdio::reader_exit_pause();
+    let input = format!(
+        "{}\n{}\n",
+        json!({"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"fixture_write","arguments":{"body":"z".repeat(3 * 1024 * 1024)}}}),
+        json!({"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":"fixture_write","arguments":{"body":"independent"}}})
+    );
+    let relay = tokio::task::spawn_blocking(move || {
+        stdio::relay_with_reader_pause(
+            &dir,
+            AtEnd {
+                input: Input {
+                    bytes: std::io::Cursor::new(input.into_bytes()),
+                    end: wait,
+                },
+                attempted: Some(attempted),
+                peer_done,
+            },
+            Box::new(sink),
+            pause,
+        );
+    });
+    tokio::time::timeout(Duration::from_secs(8), attempts_done)
+        .await
+        .unwrap()
+        .unwrap();
+    // In GREEN, Drop already released the first connection before reconnect.
+    // In RED, both writes have finished on the old connection. Release before
+    // collecting results/joining so neither branch can wait on its own hook.
+    let _ = resume.send(());
+    let _ = output.responses(2).await;
+    drop(end);
+    relay.await.unwrap();
+    let applied = peer.await.unwrap();
+    let replies = output.responses(2).await;
+    assert_eq!(replies.len(), 2, "one result per independent request");
+    let original = replies.iter().find(|reply| reply["id"] == 99).unwrap();
+    assert_eq!(
+        original["result"]["structuredContent"]["error"]["code"],
+        "mcp_delivery_unknown"
+    );
+    assert_eq!(
+        original["result"]["structuredContent"]["error"]["details"],
+        json!({"delivery":"unknown","effect":"unknown","retrySafe":false,"callId":99})
+    );
+    let independent = replies.iter().find(|reply| reply["id"] == 100).unwrap();
+    assert_eq!(
+        independent["result"]["receipt"],
+        json!({"callId":100,"delivery":"delivered","effect":"applied","retrySafe":false}),
+        "independent request did not reconnect: {independent}"
+    );
+    assert_eq!(applied, vec![json!(100)], "the original must never replay");
+    assert_eq!(std::fs::read_to_string(effects).unwrap(), "100\n");
 }

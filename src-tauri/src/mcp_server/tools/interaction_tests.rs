@@ -239,9 +239,10 @@ async fn interaction_claude_permission_prompt_through_the_socket_and_relay() {
     let binding = broker.turn(CliKind::Claude, true).await;
     let turns = TurnRegistry::default();
     let token = turns.issue(binding.clone());
-    let dir = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let dir = channel::channel_dir(root.path());
     let _listener = channel::Listener::start_with_turns(
-        dir.path(),
+        &dir,
         turn_handler(data(&broker), broker.broker().clone()),
         turns.clone(),
     )
@@ -267,7 +268,7 @@ async fn interaction_claude_permission_prompt_through_the_socket_and_relay() {
     // (the scripted decisions apply in order); the token holds for each.
     let mut messages = Vec::new();
     for batch in [&lines[..2], &lines[2..3], &lines[3..]] {
-        messages.extend(relay(dir.path(), &token, batch).await);
+        messages.extend(relay(&dir, &token, batch).await);
     }
 
     let listed = names(by_id(&messages, 1)["result"]["tools"].as_array().unwrap())

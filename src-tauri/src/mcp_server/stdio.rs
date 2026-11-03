@@ -237,6 +237,8 @@ pub fn relay_turn(
 
 #[cfg(any(unix, windows))]
 pub use local::relay_turn;
+#[cfg(all(test, unix))]
+pub(crate) use local::{reader_exit_pause, relay_with_reader_pause};
 
 #[cfg(any(unix, windows))]
 mod local {
@@ -252,6 +254,26 @@ mod local {
     use crate::mcp_server::channel::{self, ClientError};
 
     type Output = Arc<Mutex<Box<dyn Write + Send>>>;
+
+    /// A first connection's EOF pause, owned by one test relay invocation.
+    /// Production and Windows builds have no hook or shared test state.
+    #[cfg(all(test, unix))]
+    pub(crate) struct ReaderExitPause {
+        wait: std::sync::mpsc::Receiver<()>,
+        release: std::sync::mpsc::Sender<()>,
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn reader_exit_pause() -> (ReaderExitPause, std::sync::mpsc::Sender<()>) {
+        let (release, wait) = std::sync::mpsc::channel();
+        (
+            ReaderExitPause {
+                wait,
+                release: release.clone(),
+            },
+            release,
+        )
+    }
 
     fn emit(output: &Output, message: &Value) {
         let mut output = output.lock().unwrap_or_else(PoisonError::into_inner);
@@ -290,10 +312,17 @@ mod local {
         reader: Option<std::thread::JoinHandle<()>>,
         alive: Arc<AtomicBool>,
         pending: Arc<Mutex<HashMap<String, Value>>>,
+        #[cfg(all(test, unix))]
+        reader_release: Option<std::sync::mpsc::Sender<()>>,
     }
 
     impl Connection {
-        fn open(dir: &Path, turn: Option<&str>, output: &Output) -> Result<Self, ClientError> {
+        fn open(
+            dir: &Path,
+            turn: Option<&str>,
+            output: &Output,
+            #[cfg(all(test, unix))] pause: Option<ReaderExitPause>,
+        ) -> Result<Self, ClientError> {
             let stream = channel::connect_turn(dir, turn)?;
             let reader = stream.try_clone().map_err(ClientError::Other)?;
             let alive = Arc::new(AtomicBool::new(true));
@@ -301,6 +330,11 @@ mod local {
             let (thread_alive, thread_pending, thread_output) =
                 (Arc::clone(&alive), Arc::clone(&pending), Arc::clone(output));
             let probe_dir = dir.to_path_buf();
+            #[cfg(all(test, unix))]
+            let (reader_wait, reader_release) = match pause {
+                Some(pause) => (Some(pause.wait), Some(pause.release)),
+                None => (None, None),
+            };
             let reader = std::thread::spawn(move || {
                 let mut reader = BufReader::new(reader);
                 while let Ok(Some(InputLine::Line(line))) =
@@ -316,6 +350,10 @@ mod local {
                             .remove(&id.to_string());
                     }
                     emit(&thread_output, &message);
+                }
+                #[cfg(all(test, unix))]
+                if let Some(wait) = reader_wait {
+                    let _ = wait.recv();
                 }
                 let orphans: Vec<Value> = {
                     let mut pending = thread_pending
@@ -338,6 +376,8 @@ mod local {
                 reader: Some(reader),
                 alive,
                 pending,
+                #[cfg(all(test, unix))]
+                reader_release,
             })
         }
 
@@ -363,6 +403,9 @@ mod local {
             {
                 // Never replay after write_all: even its error may mean a
                 // prefix reached Clovy. The reader emits unknown for orphans.
+                // Only a later independent request may open a new connection,
+                // even if the reader has not processed EOF yet.
+                self.alive.store(false, Ordering::SeqCst);
                 let _ = self.stream.shutdown(std::net::Shutdown::Both);
             }
             true
@@ -385,6 +428,12 @@ mod local {
     }
     impl Drop for Connection {
         fn drop(&mut self) {
+            // A reconnect drops this connection before opening the next one.
+            // Release its test pause before join, never wait on our own hook.
+            #[cfg(all(test, unix))]
+            if let Some(release) = self.reader_release.take() {
+                let _ = release.send(());
+            }
             let _ = self.stream.shutdown(std::net::Shutdown::Both);
             if let Some(reader) = self.reader.take() {
                 let _ = reader.join();
@@ -407,8 +456,35 @@ mod local {
     pub fn relay_turn(
         dir: &Path,
         turn: Option<&str>,
+        input: impl BufRead,
+        output: Box<dyn Write + Send>,
+    ) {
+        relay_inner(
+            dir,
+            turn,
+            input,
+            output,
+            #[cfg(all(test, unix))]
+            None,
+        );
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn relay_with_reader_pause(
+        dir: &Path,
+        input: impl BufRead,
+        output: Box<dyn Write + Send>,
+        pause: ReaderExitPause,
+    ) {
+        relay_inner(dir, None, input, output, Some(pause));
+    }
+
+    fn relay_inner(
+        dir: &Path,
+        turn: Option<&str>,
         mut input: impl BufRead,
         output: Box<dyn Write + Send>,
+        #[cfg(all(test, unix))] mut reader_pause: Option<ReaderExitPause>,
     ) {
         let output: Output = Arc::new(Mutex::new(output));
         let refused = production_data_refusal(dir);
@@ -473,7 +549,13 @@ mod local {
                 connection = None;
             }
             if connection.is_none() {
-                match Connection::open(dir, turn, &output) {
+                match Connection::open(
+                    dir,
+                    turn,
+                    &output,
+                    #[cfg(all(test, unix))]
+                    reader_pause.take(),
+                ) {
                     Ok(opened) => connection = Some(opened),
                     Err(error) => {
                         if let Some(response) = fallback(&message, &reason(&error)) {
