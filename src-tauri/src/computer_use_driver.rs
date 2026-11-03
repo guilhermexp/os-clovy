@@ -611,9 +611,7 @@ fn packaged_process_signature_matches(audit_token: &[u8], helper_app: &std::path
         return false;
     };
     peer.check_validity(
-        CodeSigningFlags::DO_NOT_VALIDATE_RESOURCES
-            | CodeSigningFlags::STRICT_VALIDATE
-            | CodeSigningFlags::NO_NETWORK_ACCESS,
+        CodeSigningFlags::STRICT_VALIDATE | CodeSigningFlags::NO_NETWORK_ACCESS,
         &requirement,
     )
     .is_ok()
