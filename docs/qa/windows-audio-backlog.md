@@ -6,6 +6,8 @@ Registro solicitado pelo dono em 2026-11-01, antes de implementar as melhorias d
 
 Este registro foi criado antes da implementação T2. F1-F3 agora têm código e provas portáveis; as caixas seguem abertas até o aceite nativo Windows. F4/I1 permanecem investigações, sem causa confirmada.
 
+Na integração de 2026-11-03, o frontend anterior teve2.069 testes aprovados/7 ignorados. O CI41589762530 da fonte `2dbe9ac5` aprovou formato, Clippy e2.475 testes Rust únicos/16 ignorados. A fonte funcional737 teve composição nativa Mac de2.476 aprovados únicos após corrigir somente a sincronização Darwin de uma fixture; não foi uma execução integral com exit0. Não somar novamente as mesmas suítes nem atribuir esses resultados a WASAPI, endpoints ou áudio Windows. A revisão T2 está em `.tmp/verify/T2/independent-review/2/summary.md`; recibos atuais em `.tmp/verify/T7/mac-native-20261102/{24,25,26,27,28,29,30}/`. CERT estava offline na consulta RPC registrada; F1–F4/I1 permanecem abertos para o protocolo abaixo, sem causa presumida para o ASR.
+
 ## Correções identificadas
 
 - [ ] **F1: permitir controlar o áudio do sistema no Windows.** O estado inicia com `userWantsSystemAudio=true`; com System pronto e concedido, seleciona `microphonePlusSystem`. Porém, o painel e o botão de opções são condicionados a `isMacLikePlatform()`, escondendo o controle no Windows. Evidência por inspeção: `src/app/use-app-state.ts:173-197`, `src/components/note-editor/NoteEditor.tsx:347,761-779,872` e `src/lib/platform.ts:62-67`. Aceite: com captura System disponível no Windows, o usuário consegue alternar entre microfone sozinho e microfone + sistema; conferir modo solicitado e os arquivos das fontes em uma gravação sintética nativa. Ainda sem reprodução visual no Windows.

@@ -203,6 +203,10 @@ build scripts in `pnpm-workspace.yaml` — live in
   runtime, other-SID denial, Authenticode or the installed NSIS artifact.
 - **Chat and tools gate:** `cargo test chat_engine`, `cargo test mcp_server`,
   and `cargo test approval_broker` cover CLI turns and local tool authority.
+- **Agent item ordering:** `event.sequence` is a per-run replay cursor, not a
+  timeline ordinal. Item-producing events carry `data.itemSequence` from the
+  persisted conversation-wide item. Keep cursor gates and event-ID deduplication
+  separate; never substitute a cursor or timestamp for item ordering.
 - **Lint / format:** `pnpm check` (Biome: format + lint for `src/` and
   `scripts/`, including the lucide import ban) and `pnpm typecheck`
   (`tsc --noEmit`); `pnpm format` / `pnpm check:write` apply Biome fixes. Rust
@@ -280,6 +284,17 @@ the only remote). Issues and branches use the harness tickets, not `JUN-*`.
   `CLOVY_DEV_APP_IDENTIFIER=<id>` gives a run its own compiled identity, data
   directory (`<id>-dev`), and bundle. Never `tccutil reset` a release
   identifier.
+  Computer use debug peer authentication trusts real Cargo outputs under this
+  checkout's `src-tauri/target/<profile>` (optional target triple), with the
+  signed dev bundle directly in that profile directory. A packaged debug
+  app under `debug/bundle/macos` or a custom target root is not that layout;
+  do not weaken the path, audit-token or same-Team checks to qualify it.
+  Dynamic `SecCode` validation uses `STRICT_VALIDATE | NO_NETWORK_ACCESS`;
+  `DO_NOT_VALIDATE_RESOURCES` is a static-code flag and makes this dynamic
+  call fail with `errSecCSInvalidFlags` (-67070), before a permission query.
+  The private `tools/list` schema for `get_window_state.capture_mode` must
+  expose `som`, `vision`, and `ax`, matching the adapter's accepted modes.
+  Keep its closed schema and the signed-helper self-test contract intact.
 
 ## Verification
 
@@ -295,20 +310,24 @@ Functional proof (Reality) for desktop features:
 
 1. Isolation: debug builds only. The owner's `dev.guilhermexp.clovy-dev` profile
    is not a throwaway fixture. For automation compile a separate identifier:
-   `pnpm tauri:build -- --debug --bundles app --config src-tauri/tauri.macos.conf.json --config '{"identifier":"dev.guilhermexp.clovy.timelineproof"}'`
+   `pnpm tauri:build -- --debug --bundles app --config src-tauri/tauri.macos.conf.json --config '{"identifier":"dev.clovy.timelineproof"}'`
    (Node 24 PATH below). Choose a run-owned identifier/profile and create a fresh synthetic
    profile before launch. Only use a copied profile when that scenario is
    explicitly authorized; never copy its live MCP socket. This example uses
-   `~/Library/Application Support/dev.guilhermexp.clovy.timelineproof-dev`.
+   `~/Library/Application Support/dev.clovy.timelineproof-dev`.
+   Keep the full UTF-8 path to `<profile>/mcp/clovy.sock` below the macOS
+   `sockaddr_un.sun_path` limit (104 bytes including the trailing NUL);
+   choose a short proof identifier, not a socket-path or authentication bypass.
    A proof identifier never migrates the June-era profile; to prove the
    migration, set the debug-only `CLOVY_DEV_IDENTITY_MIGRATION_SOURCE=<id>` to
    a synthetic source profile `<id>-dev` (and `<id>-dev.<name>` credential
    services) the run created; `CLOVY_DEV_IDENTITY_MIGRATION_SOURCE_APP=<name>`
    names that profile's "old app" executable, which blocks the copy while it
    runs.
-   Copy the bundle into the evidence folder, re-sign ad hoc if needed
-   (`codesign --force --deep -s -`), open by exact path, and verify the process's
-   database paths with `lsof` before changing settings or generating reports.
+   Keep Apple Development signatures on the host and helpers when proving
+   private helper authentication; an ad hoc copy can prove UI only, not
+   same-Team helper readiness. Open by exact bundle path and verify the
+   process's database paths with `lsof` before changing settings or reports.
    Changing only `Info.plist` does not isolate Tauri's compiled data identity.
    Keep the normal HOME: a fake HOME hides the default Keychain.
    Bind Computer Use to that exact bundle path. If the main window is hidden,
@@ -319,9 +338,12 @@ Functional proof (Reality) for desktop features:
    proof binary against a profile with a newer database schema. Stop only
    processes started by this run.
    Startup may create the shared `~/Library/LaunchAgents/Clovy.plist` even for
-   a proof bundle. Check its `ProgramArguments`: undo this run's autostart
-   through Settings → General only when it points to this run's exact bundle,
-   and verify the entry is gone. Never remove another app's login entry.
+   a proof bundle. Preserve the whole existing unit (or its absence) and
+   inspect both `ProgramArguments` and the loaded launchd service's program.
+   Use Settings → General to undo autostart only when both belong to this
+   run. An owned plist can coexist with another session's loaded service:
+   never toggle off or bootout that service; restore only this run's created
+   file to the preserved prior state. Never remove another app's login entry.
    Never create, unlock, or switch keychains, and never change the default
    keychain or its search list: the app reads its keys from `login`
    (`<identifier>-dev.<name>` services). Only one native proof runs on the machine at a time; parallel
