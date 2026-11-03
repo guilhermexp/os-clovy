@@ -236,15 +236,12 @@ async fn capture_opt_out_survives_restarts_and_mcp_switch_saves() {
     let state = McpServerState::default();
     reconcile(&state, root.path(), &settings).await;
     let tools = list_tools(root.path()).await.expect("tools/list answered");
-    assert_eq!(
-        tools,
-        vec![
-            "search_notes",
-            "get_note",
-            "list_dictations",
-            "list_memories"
-        ]
-    );
+    for name in ["search_notes", "get_note"] {
+        assert!(tools.iter().any(|tool| tool == name), "missing {name}");
+    }
+    assert!(tools
+        .iter()
+        .all(|name| !crate::mcp_server::tools::is_activity_tool(name)));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

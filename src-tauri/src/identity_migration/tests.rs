@@ -609,32 +609,71 @@ async fn count_rows(path: &Path, table: &str) -> i64 {
 
 #[test]
 fn refuses_to_copy_while_the_old_app_is_running() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    use std::process::{Child, Command, Stdio};
+    use std::time::Duration;
+
+    struct OldApp(Child);
+    impl Drop for OldApp {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     let base = tempfile::tempdir().unwrap();
     let mut plan = dir_plan(base.path());
     old_profile(&plan.data.source);
-    // A process named like the old app's executable.
-    let name = format!("oldapp{}", std::process::id() % 100_000);
+    // A unique executable name short enough for the process-name detector.
+    let name = format!("old{:08x}", rand::random::<u32>());
     let binary = base.path().join(&name);
-    std::fs::copy("/bin/sleep", &binary).unwrap();
-    // macOS kills a copied system binary until it is signed again.
-    assert!(std::process::Command::new("/usr/bin/codesign")
+    std::fs::copy("/bin/cat", &binary).unwrap();
+    assert!(Command::new("/usr/bin/codesign")
         .args(["--force", "--sign", "-"])
         .arg(&binary)
         .output()
         .unwrap()
         .status
         .success());
-    let mut old_app = std::process::Command::new(&binary)
-        .arg("30")
-        .spawn()
+    let (mut control, child_io) = UnixStream::pair().unwrap();
+    control
+        .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    control
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut old_app = OldApp(
+        Command::new(&binary)
+            .stdin(Stdio::from(OwnedFd::from(child_io.try_clone().unwrap())))
+            .stdout(Stdio::from(OwnedFd::from(child_io)))
+            .spawn()
+            .unwrap(),
+    );
+    // Echoed I/O proves exec completed; keeping stdin open keeps cat alive.
+    control.write_all(b"migration-fixture-ready\n").unwrap();
+    let mut ready = String::new();
+    BufReader::new(&mut control).read_line(&mut ready).unwrap();
+    assert_eq!(ready, "migration-fixture-ready\n");
+    assert!(old_app.0.try_wait().unwrap().is_none());
+    // Use the guard's exact detector and require this child, not just any
+    // process matching the name, before attempting migration.
+    let detected = Command::new("/usr/bin/pgrep")
+        .args(["-x", &name])
+        .output()
+        .unwrap();
+    assert!(detected.status.success(), "{detected:?}");
+    assert!(String::from_utf8(detected.stdout)
+        .unwrap()
+        .lines()
+        .any(|pid| pid.parse::<u32>().ok() == Some(old_app.0.id())));
     plan.source_executables = vec![name.clone()];
     let before = tree_hash(&plan.data.source);
 
     let result = migrate(&plan, &MemoryStore::default(), &mut StdCopier);
-    let _ = old_app.kill();
-    let _ = old_app.wait();
+    old_app.0.kill().unwrap();
+    old_app.0.wait().unwrap();
 
     let error = result.expect_err("the old app is running");
     assert!(error.blocked, "{error}");

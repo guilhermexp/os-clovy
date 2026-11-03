@@ -200,28 +200,48 @@ async fn stop_closes_a_silent_handshake_without_waiting_five_seconds() {
     let handler: Handler = Arc::new(|_| Box::pin(async { None }));
     let listener = Listener::start(&dir, handler).await.unwrap();
     let clone = dir.clone();
-    let stream = tokio::task::spawn_blocking(move || raw(&clone))
-        .await
-        .unwrap();
-    // Let accept install the pending handshake before stopping it.
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    listener.stop();
-    tokio::task::spawn_blocking(move || {
-        stream
+    let pending = tokio::task::spawn_blocking(move || {
+        let mut pending = Vec::new();
+        for _ in 0..MAX_PENDING_HANDSHAKES {
+            let stream = raw(&clone);
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            pending.push(stream);
+        }
+        // The excess peer closes only after accept has reserved every
+        // handshake slot. Keep those silent peers open through stop.
+        let mut excess = raw(&clone);
+        excess
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let start = Instant::now();
-        let mut stream = stream;
-        let mut b = [0; 256];
-        let result = stream.read(&mut b);
+        let result = excess.read(&mut [0; 1]);
         assert!(
-            matches!(result, Ok(0))
-                || result.is_err_and(|e| matches!(
+            matches!(&result, Ok(0))
+                || matches!(&result, Err(e) if matches!(
                     e.kind(),
                     std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
                 )),
-            "listener must actually close"
+            "handshake slots must actually be occupied: {result:?}"
         );
+        pending
+    })
+    .await
+    .unwrap();
+    let start = Instant::now();
+    listener.stop();
+    tokio::task::spawn_blocking(move || {
+        for mut stream in pending {
+            let result = stream.read(&mut [0; 256]);
+            assert!(
+                matches!(&result, Ok(0))
+                    || matches!(&result, Err(e) if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                    )),
+                "listener must actually close: {result:?}"
+            );
+        }
         assert!(start.elapsed() < Duration::from_secs(2));
     })
     .await

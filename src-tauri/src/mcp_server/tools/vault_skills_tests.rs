@@ -177,7 +177,13 @@ async fn skills_follow_global_settings_and_preserve_root_precedence() {
     assert_eq!(loaded["content"], "Managed instructions");
     assert_eq!(
         loaded["path"],
-        managed.path().join("enabled/SKILL.md").to_str().unwrap()
+        managed
+            .path()
+            .join("enabled/SKILL.md")
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
     );
     assert_eq!(
         super::vault_skills::call_with_roots(
