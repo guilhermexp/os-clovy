@@ -500,7 +500,7 @@ impl BrowserBroker {
                                 preview: Some(browser_action_preview(tool, &expected)),
                             },
                         },
-                    ).await.map_err(|d| err(d.code(), d.message()))?;
+                    ).await.map_err(|d| AppError::new(d.code(), d.message()))?;
                     if decision != ApprovalOutcome::Approved {
                         return Err(err(
                             "browser_action_declined",
