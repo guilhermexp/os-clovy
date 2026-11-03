@@ -1,5 +1,436 @@
 use super::*;
 
+async fn item(pool: &SqlitePool, session: &str, run: &str, kind: &str, payload: Value) -> String {
+    let id = Uuid::new_v4().to_string();
+    query("INSERT INTO agent_items(id,session_id,run_id,sequence,kind,payload_json,created_at) SELECT ?,?,?,COALESCE(MAX(sequence),-1)+1,?,?,'now' FROM agent_items WHERE session_id=?")
+        .bind(&id).bind(session).bind(run).bind(kind).bind(payload.to_string()).bind(session)
+        .execute(pool).await.unwrap();
+    id
+}
+
+fn running_call(call: &str) -> Value {
+    json!({"toolName":"clovy.create_note","toolCallId":call,"arguments":{"title":"Synthetic"},"result":null,"status":"running"})
+}
+
+async fn payload(pool: &SqlitePool, id: &str) -> Value {
+    let row = query("SELECT payload_json FROM agent_items WHERE id=?")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    serde_json::from_str(&row.get::<String, _>("payload_json")).unwrap()
+}
+
+#[tokio::test]
+async fn stop_settles_outer_call_without_matching_broker_approval_id_or_fabricating_a_result() {
+    let (file, pool) = fixture().await;
+    let call = item(&pool, "session", "run", "tool_call", running_call("item_1")).await;
+    let receipt = json!({"toolCallId":"8434465c-37fc-4eb0-844a-3bc0e4c192af","status":"cancelled","retiredReason":"cancelled"});
+    let approval = item(&pool, "session", "run", "interruption", receipt.clone()).await;
+    // The production UI Stop already owns cancellation before host/fallback publication.
+    let (changed, owned) = crate::agent_sessions::api::claim_ui_run_cancellation_with_signal(
+        &pool,
+        "session",
+        "run",
+        || false,
+    )
+    .await
+    .unwrap();
+    assert!(changed && !owned);
+    let event = persist_terminal_event(
+        &pool,
+        &frame("run.completed"),
+        super::super::events::sanitize_log,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(event.method, "run.cancelled");
+    assert_eq!(event.data["interruptedCallIds"], json!(["item_1"]));
+    let mut expected = running_call("item_1");
+    expected["status"] = json!("interrupted");
+    assert_eq!(payload(&pool, &call).await, expected);
+    assert_eq!(payload(&pool, &approval).await, receipt);
+    assert_eq!(
+        query("SELECT COUNT(*) AS n FROM agent_items WHERE kind='tool_result'")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get::<i64, _>("n"),
+        0
+    );
+    assert!(persist_terminal_event(
+        &pool,
+        &frame("run.cancelled"),
+        super::super::events::sanitize_log
+    )
+    .await
+    .unwrap()
+    .is_none());
+    assert_eq!(payload(&pool, &call).await, expected);
+    cleanup(file, pool).await;
+}
+
+#[tokio::test]
+async fn every_terminal_winner_settles_only_unresolved_calls_in_its_exact_run() {
+    for winner in ["cancelled", "failed", "interrupted", "completed"] {
+        let (file, pool) = fixture().await;
+        query("INSERT INTO agent_sessions(id,title,model,status,created_at,updated_at) VALUES ('session-b','Other','test','running','now','now')").execute(&pool).await.unwrap();
+        query("INSERT INTO agent_runs(id,session_id,model,status,started_at,updated_at) VALUES ('newer','session','test','running','now','now'),('run-b','session-b','test','completed','now','now')").execute(&pool).await.unwrap();
+        let unresolved = item(&pool, "session", "run", "tool_call", running_call("item_1")).await;
+        let newer = item(
+            &pool,
+            "session",
+            "newer",
+            "tool_call",
+            running_call("item_1"),
+        )
+        .await;
+        let other = item(
+            &pool,
+            "session-b",
+            "run-b",
+            "tool_call",
+            running_call("item_1"),
+        )
+        .await;
+        // Same id in another run/session must not suppress this run's settlement.
+        item(
+            &pool,
+            "session",
+            "newer",
+            "tool_result",
+            json!({"toolCallId":"item_1","result":"committed","status":"complete"}),
+        )
+        .await;
+        item(
+            &pool,
+            "session-b",
+            "run-b",
+            "tool_result",
+            json!({"toolCallId":"item_1","result":"committed","status":"complete"}),
+        )
+        .await;
+        let success_call = item(
+            &pool,
+            "session",
+            "run",
+            "tool_call",
+            running_call("success"),
+        )
+        .await;
+        let success = json!({"toolCallId":"success","result":{"noteId":"committed-note"},"status":"complete"});
+        let success_result = item(&pool, "session", "run", "tool_result", success.clone()).await;
+        let error_call = item(&pool, "session", "run", "tool_call", running_call("error")).await;
+        let error = json!({"toolCallId":"error","result":"observed error","status":"failed"});
+        let error_result = item(&pool, "session", "run", "tool_result", error.clone()).await;
+        let observed =
+            json!({"toolCallId":"inline","result":{"committed":true},"status":"running"});
+        let inline = item(&pool, "session", "run", "tool_call", observed.clone()).await;
+        query("UPDATE agent_runs SET status=? WHERE id='run'")
+            .bind(winner)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let event = persist_terminal_event(
+            &pool,
+            &frame("run.completed"),
+            super::super::events::sanitize_log,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            event.data["interruptedCallIds"],
+            json!(["item_1"]),
+            "{winner}"
+        );
+        assert_eq!(payload(&pool, &unresolved).await["status"], "interrupted");
+        for (id, expected) in [
+            (newer, running_call("item_1")),
+            (other, running_call("item_1")),
+            (success_call, running_call("success")),
+            (error_call, running_call("error")),
+            (success_result, success),
+            (error_result, error),
+            (inline, observed),
+        ] {
+            assert_eq!(payload(&pool, &id).await, expected, "{winner}");
+        }
+        assert_eq!(
+            query("SELECT status FROM agent_runs WHERE id='newer'")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get::<String, _>("status"),
+            "running"
+        );
+        cleanup(file, pool).await;
+    }
+}
+
+#[tokio::test]
+async fn claimed_terminal_publication_still_repairs_unresolved_persistence_without_republishing() {
+    let (file, pool) = fixture().await;
+    let first = persist_terminal_event(
+        &pool,
+        &frame("run.cancelled"),
+        super::super::events::sanitize_log,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(first.data.get("interruptedCallIds").is_none());
+    // Historical data from a previously published terminal run must reconcile too.
+    let call = item(&pool, "session", "run", "tool_call", running_call("item_1")).await;
+    assert!(persist_terminal_event(
+        &pool,
+        &frame("run.completed"),
+        super::super::events::sanitize_log
+    )
+    .await
+    .unwrap()
+    .is_none());
+    assert_eq!(payload(&pool, &call).await["status"], "interrupted");
+    cleanup(file, pool).await;
+}
+
+#[tokio::test]
+async fn terminal_call_admission_rejects_late_starts_but_keeps_real_late_results() {
+    use crate::agent_sessions::{AgentItemPayload, AgentRepository, ToolPayload};
+    let (file, pool) = fixture().await;
+    let call = item(&pool, "session", "run", "tool_call", running_call("item_1")).await;
+    persist_terminal_event(
+        &pool,
+        &frame("run.cancelled"),
+        super::super::events::sanitize_log,
+    )
+    .await
+    .unwrap();
+    let repo = AgentRepository::new(pool.clone());
+    let tool = ToolPayload {
+        tool_name: Some("clovy.create_note".into()),
+        tool_call_id: Some("item_1".into()),
+        arguments: Some(json!({"title":"Synthetic"})),
+        result: None,
+        status: Some("running".into()),
+    };
+    assert!(repo
+        .append_item(
+            "session",
+            Some("run"),
+            100,
+            &AgentItemPayload::ToolCall(tool.clone()),
+            Some("late-start")
+        )
+        .await
+        .unwrap()
+        .is_none());
+    let late = ToolPayload {
+        result: Some(json!({"noteId":"committed-before-stop"})),
+        status: Some("complete".into()),
+        ..tool
+    };
+    assert!(repo
+        .append_item(
+            "session",
+            Some("run"),
+            101,
+            &AgentItemPayload::ToolResult(late.clone()),
+            Some("late-result")
+        )
+        .await
+        .unwrap()
+        .is_some());
+    let items = repo.items("session").await.unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[1].payload, AgentItemPayload::ToolResult(late));
+    assert_eq!(items[1].sequence, 1); // conversation ordering, never replay cursor 101
+    assert_eq!(payload(&pool, &call).await["status"], "interrupted");
+    cleanup(file, pool).await;
+}
+
+#[tokio::test]
+async fn terminal_event_never_forwards_untrusted_settlement_ids() {
+    let (file, pool) = fixture().await;
+    let mut proposal = frame("run.completed");
+    proposal.params = Some(json!({"interruptedCallIds":["another-runs-call"]}));
+    let event = persist_terminal_event(&pool, &proposal, super::super::events::sanitize_log)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(event.data.get("interruptedCallIds").is_none());
+    cleanup(file, pool).await;
+}
+
+#[tokio::test]
+async fn interruption_does_not_claim_an_unobserved_effect_was_rolled_back() {
+    let (file, pool) = fixture().await;
+    let call = item(&pool, "session", "run", "tool_call", running_call("item_1")).await;
+    // The CLI can stop after an effect committed but before reporting output.
+    query("INSERT INTO notes(id,title,created_at,updated_at) VALUES ('committed-note','Synthetic committed effect','now','now')").execute(&pool).await.unwrap();
+    persist_terminal_event(
+        &pool,
+        &frame("run.cancelled"),
+        super::super::events::sanitize_log,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(payload(&pool, &call).await["status"], "interrupted");
+    assert!(payload(&pool, &call).await["result"].is_null());
+    assert_eq!(
+        query("SELECT title FROM notes WHERE id='committed-note'")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get::<String, _>("title"),
+        "Synthetic committed effect"
+    );
+    assert_eq!(
+        query("SELECT COUNT(*) AS n FROM agent_items WHERE kind='tool_result'")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get::<i64, _>("n"),
+        0
+    );
+    cleanup(file, pool).await;
+}
+
+#[tokio::test]
+async fn unresolved_calls_without_a_valid_outer_id_are_settled_without_publishing_a_false_identity()
+{
+    let (file, pool) = fixture().await;
+    let mut calls = Vec::new();
+    for id in [Value::Null, json!(""), json!(42)] {
+        let mut call = running_call("unused");
+        call["toolCallId"] = id;
+        calls.push(item(&pool, "session", "run", "tool_call", call).await);
+    }
+    let event = persist_terminal_event(
+        &pool,
+        &frame("run.cancelled"),
+        super::super::events::sanitize_log,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(event.data.get("interruptedCallIds").is_none());
+    for call in calls {
+        assert_eq!(payload(&pool, &call).await["status"], "interrupted");
+    }
+    cleanup(file, pool).await;
+}
+
+#[tokio::test]
+async fn append_item_cannot_claim_another_sessions_run() {
+    let (file, pool) = fixture().await;
+    query("INSERT INTO agent_sessions(id,title,model,status,created_at,updated_at) VALUES ('session-b','Other','test','running','now','now')").execute(&pool).await.unwrap();
+    let repo = crate::agent_sessions::AgentRepository::new(pool.clone());
+    let tool = crate::agent_sessions::ToolPayload {
+        tool_name: None,
+        tool_call_id: Some("item_1".into()),
+        arguments: None,
+        result: None,
+        status: Some("running".into()),
+    };
+    assert!(repo
+        .append_item(
+            "session-b",
+            Some("run"),
+            100,
+            &crate::agent_sessions::AgentItemPayload::ToolCall(tool),
+            None
+        )
+        .await
+        .unwrap()
+        .is_none());
+    assert!(repo.items("session-b").await.unwrap().is_empty());
+    assert_eq!(
+        query("SELECT last_sequence FROM agent_runs WHERE id='run'")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get::<i64, _>("last_sequence"),
+        -1
+    );
+    cleanup(file, pool).await;
+}
+
+#[tokio::test]
+async fn upgrade_backfills_historical_terminal_calls_without_touching_live_or_observed_evidence() {
+    let (file, pool) = fixture().await;
+    // Recreate an installed schema-55 database with historical terminal data.
+    query("DELETE FROM schema_migrations WHERE version > 55")
+        .execute(&pool)
+        .await
+        .unwrap();
+    query("INSERT INTO agent_runs(id,session_id,model,status,started_at,updated_at) VALUES ('live','session','test','running','now','now')").execute(&pool).await.unwrap();
+    let live = item(
+        &pool,
+        "session",
+        "live",
+        "tool_call",
+        running_call("item_1"),
+    )
+    .await;
+    let unresolved = item(&pool, "session", "run", "tool_call", running_call("item_1")).await;
+    let mut terminal_calls = vec![unresolved];
+    for status in ["failed", "completed", "interrupted"] {
+        query("INSERT INTO agent_runs(id,session_id,model,status,started_at,updated_at) VALUES (?,'session','test',?,'now','now')").bind(status).bind(status).execute(&pool).await.unwrap();
+        terminal_calls.push(
+            item(
+                &pool,
+                "session",
+                status,
+                "tool_call",
+                running_call("item_1"),
+            )
+            .await,
+        );
+    }
+    let observed = item(
+        &pool,
+        "session",
+        "run",
+        "tool_call",
+        running_call("success"),
+    )
+    .await;
+    item(
+        &pool,
+        "session",
+        "run",
+        "tool_result",
+        json!({"toolCallId":"success","status":"complete","result":{"noteId":"preserved"}}),
+    )
+    .await;
+    query("UPDATE agent_runs SET status='cancelled' WHERE id='run'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    crate::db::migrations::run_migrations(&pool).await.unwrap();
+    for call in terminal_calls {
+        assert_eq!(payload(&pool, &call).await["status"], "interrupted");
+    }
+    assert_eq!(payload(&pool, &live).await, running_call("item_1"));
+    assert_eq!(payload(&pool, &observed).await, running_call("success"));
+    let after = crate::agent_sessions::AgentRepository::new(pool.clone())
+        .items("session")
+        .await
+        .unwrap();
+    crate::db::migrations::run_migrations(&pool).await.unwrap();
+    assert_eq!(
+        crate::agent_sessions::AgentRepository::new(pool.clone())
+            .items("session")
+            .await
+            .unwrap(),
+        after
+    );
+    cleanup(file, pool).await;
+}
+
 async fn fixture() -> (std::path::PathBuf, SqlitePool) {
     let file = std::env::temp_dir().join(format!("clovy-terminal-{}.sqlite3", Uuid::new_v4()));
     let pool = sqlx_sqlite::SqlitePoolOptions::new()
@@ -152,6 +583,7 @@ async fn retry_copied_config_does_not_copy_the_previous_runs_publication_claim()
 #[tokio::test]
 async fn terminal_publishers_share_one_writer_claim_and_preserve_another_live_run() {
     let (file, pool) = fixture().await;
+    let call = item(&pool, "session", "run", "tool_call", running_call("item_1")).await;
     query("INSERT INTO agent_runs(id,session_id,model,status,started_at,updated_at) VALUES ('other','session','test','running','now','now')").execute(&pool).await.unwrap();
     let a = frame("run.completed");
     let b = frame("run.cancelled");
@@ -159,10 +591,13 @@ async fn terminal_publishers_share_one_writer_claim_and_preserve_another_live_ru
         persist_terminal_event(&pool, &a, super::super::events::sanitize_log),
         persist_terminal_event(&pool, &b, super::super::events::sanitize_log),
     );
-    assert_eq!(
-        usize::from(a.unwrap().is_some()) + usize::from(b.unwrap().is_some()),
-        1
-    );
+    let events = [a.unwrap(), b.unwrap()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].data["interruptedCallIds"], json!(["item_1"]));
+    assert_eq!(payload(&pool, &call).await["status"], "interrupted");
     assert_eq!(
         query("SELECT status FROM agent_sessions WHERE id='session'")
             .fetch_one(&pool)

@@ -134,6 +134,10 @@ function AgentToolPartRow({ part }: { part: Extract<AgentChatPart, { type: "tool
           <span className="agent-tool-live-status" data-status="failed">
             {t("chat.tools.failed")}
           </span>
+        ) : part.status === "interrupted" ? (
+          <span className="agent-tool-live-status" data-status="interrupted">
+            {t("chat.tools.interrupted")}
+          </span>
         ) : null
       }
     />
@@ -141,7 +145,7 @@ function AgentToolPartRow({ part }: { part: Extract<AgentChatPart, { type: "tool
 }
 
 // Long tool runs stop growing the transcript a row per call: past this many
-// rows, settled (complete/failed) calls fold behind a single count line while
+// rows, settled calls fold behind a single count line while
 // running calls stay visible below it, so what Clovy is doing right now is
 // never hidden and failures are still called out on the fold itself.
 const AGENT_TOOL_STACK_FOLD_THRESHOLD = 3;
@@ -161,13 +165,14 @@ export function AgentToolStack({ parts }: { parts: Extract<AgentChatPart, { type
   }
   const running = parts.filter((part) => part.status === "running");
   const failedCount = settled.filter((part) => part.status === "failed").length;
+  const interruptedCount = settled.filter((part) => part.status === "interrupted").length;
   return (
     <div className="agent-tool-stack">
       {/* Uncontrolled like the per-row disclosures: the browser owns the open
        * state, so rows settling into the fold don't snap it shut. */}
       <details
         className="agent-tool-disclosure agent-tool-fold"
-        data-status={failedCount > 0 ? "failed" : "complete"}
+        data-status={failedCount > 0 ? "failed" : interruptedCount > 0 ? "interrupted" : "complete"}
       >
         <summary>
           <span className="agent-tool-icon">
@@ -181,6 +186,11 @@ export function AgentToolStack({ parts }: { parts: Extract<AgentChatPart, { type
           {failedCount > 0 ? (
             <span className="agent-tool-live-status" data-status="failed">
               {t("chat.tools.failedCount", { count: failedCount })}
+            </span>
+          ) : null}
+          {interruptedCount > 0 ? (
+            <span className="agent-tool-live-status" data-status="interrupted">
+              {t("chat.tools.interruptedCount", { count: interruptedCount })}
             </span>
           ) : null}
         </summary>

@@ -1403,6 +1403,14 @@ const MIGRATIONS: &[Migration] = &[
             }],
         }],
     },
+    Migration {
+        version: 56,
+        name: "interrupt_unresolved_tool_calls",
+        requirements: &[SchemaRequirement::Table("agent_tool_terminality_backfill")],
+        steps: &[MigrationStep::Sql(include_str!(
+            "../../migrations/038_interrupt_unresolved_tool_calls.sql"
+        ))],
+    },
 ];
 
 const NOTE_REVISION_COLUMN: &[ColumnDefinition] = &[ColumnDefinition {
@@ -2368,6 +2376,7 @@ mod tests {
                 (53, "retire_sharing_keys".to_string()),
                 (54, "dictation_app_bundle_id".to_string()),
                 (55, "agent_session_approval_mode".to_string()),
+                (56, "interrupt_unresolved_tool_calls".to_string()),
             ]
         );
         assert_latest_stamp(&pool).await;
@@ -2750,6 +2759,7 @@ mod tests {
                 (53, "retire_sharing_keys".to_string()),
                 (54, "dictation_app_bundle_id".to_string()),
                 (55, "agent_session_approval_mode".to_string()),
+                (56, "interrupt_unresolved_tool_calls".to_string()),
             ]
         );
 

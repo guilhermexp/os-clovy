@@ -397,7 +397,22 @@ argument: its installer ships `agy.exe`.
   The executor checks cancellation after the final partition authorization
   await, before either spawning the CLI or writing its prompt, on both success
   and error from that query.
-  This adds no protocol field or user configuration.
+  No user configuration is required.
+- **Tool terminality.** The same terminal transaction settles unresolved
+  `running` tool calls as `interrupted` for the exact session and run, even
+  when Stop already claimed the terminal status. A genuine `tool_result`
+  paired by that session, run, and outer CLI call id takes precedence; its
+  output or error is preserved. No result or effect outcome is synthesized.
+  Terminal events include `interruptedCallIds` only when nonempty, using
+  those outer call ids rather than the approval broker's separate UUIDs.
+  The UI applies them to the matching run's calls, including historical
+  calls, without ending a newer run. Persisted hydration and live events
+  show the same localized interrupted state in single and folded tool cards.
+  A late start cannot recreate running activity in a terminal run; genuine
+  late results and approval receipts remain admissible. Interrupted means
+  that no final result was observed, not that an effect failed or was undone.
+  Database migration 56 applies the same exact pairing and evidence rules to
+  historical terminal runs once on upgrade, without a read-time heuristic.
 - **End of the CLI.** The CLI's exit is watched alongside its stdout: when it
   exits, its process group is swept (MCP servers and helpers it started,
   including one still holding stdout), and output still in the pipe is read

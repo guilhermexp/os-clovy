@@ -15,7 +15,7 @@ export type AgentChatToolPart = {
   id: string;
   name: string;
   text: string;
-  status: "running" | "complete" | "failed";
+  status: "running" | "complete" | "failed" | "interrupted";
 };
 export type AgentApprovalChoice = "once" | "session" | "always" | "deny";
 export type AgentChatApprovalPart = {

@@ -249,6 +249,11 @@ build scripts in `pnpm-workspace.yaml` — live in
   [ADR-0073](docs/adr/0073-desktop-calls-user-providers-without-a-clovy-server.md).
 - **Clovy presents as Clovy.** CLI execution is an implementation detail;
   product instructions assert Clovy's identity.
+- **Tool terminality is evidence-based.** `agent_sessions::terminal` atomically
+  settles unresolved running calls as `interrupted` in the exact session/run,
+  including when Stop already won. This means no final result was observed,
+  not that an effect failed or rolled back. Preserve real results and keep
+  outer CLI call IDs separate from approval-broker IDs (docs/llm-providers.md).
 - **No Open Software services in the desktop (fork).** The app has no OS
   Accounts sign-in, billing, credits funding, telemetry, issue reports,
   companion, or June updater; it needs no account identity or server token. `src/`,
