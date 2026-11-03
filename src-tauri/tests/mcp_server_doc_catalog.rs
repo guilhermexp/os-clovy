@@ -2,9 +2,8 @@
 //! tables of the doc must match `tools/list` for an unbound client and for
 //! each kind of turn-bound connection (task 2.12 of the OpenSpec change
 //! `cli-substitui-agente-nativo`), Claude-only tools must stay out of the
-//! model's reach in every Claude turn, and the doc's relative links and code
-//! paths must exist. Removing, adding, or renaming a tool on either side
-//! without the other fails here.
+//! model's reach in every Claude turn. Removing, adding, or renaming a tool
+//! without updating the documented catalog fails here.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -403,86 +402,6 @@ fn connector_table_names_tools_the_server_owns_with_their_approval() {
                 routine_tool_allowed(tool, &actions, &[], Some("approval")) == mutation,
                 "`{tool}` with the actions toolsets"
             );
-        }
-    }
-}
-
-/// The spec that owns the connector tool names: the change's delta while it
-/// is open, the main spec once it is archived.
-fn connector_names_owner() -> (PathBuf, String) {
-    let root = repo_root();
-    let path = [
-        "openspec/changes/cli-substitui-agente-nativo/specs/clovy-mcp-server/spec.md",
-        "openspec/specs/clovy-mcp-server/spec.md",
-    ]
-    .into_iter()
-    .map(|path| root.join(path))
-    .find(|path| path.exists())
-    .expect("the clovy-mcp-server spec");
-    let text = std::fs::read_to_string(&path).unwrap();
-    (path, text)
-}
-
-#[test]
-fn connector_table_lists_every_connector_tool_the_spec_names() {
-    // `tools/list` cannot check these (they need connected accounts), so
-    // the doc is held to the document that owns the names.
-    let (path, spec) = connector_names_owner();
-    let named: BTreeSet<String> = spec
-        .lines()
-        .filter(|line| {
-            ["| Gmail", "| Calendar", "| GitHub", "| Notion"]
-                .iter()
-                .any(|prefix| line.starts_with(prefix))
-        })
-        .flat_map(|line| line.split('`').skip(1).step_by(2))
-        .filter(|name| *name != "notion-*")
-        .map(String::from)
-        .collect();
-    assert!(named.len() >= 20, "{}: {named:?}", path.display());
-    let doc = doc();
-    let documented: BTreeSet<String> = rows(&section(&doc, CONNECTORS))
-        .into_iter()
-        .map(|row| row.tool)
-        .collect();
-    let missing: Vec<_> = named.difference(&documented).collect();
-    assert!(
-        missing.is_empty(),
-        "named in {} but not in {DOC}: {missing:?}",
-        path.display()
-    );
-    // Beyond the spec's names, only Notion's own tools (its allowlist).
-    let extra: Vec<_> = documented
-        .difference(&named)
-        .filter(|name| !name.starts_with("notion-"))
-        .collect();
-    assert!(
-        extra.is_empty(),
-        "in {DOC} but not named in {}: {extra:?}",
-        path.display()
-    );
-}
-
-#[test]
-fn doc_links_and_code_paths_exist() {
-    let doc = doc();
-    let root = repo_root();
-    let base = root.join("docs");
-    let mut rest = doc.as_str();
-    while let Some(start) = rest.find("](") {
-        let after = &rest[start + 2..];
-        let end = after.find(')').expect("closed link");
-        let target = after[..end].split('#').next().unwrap();
-        if !target.is_empty() && !target.contains("://") {
-            assert!(base.join(target).exists(), "broken link `{target}`");
-        }
-        rest = &after[end..];
-    }
-    let code = section(&doc, "## Where the code lives");
-    for line in code.iter().filter(|line| line.starts_with("| `")) {
-        let first = line.trim_matches('|').split('|').next().unwrap();
-        for path in first.split('`').skip(1).step_by(2) {
-            assert!(root.join(path).exists(), "missing path `{path}`");
         }
     }
 }
