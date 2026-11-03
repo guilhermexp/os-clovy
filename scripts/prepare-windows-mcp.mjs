@@ -171,6 +171,8 @@ export function main(args) {
       "-NoLogo",
       "-NoProfile",
       "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
       "-File",
       join(root, "scripts", script),
       "-TargetPath",
