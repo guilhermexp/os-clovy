@@ -909,7 +909,7 @@ async fn discarded_recording_no_longer_exposes_retryable_audio() {
 }
 
 #[tokio::test]
-async fn get_note_returns_only_timed_source_transcript_rows() {
+async fn get_note_preserves_legacy_transcripts_alongside_timed_turns() {
     let repos = repos().await;
     let note = repos.create_note("default", None).await.expect("note");
     let session_id = "session-1";
@@ -935,17 +935,17 @@ async fn get_note_returns_only_timed_source_transcript_rows() {
         )
         .await
         .expect("artifact");
-    repos
+    let legacy = repos
         .create_transcript(
             &note.id,
             &audio.id,
-            "Standalone transcript should not be displayed as a turn.",
+            "Legacy transcript without a recording session",
             Some("en".into()),
             "groq",
         )
         .await
         .expect("standalone transcript");
-    repos
+    let timed = repos
         .create_source_transcript(
             &note.id,
             session_id,
@@ -964,8 +964,24 @@ async fn get_note_returns_only_timed_source_transcript_rows() {
 
     let loaded = repos.get_note(&note.id).await.expect("loaded note");
 
-    assert_eq!(loaded.source_transcripts.len(), 1);
-    assert_eq!(loaded.source_transcripts[0].text, "Timed source transcript");
+    assert_eq!(loaded.source_transcripts.len(), 2);
+    assert!(loaded.source_transcripts.iter().any(|row| {
+        row.id == legacy.id
+            && row.text == legacy.text
+            && row.recording_session_id.is_none()
+            && row.start_ms.is_none()
+            && row.end_ms.is_none()
+            && row.turn_index.is_none()
+    }));
+    assert!(loaded.source_transcripts.iter().any(|row| {
+        row.id == timed.id
+            && row.text == timed.text
+            && row.recording_session_id.as_deref() == Some(session_id)
+            && row.source.as_deref() == Some("microphone")
+            && row.start_ms == Some(1_000)
+            && row.end_ms == Some(2_000)
+            && row.turn_index == Some(0)
+    }));
 }
 
 #[tokio::test]
