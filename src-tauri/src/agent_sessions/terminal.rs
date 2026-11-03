@@ -142,9 +142,10 @@ pub(crate) async fn persist_terminal_event(
         .await?;
     }
     if method == "run.failed" {
-        query(
+        let item_sequence: i64 = query(
             "INSERT INTO agent_items(id,session_id,run_id,sequence,kind,payload_json,external_id,created_at)
-             SELECT ?,?,?,COALESCE(MAX(sequence),-1)+1,'error',?,?,? FROM agent_items WHERE session_id=?",
+             SELECT ?,?,?,COALESCE(MAX(sequence),-1)+1,'error',?,?,? FROM agent_items WHERE session_id=?
+             RETURNING sequence",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(&frame.session_id)
@@ -153,8 +154,10 @@ pub(crate) async fn persist_terminal_event(
         .bind(&event_id)
         .bind(&now)
         .bind(&frame.session_id)
-        .execute(&mut *tx)
-        .await?;
+        .fetch_one(&mut *tx)
+        .await?
+        .get("sequence");
+        data["itemSequence"] = json!(item_sequence);
     }
     tx.commit().await?;
     Ok(Some(TerminalEvent {

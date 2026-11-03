@@ -227,7 +227,7 @@ describe("CLI interruption events", () => {
       sequence,
       eventId,
       method,
-      data: { itemId: item.id, interruption: item.interruption },
+      data: { itemId: item.id, itemSequence: item.sequence, interruption: item.interruption },
     } as const;
   }
 
@@ -241,6 +241,7 @@ describe("CLI interruption events", () => {
       eventId: "tool-started",
       method: "tool.started",
       data: {
+        itemSequence: 7,
         itemId: "tool-call:1",
         callId: "call-1",
         name: "create_routine",
@@ -282,6 +283,7 @@ describe("CLI interruption events", () => {
       eventId: "tool-completed",
       method: "tool.completed",
       data: {
+        itemSequence: 8,
         itemId: "tool-result:1",
         callId: "call-1",
         name: "create_routine",

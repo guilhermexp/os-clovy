@@ -8,6 +8,7 @@ import {
 } from "../lib/agent-runtime-adapter";
 import {
   AGENT_RUNTIME_PROTOCOL_VERSION,
+  type AgentItemDto,
   type AgentRuntimeEvent,
 } from "../lib/agent-runtime-contract";
 
@@ -17,7 +18,278 @@ const frame = {
   runId: "run-1",
 };
 
+const itemData = { itemId: "new-item", itemSequence: 10, createdAt: "2026-11-03T12:00:00Z" };
+const interruptionData = {
+  ...itemData,
+  interruption: {
+    id: "approval-2",
+    sessionId: frame.sessionId,
+    runId: "run-2",
+    engine: "cli" as const,
+    kind: "approval" as const,
+    status: "pending" as const,
+    createdAt: itemData.createdAt,
+    toolName: "create_note",
+    title: "Create note",
+    description: "Synthetic note",
+    allowAlways: false,
+  },
+};
+const itemEvents = (
+  [
+    { method: "reasoning.delta", data: { ...itemData, delta: "Think" } },
+    {
+      method: "steering.consumed",
+      data: { ...itemData, messageId: "steering-2", text: "Continue" },
+    },
+    {
+      method: "tool.completed",
+      data: { ...itemData, callId: "call-2", name: "list_notes", output: "Notes" },
+    },
+    {
+      method: "tool.failed",
+      data: { ...itemData, callId: "call-2", name: "list_notes", error: "Unavailable" },
+    },
+    { method: "interruption.requested", data: interruptionData },
+    {
+      method: "interruption.updated",
+      data: {
+        ...interruptionData,
+        interruption: {
+          ...interruptionData.interruption,
+          status: "resolved",
+          resolution: "once",
+        },
+      },
+    },
+    {
+      method: "run.failed",
+      data: {
+        itemSequence: 10,
+        completedAt: itemData.createdAt,
+        message: "Synthetic failure",
+        retryable: true,
+      },
+    },
+  ] as const
+).map((event) => ({
+  ...frame,
+  runId: "run-2",
+  eventId: "new-event",
+  sequence: 1,
+  ...event,
+})) satisfies AgentRuntimeEvent[];
+
 describe("agent runtime adapter", () => {
+  it.each(itemEvents)("uses the host item ordinal for $method", (event) => {
+    const prompt: AgentItemDto = {
+      id: "prompt-2",
+      sessionId: frame.sessionId,
+      runId: "run-2",
+      sequence: 9,
+      createdAt: itemData.createdAt,
+      kind: "message",
+      role: "user",
+      text: "Prompt",
+      status: "complete",
+    };
+    const projection = applyAgentRuntimeEvent(
+      createAgentRuntimeProjection({ items: [prompt] }),
+      event,
+    );
+    expect(projection.items.map((item) => [item.id, item.sequence])).toEqual([
+      ["prompt-2", 9],
+      [event.method === "run.failed" ? "error:new-event" : "new-item", 10],
+    ]);
+    expect(agentItemsToChatTurns(projection.items).map((turn) => turn.id)).toEqual([
+      "prompt-2",
+      event.method === "run.failed" ? "error:new-event" : "new-item",
+    ]);
+    expect(projection.lastSequenceByRun["run-2"]).toBe(
+      event.method.startsWith("interruption.") ? undefined : 1,
+    );
+    expect(applyAgentRuntimeEvent(projection, event)).toBe(projection);
+  });
+  it("keeps global item order across runs, live updates, replay and hydration", () => {
+    const createdAt = "2026-11-03T12:00:00Z";
+    const session = {
+      id: frame.sessionId,
+      title: "Synthetic timeline",
+      status: "running" as const,
+      model: "auto",
+      safetyMode: "sandboxed" as const,
+      workspacePath: "/tmp/synthetic-timeline",
+      source: "user" as const,
+      createdAt,
+      updatedAt: createdAt,
+    };
+    const run = { id: "run-2", sessionId: session.id, status: "running" as const, model: "auto" };
+    const history: AgentItemDto[] = [
+      {
+        id: "prompt-1",
+        sessionId: session.id,
+        runId: "run-1",
+        sequence: 0,
+        createdAt,
+        kind: "message",
+        role: "user",
+        text: "First prompt",
+        status: "complete",
+      },
+      {
+        id: "result-1",
+        sessionId: session.id,
+        runId: "run-1",
+        sequence: 7,
+        createdAt,
+        kind: "tool_result",
+        callId: "call-1",
+        name: "list_notes",
+        output: "First result",
+        isError: false,
+      },
+      {
+        id: "answer-1",
+        sessionId: session.id,
+        runId: "run-1",
+        sequence: 8,
+        createdAt,
+        kind: "message",
+        role: "assistant",
+        text: "First answer",
+        status: "complete",
+      },
+      {
+        id: "prompt-2",
+        sessionId: session.id,
+        runId: run.id,
+        sequence: 9,
+        createdAt,
+        kind: "message",
+        role: "user",
+        text: "Second prompt",
+        status: "complete",
+      },
+    ];
+    let projection = createAgentRuntimeProjection({ session, run, items: history });
+    projection = applyAgentRuntimeEvent(projection, {
+      ...frame,
+      eventId: "run-1-terminal",
+      sequence: 50,
+      method: "run.completed",
+      data: { completedAt: createdAt },
+    });
+    const delta: AgentRuntimeEvent = {
+      ...frame,
+      runId: run.id,
+      eventId: "run-2-delta",
+      sequence: 2,
+      method: "message.delta",
+      data: { itemId: "answer-2", itemSequence: 10, role: "assistant", delta: "Second", createdAt },
+    };
+    projection = applyAgentRuntimeEvent(projection, delta);
+    projection = applyAgentRuntimeEvent(projection, {
+      ...frame,
+      runId: run.id,
+      eventId: "run-2-tool",
+      sequence: 3,
+      method: "tool.started",
+      data: {
+        itemId: "tool-2",
+        itemSequence: 11,
+        callId: "call-2",
+        name: "list_notes",
+        arguments: {},
+        createdAt,
+      },
+    });
+    projection = applyAgentRuntimeEvent(projection, {
+      ...delta,
+      eventId: "run-2-continuation",
+      sequence: 4,
+      data: { ...delta.data, delta: " answer" },
+    });
+    const expectedIds = ["prompt-1", "result-1", "answer-1", "prompt-2", "answer-2", "tool-2"];
+    expect(projection.items.map((item) => item.id)).toEqual(expectedIds);
+    expect(projection.items[4]).toMatchObject({ sequence: 10, text: "Second answer" });
+    expect(projection.lastSequenceByRun).toEqual({ "run-1": 50, "run-2": 4 });
+    expect(applyAgentRuntimeEvent(projection, { ...delta, sequence: 99 })).toBe(projection);
+    expect(applyAgentRuntimeEvent(projection, { ...delta, eventId: "stale-delta" })).toBe(
+      projection,
+    );
+    const persisted: AgentItemDto[] = [
+      ...history,
+      {
+        ...history[2],
+        id: "answer-2",
+        runId: run.id,
+        sequence: 10,
+        kind: "message",
+        role: "assistant",
+        status: "streaming",
+        text: "Second",
+      },
+      {
+        id: "tool-2",
+        sessionId: session.id,
+        runId: run.id,
+        sequence: 11,
+        createdAt,
+        kind: "tool_call",
+        callId: "call-2",
+        name: "list_notes",
+        arguments: {},
+        status: "running",
+      },
+    ];
+    const turns = agentItemsToChatTurns(projection.items);
+    expect(turns.map((turn) => turn.id)).toEqual([
+      "prompt-1",
+      "answer-1",
+      "prompt-2",
+      "answer-2",
+      "tool-2",
+    ]);
+    expect(turns[1].parts).toMatchObject([
+      { type: "tool", text: "First result" },
+      { type: "text", text: "First answer" },
+    ]);
+    const hydrated = mergeAgentRuntimeSnapshot(projection, { session, run, items: persisted });
+    expect(hydrated.items.map((item) => item.id)).toEqual(expectedIds);
+    expect(agentItemsToChatTurns(hydrated.items)).toEqual(turns);
+    expect(hydrated.items[4]).toMatchObject({ sequence: 10, text: "Second answer" });
+    expect(hydrated.lastSequenceByRun[run.id]).toBe(4);
+    expect(applyAgentRuntimeEvent(hydrated, delta)).toBe(hydrated);
+    const completed = applyAgentRuntimeEvent(hydrated, {
+      ...frame,
+      runId: run.id,
+      eventId: "run-2-answer",
+      sequence: 5,
+      method: "message.completed",
+      data: {
+        itemId: "answer-2",
+        itemSequence: 12,
+        role: "assistant",
+        text: "Second answer complete",
+        createdAt,
+      },
+    });
+    // Completion follows the host's final ordinal, which can differ from the streamed row's.
+    expect(completed.items.map((item) => item.id)).toEqual([
+      "prompt-1",
+      "result-1",
+      "answer-1",
+      "prompt-2",
+      "tool-2",
+      "answer-2",
+    ]);
+    expect(completed.items.at(-1)).toMatchObject({
+      sequence: 12,
+      text: "Second answer complete",
+      status: "complete",
+    });
+    expect(completed.items.slice(0, 4)).toEqual(history);
+  });
   it("retains the effective approval snapshot when a start event arrives", () => {
     const projection = createAgentRuntimeProjection({
       run: {
@@ -245,6 +517,7 @@ describe("agent runtime adapter", () => {
       sequence: 2,
       method: "message.delta",
       data: {
+        itemSequence: 2,
         itemId: "message-1",
         role: "assistant",
         delta: "Hello",
@@ -257,6 +530,7 @@ describe("agent runtime adapter", () => {
       sequence: 3,
       method: "message.delta",
       data: {
+        itemSequence: 2,
         itemId: "message-1",
         role: "assistant",
         delta: " there",
@@ -314,6 +588,7 @@ describe("agent runtime adapter", () => {
       sequence: 4,
       method: "message.delta",
       data: {
+        itemSequence: 1,
         itemId: "assistant:run-1",
         role: "assistant",
         delta: " plus the newest words",
@@ -354,6 +629,7 @@ describe("agent runtime adapter", () => {
       sequence: 5,
       method: "message.delta",
       data: {
+        itemSequence: 1,
         itemId: "assistant:run-1",
         role: "assistant",
         delta: " and the continuation",
@@ -431,6 +707,7 @@ describe("agent runtime adapter", () => {
       sequence: 2,
       method: "steering.consumed",
       data: {
+        itemSequence: 2,
         itemId: "steering-1",
         messageId: "message-1",
         text: "Use the launch plan",
@@ -456,6 +733,7 @@ describe("agent runtime adapter", () => {
       sequence: 4,
       method: "interruption.requested",
       data: {
+        itemSequence: 4,
         itemId: "item-approval",
         interruption: {
           id: "approval-1",
@@ -478,6 +756,7 @@ describe("agent runtime adapter", () => {
       sequence: 5,
       method: "interruption.requested",
       data: {
+        itemSequence: 5,
         itemId: "item-clarification",
         interruption: {
           id: "clarification-1",
@@ -497,6 +776,7 @@ describe("agent runtime adapter", () => {
       sequence: 6,
       method: "interruption.requested",
       data: {
+        itemSequence: 6,
         itemId: "item-secret",
         interruption: {
           id: "secret-1",
@@ -588,6 +868,7 @@ describe("agent runtime adapter", () => {
       sequence: 1,
       method: "interruption.requested",
       data: {
+        itemSequence: 1,
         itemId: "item-interruption-first",
         interruption: {
           id: "approval-stable",
@@ -661,6 +942,7 @@ describe("agent runtime adapter", () => {
       sequence: 1,
       method: "tool.started",
       data: {
+        itemSequence: 1,
         itemId: "tool-call-1",
         callId: "call-1",
         name: "list_files",
@@ -674,6 +956,7 @@ describe("agent runtime adapter", () => {
       sequence: 2,
       method: "tool.completed",
       data: {
+        itemSequence: 2,
         itemId: "tool-result-1",
         callId: "call-1",
         name: "list_files",

@@ -203,7 +203,7 @@ export function applyAgentRuntimeEvent(
         id: event.data.itemId,
         sessionId: event.sessionId,
         runId: event.runId,
-        sequence: event.sequence,
+        sequence: event.data.itemSequence,
         createdAt: event.data.createdAt,
         kind: "message",
         role: event.data.role,
@@ -219,7 +219,7 @@ export function applyAgentRuntimeEvent(
         id: event.data.itemId,
         sessionId: event.sessionId,
         runId: event.runId,
-        sequence: event.sequence,
+        sequence: event.data.itemSequence,
         createdAt: event.data.createdAt,
         kind: "steering",
         text: event.data.text,
@@ -230,7 +230,7 @@ export function applyAgentRuntimeEvent(
         id: event.data.itemId,
         sessionId: event.sessionId,
         runId: event.runId,
-        sequence: event.sequence,
+        sequence: event.data.itemSequence,
         createdAt: event.data.createdAt,
         kind: "tool_call",
         callId: event.data.callId,
@@ -251,7 +251,7 @@ export function applyAgentRuntimeEvent(
         id: event.data.itemId,
         sessionId: event.sessionId,
         runId: event.runId,
-        sequence: event.sequence,
+        sequence: event.data.itemSequence,
         createdAt: event.data.createdAt,
         kind: "tool_result",
         callId: event.data.callId,
@@ -275,8 +275,7 @@ export function applyAgentRuntimeEvent(
           id: event.data.itemId,
           sessionId: event.sessionId,
           runId: event.runId,
-          // A card keeps its place in the transcript when it changes.
-          sequence: existing?.sequence ?? event.sequence,
+          sequence: event.data.itemSequence,
           createdAt: event.data.interruption.createdAt,
           kind: "interruption",
           interruption: event.data.interruption,
@@ -321,7 +320,7 @@ export function applyAgentRuntimeEvent(
         id: `error:${event.eventId}`,
         sessionId: event.sessionId,
         runId: event.runId,
-        sequence: event.sequence,
+        sequence: event.data.itemSequence,
         createdAt: event.data.completedAt,
         kind: "error",
         message: event.data.message,
@@ -706,7 +705,7 @@ function appendTextDelta(
           id: event.data.itemId,
           sessionId: event.sessionId,
           runId: event.runId,
-          sequence: event.sequence,
+          sequence: event.data.itemSequence,
           createdAt: event.data.createdAt,
           kind,
           role: "assistant",
@@ -717,7 +716,7 @@ function appendTextDelta(
           id: event.data.itemId,
           sessionId: event.sessionId,
           runId: event.runId,
-          sequence: event.sequence,
+          sequence: event.data.itemSequence,
           createdAt: event.data.createdAt,
           kind,
           text,
@@ -735,9 +734,7 @@ function upsertItem(items: AgentItemDto[], item: AgentItemDto) {
 }
 
 function compareAgentItems(a: AgentItemDto, b: AgentItemDto) {
-  return (
-    a.sequence - b.sequence || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)
-  );
+  return a.sequence - b.sequence;
 }
 
 function itemIsRunning(item: AgentItemDto) {

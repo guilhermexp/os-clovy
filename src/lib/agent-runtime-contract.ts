@@ -62,6 +62,7 @@ type AgentItemBase = {
   id: string;
   sessionId: string;
   runId?: string;
+  /** Authoritative position in the stored conversation, across all runs. */
   sequence: number;
   createdAt: string;
 };
@@ -204,7 +205,14 @@ type RuntimeFrameBase = {
   protocolVersion: typeof AGENT_RUNTIME_PROTOCOL_VERSION;
   sessionId: string;
   runId: string;
+  /** Event cursor within this run; used only for replay/deduplication. */
   sequence: number;
+};
+
+type RuntimeItemData = {
+  itemId: string;
+  /** Conversation ordinal assigned by the host when persisting the item. */
+  itemSequence: number;
 };
 
 export type AgentRuntimeEvent = RuntimeFrameBase &
@@ -222,13 +230,12 @@ export type AgentRuntimeEvent = RuntimeFrameBase &
     | {
         eventId: string;
         method: "message.delta";
-        data: { itemId: string; role: "assistant"; delta: string; createdAt: string };
+        data: RuntimeItemData & { role: "assistant"; delta: string; createdAt: string };
       }
     | {
         eventId: string;
         method: "message.completed";
-        data: {
-          itemId: string;
+        data: RuntimeItemData & {
           role: "assistant";
           text: string;
           createdAt: string;
@@ -237,18 +244,17 @@ export type AgentRuntimeEvent = RuntimeFrameBase &
     | {
         eventId: string;
         method: "reasoning.delta";
-        data: { itemId: string; delta: string; createdAt: string };
+        data: RuntimeItemData & { delta: string; createdAt: string };
       }
     | {
         eventId: string;
         method: "steering.consumed";
-        data: { itemId: string; messageId: string; text: string; createdAt: string };
+        data: RuntimeItemData & { messageId: string; text: string; createdAt: string };
       }
     | {
         eventId: string;
         method: "tool.started";
-        data: {
-          itemId: string;
+        data: RuntimeItemData & {
           callId: string;
           name: string;
           arguments: unknown;
@@ -258,23 +264,28 @@ export type AgentRuntimeEvent = RuntimeFrameBase &
     | {
         eventId: string;
         method: "tool.completed";
-        data: { itemId: string; callId: string; name: string; output: unknown; createdAt: string };
+        data: RuntimeItemData & {
+          callId: string;
+          name: string;
+          output: unknown;
+          createdAt: string;
+        };
       }
     | {
         eventId: string;
         method: "tool.failed";
-        data: { itemId: string; callId: string; name: string; error: string; createdAt: string };
+        data: RuntimeItemData & { callId: string; name: string; error: string; createdAt: string };
       }
     | {
         eventId: string;
         method: "interruption.requested";
-        data: { itemId: string; interruption: AgentInterruptionDto };
+        data: RuntimeItemData & { interruption: AgentInterruptionDto };
       }
     | {
         /** A CLI item was answered, expired, or cancelled (approval broker). */
         eventId: string;
         method: "interruption.updated";
-        data: { itemId: string; interruption: AgentInterruptionDto };
+        data: RuntimeItemData & { interruption: AgentInterruptionDto };
       }
     | { eventId: string; method: "usage.updated"; data: AgentUsageDto }
     | { eventId: string; method: "run.completed"; data: { completedAt: string } }
@@ -283,6 +294,7 @@ export type AgentRuntimeEvent = RuntimeFrameBase &
         eventId: string;
         method: "run.failed";
         data: {
+          itemSequence: number;
           completedAt: string;
           message: string;
           category?: "tool" | "provider" | "runtime" | "context" | "credits";

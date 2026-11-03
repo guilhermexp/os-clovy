@@ -28,19 +28,25 @@ function frame(
       return {
         ...base,
         method,
-        data: { itemId: "i", role: "assistant", delta: "x", createdAt: "now" },
+        data: { itemId: "i", itemSequence: 1, role: "assistant", delta: "x", createdAt: "now" },
       } as AgentRuntimeEvent;
     case "run.failed":
       return {
         ...base,
         method,
-        data: { completedAt: "now", message: "boom", retryable: false },
+        data: { itemSequence: 2, completedAt: "now", message: "boom", retryable: false },
       } as AgentRuntimeEvent;
     case "steering.consumed":
       return {
         ...base,
         method,
-        data: { itemId: "i", messageId: "follow-up-1", text: "also do X", createdAt: "now" },
+        data: {
+          itemId: "i",
+          itemSequence: 3,
+          messageId: "follow-up-1",
+          text: "also do X",
+          createdAt: "now",
+        },
       } as AgentRuntimeEvent;
     case "run.started":
       return { ...base, method, data: { startedAt: "now", model: "m" } } as AgentRuntimeEvent;

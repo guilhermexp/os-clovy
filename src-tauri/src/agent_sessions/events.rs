@@ -99,7 +99,7 @@ pub(crate) async fn persist_runtime_event(
             data["itemId"] = json!(assistant_id);
             data["role"] = json!("assistant");
             data["createdAt"] = json!(created_at);
-            repository
+            let Some(item) = repository
                 .append_assistant_message_delta(
                     &frame.session_id,
                     &frame.run_id,
@@ -110,7 +110,11 @@ pub(crate) async fn persist_runtime_event(
                         .unwrap_or_default(),
                     &assistant_id,
                 )
-                .await?;
+                .await?
+            else {
+                return Ok(None);
+            };
+            data["itemSequence"] = json!(item.sequence);
             None
         }
         "message.completed" => {
@@ -121,7 +125,7 @@ pub(crate) async fn persist_runtime_event(
             data["itemId"] = json!(assistant_id);
             data["role"] = json!("assistant");
             data["createdAt"] = json!(created_at);
-            repository
+            let Some(item) = repository
                 .complete_assistant_message(
                     &frame.session_id,
                     &frame.run_id,
@@ -129,13 +133,17 @@ pub(crate) async fn persist_runtime_event(
                     text,
                     &assistant_id,
                 )
-                .await?;
+                .await?
+            else {
+                return Ok(None);
+            };
+            data["itemSequence"] = json!(item.sequence);
             None
         }
         "reasoning.delta" => {
             data["itemId"] = json!(reasoning_id);
             data["createdAt"] = json!(created_at);
-            repository
+            let Some(item) = repository
                 .append_reasoning_delta(
                     &frame.session_id,
                     &frame.run_id,
@@ -146,7 +154,11 @@ pub(crate) async fn persist_runtime_event(
                         .unwrap_or_default(),
                     &reasoning_id,
                 )
-                .await?;
+                .await?
+            else {
+                return Ok(None);
+            };
+            data["itemSequence"] = json!(item.sequence);
             None
         }
         "steering.consumed" => {
@@ -302,7 +314,7 @@ pub(crate) async fn persist_runtime_event(
         _ => None,
     };
     if let Some(payload) = payload {
-        let _ = repository
+        let Some(item) = repository
             .append_item(
                 &frame.session_id,
                 Some(&frame.run_id),
@@ -310,7 +322,11 @@ pub(crate) async fn persist_runtime_event(
                 &payload,
                 Some(&persistence_external_id),
             )
-            .await?;
+            .await?
+        else {
+            return Ok(None);
+        };
+        data["itemSequence"] = json!(item.sequence);
     }
     Ok(Some(PersistedRuntimeEvent {
         method: method.to_string(),
@@ -557,6 +573,129 @@ fn redact_key_tokens(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn emitted_item_ordinals_follow_persistence_across_runs_and_replays() {
+        let pool = sqlx_sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrations::run_migrations(&pool).await.unwrap();
+        let repository = AgentRepository::new(pool);
+        let session = repository
+            .create_session(
+                "Synthetic timeline",
+                "test",
+                super::super::AgentSafetyMode::Sandboxed,
+                None,
+            )
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let run = repository
+                .create_run(&session.id, "test", None)
+                .await
+                .unwrap();
+            repository
+                .append_item(
+                    &session.id,
+                    Some(&run.id),
+                    0,
+                    &AgentItemPayload::UserMessage(super::super::MessagePayload {
+                        role: "user".into(),
+                        content: "Synthetic prompt".into(),
+                        attachments: vec![],
+                    }),
+                    None,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let events = [
+                ("reasoning.delta", json!({"delta":"Think"})),
+                ("message.delta", json!({"delta":"Partial"})),
+                (
+                    "tool.started",
+                    json!({"callId":"call","name":"list_notes","arguments":{}}),
+                ),
+                ("message.delta", json!({"delta":" answer"})),
+                (
+                    "tool.completed",
+                    json!({"callId":"call","name":"list_notes","output":[]}),
+                ),
+                (
+                    "tool.failed",
+                    json!({"callId":"failed-call","name":"list_notes","error":"Unavailable"}),
+                ),
+                (
+                    "steering.consumed",
+                    json!({"messageId":Uuid::new_v4().to_string(),"text":"Continue"}),
+                ),
+                ("message.completed", json!({"text":"Final answer"})),
+            ];
+            let mut streamed_sequence = None;
+            for (index, (method, params)) in events.into_iter().enumerate() {
+                let mut frame = RpcFrame::request(
+                    "synthetic".into(),
+                    method,
+                    &session.id,
+                    &run.id,
+                    index as i64 + 1,
+                    params,
+                );
+                frame.event_id = Some(Uuid::new_v4().to_string());
+                let emitted = persist_runtime_event(&repository, &frame)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let items = repository.items(&session.id).await.unwrap();
+                let item = items.iter().find(|item| {
+                    item.run_id.as_deref() == Some(run.id.as_str()) &&
+                    match method {
+                        "message.delta" => item.external_id.as_deref() == Some(format!("assistant:{}", run.id).as_str()),
+                        "message.completed" => matches!(&item.payload, AgentItemPayload::AssistantMessage(payload) if payload.content == "Final answer"),
+                        _ => item.external_id.as_deref() == Some(frame.event_id.as_deref().unwrap()) ||
+                            item.external_id.as_deref() == emitted.data["itemId"].as_str(),
+                    }
+                }).unwrap();
+                assert_eq!(emitted.data["itemSequence"], item.sequence, "{method}");
+                assert_eq!(emitted.sequence, frame.sequence);
+                assert_eq!(
+                    repository.get_run(&run.id).await.unwrap().last_sequence,
+                    frame.sequence
+                );
+                if method == "message.delta" {
+                    if let Some(sequence) = streamed_sequence {
+                        assert_eq!(item.sequence, sequence);
+                    }
+                    streamed_sequence = Some(item.sequence);
+                    if let AgentItemPayload::AssistantMessage(payload) = &item.payload {
+                        assert_eq!(
+                            payload.content,
+                            if index == 1 {
+                                "Partial"
+                            } else {
+                                "Partial answer"
+                            }
+                        );
+                    } else {
+                        panic!("expected streamed assistant message");
+                    }
+                }
+                assert!(persist_runtime_event(&repository, &frame)
+                    .await
+                    .unwrap()
+                    .is_none());
+                assert_eq!(repository.items(&session.id).await.unwrap(), items);
+            }
+            repository
+                .update_run_status(&run.id, "completed", None, None, None)
+                .await
+                .unwrap();
+        }
+    }
+
     #[test]
     fn escape_regression_redacts_quotes_using_backslash_parity() {
         // All values are harmless synthetic fixtures, never real credentials.

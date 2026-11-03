@@ -83,6 +83,7 @@ function linearApprovalEvent(): AgentRuntimeEvent {
     sequence: 2,
     method: "interruption.requested",
     data: {
+      itemSequence: 2,
       itemId: "approval-item",
       interruption: {
         id: "functions.mcp_linear_save_issue:0",
@@ -1307,6 +1308,7 @@ describe("AgentWorkspace runtime wiring", () => {
           sequence: 2,
           method: "tool.started",
           data: {
+            itemSequence: 2,
             itemId: "tool-item-1",
             callId: "call-1",
             name: "read_file",
@@ -1827,6 +1829,7 @@ describe("AgentWorkspace runtime wiring", () => {
         sequence,
         method: "interruption.requested",
         data: {
+          itemSequence: sequence,
           itemId: `browser-item-${id}`,
           interruption: {
             id,
@@ -1938,6 +1941,7 @@ describe("AgentWorkspace runtime wiring", () => {
           sequence: 2,
           method: "interruption.requested",
           data: {
+            itemSequence: 2,
             itemId: "clarify-item",
             interruption: {
               id: "clarify-1",
@@ -2342,6 +2346,7 @@ describe("AgentWorkspace runtime wiring", () => {
           sequence: 2,
           method: "message.completed",
           data: {
+            itemSequence: 2,
             itemId: "retry-answer",
             role: "assistant",
             text: "Retry answer",
@@ -2533,6 +2538,7 @@ describe("AgentWorkspace runtime wiring", () => {
           event(sessionId, index, {
             method: "message.delta",
             data: {
+              itemSequence: 1,
               itemId: `item-${sessionId}`,
               role: "assistant",
               delta: "token ",

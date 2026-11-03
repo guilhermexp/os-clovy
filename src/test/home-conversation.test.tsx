@@ -221,6 +221,7 @@ describe("Home conversation on the default CLI engine", () => {
       sequence: 2,
       method: "message.delta",
       data: {
+        itemSequence: 2,
         itemId: "assistant:home-run",
         role: "assistant",
         delta: "Fala, tudo certo?",
@@ -246,6 +247,7 @@ describe("Home conversation on the default CLI engine", () => {
       sequence: 2,
       method: "interruption.requested",
       data: {
+        itemSequence: 2,
         itemId: "approval-item",
         interruption: {
           id: "approval-1",

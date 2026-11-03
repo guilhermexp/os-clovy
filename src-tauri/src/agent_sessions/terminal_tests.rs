@@ -206,14 +206,25 @@ async fn persisted_failure_winner_keeps_its_error_and_single_durable_card() {
     .await
     .unwrap()
     .is_none());
-    let rows = query("SELECT payload_json,external_id FROM agent_items WHERE kind='error'")
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+    let rows =
+        query("SELECT sequence,payload_json,external_id FROM agent_items WHERE kind='error'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
+        event.data["itemSequence"],
+        rows[0].get::<i64, _>("sequence")
+    );
+    assert_ne!(event.sequence, rows[0].get::<i64, _>("sequence"));
+    let mut persisted_data = event.data.clone();
+    persisted_data
+        .as_object_mut()
+        .unwrap()
+        .remove("itemSequence");
+    assert_eq!(
         serde_json::from_str::<Value>(&rows[0].get::<String, _>("payload_json")).unwrap(),
-        event.data
+        persisted_data
     );
     assert_eq!(rows[0].get::<String, _>("external_id"), event.event_id);
     cleanup(file, pool).await;

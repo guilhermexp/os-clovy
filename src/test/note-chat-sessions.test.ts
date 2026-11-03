@@ -126,7 +126,13 @@ describe("note chat sessions", () => {
               sequence,
               eventId: `delta-${sequence}`,
               method: "message.delta",
-              data: { itemId: "answer", role: "assistant", delta: "x", createdAt: "now" },
+              data: {
+                itemSequence: 1,
+                itemId: "answer",
+                role: "assistant",
+                delta: "x",
+                createdAt: "now",
+              },
             },
           });
         }
