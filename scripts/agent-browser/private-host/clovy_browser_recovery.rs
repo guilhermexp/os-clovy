@@ -930,6 +930,11 @@ mod tests {
         os::unix::{fs::symlink, process::CommandExt},
         process::{Command, Stdio},
     };
+    fn physical_tempdir() -> tempfile::TempDir {
+        // Resolve platform temp aliases before creating fixtures or adversarial links.
+        let base = std::env::temp_dir().canonicalize().unwrap();
+        tempfile::tempdir_in(base).unwrap()
+    }
     type Hook = Box<dyn FnMut(&str)>;
     thread_local! { static HOOK: RefCell<Option<Hook>> = RefCell::new(None); }
     pub(super) fn checkpoint(name: &str) {
@@ -1091,7 +1096,7 @@ mod tests {
             module_path!().split_once("::").unwrap().1
         );
         for boundary in ["grant-before-lock", "grant-after-lock"] {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = physical_tempdir();
             let mut owner = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", &test, "--nocapture"])
                 .env("CLOVY_GC_CHILD", temp.path())
@@ -1141,7 +1146,7 @@ mod tests {
             "{}::process_fixture",
             module_path!().split_once("::").unwrap().1
         );
-        let temp = tempfile::tempdir().unwrap();
+        let temp = physical_tempdir();
         let mut owner = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &test, "--nocapture"])
             .env("CLOVY_GC_CHILD", temp.path())
@@ -1194,7 +1199,7 @@ mod tests {
             "{}::process_fixture",
             module_path!().split_once("::").unwrap().1
         );
-        let temp = tempfile::tempdir().unwrap();
+        let temp = physical_tempdir();
         let mut owner = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &test, "--nocapture"])
             .env("CLOVY_GC_CHILD", temp.path())
@@ -1257,7 +1262,7 @@ mod tests {
                 .chain(Some("profile-retiring"))
                 .chain((phase != "Reserved").then_some("removed-.clovy-starting"))
             {
-                let temp = tempfile::tempdir().unwrap();
+                let temp = physical_tempdir();
                 let (nonce, _) = fixture(temp.path(), phase, false);
                 payload(temp.path(), &nonce);
                 let output = child(temp.path(), Some(boundary), None)
@@ -1284,8 +1289,8 @@ mod tests {
     }
     #[test]
     fn stop_does_not_require_local_parent_death_and_never_follows_payload_links() {
-        let temp = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let temp = physical_tempdir();
+        let outside = physical_tempdir();
         std::fs::write(outside.path().join("sentinel"), b"keep").unwrap();
         let (nonce, profile) = fixture(temp.path(), "Starting", true);
         payload(temp.path(), &nonce);
@@ -1305,7 +1310,7 @@ mod tests {
             "profile-removed",
             "holder-removed",
         ] {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = physical_tempdir();
             let (nonce, _) = fixture(temp.path(), "Starting", false);
             assert_eq!(
                 child(temp.path(), Some(boundary), None)
@@ -1336,7 +1341,7 @@ mod tests {
     #[test]
     fn concurrent_collectors_exclude_before_and_after_lease_removal() {
         for boundary in ["authorized", "terminal-published", "removed-.clovy-lease"] {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = physical_tempdir();
             let (nonce, _) = fixture(temp.path(), "Starting", false);
             let mut first = child(temp.path(), None, Some(boundary));
             let mut output = BufReader::new(first.stdout.take().unwrap());
@@ -1364,7 +1369,7 @@ mod tests {
     #[test]
     fn terminal_legacy_or_wrong_platform_location_never_falls_back_to_payload_gc() {
         for change in ["legacy", "location"] {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = physical_tempdir();
             let (nonce, _) = fixture(temp.path(), "Starting", false);
             assert_eq!(
                 child(temp.path(), Some("terminal-published"), None)
@@ -1397,7 +1402,7 @@ mod tests {
     #[test]
     fn terminal_rejects_replaced_controls_and_holder_without_deleting_them() {
         for object in [RECEIPT, LEASE, MARKER, "profile", "holder"] {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = physical_tempdir();
             let (nonce, _) = fixture(temp.path(), "Starting", false);
             assert_eq!(
                 child(temp.path(), Some("terminal-published"), None)
@@ -1433,7 +1438,7 @@ mod tests {
     }
     #[test]
     fn rename_collision_and_invalid_components_preserve_unknown_entries() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = physical_tempdir();
         let root = RecoveryRoot::open(temp.path()).unwrap();
         for name in ["", ".", "..", "a/b", "not-a-uuid"] {
             assert!(root.profile(OsStr::new(name)).is_err());
@@ -1460,8 +1465,8 @@ mod tests {
     #[test]
     fn substitutions_and_unknown_holder_never_authorize_replacement() {
         for object in ["profile", "holder", LEASE, RECEIPT, MARKER] {
-            let temp = tempfile::tempdir().unwrap();
-            let outside = tempfile::tempdir().unwrap();
+            let temp = physical_tempdir();
+            let outside = physical_tempdir();
             std::fs::write(outside.path().join("sentinel"), b"external").unwrap();
             let (nonce, profile) = fixture(temp.path(), "Starting", true);
             payload(temp.path(), &nonce);
@@ -1504,7 +1509,7 @@ mod tests {
                 b"external"
             );
         }
-        let temp = tempfile::tempdir().unwrap();
+        let temp = physical_tempdir();
         let (nonce, profile) = fixture(temp.path(), "Reserved", true);
         let holder = temp.path().join(format!("{HOLDER}{nonce}"));
         std::fs::create_dir(&holder).unwrap();
@@ -1518,8 +1523,8 @@ mod tests {
     #[test]
     fn captured_ancestor_and_root_swaps_only_delete_original_profile() {
         for ancestor in [false, true] {
-            let temp = tempfile::tempdir().unwrap();
-            let external = tempfile::tempdir().unwrap();
+            let temp = physical_tempdir();
+            let external = physical_tempdir();
             let root = temp.path().join("ancestor/root");
             std::fs::create_dir_all(&root).unwrap();
             let (nonce, profile) = fixture(&root, "Starting", true);
@@ -1549,7 +1554,7 @@ mod tests {
     }
     #[test]
     fn owned_free_lease_with_live_descendant_is_preserved_until_group_exits() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = physical_tempdir();
         let (nonce, profile) = fixture(temp.path(), "Owned", false);
         let mut host = Command::new("/bin/sh")
             .args(["-c", "sleep 60 & echo $!; read x"])
@@ -1597,7 +1602,7 @@ mod tests {
     }
     #[test]
     fn alive_busy_birth_mismatch_boot_corrupt_legacy_links_are_preserved() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = physical_tempdir();
         let root = RecoveryRoot::open(temp.path()).unwrap();
         let mut keep = Vec::new();
         for phase in ["Reserved", "Starting", "Cancelled", "Owned"] {
@@ -1626,7 +1631,7 @@ mod tests {
         let legacy = uuid::Uuid::new_v4().to_string();
         std::fs::create_dir(temp.path().join(&legacy)).unwrap();
         keep.push(legacy);
-        let external = tempfile::tempdir().unwrap();
+        let external = physical_tempdir();
         std::fs::write(external.path().join("sentinel"), b"keep").unwrap();
         let link = uuid::Uuid::new_v4().to_string();
         symlink(external.path(), temp.path().join(&link)).unwrap();

@@ -1099,6 +1099,11 @@ fn unix_group_exited(group: i32) -> bool {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    fn physical_tempdir() -> tempfile::TempDir {
+        // Resolve platform temp aliases before creating fixtures or adversarial links.
+        let base = std::env::temp_dir().canonicalize().unwrap();
+        tempfile::tempdir_in(base).unwrap()
+    }
     fn test_profile(path: &std::path::Path) -> RecoveryProfile {
         RecoveryRoot::open(path.parent().unwrap())
             .unwrap()
@@ -1605,7 +1610,7 @@ mod lifecycle_tests {
     }
     #[tokio::test]
     async fn starting_refuses_a_different_parent_generation() {
-        let root = tempfile::tempdir().unwrap();
+        let root = physical_tempdir();
         let config = EngineConfig::production(
             root.path().join("resources"),
             root.path().join("data"),
@@ -1627,7 +1632,7 @@ mod lifecycle_tests {
     #[tokio::test]
     async fn reserved_recovery_preserves_live_busy_starting_legacy_and_links() {
         use std::os::unix::fs::symlink;
-        let root = tempfile::tempdir().unwrap();
+        let root = physical_tempdir();
         let config = EngineConfig::production(
             root.path().join("unicode-á-😀/resources"),
             root.path().join("unicode-á-😀/data"),
@@ -1642,7 +1647,10 @@ mod lifecycle_tests {
         let link = config.temporary_root.join(uuid::Uuid::new_v4().to_string());
         symlink(&external, &link).unwrap();
 
-        let mut dead = Command::new("/bin/true").spawn().unwrap();
+        let mut dead = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
         let dead_pid = dead.id();
         assert!(dead.wait().unwrap().success());
         assert!(process_definitely_absent(dead_pid));
@@ -1854,7 +1862,7 @@ mod lifecycle_tests {
     }
     #[tokio::test]
     async fn anonymous_profiles_are_capped_reaped_and_deleted_without_touching_login_profile() {
-        let root = tempfile::tempdir().unwrap();
+        let root = physical_tempdir();
         let config = EngineConfig::production(
             root.path().join("resources"),
             root.path().join("data"),
