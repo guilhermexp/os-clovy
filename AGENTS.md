@@ -42,7 +42,7 @@ os-clovy/
 │   ├── src/activity/        # text-only capture: macOS AX/Vision, windows/ UIA/WGC/OCR; encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057); timeline/ = ETL, gaps, categories, FTS search, agent tools (docs/activity-timeline.md); tests: `cargo test activity`
 │   ├── src/coding_agents/   # read-only ingest of local coding-agent transcripts, blocks, tool-free summaries (docs/coding-agent-sessions.md; tests: `cargo test coding_agents`)
 │   ├── src/day_intelligence/ # distillation + local embeddings, hourly reports, workstreams, day summary/standup, schedule, notifications (docs/day-intelligence.md; tests: `cargo test day_intelligence`)
-│   ├── src/mcp_server/      # Clovy MCP server: `clovy-mcp` stdio relay, authenticated local socket, read-only tools/resources (docs/mcp-server.md, ADR-0058/0059; tests: `cargo test mcp_server`)
+│   ├── src/mcp_server/      # Clovy MCP server: `clovy-mcp` stdio relay, authenticated private IPC (macOS Unix socket; Windows named pipe), unbound read-only tools and host-bound tools (docs/mcp-server.md, ADR-0058/0059; tests: `cargo test mcp_server`)
 │   ├── src/chat_engine/     # agent CLIs as a chat session's engine (Home included, ADR-0064): resume, stream → agent items, cancel, Clovy tools via MCP (docs/llm-providers.md; tests: `cargo test chat_engine`)
 │   ├── src/commands.rs      # the Tauri command surface; every command invoked from `src/` must be in `lib.rs` `generate_handler!` (guard: `src/test/tauri-command-registry.test.ts`)
 │   └── native/              # macOS system-audio helper (Swift) + dictation helper + dev launcher (`dev-launcher/`, ADR-0060) + `mac-local-transcriber/` (SwiftPM + FluidAudio, pinned model manifest in `resources/local-transcriber-model.json`, built by `scripts/prepare-local-transcriber.mjs`; plain `cargo` builds bundle only a placeholder, so local transcription needs `pnpm local-transcriber:prepare`)
@@ -198,6 +198,9 @@ build scripts in `pnpm-workspace.yaml` — live in
   only on Windows, so `make verify` on the Mac does not run them. Run
   `cargo test --manifest-path src-tauri/Cargo.toml --locked <activity|llm|chat_engine>`
   on a Windows host; CI's `windows-rust` job (manual dispatch) runs the same three.
+- **Windows MCP:** also run `cargo test --manifest-path src-tauri/Cargo.toml --locked mcp_server`
+  on Windows. Unix transport tests and GNU metadata checks do not qualify named-pipe
+  runtime, other-SID denial, Authenticode or the installed NSIS artifact.
 - **Chat and tools gate:** `cargo test chat_engine`, `cargo test mcp_server`,
   and `cargo test approval_broker` cover CLI turns and local tool authority.
 - **Lint / format:** `pnpm check` (Biome: format + lint for `src/` and
