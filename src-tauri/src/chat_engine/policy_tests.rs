@@ -103,22 +103,14 @@ fn policy_claude_attended_turns_ask_through_the_default_mode_and_grant_only_clov
 /// claude turn.
 #[tokio::test]
 async fn policy_claude_interaction_tools_are_listed_to_claude_turns() {
+    let broker = crate::approval_broker::testing::TestBroker::new([]).await;
+    let binding = broker.turn(CliKind::Claude, true).await;
     let data = crate::mcp_server::tools::McpData {
-        notes: sqlx_sqlite::SqlitePool::connect_lazy("sqlite::memory:").unwrap(),
-        profile: "default".into(),
+        notes: broker.pool().clone(),
+        profile: binding.data_partition.clone(),
         memory_enabled: true,
         activity: crate::mcp_server::tools::ActivityAccess::Off,
         now: chrono::Utc::now(),
-    };
-    let binding = crate::mcp_server::turns::TurnBinding {
-        authority: crate::domain::turn_authority::TurnAuthority::new(),
-        session_id: "session-1".into(),
-        run_id: "run-1".into(),
-        data_partition: "default".into(),
-        cli: CliKind::Claude,
-        safety_mode: AgentSafetyMode::Sandboxed,
-        attended: true,
-        surface: "chat".into(),
     };
     let ctx = crate::mcp_server::tools::ToolCtx {
         binding: Some(&binding),

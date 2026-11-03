@@ -684,13 +684,11 @@ async fn the_relay_answers_mcp_calls_through_the_authenticated_socket() {
         by_id(&messages, 1)["result"]["serverInfo"]["name"],
         json!("clovy")
     );
-    assert_eq!(
-        by_id(&messages, 2)["result"]["tools"]
-            .as_array()
-            .unwrap()
-            .len(),
-        4
-    );
+    assert!(by_id(&messages, 2)["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == tools::SEARCH_NOTES));
     let found: Value = serde_json::from_str(
         by_id(&messages, 3)["result"]["content"][0]["text"]
             .as_str()

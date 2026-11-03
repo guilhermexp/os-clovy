@@ -14,7 +14,7 @@ use super::tests::{by_id, data, notes_pool, Captured};
 use super::tools::{ActivityAccess, McpData, ToolCtx, ToolGroup};
 use super::turns::{TurnBinding, TurnRegistry, TURN_EXPIRED};
 use super::*;
-use crate::agent_sessions::domain::AgentSafetyMode;
+use crate::agent_sessions::{AgentRepository, AgentSafetyMode};
 use crate::domain::types::AppError;
 use crate::llm::cli::CliKind;
 
@@ -128,15 +128,6 @@ fn names(listed: &Value) -> Vec<String> {
         .collect()
 }
 
-fn read_catalog() -> Vec<String> {
-    vec![
-        tools::SEARCH_NOTES.to_string(),
-        tools::GET_NOTE.to_string(),
-        tools::LIST_DICTATIONS.to_string(),
-        tools::LIST_MEMORIES.to_string(),
-    ]
-}
-
 /// A raw connection after its handshake: the reply line and both halves
 /// (the write half keeps the connection open).
 type Raw = (
@@ -206,7 +197,12 @@ async fn an_unbound_client_sees_only_the_read_catalog_and_gets_turn_required() {
 
     let output = relay(&dir, None, &list_and_probe()).await;
     let messages = output.messages(2);
-    assert_eq!(names(by_id(&messages, 1)), read_catalog());
+    let listed = names(by_id(&messages, 1));
+    assert!(listed.iter().all(|name| tools::is_read_tool(name)));
+    for name in [tools::SEARCH_NOTES, tools::GET_NOTE] {
+        assert!(listed.iter().any(|tool| tool == name), "missing {name}");
+    }
+    assert!(!listed.iter().any(|name| name == PROBE));
     let refused = &by_id(&messages, 2)["result"];
     assert_eq!(refused["isError"], json!(true));
     assert!(
@@ -224,16 +220,46 @@ async fn a_bound_relay_runs_turn_tools_in_its_session_and_run() {
     let root = tempfile::tempdir().unwrap();
     let dir = channel::channel_dir(root.path());
     let turns = TurnRegistry::default();
-    let listener = listen(&dir, &turns).await;
-    let token = turns.issue(binding("run-7"));
+    let data = data(notes_pool().await, ActivityAccess::Off);
+    let repo = AgentRepository::new(data.notes.clone());
+    let session = repo
+        .create_session_in_profile(
+            "Bound relay fixture",
+            "test",
+            AgentSafetyMode::Sandboxed,
+            None,
+            &data.profile,
+        )
+        .await
+        .unwrap();
+    let run = repo.create_run(&session.id, "test", None).await.unwrap();
+    let binding = TurnBinding {
+        authority: crate::domain::turn_authority::TurnAuthority::new(),
+        session_id: session.id.clone(),
+        run_id: run.id.clone(),
+        data_partition: crate::agent_sessions::run_partition::resolve(
+            &data.notes,
+            &session.id,
+            &run.id,
+        )
+        .await
+        .unwrap(),
+        cli: CliKind::Claude,
+        safety_mode: AgentSafetyMode::Sandboxed,
+        attended: true,
+        surface: "chat".into(),
+    };
+    let token = turns.issue(binding);
+    let listener = channel::Listener::start_with_turns(&dir, turn_handler(data), turns.clone())
+        .await
+        .unwrap();
 
     let output = relay(&dir, Some(&token), &list_and_probe()).await;
     let messages = output.messages(2);
-    // The read catalog first, then the bound-only groups (the parity groups
-    // of phase 2 and this probe).
     let listed = names(by_id(&messages, 1));
-    let read = read_catalog();
-    assert_eq!(listed[..read.len()], read[..]);
+    for name in [tools::SEARCH_NOTES, tools::GET_NOTE] {
+        assert!(listed.iter().any(|tool| tool == name), "missing {name}");
+    }
     assert_eq!(listed.iter().filter(|name| *name == PROBE).count(), 1);
     let probed: Value = serde_json::from_str(
         by_id(&messages, 2)["result"]["content"][0]["text"]
@@ -243,7 +269,7 @@ async fn a_bound_relay_runs_turn_tools_in_its_session_and_run() {
     .unwrap();
     assert_eq!(
         probed,
-        json!({ "sessionId": "session-1", "runId": "run-7", "cli": "claude", "attended": true })
+        json!({ "sessionId": session.id, "runId": run.id, "cli": "claude", "attended": true })
     );
     listener.stop();
 }

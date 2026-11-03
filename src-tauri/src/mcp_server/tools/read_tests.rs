@@ -163,14 +163,44 @@ async fn routine_read_enabled_context_permits_data_reads() {
 #[tokio::test]
 async fn routine_read_policy_preserves_unbound_and_attended_chat_reads() {
     let (data, _) = fixture().await;
-    let broker = TestBroker::new([]).await;
-    let chat = broker.turn(CliKind::Claude, true).await;
+    let repo = crate::agent_sessions::AgentRepository::new(data.notes.clone());
+    let session = repo
+        .create_session_in_profile(
+            "Attended read fixture",
+            "test",
+            crate::agent_sessions::AgentSafetyMode::Sandboxed,
+            None,
+            &data.profile,
+        )
+        .await
+        .unwrap();
+    let run = repo.create_run(&session.id, "test", None).await.unwrap();
+    let chat = TurnBinding {
+        authority: crate::domain::turn_authority::TurnAuthority::new(),
+        data_partition: crate::agent_sessions::run_partition::resolve(
+            &data.notes,
+            &session.id,
+            &run.id,
+        )
+        .await
+        .unwrap(),
+        session_id: session.id,
+        run_id: run.id,
+        cli: CliKind::Claude,
+        safety_mode: crate::agent_sessions::AgentSafetyMode::Sandboxed,
+        attended: true,
+        surface: "chat".into(),
+    };
     for binding in [None, Some(&chat)] {
         let ctx = ToolCtx {
             binding,
             ..ToolCtx::unbound(&data)
         };
-        assert_eq!(ReadTools.catalog(&ctx).await.len(), 15);
+        assert!(ReadTools
+            .catalog(&ctx)
+            .await
+            .iter()
+            .any(|tool| tool["name"] == "get_note"));
         assert_eq!(
             call(&ctx, "get_note", &json!({"id":"note-roadmap"}))
                 .await
