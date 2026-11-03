@@ -2144,11 +2144,19 @@ mod native {
     }
     fn open(parent: &File, name: &OsStr, flags: i32) -> io::Result<File> {
         let name = part(name)?;
+        let nofollow = libc::O_NOFOLLOW;
+        #[cfg(target_os = "macos")]
+        let nofollow = if flags & libc::O_SYMLINK != 0 {
+            // O_SYMLINK opens the link itself; adding O_NOFOLLOW makes Darwin reject it.
+            0
+        } else {
+            nofollow
+        };
         let fd = unsafe {
             libc::openat(
                 parent.as_raw_fd(),
                 name.as_ptr(),
-                flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                flags | nofollow | libc::O_CLOEXEC,
                 0o600,
             )
         };
