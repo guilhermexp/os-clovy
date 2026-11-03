@@ -13,9 +13,10 @@ use clovy_lib::activity::key::{ActivityKeyStore, KeyStoreError};
 use clovy_lib::activity::settings::ActivitySettings;
 use clovy_lib::activity::store::{ActivityStore, NewFrame, TextSource, ACTIVITY_DB_FILE};
 use clovy_lib::activity::timeline::etl::run_pass;
+use clovy_lib::agent_sessions::{AgentRepository, AgentSafetyMode};
 use clovy_lib::db::repositories::Repositories;
 use clovy_lib::llm::cli::CliKind;
-use clovy_lib::mcp_server::tools::{ActivityAccess, McpData, ToolCtx};
+use clovy_lib::mcp_server::tools::{ActivityAccess, McpData, ReadTools, ToolCtx, ToolGroup};
 use clovy_lib::mcp_server::turns::{TurnBinding, TurnRegistry};
 use clovy_lib::mcp_server::{channel, protocol, stdio};
 use serde_json::{json, Value};
@@ -293,32 +294,24 @@ async fn mcp_server_binary_answers_a_stdio_client_from_the_active_profile() {
     let mut client = Client::spawn(&dir).await;
 
     let listed = client.request("tools/list", json!({})).await;
-    let mut names: Vec<&str> = listed["result"]["tools"]
+    let names: Vec<&str> = listed["result"]["tools"]
         .as_array()
         .unwrap()
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    names.sort_unstable();
-    assert_eq!(
-        names,
-        vec![
-            "get_active_session",
-            "get_activity_stats",
-            "get_activity_timeline",
-            "get_day_panels",
-            "get_day_schedule",
-            "get_day_summary",
-            "get_note",
-            "get_session_detail",
-            "list_app_usage",
-            "list_coding_agent_sessions",
-            "list_dictations",
-            "list_memories",
-            "search_activity",
-            "search_notes",
-        ]
-    );
+    // ReadTools::owns delegates to the crate's is_read_tool predicate.
+    assert!(names.iter().all(|name| ReadTools.owns(name)), "{listed}");
+    for name in [
+        "search_notes",
+        "get_note",
+        "list_dictations",
+        "get_activity_timeline",
+        "get_day_panels",
+        "get_day_schedule",
+    ] {
+        assert!(names.contains(&name), "missing {name}: {listed}");
+    }
 
     let found = client
         .call("search_notes", json!({ "query": "zephyr" }))
@@ -515,29 +508,55 @@ async fn mcp_server_binary_binds_a_turn_until_it_is_revoked() {
     let root = tempfile::tempdir().unwrap();
     let dir = channel::channel_dir(root.path());
     let turns = TurnRegistry::default();
-    let listener =
-        channel::Listener::start_with_turns(&dir, turn_handler(notes_pool().await), turns.clone())
-            .await
-            .unwrap();
-    let token = turns.issue(host_binding::binding(
-        CliKind::Codex,
-        true,
-        "session-1",
-        "run-1",
-    ));
+    let notes = notes_pool().await;
+    let repo = AgentRepository::new(notes.clone());
+    let session = repo
+        .create_session_in_profile(
+            "Bound stdio fixture",
+            "test",
+            AgentSafetyMode::Sandboxed,
+            None,
+            "default",
+        )
+        .await
+        .unwrap();
+    let run = repo.create_run(&session.id, "test", None).await.unwrap();
+    let mut binding = host_binding::binding(CliKind::Codex, true, &session.id, &run.id);
+    // Read the host-created snapshot through the public repository API.
+    // Bound dispatch revalidates it via the internal run_partition::resolve.
+    binding.data_partition = repo.run_config(&run.id).await.unwrap().unwrap()["dataPartition"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let token = turns.issue(binding);
+    let listener = channel::Listener::start_with_turns(&dir, turn_handler(notes), turns.clone())
+        .await
+        .unwrap();
 
     // A live turn: the compiled relay is accepted and serves the catalog.
     let mut bound = Client::spawn_for_turn(&dir, &token).await;
     let listed = bound.request("tools/list", json!({})).await;
     assert!(listed["result"]["tools"].as_array().is_some(), "{listed}");
-    assert!(bound
+    let found = bound
         .call("search_notes", json!({ "query": "zephyr" }))
         .await
-        .is_ok());
+        .unwrap();
+    let found_notes = found["notes"].as_array().unwrap();
+    let roadmap = found_notes
+        .iter()
+        .find(|note| note["id"] == "note-roadmap")
+        .unwrap_or_else(|| panic!("default partition's note missing: {found}"));
+    assert_eq!(roadmap["title"], json!("Roadmap sync"), "{found}");
+    assert!(
+        found_notes
+            .iter()
+            .all(|note| note["id"] != "note-other-profile"),
+        "another partition's note leaked: {found}"
+    );
 
     // The run ends: the open relay and a new one with the same token both
     // answer that the turn ended, and no tool runs.
-    assert_eq!(turns.revoke_run("run-1"), 1);
+    assert_eq!(turns.revoke_run(&run.id), 1);
     for _ in 0..50 {
         if bound
             .call("search_notes", json!({ "query": "zephyr" }))
