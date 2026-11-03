@@ -254,6 +254,11 @@ build scripts in `pnpm-workspace.yaml` — live in
   including when Stop already won. This means no final result was observed,
   not that an effect failed or rolled back. Preserve real results and keep
   outer CLI call IDs separate from approval-broker IDs (docs/llm-providers.md).
+- **Dock visibility is independent of autostart.** On macOS, opt-in hiding
+  uses Accessory only while the main window is hidden; showing it restores
+  Regular and focus. Closing a window is not quitting the app. Keep tray
+  reopening and the preference-off behavior intact
+  (`openspec/specs/dock-presence/spec.md`).
 - **No Open Software services in the desktop (fork).** The app has no OS
   Accounts sign-in, billing, credits funding, telemetry, issue reports,
   companion, or June updater; it needs no account identity or server token. `src/`,
