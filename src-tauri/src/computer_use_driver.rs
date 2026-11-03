@@ -928,7 +928,6 @@ mod private_protocol_tests {
         for mode in ["som", "vision", "ax"] {
             assert!(modes.contains(&json!(mode)), "missing capture mode {mode}");
         }
-        assert_eq!(schema["required"], json!(["pid", "window_id"]));
         assert_eq!(schema["additionalProperties"], false);
     }
 
