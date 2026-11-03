@@ -397,7 +397,9 @@ fn allowed_tool_list() -> Value {
     let tools: Vec<Value> = ALLOWED_TOOLS.iter().map(|name| {
         let definition = &contract["driverTools"][*name];
         let properties: serde_json::Map<String,Value> = definition["properties"].as_object().expect("private tool properties").iter().map(|(field,kind)| {
-            let schema = if kind == "array" { json!({"type":"array","items":{"type":"string"},"maxItems":16}) } else { json!({"type":kind}) };
+            let schema = if *name == "get_window_state" && field == "capture_mode" {
+                json!({"type":kind,"enum":["som","vision","ax"]})
+            } else if kind == "array" { json!({"type":"array","items":{"type":"string"},"maxItems":16}) } else { json!({"type":kind}) };
             (field.clone(),schema)
         }).collect();
         json!({"name":name,"description":"Private broker-authorized Clovy desktop operation","inputSchema":{"type":"object","properties":properties,"required":definition["required"],"additionalProperties":false}})
@@ -906,6 +908,30 @@ fn arguments_are_narrow(tool: &str, arguments: &Value) -> bool {
 #[cfg(test)]
 mod private_protocol_tests {
     use super::*;
+
+    #[test]
+    fn window_state_schema_advertises_supported_capture_modes() {
+        let tool_list = allowed_tool_list();
+        let capture = tool_list["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "get_window_state")
+            .expect("get_window_state is advertised");
+        let schema = &capture["inputSchema"];
+        let capture_mode = &schema["properties"]["capture_mode"];
+        assert_eq!(capture_mode["type"], "string");
+        let modes = capture_mode["enum"]
+            .as_array()
+            .expect("capture_mode advertises its supported modes");
+        assert_eq!(modes.len(), 3);
+        for mode in ["som", "vision", "ax"] {
+            assert!(modes.contains(&json!(mode)), "missing capture mode {mode}");
+        }
+        assert_eq!(schema["required"], json!(["pid", "window_id"]));
+        assert_eq!(schema["additionalProperties"], false);
+    }
+
     #[tokio::test]
     async fn oversized_or_unterminated_frames_close_the_private_channel() {
         for bytes in [b"12345\n".as_slice(), b"1234".as_slice()] {
