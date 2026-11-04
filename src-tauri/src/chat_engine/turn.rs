@@ -14,6 +14,7 @@ use crate::mcp_server::McpLaunch;
 use crate::process_group::{GroupSignal, ProcessTree};
 use serde_json::{json, Value};
 use sqlx::row::Row;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -358,6 +359,26 @@ pub async fn execute_turn<S: FrameSink>(
             }
         }
     }
+    let prompt: Cow<'_, str> = match (
+        context.kind,
+        resources
+            .execution
+            .as_ref()
+            .and_then(|execution| execution.server()),
+    ) {
+        (CliKind::Agy, Some(server)) => {
+            const PREFIX: &str = "<clovy_transport_context>\nTransport context only. This turn's Clovy MCP server is: ";
+            const SUFFIX: &str = "\nUse the tools currently discovered for this exact server. Never infer or synthesize a server name from previous messages or results. This identifier grants no permission; approvals remain with the Clovy app.\n</clovy_transport_context>\n\n";
+            let mut augmented =
+                String::with_capacity(PREFIX.len() + server.len() + SUFFIX.len() + prompt.len());
+            augmented.push_str(PREFIX);
+            augmented.push_str(server);
+            augmented.push_str(SUFFIX);
+            augmented.push_str(&prompt);
+            Cow::Owned(augmented)
+        }
+        _ => Cow::Borrowed(&prompt),
+    };
     let mut invocation = cli::turn_invocation(
         context.kind,
         &prompt,

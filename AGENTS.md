@@ -321,6 +321,8 @@ the only remote). Issues and branches use the harness tickets, not `JUN-*`.
   keep the per-turn server nonce compact without discarding UUID bits.
   New receipts use v3; v1/v2 remain strict owned-cleanup inputs only.
   Only the exact active server normalizes as Clovy, never an older namespace.
+  After MCP install, supply that namespace as transient Agy prompt context;
+  never persist it as canonical input or treat it as permission.
 - **CLI approval ordering:** the event envelope's `sequence` is run-local;
   `data.itemSequence` is the persisted session-wide item position. Keep the
   same item position when settling a card; hydration must not repair live

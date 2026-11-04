@@ -409,6 +409,13 @@ argument: its installer ships `agy.exe`.
   separate gateway transport-name issue is tracked as F18; no canonical tools
   are filtered, truncated or renamed here.
 
+  After MCP installation, chat supplies the exact active server name as
+  transient transport context, including when resuming a native conversation.
+  Canonical input/history is unchanged; previous messages and native results
+  do not define the current namespace. This context grants no authority:
+  approvals remain with the app, and unowned servers are never rerouted or
+  normalized as Clovy. Native SDK acceptance of this context remains separate.
+
   A private receipt records the exact owned transport and filesystem identity.
   Cleanup removes only matching transport, preserves altered/foreign content
   with an explicit diagnostic, and never removes native authentication state.
