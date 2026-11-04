@@ -367,9 +367,16 @@ fn rf1_legacy_identified_partial_config_is_recovered_without_touching_auth() {
     let mut receipt: Receipt = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     receipt.version = 1;
     receipt.candidate = None;
+    let entry = receipt.config["mcpServers"]
+        .as_object_mut()
+        .unwrap()
+        .remove(&receipt.server)
+        .unwrap();
+    receipt.server = format!("clovy_turn_{}", Uuid::new_v4().simple());
+    receipt.config = json!({"mcpServers":{(receipt.server.clone()):entry}});
     std::fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
     let config = cwd.join(".agents").join(CONFIG);
-    let bytes = std::fs::read(&config).unwrap();
+    let bytes = serde_json::to_vec_pretty(&receipt.config).unwrap();
     std::fs::write(&config, &bytes[..bytes.len() / 2]).unwrap();
     execution.finish().unwrap();
     drop(execution);

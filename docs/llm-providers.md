@@ -392,12 +392,22 @@ argument: its installer ships `agy.exe`.
   the HOME-based conversation origin are unchanged.
 
   Only the owned execution directory receives `.agents/mcp_config.json`: one
-  fresh `clovy_turn_<uuid>` server, the existing absolute `McpLaunch` program
+  fresh server named `c` plus the unpadded URL-safe base64 encoding of a full
+  128-bit UUID nonce (23 characters), the existing absolute `McpLaunch` program
   and `--dir`, a turn token and `timeoutSeconds: 900`. The supported server
   `env` entry supplies the host HOME (and Windows profile paths) to the stdio
   relay. The SDK retains its private HOME; the relay keeps the existing host
   identity and debug production-data refusal. It remains a proxy and opens no
   database. No alternate relay bypass or credential export is introduced.
+
+  Native Antigravity CLI 1.4.12 measurements show that the SDK qualifies names
+  as `mcp_<server>_<tool>` and enforces `^[a-zA-Z0-9_-]{1,64}$`. The compact
+  server leaves 36 characters for core tool names, including clarification and
+  conversation tools. This identifier is not authority; only the exact active
+  server is normalized as Clovy. External MCP names are not all representable:
+  `agent_mcp::runtime_tool_name` currently permits up to 128 characters. That
+  separate gateway transport-name issue is tracked as F18; no canonical tools
+  are filtered, truncated or renamed here.
 
   A private receipt records the exact owned transport and filesystem identity.
   Cleanup removes only matching transport, preserves altered/foreign content
@@ -408,7 +418,11 @@ argument: its installer ships `agy.exe`.
   MCP config and receipt are published from complete private candidates with
   atomic creation that refuses an existing destination. Recovery recognizes
   the receipted candidate before publication and the same unit after publication.
-  A legacy receipt can also identify a partial write of its exact config bytes.
+  New transport receipts use version 3 with strict compact-name validation.
+  Versions 1 and 2 remain cleanup-only recovery inputs under their existing
+  long-name grammar and profile/config/filesystem identity checks; they are
+  never issued or adopted as the current live server. A version 1 receipt can
+  also identify a partial write of its exact config bytes.
   Unreceipted staging files are retained without blocking a retry; malformed
   receipts and foreign published units remain refused. No cleanup relies on a
   staging filename alone as proof of ownership.

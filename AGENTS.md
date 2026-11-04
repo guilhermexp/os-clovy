@@ -317,6 +317,10 @@ the only remote). Issues and branches use the harness tickets, not `JUN-*`.
   filesystem primitives, not a Git runtime dependency. Legacy/foreign native IDs
   replay canonical history rather than resuming another profile
   (`docs/llm-providers.md`).
+  Agy qualifies MCP names as `mcp_<server>_<tool>` under a 64-character limit;
+  keep the per-turn server nonce compact without discarding UUID bits.
+  New receipts use v3; v1/v2 remain strict owned-cleanup inputs only.
+  Only the exact active server normalizes as Clovy, never an older namespace.
 - **CLI approval ordering:** the event envelope's `sequence` is run-local;
   `data.itemSequence` is the persisted session-wide item position. Keep the
   same item position when settling a card; hydration must not repair live
