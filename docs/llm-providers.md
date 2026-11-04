@@ -303,6 +303,10 @@ argument: its installer ships `agy.exe`.
   connections. MCP servers configured in Clovy use the Clovy gateway;
   their stored credentials are not copied into the CLI configuration
   ([ADR-0063](adr/0063-cli-turns-get-write-tools-through-an-approval-broker.md)).
+  Approval events keep the run's event cursor in the envelope and the persisted
+  session-wide item position in `data.itemSequence`. Requested and updated cards
+  use that same item position, so live approval does not move into older turns
+  or wait for hydration to appear in the correct order.
   With Clovy's server, claude
   also gets `--permission-prompt-tool mcp__clovy__approve_action
   --disallowedTools mcp__clovy__approve_action AskUserQuestion`

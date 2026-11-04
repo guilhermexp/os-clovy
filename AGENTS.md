@@ -317,6 +317,10 @@ the only remote). Issues and branches use the harness tickets, not `JUN-*`.
   filesystem primitives, not a Git runtime dependency. Legacy/foreign native IDs
   replay canonical history rather than resuming another profile
   (`docs/llm-providers.md`).
+- **CLI approval ordering:** the event envelope's `sequence` is run-local;
+  `data.itemSequence` is the persisted session-wide item position. Keep the
+  same item position when settling a card; hydration must not repair live
+  ordering (`docs/llm-providers.md`).
 
 ## Verification
 

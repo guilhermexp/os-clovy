@@ -20,6 +20,8 @@ pub struct StoredInterruption {
     pub external_id: String,
     /// The run's last event sequence when the item was written.
     pub sequence: i64,
+    /// The item's persisted position across the whole session.
+    pub item_sequence: i64,
     pub payload: Value,
 }
 
@@ -137,6 +139,7 @@ pub async fn insert_pending(
     Ok(StoredInterruption {
         external_id,
         sequence,
+        item_sequence: display_sequence,
         payload: payload.clone(),
     })
 }
@@ -201,7 +204,7 @@ pub async fn settle(
     let now = crate::db::repositories::timestamp();
     let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
     let row = sqlx::query::query(
-        "SELECT i.id, i.session_id, i.payload_json, r.last_sequence
+        "SELECT i.id, i.session_id, i.payload_json, i.sequence AS item_sequence, r.last_sequence
          FROM agent_items i JOIN agent_runs r ON r.id = i.run_id
          WHERE i.kind = 'interruption'
            AND i.run_id = ?
@@ -227,6 +230,7 @@ pub async fn settle(
     let item_id: String = row.get("id");
     let session_id: String = row.get("session_id");
     let sequence: i64 = row.get("last_sequence");
+    let item_sequence: i64 = row.get("item_sequence");
     let payload_json: String = row.get("payload_json");
     let mut payload: Value = serde_json::from_str(&payload_json)
         .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
@@ -278,6 +282,7 @@ pub async fn settle(
     Ok(Some(StoredInterruption {
         external_id: external_id(run_id, interruption_id),
         sequence,
+        item_sequence,
         payload,
     }))
 }

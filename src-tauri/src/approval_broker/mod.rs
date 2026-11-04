@@ -344,7 +344,7 @@ impl ApprovalBroker {
             &turn.run_id,
             inserted.sequence,
             "interruption.requested",
-            json!({ "itemId": inserted.external_id, "itemSequence": inserted.sequence, "interruption": inserted.payload }),
+            json!({ "itemId": inserted.external_id, "itemSequence": inserted.item_sequence, "interruption": inserted.payload }),
         );
 
         let mut rx = rx;
@@ -519,7 +519,7 @@ impl ApprovalBroker {
                     &waiter.run_id,
                     updated.sequence,
                     "interruption.updated",
-                    json!({ "itemId": updated.external_id, "itemSequence": updated.sequence, "interruption": updated.payload }),
+                    json!({ "itemId": updated.external_id, "itemSequence": updated.item_sequence, "interruption": updated.payload }),
                 );
                 (settled, true)
             }
