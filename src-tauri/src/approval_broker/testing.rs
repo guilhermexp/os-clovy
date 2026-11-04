@@ -138,6 +138,8 @@ impl TestBroker {
             .expect("running run");
         TurnBinding {
             authority: crate::domain::turn_authority::TurnAuthority::new(),
+            wire_names: matches!(cli, CliKind::Claude | CliKind::Codex | CliKind::Agy)
+                .then(crate::mcp_server::wire_names::WireNames::default),
             session_id: session.id,
             run_id: run.id,
             data_partition: "default".into(),

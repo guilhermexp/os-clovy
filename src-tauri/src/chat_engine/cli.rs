@@ -308,6 +308,7 @@ pub struct StreamTranslator {
     completed: bool,
     /// Only this workspace lease's server can claim Clovy ownership in Agy.
     turn_mcp_server: Option<String>,
+    wire_names: Option<crate::mcp_server::wire_names::WireNames>,
     agy_finished_tools: HashSet<String>,
     agy_text: String,
 }
@@ -325,6 +326,7 @@ impl StreamTranslator {
             pending_failure: None,
             completed: false,
             turn_mcp_server: None,
+            wire_names: None,
             agy_finished_tools: HashSet::new(),
             agy_text: String::new(),
         }
@@ -333,6 +335,66 @@ impl StreamTranslator {
     pub fn with_turn_mcp_server(mut self, server: Option<&str>) -> Self {
         self.turn_mcp_server = server.map(str::to_string);
         self
+    }
+
+    pub fn with_wire_names(
+        mut self,
+        names: Option<crate::mcp_server::wire_names::WireNames>,
+    ) -> Self {
+        self.wire_names = names;
+        self
+    }
+
+    /// Called only after the transport's server identity has been checked.
+    /// Cached names already contain the canonical identity and never reenter
+    /// this decoder when the corresponding result arrives.
+    fn managed_tool_name(&self, tool: &str, prefix: &str) -> Option<String> {
+        match &self.wire_names {
+            Some(names) => names
+                .resolve(tool)
+                .map(|canonical| format!("{prefix}{}", canonical.as_ref())),
+            None => Some(format!("{prefix}{tool}")),
+        }
+    }
+
+    fn claude_tool_name(&self, observed: &str) -> String {
+        match observed
+            .strip_prefix("mcp__")
+            .and_then(|name| name.split_once("__"))
+        {
+            Some((SERVER_KEY, tool)) => self
+                .managed_tool_name(tool, "mcp__clovy__")
+                .unwrap_or_else(|| format!("external_mcp.{SERVER_KEY}.{tool}")),
+            _ => observed.to_string(),
+        }
+    }
+
+    fn codex_tool(&self, item: &Value) -> Option<(String, Value)> {
+        if str_at(item, "type") == Some("mcp_tool_call")
+            && str_at(item, "server") == Some(SERVER_KEY)
+        {
+            let tool = str_at(item, "tool").unwrap_or("tool");
+            return Some((
+                self.managed_tool_name(tool, "clovy.")
+                    .unwrap_or_else(|| format!("external_mcp.{SERVER_KEY}.{tool}")),
+                item["arguments"].clone(),
+            ));
+        }
+        codex_tool(item)
+    }
+
+    fn codex_mcp_error(&self, item: &Value, name: &str, error: &Value) -> String {
+        if self.wire_names.is_none() {
+            return codex_mcp_error(item, error);
+        }
+        let server = str_at(item, "server").unwrap_or("unknown");
+        let owned = server == SERVER_KEY && name.starts_with("clovy.");
+        let tool = if owned {
+            name.strip_prefix("clovy.").unwrap_or("unknown")
+        } else {
+            str_at(item, "tool").unwrap_or("unknown")
+        };
+        cli_mcp_error_from(server, tool, error, "The tool call failed.", owned)
     }
 
     /// Translates one stdout line; lines that are not JSON objects (warnings
@@ -479,7 +541,8 @@ impl StreamTranslator {
                             if let (Some(id), Some(name)) =
                                 (str_at(block, "id"), str_at(block, "name"))
                             {
-                                self.start_tool(id, name, block["input"].clone(), out);
+                                let name = self.claude_tool_name(name);
+                                self.start_tool(id, &name, block["input"].clone(), out);
                             }
                         }
                         _ => {}
@@ -546,7 +609,8 @@ impl StreamTranslator {
             }
             Some("item.started") => {
                 let item = &event["item"];
-                if let (Some(id), Some((name, arguments))) = (str_at(item, "id"), codex_tool(item))
+                if let (Some(id), Some((name, arguments))) =
+                    (str_at(item, "id"), self.codex_tool(item))
                 {
                     self.start_tool(id, &name, arguments, out);
                 }
@@ -568,7 +632,7 @@ impl StreamTranslator {
                         }
                     }
                     _ => {
-                        let Some((name, arguments)) = codex_tool(item) else {
+                        let Some((name, arguments)) = self.codex_tool(item) else {
                             return;
                         };
                         self.start_tool(id, &name, arguments, out);
@@ -597,17 +661,19 @@ impl StreamTranslator {
                             }
                             Some("mcp_tool_call") => {
                                 match item.get("error").filter(|error| !error.is_null()) {
-                                    Some(error) => {
-                                        (Value::Null, Some(codex_mcp_error(item, error)), false)
-                                    }
+                                    Some(error) => (
+                                        Value::Null,
+                                        Some(self.codex_mcp_error(item, &name, error)),
+                                        false,
+                                    ),
                                     None if item["result"]["isError"].as_bool() == Some(true) => (
                                         Value::Null,
-                                        Some(codex_mcp_error(item, &item["result"])),
+                                        Some(self.codex_mcp_error(item, &name, &item["result"])),
                                         false,
                                     ),
                                     None if status == Some("failed") => (
                                         Value::Null,
-                                        Some(codex_mcp_error(item, &Value::Null)),
+                                        Some(self.codex_mcp_error(item, &name, &Value::Null)),
                                         false,
                                     ),
                                     None => (item["result"].clone(), None, false),
@@ -780,15 +846,18 @@ impl StreamTranslator {
                                 ))
                             })
                             .flatten();
-                        let owned = mcp.is_some_and(|(server, _)| {
-                            self.turn_mcp_server.as_deref() == Some(server)
+                        let managed_name = mcp.and_then(|(server, tool)| {
+                            (self.turn_mcp_server.as_deref() == Some(server))
+                                .then(|| self.managed_tool_name(tool, "clovy."))
+                                .flatten()
                         });
-                        let name = match mcp {
-                            Some((_, tool)) if owned => format!("{SERVER_KEY}.{tool}"),
+                        let owned = managed_name.is_some();
+                        let name = match (mcp, managed_name) {
+                            (Some(_), Some(name)) => name,
                             // Keep an explicit external origin, even if the
                             // inherited server itself calls itself `clovy`.
-                            Some((server, tool)) => format!("external_mcp.{server}.{tool}"),
-                            None => wrapper.to_string(),
+                            (Some((server, tool)), _) => format!("external_mcp.{server}.{tool}"),
+                            (None, _) => wrapper.to_string(),
                         };
                         let arguments = if mcp.is_some() {
                             parameters["Arguments"].clone()
@@ -829,7 +898,11 @@ impl StreamTranslator {
                             Some(match mcp {
                                 Some((server, tool)) => cli_mcp_error_from(
                                     server,
-                                    tool,
+                                    if owned {
+                                        name.strip_prefix("clovy.").unwrap_or(tool)
+                                    } else {
+                                        tool
+                                    },
                                     &envelope,
                                     "The tool call failed.",
                                     owned,
@@ -1237,6 +1310,18 @@ fn codex_mcp_error(item: &Value, error: &Value) -> String {
 }
 
 fn claude_mcp_error(name: &str, block: &Value, message: &str) -> Option<String> {
+    if let Some((server, tool)) = name
+        .strip_prefix("external_mcp.")
+        .and_then(|name| name.split_once('.'))
+    {
+        return Some(cli_mcp_error_from(
+            server,
+            tool,
+            &block["error"],
+            message,
+            false,
+        ));
+    }
     let (server, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
     if server.is_empty() || tool.is_empty() {
         return None;
@@ -1317,6 +1402,166 @@ fn cursor_tool_name(key: &str, call: &Value) -> String {
 #[cfg(test)]
 mod mcp_origin_tests {
     use super::*;
+
+    fn transport_events(kind: CliKind, server: &str, tool: &str, result: Value) -> Vec<Value> {
+        match kind {
+            CliKind::Claude => vec![
+                json!({"type":"assistant","message":{"content":[{
+                    "type":"tool_use","id":"wire-call","name":format!("mcp__{server}__{tool}"),"input":{"id":"fixture"}
+                }]}}),
+                json!({"type":"user","message":{"content":[{
+                    "type":"tool_result","tool_use_id":"wire-call", "is_error":result["isError"],
+                    "content":result["content"], "error":result
+                }]}}),
+            ],
+            CliKind::Codex => vec![
+                json!({"type":"item.started","item":{
+                    "id":"wire-call","type":"mcp_tool_call","server":server,"tool":tool,
+                    "arguments":{"id":"fixture"},"status":"in_progress"
+                }}),
+                json!({"type":"item.completed","item":{
+                    "id":"wire-call","type":"mcp_tool_call","server":server,"tool":tool,
+                    "arguments":{"id":"fixture"},"status":"completed","result":result
+                }}),
+            ],
+            CliKind::Agy => vec![
+                json!({"event":"step_update","step_update":{
+                    "step_index":12,"step_type":"tool","state":"RUNNING","tool_name":"call_mcp_tool",
+                    "tool_info":{"parameters":{"ServerName":server,"ToolName":tool,"Arguments":{"id":"fixture"}}}
+                }}),
+                json!({"event":"step_update","step_update":{
+                    "step_index":12,"step_type":"tool","state":"DONE","tool_name":"call_mcp_tool",
+                    "tool_info":{"parameters":{"ServerName":server,"ToolName":tool,"Arguments":{"id":"fixture"}},"output":result}
+                }}),
+            ],
+            _ => unreachable!("only managed transports"),
+        }
+    }
+
+    fn translate_transport(
+        kind: CliKind,
+        names: crate::mcp_server::wire_names::WireNames,
+        server: &str,
+        tool: &str,
+        result: Value,
+    ) -> Vec<EngineEvent> {
+        let mut translator = StreamTranslator::new(kind)
+            .with_wire_names(Some(names))
+            .with_turn_mcp_server(Some("c0123456789012345678901"));
+        transport_events(kind, server, tool, result)
+            .into_iter()
+            .flat_map(|event| translator.translate_line(&event.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn managed_wire_names_restore_full_canonical_identity_in_each_protocol() {
+        let names = crate::mcp_server::wire_names::WireNames::default();
+        let long = format!("mcp_fixture_{}", "x".repeat(116));
+        let mut first = [json!({"name":long})];
+        names.publish(&mut first).unwrap();
+        // The second canonical name is itself an advertised wire alias for
+        // the first tool. A second decode would incorrectly select that tool.
+        // Every protocol receives a separate start and result update.
+        let chained = first[0]["name"].as_str().unwrap().to_string();
+        for canonical in [long, chained] {
+            assert!(canonical.len() <= 128);
+            let mut descriptors = [
+                json!({"name":canonical,"description":"Synthetic method","inputSchema":{"type":"object"}}),
+            ];
+            names.publish(&mut descriptors).unwrap();
+            let wire = descriptors[0]["name"].as_str().unwrap();
+            assert_ne!(wire, canonical);
+            for kind in [CliKind::Claude, CliKind::Codex, CliKind::Agy] {
+                let server = if kind == CliKind::Agy {
+                    "c0123456789012345678901"
+                } else {
+                    SERVER_KEY
+                };
+                let events = translate_transport(
+                    kind,
+                    names.clone(),
+                    server,
+                    wire,
+                    json!({"isError":false,"content":[{"type":"text","text":"fixture state"}]}),
+                );
+                let expected = if kind == CliKind::Claude {
+                    format!("mcp__clovy__{canonical}")
+                } else {
+                    format!("clovy.{canonical}")
+                };
+                assert_eq!(events.iter().filter(|event| matches!(event, EngineEvent::ToolStarted { name, arguments, .. } if name == &expected && arguments == &json!({"id":"fixture"}))).count(), 1);
+                assert_eq!(events.iter().filter(|event| matches!(event, EngineEvent::ToolFinished { name, error:None, .. } if name == &expected)).count(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn only_current_resolved_wire_names_can_claim_a_managed_diagnostic() {
+        let canonical = format!("mcp_fixture_{}", "x".repeat(116));
+        let names = crate::mcp_server::wire_names::WireNames::default();
+        let mut descriptors = [json!({"name":canonical})];
+        names.publish(&mut descriptors).unwrap();
+        let wire = descriptors[0]["name"].as_str().unwrap();
+        let diagnostic = crate::agent_mcp::AgentMcpError::OauthReconnectRequired.diagnostic(
+            "fixture",
+            Some(&canonical),
+            "refresh",
+        );
+        let result = json!({"isError":true,"content":[{"type":"text","text":"native failure"}],"_meta":{"clovy":{"diagnostic":diagnostic}}});
+        for kind in [CliKind::Claude, CliKind::Codex, CliKind::Agy] {
+            let active = if kind == CliKind::Agy {
+                "c0123456789012345678901"
+            } else {
+                SERVER_KEY
+            };
+            for (metadata, server, observed, owned) in [
+                (names.clone(), active, wire, true),
+                (names.clone(), "foreign", wire, false),
+                (names.clone(), active, "_c_unadvertised", false),
+                (names.clone(), active, canonical.as_str(), false),
+                (
+                    crate::mcp_server::wire_names::WireNames::default(),
+                    active,
+                    wire,
+                    false,
+                ),
+            ] {
+                let events = translate_transport(kind, metadata, server, observed, result.clone());
+                let (name, error) = events
+                    .iter()
+                    .find_map(|event| match event {
+                        EngineEvent::ToolFinished {
+                            name,
+                            error: Some(error),
+                            ..
+                        } => Some((name, error)),
+                        _ => None,
+                    })
+                    .unwrap();
+                if owned {
+                    assert!(name.ends_with(&canonical), "{name}");
+                    assert!(error.contains("agent_mcp_reconnect_required"), "{error}");
+                    assert!(error.contains(&canonical), "{error}");
+                } else {
+                    assert!(
+                        !name.starts_with("clovy.") && !name.starts_with("mcp__clovy__"),
+                        "{name}"
+                    );
+                    assert!(error.contains("origin: external_cli"), "{error}");
+                    assert!(error.contains("native failure"), "{error}");
+                    assert!(!error.contains("agent_mcp_reconnect_required"), "{error}");
+                }
+            }
+            if kind == CliKind::Agy {
+                for previous in ["clovy", "c_previous_turn"] {
+                    let events =
+                        translate_transport(kind, names.clone(), previous, wire, result.clone());
+                    assert!(events.iter().any(|event| matches!(event, EngineEvent::ToolFinished { name, error:Some(error), .. } if name.starts_with("external_mcp.") && error.contains("origin: external_cli") && !error.contains("agent_mcp_reconnect_required"))));
+                }
+            }
+        }
+    }
 
     #[test]
     fn codex_external_failure_keeps_origin_without_changing_healthy_managed_result() {

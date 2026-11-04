@@ -21,6 +21,7 @@ async fn issued_token_rejects_reassignment_before_listing_reading_or_context_pub
     let run = repo.create_run(&a.id, "test", None).await.unwrap();
     let binding = turns::TurnBinding {
         authority: crate::domain::turn_authority::TurnAuthority::new(),
+        wire_names: None,
         session_id: a.id.clone(),
         run_id: run.id.clone(),
         data_partition: crate::agent_sessions::run_partition::resolve(&pool, &a.id, &run.id)

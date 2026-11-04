@@ -323,6 +323,12 @@ the only remote). Issues and branches use the harness tickets, not `JUN-*`.
   Only the exact active server normalizes as Clovy, never an older namespace.
   After MCP install, supply that namespace as transient Agy prompt context;
   never persist it as canonical input or treat it as permission.
+- **Native MCP wire names:** `mcp_server/wire_names.rs` is passive per-grant
+  metadata shared by private Claude/Codex/Agy bindings and stream translators.
+  Keep full canonical names in catalog, dispatch, policies and history; encode
+  only at the protocol boundary and resolve once after the managed-origin guard.
+  Unknown/unpublished aliases and raw names needing encoding are refused.
+  Public/unbound MCP and other CLI kinds retain their existing behavior.
 - **CLI approval ordering:** the event envelope's `sequence` is run-local;
   `data.itemSequence` is the persisted session-wide item position. Keep the
   same item position when settling a card; hydration must not repair live

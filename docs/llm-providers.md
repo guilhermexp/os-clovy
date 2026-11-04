@@ -97,6 +97,15 @@ codex and agy in their least-privileged mode** (`CliKind::one_shot_allowed`):
 | cursor-agent | Refused | print mode "has access to all tools"; `--mode ask` still reads |
 | copilot | Refused | MCP servers from the user's configuration and plugins cannot all be excluded |
 
+Native Mac backend qualification also exercised the unchanged production
+`llm::test_provider` path (the core of Models, Test): Antigravity measured
+`JsonSchema` in its authenticated private profile. Synthetic calls through
+`providers::generate_note_from_transcript` and `llm::generate_for_activity`
+returned a generated note and validated activity JSON with `provider: cli:agy`.
+These headless checks changed settings only in their isolated test process;
+they do not qualify the recording/ASR UI, day-summary persistence, sole-CLI
+installation or unattended routines.
+
 cursor-agent and copilot stay refused. A refused CLI fails with `LlmError::CliToolsNotDisabled` (`llm_cli_tools_not_disabled`)
 before anything is spawned, in `generate`, `generate_for_activity`,
 `generate_on_cli_for_activity`, and the connection test. `llm_set_usage`
@@ -358,6 +367,22 @@ argument: its installer ships `agy.exe`.
   it closes; a call still unanswered then gets `turn_expired` from the relay.
   App shutdown revokes every token after the turns stop
   (`shutdown::run_cleanup`). Each run gets a new token.
+- **Native wire names.** Bound Claude Code, Codex and Antigravity turns share
+  one passive name codec per MCP grant, attached to the binding and stream
+  translator. The existing canonical catalog, dispatcher, history, snapshots
+  and approval broker remain the single pool and authority. At `tools/list`,
+  ASCII names of at most 36 bytes using letters, digits, `_` and `-` pass
+  unchanged unless they start with the reserved `_c_` prefix. Other names use
+  `_c_` plus unpadded URL-safe base64 of the first 24 SHA-256 digest bytes
+  (35 bytes total). Only advertised encoded names resolve, exactly once;
+  raw names requiring encoding and unknown aliases are refused. A collision
+  fails catalog publication atomically. Descriptions retain the full canonical
+  name and original description; schemas and annotations stay intact.
+  No canonical name is truncated, filtered or replaced in policy keys. The
+  map lives only for this grant and adds no permissions. Public/unbound MCP
+  and other CLI kinds retain their existing canonical behavior. Native events
+  resolve wire names only after the engine's managed-server guard; foreign
+  origins and unresolved names cannot claim a managed diagnostic.
 - **Antigravity execution context.** `llm::agy::HostContext` is captured from
   `app_paths::app_data_dir` while the host environment is intact. The SDK's
   common HOME is `<app_data>/runtime-profiles/agy/home`; XDG directories live
@@ -402,12 +427,18 @@ argument: its installer ships `agy.exe`.
 
   Native Antigravity CLI 1.4.12 measurements show that the SDK qualifies names
   as `mcp_<server>_<tool>` and enforces `^[a-zA-Z0-9_-]{1,64}$`. The compact
-  server leaves 36 characters for core tool names, including clarification and
-  conversation tools. This identifier is not authority; only the exact active
-  server is normalized as Clovy. External MCP names are not all representable:
-  `agent_mcp::runtime_tool_name` currently permits up to 128 characters. That
-  separate gateway transport-name issue is tracked as F18; no canonical tools
-  are filtered, truncated or renamed here.
+  server leaves 36 bytes for tool names. The common wire codec above makes
+  every admitted canonical tool representable, including the gateway's
+  unchanged `agent_mcp::runtime_tool_name` identity of up to 128 bytes. This
+  identifier is not authority; only the exact active server and a resolved
+  wire name normalize as Clovy. Previous server namespaces remain foreign,
+  with no raw-name or old-server fallback. Actual native SDK/UI qualification
+  of the codec for all three engines remains pending; pure codec tests do not
+  establish native acceptance.
+  Real Tauri protocol/broker checks additionally cover the 36/37/128-byte
+  boundaries, approved effects, deny/revoke without effects, canonical policy
+  keys and all three event adapters. They do not substitute for a native model
+  calling the wire-named tool through the signed app.
 
   After MCP installation, chat supplies the exact active server name as
   transient transport context, including when resuming a native conversation.

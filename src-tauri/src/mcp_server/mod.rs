@@ -26,6 +26,7 @@ pub mod tools;
 #[path = "turn_tests.rs"]
 mod turn_tests;
 pub mod turns;
+pub mod wire_names;
 
 use std::path::{Path, PathBuf};
 

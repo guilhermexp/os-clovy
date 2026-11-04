@@ -37,6 +37,275 @@ use crate::llm::cli::CliKind;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+const WIRE_FIXTURE_SERVER: &str = "wirefixture";
+// One leading c plus 22 URL-safe characters, matching the native namespace's
+// measured size without touching an installed engine or its configuration.
+const WIRE_NATIVE_SERVER: &str = "c0123456789012345678901";
+
+fn wire_fixture_methods() -> Vec<String> {
+    let prefix = format!("mcp_{WIRE_FIXTURE_SERVER}_").len();
+    [36, 37, 128]
+        .into_iter()
+        .map(|length| format!("write_{}", "x".repeat(length - prefix - 6)))
+        .chain(std::iter::once("read_state".into()))
+        .collect()
+}
+
+async fn wire_fixture_server(broker: &TestBroker, http: &HttpFixture) {
+    let mut server = McpServerDefinition::new(WIRE_FIXTURE_SERVER, McpTransport::StreamableHttp);
+    server.url = Some(http.url.clone());
+    server.safety.requires_approval = true;
+    // No secret reference: this fixture exercises the production dispatcher
+    // without accessing the machine's credential store.
+    AgentMcpRepository::new(broker.pool().clone())
+        .create(&server)
+        .await
+        .unwrap();
+}
+
+async fn wire_protocol(
+    ctx: &ToolCtx<'_>,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    crate::mcp_server::protocol::handle_in(
+        ctx,
+        &json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}),
+    )
+    .await
+    .unwrap()
+}
+
+fn wire_advertised<'a>(listing: &'a serde_json::Value, remote: &str) -> &'a serde_json::Value {
+    listing["result"]["tools"]
+        .as_array()
+        .expect("protocol tools/list must succeed")
+        .iter()
+        .find(|tool| {
+            tool["_meta"]["clovy"]["id"]
+                .as_str()
+                .is_some_and(|id| id.ends_with(&format!("/{remote}")))
+        })
+        .expect("every admitted fixture method must remain advertised")
+}
+
+async fn wire_pending(broker: &TestBroker) -> String {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting = broker.broker().waiting_ids();
+            if let Some(id) = broker.requests().iter().find_map(|card| {
+                let id = card["id"].as_str()?;
+                waiting
+                    .iter()
+                    .any(|waiting| waiting == id)
+                    .then(|| id.to_owned())
+            }) {
+                return id;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("wire call must reach a real pending approval")
+}
+
+#[tokio::test]
+async fn f18_protocol_advertised_names_fit_native_bound_and_call_every_canonical_method() {
+    for cli in [CliKind::Claude, CliKind::Codex, CliKind::Agy] {
+        let methods = wire_fixture_methods();
+        let http = HttpFixture::with_stateful_methods(methods.clone()).await;
+        let broker = TestBroker::new([]).await;
+        let binding = broker.turn(cli, true).await;
+        let data = data(&broker);
+        wire_fixture_server(&broker, &http).await;
+        let ctx = ToolCtx {
+            data: &data,
+            app: None,
+            binding: Some(&binding),
+            broker: Some(broker.broker()),
+        };
+        let listing = wire_protocol(&ctx, "tools/list", json!({})).await;
+        let mut expected_state = Vec::new();
+        let mut canonical_names = Vec::new();
+        for remote in &methods {
+            let canonical =
+                crate::agent_mcp::runtime_tool_name(WIRE_FIXTURE_SERVER, remote).unwrap();
+            canonical_names.push(canonical.clone());
+            let descriptor = wire_advertised(&listing, remote);
+            let wire = descriptor["name"].as_str().unwrap();
+            let qualified = format!("mcp_{WIRE_NATIVE_SERVER}_{wire}");
+            assert!(
+                qualified.len() <= 64
+                    && qualified
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'),
+                "{cli:?}: advertised tool rejected by native SDK: {qualified}"
+            );
+            if canonical.len() <= 36 {
+                assert_eq!(wire, canonical);
+            } else {
+                assert_ne!(wire, canonical);
+            }
+            let arguments = if remote == "read_state" {
+                json!({})
+            } else {
+                json!({"stamp":format!("{cli:?}-{}", canonical.len())})
+            };
+            let request = wire_protocol(
+                &ctx,
+                "tools/call",
+                json!({"name":wire,"arguments":arguments}),
+            );
+            let decide = async {
+                let id = wire_pending(&broker).await;
+                assert_eq!(*http.effects.lock().unwrap(), expected_state);
+                assert_eq!(broker.requests().last().unwrap()["toolName"], canonical);
+                broker
+                    .broker()
+                    .decide(
+                        broker.pool(),
+                        &id,
+                        crate::approval_broker::Decision::Approve,
+                    )
+                    .await
+                    .unwrap();
+            };
+            let (result, ()) = tokio::join!(request, decide);
+            assert_eq!(result["result"]["isError"], false, "{result}");
+            if remote != "read_state" {
+                expected_state.push(arguments);
+            } else {
+                for effect in &expected_state {
+                    assert!(
+                        result
+                            .to_string()
+                            .contains(effect["stamp"].as_str().unwrap()),
+                        "read did not observe approved state: {result}"
+                    );
+                }
+            }
+            assert_eq!(*http.effects.lock().unwrap(), expected_state);
+        }
+        assert_eq!(http.tool_calls(), methods.len());
+        assert!(canonical_names.iter().any(|name| name.len() == 128));
+        let mut snapshots: Vec<String> = sqlx::query_scalar::query_scalar(
+            "SELECT tool_name FROM agent_run_mcp_policies WHERE run_id = ? ORDER BY tool_name",
+        )
+        .bind(&binding.run_id)
+        .fetch_all(broker.pool())
+        .await
+        .unwrap();
+        canonical_names.sort();
+        snapshots.sort();
+        assert_eq!(snapshots, canonical_names);
+        assert_eq!(wire_protocol(&ctx, "tools/list", json!({})).await, listing);
+    }
+}
+
+#[tokio::test]
+async fn f18_wire_denial_and_revocation_never_apply_the_connected_effect() {
+    for revoke in [false, true] {
+        let methods = wire_fixture_methods();
+        let remote = &methods[2];
+        let http = HttpFixture::with_stateful_methods(methods.clone()).await;
+        let broker = TestBroker::new([]).await;
+        let binding = broker.turn(CliKind::Agy, true).await;
+        let data = data(&broker);
+        wire_fixture_server(&broker, &http).await;
+        let ctx = ToolCtx {
+            data: &data,
+            app: None,
+            binding: Some(&binding),
+            broker: Some(broker.broker()),
+        };
+        let listing = wire_protocol(&ctx, "tools/list", json!({})).await;
+        let canonical = crate::agent_mcp::runtime_tool_name(WIRE_FIXTURE_SERVER, remote).unwrap();
+        let wire = wire_advertised(&listing, remote)["name"].as_str().unwrap();
+        assert_ne!(
+            wire, canonical,
+            "long identity must be encoded at publication"
+        );
+        let request = wire_protocol(
+            &ctx,
+            "tools/call",
+            json!({"name":wire,"arguments":{"stamp":"must not apply"}}),
+        );
+        let decide = async {
+            let id = wire_pending(&broker).await;
+            assert!(http.effects.lock().unwrap().is_empty());
+            assert_eq!(http.tool_calls(), 0);
+            assert_eq!(broker.requests().last().unwrap()["toolName"], canonical);
+            if revoke {
+                binding.authority.revoke();
+            }
+            broker
+                .broker()
+                .decide(
+                    broker.pool(),
+                    &id,
+                    if revoke {
+                        crate::approval_broker::Decision::Approve
+                    } else {
+                        crate::approval_broker::Decision::Deny
+                    },
+                )
+                .await
+                .unwrap();
+        };
+        let (result, ()) = tokio::join!(request, decide);
+        assert_eq!(result["result"]["isError"], true, "{result}");
+        assert!(
+            result.to_string().contains(if revoke {
+                "turn_expired"
+            } else {
+                "user_denied"
+            }),
+            "{result}"
+        );
+        assert!(http.effects.lock().unwrap().is_empty());
+        assert_eq!(http.tool_calls(), 0);
+    }
+}
+
+#[tokio::test]
+async fn f18_raw_and_unadvertised_wire_names_cannot_reuse_another_grant() {
+    let methods = wire_fixture_methods();
+    let http = HttpFixture::with_stateful_methods(methods.clone()).await;
+    let broker = TestBroker::new([Scripted::Deny, Scripted::Deny]).await;
+    let binding = broker.turn(CliKind::Codex, true).await;
+    let data = data(&broker);
+    wire_fixture_server(&broker, &http).await;
+    let ctx = ToolCtx {
+        data: &data,
+        app: None,
+        binding: Some(&binding),
+        broker: Some(broker.broker()),
+    };
+    let listing = wire_protocol(&ctx, "tools/list", json!({})).await;
+    let canonical = crate::agent_mcp::runtime_tool_name(WIRE_FIXTURE_SERVER, &methods[2]).unwrap();
+    let wire = wire_advertised(&listing, &methods[2])["name"]
+        .as_str()
+        .unwrap();
+    for name in [canonical.as_str(), "_c_unadvertised"] {
+        let refused = wire_protocol(&ctx, "tools/call", json!({"name":name,"arguments":{}})).await;
+        assert!(refused.get("error").is_some(), "{refused}");
+    }
+    let fresh = broker.turn(CliKind::Codex, true).await;
+    let refused = wire_protocol(
+        &ToolCtx {
+            binding: Some(&fresh),
+            ..ctx
+        },
+        "tools/call",
+        json!({"name":wire,"arguments":{}}),
+    )
+    .await;
+    assert!(refused.get("error").is_some(), "{refused}");
+    assert!(broker.requests().is_empty());
+    assert!(http.effects.lock().unwrap().is_empty());
+    assert_eq!(http.tool_calls(), 0);
+}
+
 #[derive(Clone, Default)]
 struct MemorySecrets(Arc<Mutex<HashMap<String, McpSecretBundle>>>);
 impl McpSecretStore for MemorySecrets {

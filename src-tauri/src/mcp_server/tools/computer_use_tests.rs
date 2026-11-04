@@ -257,6 +257,7 @@ async fn driver_error_keeps_code_and_delivery_evidence() {
 fn binding(run_id: &str, attended: bool) -> TurnBinding {
     TurnBinding {
         authority: crate::domain::turn_authority::TurnAuthority::new(),
+        wire_names: None,
         session_id: "session-1".into(),
         run_id: run_id.into(),
         data_partition: "default".into(),
