@@ -29,6 +29,20 @@ pub async fn llm_detect_clis() -> Result<Vec<CliStatus>, AppError> {
     Ok(detect::detect_all(env.as_ref()).await)
 }
 
+/// Opens native OAuth in a new terminal for Clovy's own Agy profile. The
+/// return value means the terminal was opened, never that login succeeded.
+#[tauri::command]
+pub async fn llm_open_agy_login() -> Result<(), AppError> {
+    let env = shell_env::login_env().await;
+    let host = super::agy::HostContext::current()
+        .map_err(|error| AppError::new("agy_profile_unavailable", error.to_string()))?;
+    let login = super::agy_login::Login::prepare(&host, env.as_ref())?;
+    tauri::async_runtime::spawn_blocking(move || login.open())
+        .await
+        .map_err(|error| AppError::new("agy_login_open_failed", error.to_string()))??;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn llm_save_endpoint(
     state: State<'_, ProviderSettingsState>,

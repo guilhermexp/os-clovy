@@ -22,7 +22,7 @@ pub(super) fn denied() -> io::Error {
         "Clovy MCP requires private local objects owned by the current user",
     )
 }
-pub(super) fn win(error: windows::core::Error) -> io::Error {
+pub(crate) fn win(error: windows::core::Error) -> io::Error {
     let code = error.code().0 as u32;
     if code & 0xffff0000 == 0x80070000 {
         io::Error::from_raw_os_error((code & 0xffff) as i32)
@@ -30,7 +30,7 @@ pub(super) fn win(error: windows::core::Error) -> io::Error {
         io::Error::other(error)
     }
 }
-pub(super) fn wide(value: &std::ffi::OsStr) -> io::Result<Vec<u16>> {
+pub(crate) fn wide(value: &std::ffi::OsStr) -> io::Result<Vec<u16>> {
     let mut value: Vec<_> = value.encode_wide().collect();
     if value.contains(&0) {
         return Err(denied());
@@ -38,7 +38,7 @@ pub(super) fn wide(value: &std::ffi::OsStr) -> io::Result<Vec<u16>> {
     value.push(0);
     Ok(value)
 }
-pub(super) struct Handle(pub HANDLE);
+pub(crate) struct Handle(pub HANDLE);
 impl Drop for Handle {
     fn drop(&mut self) {
         unsafe {
@@ -125,7 +125,7 @@ fn own_sid() -> io::Result<String> {
         string.to_string().map_err(|_| denied())
     }
 }
-pub(super) struct Security {
+pub(crate) struct Security {
     _descriptor: Local,
     pub attributes: SECURITY_ATTRIBUTES,
 }
@@ -154,7 +154,7 @@ impl Security {
     }
 }
 
-fn object_info(handle: HANDLE, directory: bool) -> io::Result<()> {
+pub(crate) fn object_info(handle: HANDLE, directory: bool) -> io::Result<()> {
     unsafe {
         let mut info = BY_HANDLE_FILE_INFORMATION::default();
         GetFileInformationByHandle(handle, &mut info).map_err(win)?;
@@ -167,7 +167,7 @@ fn object_info(handle: HANDLE, directory: bool) -> io::Result<()> {
         Ok(())
     }
 }
-fn private_acl(handle: HANDLE) -> io::Result<()> {
+pub(crate) fn private_acl(handle: HANDLE) -> io::Result<()> {
     unsafe {
         let mut owner = PSID::default();
         let mut dacl = std::ptr::null_mut();
@@ -242,7 +242,7 @@ pub(super) fn test_pipe_acl(handle: HANDLE) -> io::Result<()> {
     private_acl(handle)
 }
 
-fn open_dir(path: &Path) -> io::Result<Handle> {
+pub(crate) fn open_dir(path: &Path) -> io::Result<Handle> {
     let path = wide(path.as_os_str())?;
     unsafe {
         let handle = Handle(
@@ -263,7 +263,7 @@ fn open_dir(path: &Path) -> io::Result<Handle> {
 }
 /// Pin all local ancestors against rename/delete while accessing the secret.
 /// Never change their ACLs. UNC paths, relative paths, '..' and reparses fail.
-fn ancestors(dir: &Path) -> io::Result<Vec<Handle>> {
+pub(crate) fn ancestors(dir: &Path) -> io::Result<Vec<Handle>> {
     let mut components = dir.components();
     if !matches!(components.next(), Some(Component::Prefix(p)) if matches!(p.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)))
         || !matches!(components.next(), Some(Component::RootDir))
@@ -277,7 +277,7 @@ fn ancestors(dir: &Path) -> io::Result<Vec<Handle>> {
     paths.reverse();
     paths.into_iter().map(open_dir).collect()
 }
-pub(super) fn directory(dir: &Path, create: bool) -> io::Result<Vec<Handle>> {
+pub(crate) fn directory(dir: &Path, create: bool) -> io::Result<Vec<Handle>> {
     let mut held = ancestors(dir)?;
     if create {
         let security = Security::new()?;

@@ -9,7 +9,8 @@
 //! sandbox and no auto-approval. The other CLIs are refused with
 //! [`LlmError::CliToolsNotDisabled`] before anything is spawned.
 //!
-//! Each call is also isolated as far as the CLI allows: no session persisted,
+//! Each call is also isolated as far as the CLI allows: no session persisted
+//! where supported (Antigravity retains native state in an app-owned profile),
 //! no project context files, skills, or slash commands, an empty scratch
 //! working directory, and a timeout enforced by [`super::process`]. The
 //! prompt always starts with [`super::CLOVY_AUTHORSHIP_MARKER`] on its own
@@ -111,7 +112,8 @@ impl CliKind {
     /// tool-free ones, plus codex and agy in their least-privileged mode
     /// (owner decision): codex `exec --sandbox read-only` with approval
     /// `never`, no web search, no network, no saved session; agy `--print`
-    /// with `--sandbox`, where nobody can approve a permission request.
+    /// with `--sandbox`, a private profile and explicit native-tool/MCP deny
+    /// settings, where nobody can approve a permission request.
     /// cursor-agent and copilot stay refused.
     pub fn one_shot_allowed(self) -> bool {
         self.tools_disabled() || matches!(self, CliKind::Codex | CliKind::Agy)
@@ -333,104 +335,6 @@ pub fn codex_mcp_off_args(list: &str) -> Result<Vec<String>, String> {
         args.push(format!("mcp_servers.{name}.enabled=false"));
     }
     Ok(args)
-}
-
-/// Why agy cannot take a one-shot call with the configuration under `home`:
-/// print mode starts every enabled MCP server and plugin outside
-/// `--sandbox`, and agy has no per-call switch to turn them off.
-pub fn agy_extensions_on(home: &std::path::Path) -> Option<String> {
-    let config = home.join(".gemini").join("config");
-    let mut on = Vec::new();
-    if let Ok(text) = std::fs::read_to_string(config.join("mcp_config.json")) {
-        let Ok(parsed) = serde_json::from_str::<Value>(&text) else {
-            return Some("its MCP configuration could not be read".to_string());
-        };
-        if let Some(servers) = parsed.get("mcpServers").and_then(Value::as_object) {
-            on.extend(
-                servers
-                    .iter()
-                    .filter(|(_, server)| {
-                        !server
-                            .get("disabled")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false)
-                    })
-                    .map(|(name, _)| format!("MCP server {name}")),
-            );
-        }
-    }
-    // agy records whether a plugin is on in its `config.json`
-    // (`plugins.<dir>.enabled`, keyed by directory); a plugin with no entry
-    // follows its own `plugin.json` (`"disabled": true` ships off). A file
-    // that exists but cannot be read or parsed may hide those choices.
-    let choices = match json_file_if_present(&config.join("config.json")) {
-        Ok(config) => config
-            .and_then(|config| config.get("plugins").cloned())
-            .unwrap_or(Value::Null),
-        Err(error) => {
-            return Some(format!(
-                "its configuration (~/.gemini/config/config.json) could not be read ({error}), so Clovy cannot tell which plugins are on. Fix or remove the file, or choose another provider."
-            ))
-        }
-    };
-    if let Ok(entries) = std::fs::read_dir(config.join("plugins")) {
-        on.extend(
-            entries
-                .flatten()
-                .filter(|entry| entry.path().is_dir())
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .filter(|name| {
-                    match choices
-                        .get(name)
-                        .and_then(|choice| choice.get("enabled"))
-                        .and_then(Value::as_bool)
-                    {
-                        Some(enabled) => enabled,
-                        None => !agy_plugin_ships_off(&config.join("plugins").join(name)),
-                    }
-                })
-                .map(|name| format!("plugin {name}")),
-        );
-    }
-    (!on.is_empty()).then(|| {
-        format!(
-            "it would start {} outside its sandbox. Turn them off with `agy mcp disable` or `agy plugin disable`, or choose another provider.",
-            on.join(", ")
-        )
-    })
-}
-
-/// A JSON file agy reads, tolerating the byte order mark Windows editors
-/// write (agy itself accepts it).
-fn json_file(path: &std::path::Path) -> Option<Value> {
-    json_file_if_present(path).ok().flatten()
-}
-
-/// Like [`json_file`], telling a missing file (`Ok(None)`) from one that
-/// cannot be read or parsed (`Err`).
-fn json_file_if_present(path: &std::path::Path) -> Result<Option<Value>, String> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.kind().to_string()),
-    };
-    serde_json::from_str(text.trim_start_matches('\u{feff}'))
-        .map(Some)
-        .map_err(|_| "not valid JSON".to_string())
-}
-
-/// Whether a plugin's own manifest declares it off by default. agy reads the
-/// manifest at the plugin root, `.antigravity-plugin/` or `.gemini-plugin/`.
-fn agy_plugin_ships_off(plugin: &std::path::Path) -> bool {
-    [
-        plugin.join("plugin.json"),
-        plugin.join(".antigravity-plugin").join("plugin.json"),
-        plugin.join(".gemini-plugin").join("plugin.json"),
-    ]
-    .iter()
-    .find_map(|manifest| json_file(manifest))
-    .and_then(|manifest| manifest.get("disabled").and_then(Value::as_bool))
-    .unwrap_or(false)
 }
 
 /// Longest command line `CreateProcessW` accepts, in UTF-16 units, without

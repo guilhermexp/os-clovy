@@ -97,7 +97,7 @@ pub async fn detect(kind: CliKind, env: &LoginEnv) -> CliStatus {
             one_shot: kind.one_shot_allowed(),
         };
     };
-    let version = read_version(&path, env).await;
+    let version = read_version(kind, &path, env).await;
     CliStatus {
         id: kind,
         name: kind.display_name().to_string(),
@@ -110,13 +110,36 @@ pub async fn detect(kind: CliKind, env: &LoginEnv) -> CliStatus {
     }
 }
 
-async fn read_version(path: &std::path::Path, env: &LoginEnv) -> Option<String> {
-    let scratch = tempfile::tempdir().ok()?;
+async fn read_version(kind: CliKind, path: &std::path::Path, env: &LoginEnv) -> Option<String> {
+    let managed = if kind == CliKind::Agy {
+        Some(super::agy::HostContext::current().ok()?.one_shot().ok()?)
+    } else {
+        None
+    };
+    let scratch = if managed.is_none() {
+        Some(tempfile::tempdir().ok()?)
+    } else {
+        None
+    };
+    let cwd = managed
+        .as_ref()
+        .map(|execution| execution.cwd())
+        .or_else(|| scratch.as_ref().map(|scratch| scratch.path()))?;
+    let child_env = super::shell_env::cli_environment(env.vars());
+    let child_env = managed
+        .as_ref()
+        .map(|execution| execution.environment(&child_env))
+        .unwrap_or(child_env);
+    let program = if kind == CliKind::Agy {
+        std::fs::canonicalize(path).ok()?
+    } else {
+        path.to_path_buf()
+    };
     let output = process::run(ProcessSpec {
-        program: path.to_path_buf(),
+        program,
         args: vec!["--version".to_string()],
-        env: super::shell_env::cli_environment(env.vars()),
-        cwd: scratch.path().to_path_buf(),
+        env: child_env,
+        cwd: cwd.to_path_buf(),
         stdin: None,
         timeout: VERSION_TIMEOUT,
     })

@@ -67,6 +67,9 @@ pub(crate) async fn persist_runtime_event(
     frame: &RpcFrame,
 ) -> Result<Option<PersistedRuntimeEvent>, AppError> {
     let method = frame.method.as_deref().unwrap_or_default();
+    if method == "run.diagnostic" {
+        return persist_cleanup_diagnostic(repository, frame).await;
+    }
     if matches!(method, "run.completed" | "run.cancelled" | "run.failed") {
         let terminal =
             super::terminal::persist_terminal_event(&repository.pool, frame, sanitize_log).await?;
@@ -187,11 +190,15 @@ pub(crate) async fn persist_runtime_event(
             )))
         }
         "tool.failed" => {
+            data["error"] = json!(sanitize_log(
+                params
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Tool failed.")
+            ));
             data["itemId"] = json!(format!("tool-result:{event_id}"));
             data["createdAt"] = json!(created_at);
-            Some(AgentItemPayload::ToolResult(tool_payload(
-                &params, "failed",
-            )))
+            Some(AgentItemPayload::ToolResult(tool_payload(&data, "failed")))
         }
         "interruption.requested" => {
             let serialized = params
@@ -336,6 +343,77 @@ pub(crate) async fn persist_runtime_event(
     }))
 }
 
+/// A cleanup diagnostic is an observation, independent of terminal arbitration.
+/// Stop may already have published cancellation and advanced its replay cursor.
+/// Append one scoped, sanitized item without changing any run/session status.
+async fn persist_cleanup_diagnostic(
+    repository: &AgentRepository,
+    frame: &RpcFrame,
+) -> Result<Option<PersistedRuntimeEvent>, AppError> {
+    use sqlx::{query::query, row::Row};
+    let message = frame
+        .params
+        .as_ref()
+        .and_then(|params| params.get("message"))
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .ok_or_else(|| {
+            AppError::new(
+                "agent_diagnostic_invalid",
+                "Cleanup diagnostic needs a message.",
+            )
+        })?;
+    let external_id = format!("workspace-mcp-cleanup:{}", frame.run_id);
+    let mut tx = repository.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let run = query("SELECT last_sequence FROM agent_runs WHERE id=? AND session_id=?")
+        .bind(&frame.run_id)
+        .bind(&frame.session_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let existing =
+        query("SELECT id FROM agent_items WHERE session_id=? AND run_id=? AND external_id=?")
+            .bind(&frame.session_id)
+            .bind(&frame.run_id)
+            .bind(&external_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if existing.is_some() {
+        tx.commit().await?;
+        return Ok(None);
+    }
+    let sequence = frame
+        .sequence
+        .max(run.get::<i64, _>("last_sequence").saturating_add(1));
+    let id = Uuid::new_v4().to_string();
+    let now = crate::db::repositories::timestamp();
+    let payload = json!({"message":sanitize_log(message),"category":"runtime",
+        "code":"agent_workspace_mcp_cleanup","retryable":false});
+    let item_sequence: i64 = query("INSERT INTO agent_items(id,session_id,run_id,sequence,kind,payload_json,external_id,created_at)
+        SELECT ?,?,?,COALESCE(MAX(sequence),-1)+1,'error',?,?,? FROM agent_items WHERE session_id=? RETURNING sequence")
+        .bind(&id).bind(&frame.session_id).bind(&frame.run_id).bind(payload.to_string())
+        .bind(&external_id).bind(&now).bind(&frame.session_id).fetch_one(&mut *tx).await?.get("sequence");
+    query("UPDATE agent_runs SET last_sequence=? WHERE id=? AND session_id=?")
+        .bind(sequence)
+        .bind(&frame.run_id)
+        .bind(&frame.session_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let mut data = payload;
+    data["itemId"] = json!(id);
+    data["itemSequence"] = json!(item_sequence);
+    data["createdAt"] = json!(now);
+    Ok(Some(PersistedRuntimeEvent {
+        method: "run.diagnostic".into(),
+        event_id: frame
+            .event_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        sequence,
+        data,
+    }))
+}
+
 fn tool_payload(params: &Value, status: &str) -> ToolPayload {
     ToolPayload {
         tool_name: params
@@ -347,6 +425,11 @@ fn tool_payload(params: &Value, status: &str) -> ToolPayload {
             .and_then(Value::as_str)
             .map(str::to_string),
         arguments: params.get("arguments").cloned(),
+        error: params
+            .get("error")
+            .and_then(Value::as_str)
+            .filter(|_| status == "failed")
+            .map(sanitize_log),
         result: params
             .get("output")
             .cloned()

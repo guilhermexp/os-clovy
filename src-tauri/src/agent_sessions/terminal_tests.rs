@@ -209,6 +209,7 @@ async fn terminal_call_admission_rejects_late_starts_but_keeps_real_late_results
     .unwrap();
     let repo = AgentRepository::new(pool.clone());
     let tool = ToolPayload {
+        error: None,
         tool_name: Some("clovy.create_note".into()),
         tool_call_id: Some("item_1".into()),
         arguments: Some(json!({"title":"Synthetic"})),
@@ -227,6 +228,7 @@ async fn terminal_call_admission_rejects_late_starts_but_keeps_real_late_results
         .unwrap()
         .is_none());
     let late = ToolPayload {
+        error: None,
         result: Some(json!({"noteId":"committed-before-stop"})),
         status: Some("complete".into()),
         ..tool
@@ -329,6 +331,7 @@ async fn append_item_cannot_claim_another_sessions_run() {
     query("INSERT INTO agent_sessions(id,title,model,status,created_at,updated_at) VALUES ('session-b','Other','test','running','now','now')").execute(&pool).await.unwrap();
     let repo = crate::agent_sessions::AgentRepository::new(pool.clone());
     let tool = crate::agent_sessions::ToolPayload {
+        error: None,
         tool_name: None,
         tool_call_id: Some("item_1".into()),
         arguments: None,

@@ -205,11 +205,15 @@ describe("tool terminality after Stop", () => {
       output: isError ? "Observed error" : { noteId: "committed-note" },
       isError,
     });
-    const hydratedStale = mergeAgentRuntimeSnapshot(projection, {
-      session,
-      run,
-      items: [call, otherRun],
-    });
+    const hydratedStale = mergeAgentRuntimeSnapshot(
+      projection,
+      {
+        session,
+        run,
+        items: [call, otherRun],
+      },
+      projection.processedEventIds,
+    );
     expect(hydratedStale.run?.status).toBe("cancelled");
     expect(hydratedStale.items.find((item) => item.kind === "tool_result")).toEqual(
       projection.items.find((item) => item.kind === "tool_result"),
@@ -227,11 +231,19 @@ describe("tool terminality after Stop", () => {
       data: { ...started().data, itemId: "late-new-call", callId: "item_2", itemSequence: 5 },
     } as AgentRuntimeEvent);
     expect(projection.items).toEqual([{ ...call, status: "interrupted" }]);
-    projection = mergeAgentRuntimeSnapshot(projection, { session, run, items: [call] });
+    projection = mergeAgentRuntimeSnapshot(
+      projection,
+      { session, run, items: [call] },
+      projection.processedEventIds,
+    );
     expect(projection.run?.status).toBe("cancelled");
     expect(projection.items).toEqual([{ ...call, status: "interrupted" }]);
     const newerRun = { ...run, id: "run-2" };
-    projection = mergeAgentRuntimeSnapshot(projection, { session, run: newerRun, items: [call] });
+    projection = mergeAgentRuntimeSnapshot(
+      projection,
+      { session, run: newerRun, items: [call] },
+      projection.processedEventIds,
+    );
     projection = applyAgentRuntimeEvent(projection, started(7));
     expect(projection.run).toEqual(newerRun);
     expect(projection.items).toEqual([{ ...call, status: "interrupted" }]);
@@ -318,7 +330,11 @@ describe("tool terminality after Stop", () => {
       data: { startedAt: createdAt, model: "auto" },
     });
     const beforeStaleSnapshot = projection;
-    projection = mergeAgentRuntimeSnapshot(projection, { session, run, items: [call] });
+    projection = mergeAgentRuntimeSnapshot(
+      projection,
+      { session, run, items: [call] },
+      projection.processedEventIds,
+    );
     expect(projection).toBe(beforeStaleSnapshot);
     expect(projection.run).toMatchObject({ id: "run-2", status: "running" });
     expect(projection.items).toEqual([{ ...call, status: "interrupted" }]);
@@ -328,11 +344,15 @@ describe("tool terminality after Stop", () => {
     const interrupted: AgentItemDto = { ...call, status: "interrupted" };
     const current = createAgentRuntimeProjection({ session, run, items: [interrupted] });
     expect(applyAgentRuntimeEvent(current, started()).items).toEqual([interrupted]);
-    const switched = mergeAgentRuntimeSnapshot(current, {
-      session: { ...session, id: "session-2" },
-      run: { ...run, sessionId: "session-2" },
-      items: [{ ...call, sessionId: "session-2" }],
-    });
+    const switched = mergeAgentRuntimeSnapshot(
+      current,
+      {
+        session: { ...session, id: "session-2" },
+        run: { ...run, sessionId: "session-2" },
+        items: [{ ...call, sessionId: "session-2" }],
+      },
+      current.processedEventIds,
+    );
     expect(switched.items).toEqual([{ ...call, sessionId: "session-2" }]);
   });
 

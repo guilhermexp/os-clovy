@@ -11,7 +11,7 @@
 //! | claude | `-p --output-format stream-json --verbose --include-partial-messages`, prompt on stdin | `session_id` of `system/init`, `--resume <id>` | `--mcp-config <file>` |
 //! | codex | `exec [resume] --json --skip-git-repo-check [--image <path>]... -c <policy>... [<id>] -`, prompt on stdin | `thread_id` of `thread.started` | `-c mcp_servers.clovy.*` |
 //! | pi | `--print --mode json --session-id <id>`, prompt on stdin | chosen by Clovy (UUID) | no MCP support |
-//! | agy | `--print=<prompt> --output-format stream-json` | `conversation_id` of `init`, `--conversation <id>` | only through `agy mcp add` (global), not offered |
+//! | agy | `--print=<prompt> --output-format stream-json` | `conversation_id` of `init`, `--conversation <id>` | workspace `.agents/mcp_config.json`, leased per turn |
 //! | cursor-agent | `-p --output-format stream-json --stream-partial-output --trust -- <prompt>` | `session_id` of `system/init`, `--resume <id>` | project servers need approval in Cursor, not offered |
 //! | copilot | `--prompt=<prompt> --output-format json --session-id <id>` | chosen by Clovy (UUID) | `--additional-mcp-config @<file>` |
 //!
@@ -63,7 +63,10 @@ pub enum EngineEvent {
 /// Whether Clovy can hand its MCP server to the CLI for one turn without
 /// touching the CLI's own configuration.
 pub fn accepts_mcp(kind: CliKind) -> bool {
-    matches!(kind, CliKind::Claude | CliKind::Codex | CliKind::Copilot)
+    matches!(
+        kind,
+        CliKind::Claude | CliKind::Codex | CliKind::Agy | CliKind::Copilot
+    )
 }
 
 /// CLIs whose conversation id Clovy chooses (a fresh UUID) on the first turn.
@@ -303,6 +306,10 @@ pub struct StreamTranslator {
     /// pi and codex report failures that a retry may still recover from.
     pending_failure: Option<String>,
     completed: bool,
+    /// Only this workspace lease's server can claim Clovy ownership in Agy.
+    turn_mcp_server: Option<String>,
+    agy_finished_tools: HashSet<String>,
+    agy_text: String,
 }
 
 impl StreamTranslator {
@@ -317,7 +324,15 @@ impl StreamTranslator {
             streamed_ids: HashSet::new(),
             pending_failure: None,
             completed: false,
+            turn_mcp_server: None,
+            agy_finished_tools: HashSet::new(),
+            agy_text: String::new(),
         }
+    }
+
+    pub fn with_turn_mcp_server(mut self, server: Option<&str>) -> Self {
+        self.turn_mcp_server = server.map(str::to_string);
+        self
     }
 
     /// Translates one stdout line; lines that are not JSON objects (warnings
@@ -350,6 +365,11 @@ impl StreamTranslator {
                 self.pending_failure
                     .clone()
                     .unwrap_or_else(|| "Codex ended without completing the turn.".into()),
+            ),
+            CliKind::Agy if !self.completed => Some(
+                self.pending_failure
+                    .clone()
+                    .unwrap_or_else(|| "Antigravity ended without completing the turn.".into()),
             ),
             CliKind::Pi => self.pending_failure.clone(),
             _ => None,
@@ -486,7 +506,20 @@ impl StreamTranslator {
                             .unwrap_or(text);
                         self.finish_tool(id, None, Value::Null, Some(detail), needs_approval, out);
                     } else {
-                        self.finish_tool(id, None, Value::String(text), None, false, out);
+                        // Keep the real MCP content boundaries. The structured JSON
+                        // block after a long screen tree is context too; flattening
+                        // it into one string loses its provenance and references.
+                        let clovy_mcp = self
+                            .tool_names
+                            .get(id)
+                            .and_then(|name| name.strip_prefix("mcp__"))
+                            .and_then(|name| name.split_once("__"))
+                            .is_some_and(|(server, _)| server == SERVER_KEY);
+                        let output = match &block["content"] {
+                            Value::Array(blocks) if clovy_mcp => Value::Array(blocks.clone()),
+                            _ => Value::String(text),
+                        };
+                        self.finish_tool(id, None, output, None, false, out);
                     }
                 }
             }
@@ -700,6 +733,11 @@ impl StreamTranslator {
     }
 
     fn agy(&mut self, event: &Value, out: &mut Vec<EngineEvent>) {
+        // Terminal records and repeated DONE updates must not duplicate a
+        // result/effect in the common projection. An error remains an error.
+        if self.completed {
+            return;
+        }
         match str_at(event, "event") {
             Some("init") => {
                 if let Some(id) = str_at(event, "conversation_id") {
@@ -714,62 +752,149 @@ impl StreamTranslator {
                             out.push(EngineEvent::Reasoning(text.to_string()));
                         }
                         if let Some(text) = non_empty(step, "text_delta") {
+                            self.agy_text.push_str(text);
                             out.push(EngineEvent::TextDelta(text.to_string()));
                         }
                     }
                     Some("tool") => {
-                        let call_id = format!(
-                            "agy-step-{}",
-                            step.get("step_index").and_then(Value::as_i64).unwrap_or(-1)
-                        );
-                        let info = &step["tool_info"];
-                        let name = str_at(step, "tool_name")
-                            .or_else(|| str_at(info, "name"))
-                            .unwrap_or("tool")
-                            .to_string();
-                        self.start_tool(&call_id, &name, info["parameters"].clone(), out);
-                        match str_at(step, "state") {
-                            Some("DONE") => {
-                                let output = info
-                                    .get("result")
-                                    .or_else(|| info.get("output"))
-                                    .cloned()
-                                    .unwrap_or(Value::Null);
-                                self.finish_tool(&call_id, Some(&name), output, None, false, out);
-                            }
-                            Some("ERROR") => {
-                                // Measured: "permission check failed for ...:
-                                // user denied permission to run command".
-                                let detail = info
-                                    .get("error")
-                                    .and_then(|error| str_at(error, "message"))
-                                    .unwrap_or("The tool failed.")
-                                    .to_string();
-                                let needs_approval = detail.contains("permission");
-                                self.finish_tool(
-                                    &call_id,
-                                    Some(&name),
-                                    Value::Null,
-                                    Some(detail),
-                                    needs_approval,
-                                    out,
-                                );
-                            }
-                            _ => {}
+                        let Some(index) = step.get("step_index").and_then(Value::as_u64) else {
+                            out.push(EngineEvent::Failed(
+                                "Antigravity omitted the tool step identity.".into(),
+                            ));
+                            return;
+                        };
+                        let call_id = format!("agy-step-{index}");
+                        if self.agy_finished_tools.contains(&call_id) {
+                            return;
                         }
+                        let info = &step["tool_info"];
+                        let wrapper = str_at(step, "tool_name")
+                            .or_else(|| str_at(info, "name"))
+                            .unwrap_or("tool");
+                        let parameters = &info["parameters"];
+                        let mcp = (wrapper == "call_mcp_tool")
+                            .then(|| {
+                                Some((
+                                    str_at(parameters, "ServerName")?,
+                                    str_at(parameters, "ToolName")?,
+                                ))
+                            })
+                            .flatten();
+                        let owned = mcp.is_some_and(|(server, _)| {
+                            self.turn_mcp_server.as_deref() == Some(server)
+                        });
+                        let name = match mcp {
+                            Some((_, tool)) if owned => format!("{SERVER_KEY}.{tool}"),
+                            // Keep an explicit external origin, even if the
+                            // inherited server itself calls itself `clovy`.
+                            Some((server, tool)) => format!("external_mcp.{server}.{tool}"),
+                            None => wrapper.to_string(),
+                        };
+                        let arguments = if mcp.is_some() {
+                            parameters["Arguments"].clone()
+                        } else {
+                            parameters.clone()
+                        };
+                        self.start_tool(&call_id, &name, arguments, out);
+                        let state = str_at(step, "state");
+                        if !matches!(state, Some("DONE" | "ERROR")) {
+                            return;
+                        }
+                        let output = info
+                            .get("result")
+                            .or_else(|| info.get("output"))
+                            .cloned()
+                            .unwrap_or(Value::Null);
+                        // Agy can wrap an MCP error in a DONE step. Inspect the
+                        // observed envelope, including its string encoding.
+                        let envelope = output
+                            .as_str()
+                            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                            .unwrap_or_else(|| output.clone());
+                        let error = if state == Some("ERROR") {
+                            let detail = info
+                                .get("error")
+                                .and_then(|error| {
+                                    str_at(error, "message").or_else(|| error.as_str())
+                                })
+                                .unwrap_or("The tool failed.");
+                            Some(
+                                if mcp.is_some() && detail.starts_with("permission check failed") {
+                                    format!("Antigravity CLI permission check: {detail}")
+                                } else {
+                                    detail.to_string()
+                                },
+                            )
+                        } else if envelope.get("isError").and_then(Value::as_bool) == Some(true) {
+                            Some(match mcp {
+                                Some((server, tool)) => cli_mcp_error_from(
+                                    server,
+                                    tool,
+                                    &envelope,
+                                    "The tool call failed.",
+                                    owned,
+                                ),
+                                None => content_text(&envelope["content"]),
+                            })
+                        } else {
+                            None
+                        };
+                        // A host denial is final evidence, not a request to
+                        // widen the CLI's permissions in its global settings.
+                        let needs_approval = mcp.is_none()
+                            && error
+                                .as_ref()
+                                .is_some_and(|error| error.contains("user denied permission"));
+                        self.agy_finished_tools.insert(call_id.clone());
+                        self.finish_tool(&call_id, Some(&name), output, error, needs_approval, out);
                     }
                     _ => {}
                 }
             }
             Some("result") => {
                 let result = &event["result"];
-                if let Some(status) = str_at(result, "status").filter(|status| *status != "SUCCESS")
-                {
-                    let detail = result
-                        .get("error")
-                        .and_then(|error| str_at(error, "message").or_else(|| error.as_str()))
-                        .unwrap_or(status);
-                    out.push(EngineEvent::Failed(detail.to_string()));
+                if let Some(id) = str_at(result, "conversation_id") {
+                    out.push(EngineEvent::Conversation(id.to_string()));
+                }
+                if let Some(response) = non_empty(result, "response") {
+                    if self.agy_text.is_empty() {
+                        out.push(EngineEvent::TextDelta(response.to_string()));
+                        self.agy_text.push_str(response);
+                    } else if let Some(suffix) = response
+                        .strip_prefix(&self.agy_text)
+                        .filter(|suffix| !suffix.is_empty())
+                    {
+                        out.push(EngineEvent::TextDelta(suffix.to_string()));
+                        self.agy_text = response.to_string();
+                    }
+                }
+                match str_at(result, "status") {
+                    Some("SUCCESS") => {
+                        self.completed = true;
+                        if self.agy_text.trim().is_empty() {
+                            let denied = result
+                                .get("denied_actions")
+                                .and_then(Value::as_array)
+                                .filter(|actions| !actions.is_empty());
+                            let failure=match denied {
+                                Some(actions)=>format!("Antigravity reported SUCCESS without an answer after its headless permission check denied actions: {}. These are CLI denials, not a Clovy approval decision.",json!(actions)),
+                                None=>"Antigravity completed without an answer.".into(),
+                            };
+                            out.push(EngineEvent::Failed(failure));
+                        }
+                    }
+                    Some(status) => {
+                        self.completed = true;
+                        let detail = result
+                            .get("error")
+                            .and_then(|error| str_at(error, "message").or_else(|| error.as_str()))
+                            .unwrap_or(status);
+                        out.push(EngineEvent::Failed(detail.to_string()));
+                    }
+                    None => {
+                        self.pending_failure =
+                            Some("Antigravity returned a result without a terminal status.".into());
+                    }
                 }
             }
             _ => {}
@@ -1120,7 +1245,17 @@ fn claude_mcp_error(name: &str, block: &Value, message: &str) -> Option<String> 
 }
 
 fn cli_mcp_error(server: &str, tool: &str, error: &Value, fallback: &str) -> String {
-    let origin = if server == SERVER_KEY {
+    cli_mcp_error_from(server, tool, error, fallback, server == SERVER_KEY)
+}
+
+fn cli_mcp_error_from(
+    server: &str,
+    tool: &str,
+    error: &Value,
+    fallback: &str,
+    owned: bool,
+) -> String {
+    let origin = if owned {
         "clovy_gateway"
     } else {
         "external_cli"
@@ -1129,7 +1264,7 @@ fn cli_mcp_error(server: &str, tool: &str, error: &Value, fallback: &str) -> Str
     // server cannot claim Clovy ownership by returning the same metadata.
     if let Some(diagnostic) = error
         .pointer("/_meta/clovy/diagnostic")
-        .filter(|_| server == SERVER_KEY)
+        .filter(|_| owned)
         .and_then(|value| {
             serde_json::from_value::<crate::agent_mcp::AgentMcpDiagnostic>(value.clone()).ok()
         })
@@ -1150,7 +1285,7 @@ fn cli_mcp_error(server: &str, tool: &str, error: &Value, fallback: &str) -> Str
             _ => None,
         })
         .unwrap_or_else(|| "none".to_string());
-    let action = if server == SERVER_KEY {
+    let action = if owned {
         "inspect_clovy_connection"
     } else if remote_code.eq_ignore_ascii_case("unauthorized")
         || matches!(remote_code.as_str(), "401" | "403")

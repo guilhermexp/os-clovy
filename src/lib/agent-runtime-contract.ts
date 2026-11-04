@@ -254,6 +254,17 @@ export type AgentRuntimeEvent = RuntimeFrameBase &
       }
     | {
         eventId: string;
+        method: "run.diagnostic";
+        data: RuntimeItemData & {
+          message: string;
+          category: "runtime";
+          code: "agent_workspace_mcp_cleanup";
+          retryable: false;
+          createdAt: string;
+        };
+      }
+    | {
+        eventId: string;
         method: "tool.started";
         data: RuntimeItemData & {
           callId: string;

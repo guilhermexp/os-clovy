@@ -14,8 +14,10 @@ Clovy is a local-first **Tauri desktop app** for meeting notes: it records a
 meeting or dictation, transcribes audio, turns transcripts into structured
 notes, and hosts CLI chat over the user's notes. The frontend is **React**
 (`src/`), and the native shell is **Rust** (`src-tauri/`). Chat uses installed
-CLI engines, with Claude Code as default and Codex as the existing local
-fallback. The desktop calls **Groq**, **OpenRouter**, and **fal** directly with
+CLI engines (Claude Code, Codex and Antigravity), with Claude Code as the initial
+default when available. The app owns canonical history and the common tool
+gateway; execution failure never silently switches engines. The desktop calls
+**Groq**, **OpenRouter**, and **fal** directly with
 the user's own keys; transcription may instead use the user-installed local
 Parakeet engine (macOS Apple Silicon only, ADR-0074). CLI and endpoint note routes remain separate. There is
 no Clovy inference server, native agent sidecar, local bearer token, sign-in,
@@ -305,6 +307,16 @@ the only remote). Issues and branches use the harness tickets, not `JUN-*`.
   The private `tools/list` schema for `get_window_state.capture_mode` must
   expose `som`, `vision`, and `ax`, matching the adapter's accepted modes.
   Keep its closed schema and the signed-helper self-test contract intact.
+- **Managed Antigravity context:** `llm/agy.rs` owns the durable
+  `<app_data>/runtime-profiles/agy/home` and private execution workspaces.
+  HOME/XDG and Windows profile aliases change only in the CLI child; personal
+  transcript ingestion and the relay's host identity stay unchanged.
+  Chat, Test, note/activity calls and `llm_open_agy_login` use that same context.
+  Native authentication is retained, not copied or removed with a turn.
+  Workspace discovery is bounded by an app-owned empty Git root created through
+  filesystem primitives, not a Git runtime dependency. Legacy/foreign native IDs
+  replay canonical history rather than resuming another profile
+  (`docs/llm-providers.md`).
 
 ## Verification
 

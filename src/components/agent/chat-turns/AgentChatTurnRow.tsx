@@ -584,6 +584,7 @@ export function AgentChatTurnRow({
               <UpstreamProviderFailureNoticePart
                 key={`${turn.id}:notice:${index}`}
                 kind={part.kind}
+                diagnostic={part.diagnostic}
                 attempted={upstreamFailureRetryAttempted}
                 disabled={upstreamFailureRetryDisabled}
                 onRetry={

@@ -241,18 +241,7 @@ async fn mutate(ctx: &ToolCtx<'_>, name: &str, args: &Value) -> Result<Value, Ap
         }
         id.to_string()
     } else {
-        let id = uuid::Uuid::new_v4().to_string();
-        let cli =
-            crate::providers::default_unattended_cli().unwrap_or(crate::llm::cli::CliKind::Claude);
-        let model = crate::chat_engine::engine_model_id(cli);
-        query("INSERT INTO agent_sessions (id,title,status,model,safety_mode,source,created_at,updated_at) VALUES (?,?,'idle',?,'sandboxed','user',?,?)").bind(&id).bind(title.unwrap_or_default()).bind(model).bind(&now).bind(&now).execute(&mut *tx).await?;
-        query("INSERT INTO session_profiles (session_id,profile,assigned_at) VALUES (?,?,?)")
-            .bind(&id)
-            .bind(&ctx.data.profile)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await?;
-        id
+        create_conversation(&mut tx, &ctx.data.profile, title.unwrap_or_default(), &now).await?
     };
     match name {
         "rename_conversation" => {
@@ -303,5 +292,63 @@ async fn ensure(ctx: &ToolCtx<'_>, id: &str) -> Result<(), AppError> {
         ))
     } else {
         Ok(())
+    }
+}
+
+async fn create_conversation(
+    tx: &mut sqlx::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
+    profile: &str,
+    title: &str,
+    now: &str,
+) -> Result<String, AppError> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let model = crate::providers::selected_chat_engine_model();
+    query("INSERT INTO agent_sessions (id,title,status,model,safety_mode,source,created_at,updated_at) VALUES (?,?,'idle',?,'sandboxed','user',?,?)").bind(&id).bind(title).bind(model).bind(now).bind(now).execute(&mut **tx).await?;
+    query("INSERT INTO session_profiles (session_id,profile,assigned_at) VALUES (?,?,?)")
+        .bind(&id)
+        .bind(profile)
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
+    Ok(id)
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::llm::{cli::CliKind, registry::ProviderRef};
+    #[tokio::test]
+    async fn selection41_conversation_creation_uses_selected_chat_including_unavailable_choice() {
+        let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        for chosen in [CliKind::Agy, CliKind::Codex] {
+            let mut settings = crate::providers::default_settings_for_tests();
+            settings.llm_usage.chat = ProviderRef::Cli { id: chosen };
+            settings.llm_cli_default_applied = true;
+            crate::providers::replace_current_settings_for_tests(settings);
+            let pool = sqlx_sqlite::SqlitePoolOptions::new()
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            query("CREATE TABLE agent_sessions(id TEXT PRIMARY KEY,title TEXT,status TEXT,model TEXT,safety_mode TEXT,source TEXT,created_at TEXT,updated_at TEXT)").execute(&pool).await.unwrap();
+            query("CREATE TABLE session_profiles(session_id TEXT,profile TEXT,assigned_at TEXT)")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mut tx = pool.begin().await.unwrap();
+            let id = create_conversation(&mut tx, "synthetic", "New conversation", "now")
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            let model: String =
+                sqlx::query_scalar::query_scalar("SELECT model FROM agent_sessions WHERE id=?")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(model, crate::chat_engine::engine_model_id(chosen));
+        }
+        crate::providers::replace_current_settings_for_tests(
+            crate::providers::default_settings_for_tests(),
+        );
     }
 }

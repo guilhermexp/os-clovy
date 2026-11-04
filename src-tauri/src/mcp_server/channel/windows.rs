@@ -19,7 +19,7 @@ use tokio::net::windows::named_pipe::{
 };
 use tokio::sync::{watch, Semaphore};
 #[path = "windows_security.rs"]
-mod security;
+pub(crate) mod security;
 
 /// Mio intentionally leaves writes pending on ordinary pipe Drop. Explicitly
 /// cancel *all* I/O first. Mio owns an Arc for each completion, retaining its

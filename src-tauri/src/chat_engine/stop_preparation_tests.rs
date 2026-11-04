@@ -73,6 +73,7 @@ fn context(session: &str, run: &str, dir: &std::path::Path) -> TurnContext {
         kind: CliKind::Claude,
         program,
         env: BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
+        agy: None,
         workspace: dir.into(),
         input: "Synthetic private prompt".into(),
         mcp: None,

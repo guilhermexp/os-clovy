@@ -13,6 +13,22 @@ O Clovy SHALL funcionar com apenas Claude Code, apenas Codex ou apenas Antigravi
 - **WHEN** o usuário já escolheu um dos três motores e muda a lista de instalados
 - **THEN** a escolha é mantida e uma eventual indisponibilidade é explicada sem troca silenciosa
 
+### Requirement: Perfil Antigravity e autenticação gerenciados pelo app
+O Clovy SHALL usar um único contexto de perfil Antigravity próprio para chat, notas, atividade, teste de provedor e entrada de autenticação nativa. O ambiente pessoal do app e a ingestão de sessões MUST permanecer independentes. Instalação ou versão do binário MUST NOT ser apresentadas como prova de autenticação desse perfil; o app MUST NOT copiar credenciais, usar outro motor ou aceitar consentimento nativo em nome da pessoa.
+
+#### Scenario: Primeira autenticação no Clovy
+- **WHEN** o usuário inicia a autenticação do Antigravity nos ajustes do Clovy
+- **THEN** o app abre o fluxo nativo no perfil próprio, sem prompt de tarefa e sem alterar o HOME do processo principal ou o perfil pessoal
+
+#### Scenario: Teste e execução compartilham a origem
+- **WHEN** o usuário testa o provedor e depois executa chat, nota ou resumo com Antigravity
+- **THEN** essas operações usam o mesmo perfil gerenciado; falta de login é explicada sem tomar o login pessoal ou outro runtime como substituto
+
+#### Scenario: Continuidade após adoção do perfil próprio
+- **WHEN** uma sessão contém identificador Antigravity criado no HOME anterior ou de origem desconhecida
+- **THEN** o app preserva sua história e inicia a conversa nativa no perfil atual com replay canônico autorizado, sem tentar retomar o identificador incompatível ou copiar dados do SDK
+
+
 ### Requirement: Pool único das ferramentas do Clovy
 Claude Code, Codex e Antigravity SHALL receber do mesmo gateway o catálogo autorizado das ferramentas do Clovy e de seus conectores. O alcance MUST depender da superfície, do vínculo e da política do app, não do motor. Credenciais, efeitos, aprovações e clarificações MUST permanecer sob a autoridade do Clovy, sem catálogos ou autorizações paralelos por runtime.
 
@@ -42,6 +58,10 @@ Antigravity SHALL poder executar a geração de notas e os recursos de atividade
 #### Scenario: Nota e atividade sem outros agentes
 - **WHEN** Antigravity é o único agente instalado, é escolhido para Notas e passa no teste de schema para Atividade
 - **THEN** uma transcrição sintética gera a nota e os dados sintéticos de atividade geram o resumo esperado sem chamada a Claude Code, Codex ou provedor alternativo
+
+#### Scenario: Extensões globais continuam ligadas
+- **WHEN** o usuário escolhe Antigravity para gerar nota ou resumo e mantém suas extensões globais ligadas
+- **THEN** o Clovy executa a geração autorizada com isolamento próprio, preservando a configuração externa e sem exigir outro motor ou desativação manual das extensões
 
 #### Scenario: Falha ou schema inválido
 - **WHEN** Antigravity falha, excede o prazo ou não devolve o schema exigido

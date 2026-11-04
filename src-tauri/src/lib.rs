@@ -382,6 +382,7 @@ pub fn run() {
             providers::probe_local_generation_endpoint,
             llm::commands::llm_providers,
             llm::commands::llm_detect_clis,
+            llm::commands::llm_open_agy_login,
             llm::commands::llm_save_endpoint,
             llm::commands::llm_delete_endpoint,
             llm::commands::llm_set_usage,

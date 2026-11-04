@@ -42,6 +42,7 @@ pub(super) struct Harness {
     pub workspace: tempfile::TempDir,
     pub bin: tempfile::TempDir,
     pub log: tempfile::TempDir,
+    pub app_data: tempfile::TempDir,
 }
 
 impl Harness {
@@ -71,6 +72,20 @@ impl Harness {
             workspace,
             bin: tempfile::tempdir().unwrap(),
             log: tempfile::tempdir().unwrap(),
+            app_data: {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    tempfile::Builder::new()
+                        .permissions(std::fs::Permissions::from_mode(0o700))
+                        .tempdir()
+                        .unwrap()
+                }
+                #[cfg(windows)]
+                {
+                    tempfile::tempdir().unwrap()
+                }
+            },
         }
     }
 
@@ -116,6 +131,30 @@ impl Harness {
             kind,
             program: program.to_path_buf(),
             env: BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]),
+            agy: if kind == CliKind::Agy {
+                Some(
+                    crate::llm::agy::HostContext::new(
+                        self.app_data.path().canonicalize().unwrap(),
+                        &BTreeMap::from([
+                            (
+                                "HOME".into(),
+                                self.app_data.path().join("host-home").display().to_string(),
+                            ),
+                            (
+                                "APPDATA".into(),
+                                self.app_data
+                                    .path()
+                                    .join("host-appdata")
+                                    .display()
+                                    .to_string(),
+                            ),
+                        ]),
+                    )
+                    .unwrap(),
+                )
+            } else {
+                None
+            },
             workspace: self.workspace.path().to_path_buf(),
             input: input.to_string(),
             mcp,
@@ -636,7 +675,8 @@ echo '{"type":"turn.completed"}'"#,
         (CliKind::Pi, r#"echo '{"type":"agent_end","messages":[]}'"#),
         (
             CliKind::Agy,
-            r#"echo '{"event":"result","result":{"status":"SUCCESS"}}'"#,
+            r#"cp .agents/mcp_config.json "$LOG/mcp.json"
+echo '{"event":"result","result":{"status":"SUCCESS","response":"Configured"}}'"#,
         ),
         (
             CliKind::CursorAgent,
@@ -669,6 +709,21 @@ echo '{"type":"turn.completed"}'"#,
                     "{kind:?}"
                 );
                 assert_eq!(server["args"], json!(launch.args), "{kind:?}");
+            }
+            CliKind::Agy => {
+                let config = config.expect("Agy received workspace MCP configuration");
+                let servers = config["mcpServers"].as_object().unwrap();
+                assert_eq!(servers.len(), 1);
+                let (name, server) = servers.iter().next().unwrap();
+                assert!(name.starts_with("clovy_turn_"));
+                assert_eq!(server["command"], json!(launch.command));
+                assert_eq!(server["args"], json!(launch.args));
+                assert_eq!(server["timeoutSeconds"], 900);
+                assert!(!harness
+                    .workspace
+                    .path()
+                    .join(".agents/mcp_config.json")
+                    .exists());
             }
             CliKind::Codex => {
                 assert!(args.contains(&format!(

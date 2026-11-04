@@ -157,6 +157,32 @@ describe("agent run settlement relay", () => {
     expect(settled).toHaveLength(1);
   });
 
+  it("does not count a late diagnostic as another active run", async () => {
+    const { send, settled } = startRelay();
+    await Promise.resolve();
+    send({
+      protocolVersion: 1,
+      eventId: "late-cleanup",
+      sessionId: "old-session",
+      runId: "old-run",
+      sequence: 51,
+      method: "run.diagnostic",
+      data: {
+        itemId: "warning",
+        itemSequence: 2,
+        createdAt: "now",
+        message: "Workspace MCP cleanup needs recovery.",
+        category: "runtime",
+        code: "agent_workspace_mcp_cleanup",
+        retryable: false,
+      },
+    });
+    send(frame("session-1", "run-1", "run.started", 1));
+    send(frame("session-1", "run-1", "run.completed", 2));
+    expect(settled).toHaveLength(1);
+    expect(settled[0].activeCount).toBe(0);
+  });
+
   it("counts runs that are still active when another one completes", async () => {
     const { send, settled } = startRelay();
     await Promise.resolve();

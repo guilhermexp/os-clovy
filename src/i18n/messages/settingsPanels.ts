@@ -454,6 +454,11 @@ export default defineMessages({
     "settingsPanels.llm.notInstalledReason": "Not found on your PATH.",
     "settingsPanels.llm.test": "Test",
     "settingsPanels.llm.testing": "Testing...",
+    "settingsPanels.llm.agyLogin": "Authenticate in Clovy",
+    "settingsPanels.llm.agyLoginOpening": "Opening terminal...",
+    "settingsPanels.llm.agyLoginDescription":
+      "Clovy uses its own Antigravity profile. Authenticate here the first time, then use Test.",
+    "settingsPanels.llm.agyLoginError": "Could not open authentication. {detail} Try again.",
     "settingsPanels.llm.testSuccess": "Connected in {ms} ms · Structured output: {level}",
     "settingsPanels.llm.levelNone": "None",
     "settingsPanels.llm.levelPrompt": "Prompt",
@@ -954,6 +959,12 @@ export default defineMessages({
     "settingsPanels.llm.notInstalledReason": "Não encontrado no PATH da sua sessão.",
     "settingsPanels.llm.test": "Testar",
     "settingsPanels.llm.testing": "Testando...",
+    "settingsPanels.llm.agyLogin": "Autenticar no Clovy",
+    "settingsPanels.llm.agyLoginOpening": "Abrindo terminal...",
+    "settingsPanels.llm.agyLoginDescription":
+      "O Clovy usa um perfil próprio do Antigravity. Autentique aqui na primeira vez e depois use Testar.",
+    "settingsPanels.llm.agyLoginError":
+      "Não foi possível abrir a autenticação. {detail} Tente novamente.",
     "settingsPanels.llm.testSuccess": "Conectado em {ms} ms · Saída estruturada: {level}",
     "settingsPanels.llm.levelNone": "Nenhuma",
     "settingsPanels.llm.levelPrompt": "Prompt",

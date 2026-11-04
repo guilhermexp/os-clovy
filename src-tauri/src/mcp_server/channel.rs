@@ -111,7 +111,7 @@ mod unix;
 pub use unix::{connect, connect_turn, endpoint_available, Listener, SyncStream};
 #[cfg(windows)]
 #[path = "channel/windows.rs"]
-mod windows;
+pub(crate) mod windows;
 #[cfg(windows)]
 pub use windows::{connect, connect_turn, endpoint_available, Listener, SyncStream};
 #[cfg(test)]

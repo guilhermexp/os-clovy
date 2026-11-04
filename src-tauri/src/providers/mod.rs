@@ -1312,6 +1312,19 @@ async fn list_provider_models_impl(
 }
 
 pub fn setup(app: &mut tauri::App) {
+    // Resolve the real app identity once, before any Agy child gets a private
+    // HOME. Authentication and every generation route share these paths.
+    let agy_paths = crate::app_paths::app_data_dir(app.handle())
+        .map_err(|error| error.to_string())
+        .and_then(|data| {
+            let host_env = std::env::vars().collect();
+            crate::llm::agy::HostContext::new(data, &host_env)
+                .and_then(crate::llm::agy::HostContext::configure)
+                .map_err(|error| error.to_string())
+        });
+    if let Err(error) = agy_paths {
+        tracing::warn!(%error, "could not resolve the Clovy Antigravity profile");
+    }
     let path = provider_settings_path(app.handle())
         .unwrap_or_else(|| PathBuf::from("provider-settings.json"));
     let (settings, migrated_now) = load_settings_from_disk(app.handle());
@@ -1371,15 +1384,9 @@ pub async fn ensure_cli_default(state: &ProviderSettingsState) {
     }
 }
 
-/// The CLI new unattended work (routines) runs on: the chat engine when it
-/// is one of the default CLIs (Claude Code or Codex), else none.
-pub fn default_unattended_cli() -> Option<CliKind> {
-    match current_settings().llm_usage.chat {
-        ProviderRef::Cli { id } if crate::llm::registry::DEFAULT_CHAT_CLIS.contains(&id) => {
-            Some(id)
-        }
-        _ => None,
-    }
+/// The selected chat engine, including an explicitly chosen unavailable CLI.
+pub fn selected_chat_engine_model() -> String {
+    crate::chat_engine::default_engine_of(&current_settings()).model_id
 }
 
 pub fn load_local_env() {
@@ -3483,6 +3490,34 @@ mod tests {
             )])),
         ));
         bin
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn selection_launch_resolves_only_the_installed_cli_without_invoking_any_cli() {
+        let _lock = GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let _restore = RestoreGlobals;
+        for only in [CliKind::Claude, CliKind::Codex, CliKind::Agy] {
+            let bin = login_path_with(&[only.id()]);
+            let calls = bin.path().join("calls");
+            fs::write(
+                bin.path().join(only.id()),
+                format!(
+                    "#!/bin/sh\necho invoked >> '{}'\nexit 91\n",
+                    calls.display()
+                ),
+            )
+            .unwrap();
+            let state = test_state();
+            ensure_cli_default(&state).await;
+            let saved: ProviderModelSettings =
+                serde_json::from_slice(&fs::read(&state.path).unwrap()).unwrap();
+            assert_eq!(crate::chat_engine::default_engine_of(&saved).cli, only);
+            assert_eq!(saved.llm_usage.notes, ProviderRef::OpenRouter);
+            assert_eq!(saved.generation_model, default_settings().generation_model);
+            assert!(!calls.exists(), "selection must never invoke a CLI");
+            fs::remove_dir_all(state.path.parent().unwrap()).unwrap();
+        }
     }
 
     #[tokio::test]

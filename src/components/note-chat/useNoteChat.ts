@@ -5,6 +5,7 @@ import {
   agentItemsToChatTurns,
   applyAgentRuntimeEvent,
   createAgentRuntimeProjection,
+  mergeAgentRuntimeSnapshot,
   type AgentRuntimeProjection,
 } from "../../lib/agent-runtime-adapter";
 import type { AgentItemDto, AgentRuntimeEvent } from "../../lib/agent-runtime-contract";
@@ -83,6 +84,9 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
   const [projection, setProjection] = useState<AgentRuntimeProjection>(() =>
     createAgentRuntimeProjection(),
   );
+  const projectionEventsRef = useRef(projection.processedEventIds);
+  projectionEventsRef.current = projection.processedEventIds;
+  const hydrationRequestRef = useRef(0);
   const [model, setModelState] = useState(DEFAULT_MODEL);
   const [loading, setLoading] = useState(false);
   const [submissionPending, setSubmissionPending] = useState(false);
@@ -125,19 +129,30 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
   const hydrate = useCallback(
     async (sessionId: string) => {
       const generation = generationRef.current;
+      const request = ++hydrationRequestRef.current;
+      const readStartedEventIds = projectionEventsRef.current;
       const modelSelectionRevision = modelSelectionRevisionRef.current;
       const isCurrentSession = () =>
-        generationRef.current === generation && sessionIdRef.current === sessionId;
+        generationRef.current === generation &&
+        sessionIdRef.current === sessionId &&
+        hydrationRequestRef.current === request;
       const [session, items, latestRun] = await Promise.all([
         agentRuntimeBindings.getSession(sessionId),
         agentRuntimeBindings.listItems(sessionId),
         agentRuntimeBindings.getLatestRun?.(sessionId) ?? Promise.resolve(null),
       ]);
       if (!isCurrentSession()) return;
-      setProjection({
-        ...createAgentRuntimeProjection({ session, items }),
-        run: latestRun ?? undefined,
-      });
+      setProjection((current) =>
+        mergeAgentRuntimeSnapshot(
+          current,
+          {
+            session,
+            items,
+            run: latestRun ?? undefined,
+          },
+          readStartedEventIds,
+        ),
+      );
       if (modelSelectionRevisionRef.current !== modelSelectionRevision) return;
       const storedModel = loadSessionModels()[session.id] ?? session.model ?? DEFAULT_MODEL;
       const resumedModel = storedModel.startsWith(CLI_ENGINE_MODEL_PREFIX)
@@ -193,6 +208,7 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
     void listen<AgentRuntimeEvent>(AGENT_RUNTIME_EVENT, ({ payload }) => {
       if (payload.sessionId !== sessionIdRef.current) return;
       setProjection((current) => applyAgentRuntimeEvent(current, payload));
+      if (payload.method === "run.diagnostic") return;
       const terminal =
         payload.method === "run.completed" ||
         payload.method === "run.cancelled" ||

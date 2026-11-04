@@ -44,8 +44,8 @@ export function chatModelId(
 }
 
 /** The CLIs that are the default chat engine, in order of preference
- * (ADR-0062): Claude Code, else Codex. */
-export const DEFAULT_CHAT_CLI_IDS = ["claude", "codex"] as const;
+ * Claude Code, then Codex, then Antigravity. Unattended eligibility is separate. */
+export const DEFAULT_CHAT_CLI_IDS = ["claude", "codex", "agy"] as const;
 
 export type ChatDefaultEngine = { modelId: string; cli: string };
 
@@ -73,7 +73,7 @@ export async function defaultChatModelId(): Promise<string> {
 }
 
 /** The CLI the engine picker marks as the default: Claude Code when it is
- * installed, else Codex when it is, else Claude Code. */
+ * installed, else Codex, else Antigravity, else Claude Code for setup. */
 export function defaultChatCliId(
   clis: ReadonlyArray<Pick<ChatEngineCliStatus, "id" | "installed">>,
 ): string {

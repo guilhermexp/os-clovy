@@ -14,7 +14,9 @@ with the user's own key; CLIs and endpoints do not transcribe audio.
 | `llm/mod.rs` | Public API: `generate`, `generate_for_activity`, `generate_on_cli_for_activity`, `provider_for`, `test_provider`, `run_cli`, `parse_json_value`, `StructuredOutputLevel`, `LlmError`, `CLOVY_AUTHORSHIP_MARKER` |
 | `llm/cli.rs` | Catalog of the six CLIs (`claude`, `codex`, `pi`, `agy`, `cursor-agent`, `copilot`), which of them can run with every tool off, one-shot argv/stdin/env for those, output parsing, schema strictifier |
 | `llm/shell_env.rs` | Login-shell environment (`$SHELL -l -c 'env -0'`, captured once, merged over the app environment, plus fallback bin dirs); on Windows the app environment plus the installers' directories, with `PATHEXT` resolution |
-| `llm/detect.rs` | Installed / path / `--version` per CLI |
+| `llm/detect.rs` | Installed / path / `--version` per CLI, without claiming authentication |
+| `llm/agy.rs`, `llm/agy_private.rs` | App-owned Antigravity profile, private execution directories and disposable MCP transport |
+| `llm/agy_login.rs` | Owned OS terminal for native Antigravity authentication in that same profile |
 | `llm/process.rs` | Child runner: own process group, timeout kills the whole group, group swept after exit, 8 MiB output cap |
 | `llm/endpoint.rs` | OpenAI-compatible `/chat/completions` one-shot calls, structured-output ladder probe, RPM pacing |
 | `llm/registry.rs` | Persisted registry (endpoints, per-use selection, measured levels), legacy migration, validation |
@@ -91,7 +93,7 @@ codex and agy in their least-privileged mode** (`CliKind::one_shot_allowed`):
 | claude | Yes | `--tools ""` turns off every built-in tool; `--strict-mcp-config` without `--mcp-config` and `--setting-sources ""` load no MCP server, plugin, or hook |
 | pi | Yes | `--no-tools` (built-in and extension tools) and `--no-extensions` |
 | codex | Yes, least privilege | `exec --sandbox read-only --ephemeral --skip-git-repo-check -c approval_policy="never" -c web_search="disabled" -c sandbox_workspace_write.network_access=false -c features.plugins=false -c features.apps=false -c features.hooks=false -c notify=[] --output-last-message last_message.txt [--output-schema schema.json] -c mcp_servers.<name>.enabled=false… -`, prompt on stdin: no writes, no network for commands, no approval prompt, no saved session; the answer is read from the last-message file in the scratch directory, under the 8 MiB capture cap (a larger answer is refused). Its built-in tools stay on (it can still read files), which the owner accepted. MCP servers, plugins, hooks and `notify` run outside its sandbox, so all are off: before the call, `codex -c features.plugins=false -c features.apps=false mcp list --json` lists the servers codex resolves from every config layer, and each is turned off by name. `--ignore-user-config` is not used because it also drops the user's `[windows] sandbox` and model settings. A list that fails or a name `-c` cannot address (outside `[A-Za-z0-9_-]`) fails the call before codex sees any content |
-| agy | Yes, least privilege, without MCP servers or plugins | `--print <prompt> --output-format json --sandbox --disable-slash-commands [--json-schema <schema>]`: no flag turns its tools off; in print mode nobody can approve a permission request, so tool steps fail ("user denied permission"), and `--sandbox` restricts its terminal. agy has no flag to skip saving its conversation. Print mode starts every enabled MCP server (`~/.gemini/config/mcp_config.json`) and plugin (`~/.gemini/config/plugins/`) outside `--sandbox`, and agy 1.3 has no per-call switch to turn them off (only `agy mcp disable`, which edits its global configuration, or another `HOME`, which hides its login), so a one-shot call is refused while any is on, naming them. The prompt goes in argv: text print mode does not read stdin ("empty prompt"); on Windows the whole command line is measured in UTF-16 with its quoting and a call over 32,766 units fails before agy starts |
+| agy | Yes, least privilege, in Clovy's private profile | `--print <prompt> --output-format json --sandbox --disable-slash-commands [--json-schema <schema>]`, plus transient settings with native tools and MCP denied. The app-owned profile replaces personal HOME/XDG discovery; personal MCP/plugins do not block a call. Each call has its own disposable working directory and a process-tree timeout. Native OAuth state persists in the common profile; API-key billing variables are excluded. The CLI still saves its native conversation. Windows measures the full quoted command line in UTF-16 and refuses more than 32,766 units before spawn. These restrictions do not establish an OS sandbox or unattended acceptance. |
 | cursor-agent | Refused | print mode "has access to all tools"; `--mode ask` still reads |
 | copilot | Refused | MCP servers from the user's configuration and plugins cannot all be excluded |
 
@@ -107,17 +109,21 @@ Every allowed one-shot call also:
 
 - resolves the executable on the login-shell PATH (a GUI app does not inherit
   the shell PATH) and runs with the login-shell environment, so `HOME`,
-  `PI_CODING_AGENT_DIR`, and other profile variables reach the CLI unchanged;
+  `PI_CODING_AGENT_DIR`, and other profile variables reach the CLI unchanged
+  except for Antigravity's final private environment described above;
   Clovy's own variables (`OS_CLOVY_*`, `OS_JUNE_*`, `OS_ACCOUNTS_*`, `CLOVY_*`,
   `JUNE_*`, `GOOGLE_OAUTH_CLIENT_*`) are removed by `llm::shell_env::cli_environment`, the one filter
   for one-shot calls, `--version` detection, the login-shell capture, and the
-  CLI chat engine; Clovy never logs in or edits CLI configuration; on
+  CLI chat engine; Antigravity then applies its private environment allowlist.
+  Clovy opens native login only on explicit request and owns only its private
+  transport configuration; on
   Windows see [Windows resolution](#windows-resolution);
 - starts with `CLOVY_AUTHORSHIP_MARKER` (`[clovy-internal-ai-call]`) alone on
   the first prompt line and sets `CLOVY_ONESHOT=1`; session ingestion skips
   any CLI session whose first prompt's first line is exactly the marker;
-- runs in an empty scratch directory with sessions, context files, skills,
-  and slash commands off (claude `--no-session-persistence --tools ""
+- runs in an empty scratch directory (Antigravity: an app-owned exclusive
+  execution directory with durable native authentication). Where supported, sessions, context files, skills,
+  and slash commands are off (claude `--no-session-persistence --tools ""
   --setting-sources "" --strict-mcp-config --disable-slash-commands`; pi
   `--no-session --no-tools --no-extensions --no-context-files --no-skills
   --no-prompt-templates --no-approve`);
@@ -129,7 +135,8 @@ Every allowed one-shot call also:
   Windows: a kill-on-close Job Object, `process_group::ProcessTree`); stdout
   and stderr are each capped at 8 MiB;
 - on Windows starts without a console window (`hide_console`), like every
-  process Clovy starts.
+  one-shot process Clovy starts. Explicit native login creates a visible
+  owned console instead.
 
 ## Settings and routing
 
@@ -249,7 +256,7 @@ One message on a CLI engine is one CLI process in the session workspace:
 | claude | `-p --output-format stream-json --verbose --include-partial-messages`, prompt on stdin | `session_id` of `system/init`; `--resume <id>` | `--mcp-config <temporary file>` |
 | codex | `exec [resume] --json --skip-git-repo-check [--image <path>]... -c <policy>... [<id>] -`, prompt on stdin | `thread_id` of `thread.started` | `-c mcp_servers.clovy.command=… -c mcp_servers.clovy.args=…` |
 | pi | `--print --mode json --session-id <id>`, prompt on stdin | a UUID Clovy chooses on the first turn | none (pi has no MCP) |
-| agy | `--print=<prompt> --output-format stream-json` | `conversation_id` of `init`; `--conversation <id>` | none (only `agy mcp add`, which edits its global configuration) |
+| agy | `--print=<prompt> --output-format stream-json` | `conversation_id` of `init`; `--conversation <id>` | workspace `.agents/mcp_config.json`, with a unique server and a turn-scoped lease |
 | cursor-agent | `-p --output-format stream-json --stream-partial-output --trust -- <prompt>` | `session_id` of `system/init`; `--resume <id>` | none (project MCP servers need approval inside Cursor) |
 | copilot | `--prompt=<prompt> --output-format json --session-id <id>` | a UUID Clovy chooses on the first turn | `--additional-mcp-config=@<temporary file>` |
 
@@ -336,7 +343,8 @@ argument: its installer ships `agy.exe`.
   token in the server's turn registry (`mcp_server::turns::TurnRegistry`,
   binding: session, run, CLI, safety mode, attended) and the CLI's server
   arguments carry `--turn <token>` (claude and copilot in the temporary
-  configuration file, codex in `mcp_servers.clovy.args`); the token never
+  configuration file, codex in `mcp_servers.clovy.args`, and agy in the
+  workspace configuration); the token never
   goes into the prompt or the environment. Connections opened with it are
   bound to the run and see the tools that need a turn. It is revoked when
   the turn ends, fails, or is cancelled (`chat_engine::turn::TurnGrant`), and
@@ -346,12 +354,74 @@ argument: its installer ships `agy.exe`.
   it closes; a call still unanswered then gets `turn_expired` from the relay.
   App shutdown revokes every token after the turns stop
   (`shutdown::run_cleanup`). Each run gets a new token.
+- **Antigravity execution context.** `llm::agy::HostContext` is captured from
+  `app_paths::app_data_dir` while the host environment is intact. The SDK's
+  common HOME is `<app_data>/runtime-profiles/agy/home`; XDG directories live
+  there too. Windows also redirects USERPROFILE/APPDATA/LOCALAPPDATA. LoginEnv
+  and the app's global environment remain host-owned. Chat executes in a
+  stable app-owned directory keyed by the stored session; each one-shot call
+  gets an exclusive disposable directory. A requested personal workspace stays
+  in the host gateway's authorization context and is never the SDK's cwd or
+  an additional discovery root. Personal coding-agent ingestion is unchanged.
+
+  A retained OS lease excludes concurrent turns of the same session; separate
+  sessions have separate execution directories and grants. Directory/file
+  creation refuses symlinks, unexpected ownership and unsafe permissions or
+  ACLs before publishing authority. Unix creates children relative to held
+  parent descriptors. Windows creates private current-user/SYSTEM objects
+  with held ancestor handles. Existing objects are never repaired in place.
+  There is no shared user configuration replacement or preservation algorithm.
+
+  Each execution directory also owns a valid empty Git root, created directly
+  through the private filesystem primitives without running Git. This stops
+  SDK customization discovery at that directory instead of an ancestor's
+  repository and hooks. A private receipt binds the minimal metadata to its
+  filesystem identities; unknown, altered or unreceipted Git roots are refused
+  before authority. Host `GIT_*` routing/configuration variables remain excluded.
+  New boundaries are built entirely in exclusive private staging, with their
+  complete ownership receipt inside the unit, then published atomically as
+  `.git` without replacement. Interrupted staging remains private and retained
+  without blocking another attempt in the same session. Existing complete
+  boundaries with an outer receipt remain valid without rewriting their proof.
+  One-shot cleanup removes only identified files and empty directories, retaining
+  unknown data. Chat/login boundaries remain durable; native authentication and
+  the HOME-based conversation origin are unchanged.
+
+  Only the owned execution directory receives `.agents/mcp_config.json`: one
+  fresh `clovy_turn_<uuid>` server, the existing absolute `McpLaunch` program
+  and `--dir`, a turn token and `timeoutSeconds: 900`. The supported server
+  `env` entry supplies the host HOME (and Windows profile paths) to the stdio
+  relay. The SDK retains its private HOME; the relay keeps the existing host
+  identity and debug production-data refusal. It remains a proxy and opens no
+  database. No alternate relay bypass or credential export is introduced.
+
+  A private receipt records the exact owned transport and filesystem identity.
+  Cleanup removes only matching transport, preserves altered/foreign content
+  with an explicit diagnostic, and never removes native authentication state.
+  The next lease can recover a crashed transport. Revocation precedes cleanup
+  and terminal publication, including preparation failure and Stop. Persistent
+  cleanup diagnostics remain canonical even if Stop already published.
+  MCP config and receipt are published from complete private candidates with
+  atomic creation that refuses an existing destination. Recovery recognizes
+  the receipted candidate before publication and the same unit after publication.
+  A legacy receipt can also identify a partial write of its exact config bytes.
+  Unreceipted staging files are retained without blocking a retry; malformed
+  receipts and foreign published units remain refused. No cleanup relies on a
+  staging filename alone as proof of ownership.
+
+  Transient settings use `request-review`, allow only this turn's MCP server,
+  and deny native command/file/URL actions. A one-shot call denies MCP too.
+  `useG1Credits: false`, an empty `modelProvider`, and the environment allowlist
+  preserve native OAuth rather than silently selecting API-key billing.
+  Settings are not a claim of an OS sandbox. The parent's native evidence
+  verifies server env.HOME and some denied native actions; browser, delegation,
+  app Stop and unattended/platform acceptance still require their own proofs.
 - **Note references.** A message that references notes (`@note:<id>`, which
   the note chat panel always puts first) reaches the CLI with a line asking it
   to read them with Clovy's `get_note` tool
   (`chat_engine::with_note_reference_context`); the stored user message is
   unchanged.
-- **Environment.** The login-shell environment, as for one-shot calls (PATH,
+- **Environment.** Except for the private Antigravity context above, the login-shell environment, as for one-shot calls (PATH,
   `HOME`, `PI_CODING_AGENT_DIR`, and the user's other profile variables
   unchanged), minus Clovy's own variables (`OS_CLOVY_*`, `OS_JUNE_*`,
   `OS_ACCOUNTS_*`, `CLOVY_*`, `JUNE_*`, `GOOGLE_OAUTH_CLIENT_*`; for example the
@@ -363,14 +433,40 @@ argument: its installer ships `agy.exe`.
 - **Continuity.** The CLI's conversation id is saved in the run's config
   (`{"engine": "cli", "cli", "conversationId"}`) as soon as it is known, and
   the next message resumes it while the session's previous turns stayed on the
-  same CLI. A CLI that starts a new conversation in a session with earlier
-  messages (another engine answered before, or a branch) gets them, bounded
-  to 24,000 characters, ahead of the new message.
+  same CLI. Antigravity also persists `cliProfileId` in this existing JSON;
+  a missing or different profile origin starts a new native conversation with
+  canonical replay, never passes the legacy ID to `--conversation`, and never
+  copies SDK brain/auth data. The next turn in the same private profile resumes
+  normally. A CLI that starts a new conversation in a session with earlier
+  messages (another engine answered before, or a branch) gets the canonical
+  persisted messages, steering, summaries and completed Clovy tool observations,
+  bounded to 24,000 characters, ahead of the new message. Tool observations keep
+  call identity, arguments, results and references as context, with secrets
+  scrubbed; they grant no approval and never execute a tool. Replaced retry
+  ancestry remains excluded, including on later switches, and the stored
+  history is unchanged. Returning A to B to A starts fresh on A rather than
+  resurrecting its older internal conversation.
 - **Stream.** Text, reasoning, and tool activity become stable session events
   (`message.delta`, `reasoning.delta`, `tool.started`,
   `tool.completed`/`tool.failed`, `message.completed`, `run.completed`/
   `run.failed`/`run.cancelled`). The neutral `agent_sessions` module persists
   them so the UI and stored history share the same event/item contract.
+  Claude's successful Clovy MCP results keep their original content blocks.
+  A structured JSON block after a long Computer use tree therefore keeps its
+  action/application references in replay. Existing flattened history stays
+  untouched; arbitrary JSON is never searched for inside untrusted prose.
+  Antigravity preserves the measured step indices, MCP arguments, output and
+  tool errors, deduplicates terminal tool updates, and consumes `result.response`
+  when no answer was streamed (or appends its unstreamed suffix). A missing
+  terminal verdict or a successful verdict without an answer fails the run.
+  A headless `SUCCESS` with an empty response and `denied_actions` reports the
+  observed CLI permission denial and action names; it is not a human decision
+  in Clovy. No successful tool result is inferred, and CLI stderr suggestions
+  to bypass permissions are not followed or forwarded as recovery advice.
+  Only `call_mcp_tool` events naming this turn's exact leased server normalize
+  to `clovy.<tool>`; inherited/previous servers retain an external MCP origin,
+  including one that calls itself `clovy`. A DONE wrapper containing an MCP
+  error stays a failed tool; no result is manufactured to settle a spinner.
 - **Cancel.** The run's cancellation is registered (`ChatEngineHost::register`)
   before anything is awaited for it, and the turn checks it and the run's
   status again right before spawning, so a cancel during launch preparation
@@ -425,7 +521,7 @@ argument: its installer ships `agy.exe`.
 - **Messages during a run.** `steer_agent_run` answers
   `{ accepted: false, reason: "cli_engine" }`; the composer's follow-up queue
   sends the message as the next turn when the run ends.
-- **Clovy's tools.** Given to claude, codex, and copilot while the Clovy MCP
+- **Clovy's tools.** Given to claude, codex, agy, and copilot while the Clovy MCP
   server is on ([mcp-server.md](mcp-server.md)); `chat_engine_catalog` reports
   `clovyTools` (`available`, `server_off`, `unsupported`) and the session says
   when it has none. A bound turn gets the read tools plus the turn-bound
@@ -529,3 +625,23 @@ through byte for byte; for chat turns see [CLI chat engine](#cli-chat-engine).
 - `cargo test --locked llm::registry` covers the one-time move to the default
   CLI; `cargo test --locked routines` covers a routine on a fake claude under
   the unattended policy, recorded in the routine history.
+
+## Antigravity authentication in Clovy
+
+For an installed Antigravity CLI, Settings offers **Authenticate in Clovy**
+(**Autenticar no Clovy**). `openAntigravityLogin(): Promise<void>` invokes
+`llm_open_agy_login` without a token payload. The command resolves the installed
+program from the real login environment, then opens a new owned OS terminal in
+that same app-owned profile. macOS uses Terminal via `/usr/bin/open`; Windows
+creates the CLI in a new native console with structured argv and an explicit
+child environment. A POSIX launcher is private, contains no inherited provider keys,
+and removes itself after the interactive CLI exits.
+
+The SDK conducts OAuth and consent. Clovy supplies no task prompt, consent
+bypass, API-key route or other CLI. Opening a terminal is not authentication
+success: the button reports opening/errors, and the existing Test action checks
+the provider afterward. First authentication is independent of personal SDK
+login. Closing a chat, Stop, one-shot failure and transport recovery retain the
+SDK's native state. No credential/profile contents belong in review artifacts.
+Native terminal/OAuth and Windows runtime acceptance are performed separately
+by the parent; portable source tests do not qualify them.
