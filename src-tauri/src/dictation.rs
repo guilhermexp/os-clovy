@@ -808,9 +808,75 @@ pub struct DictationTakeState {
     admitted_settings:
         Mutex<std::collections::HashMap<String, crate::providers::ProviderModelSettings>>,
     helper_command_generation: Mutex<u64>,
+    #[cfg(any(target_os = "macos", test))]
+    last_dictation: Mutex<Option<(String, String)>>,
 }
 
 impl DictationTakeState {
+    // Retain only a final, authorized result, before helper I/O can fail.
+    // The delivery claim remains the cancellation point of no return (ADR-0049).
+    #[cfg(any(target_os = "macos", test))]
+    fn remember_last_dictation(
+        &self,
+        claim: &DictationDeliveryClaim,
+        profile: &str,
+        outcome: &DictationTranscriptionOutcome,
+    ) {
+        // A preclaimed result may finish after a replacement started. Never let
+        // it overwrite that replacement's cache, even though delivery was authorized.
+        let current = self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !current
+            .as_ref()
+            .is_some_and(|take| Arc::ptr_eq(&take.inner, &claim.take.inner))
+        {
+            return;
+        }
+        let eligible = outcome.quarantine_transcript.is_none()
+            && (outcome.helper_command["type"] == "paste_text"
+                || outcome
+                    .event
+                    .as_ref()
+                    .is_some_and(|event| event["type"] == "agent_session_prompt"));
+        if let Some(text) = outcome
+            .transcript
+            .as_ref()
+            .filter(|transcript| eligible && !transcript.text.trim().is_empty())
+            .map(|transcript| &transcript.text)
+        {
+            *self
+                .last_dictation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some((profile.to_string(), text.clone()));
+        }
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn last_dictation_response(
+        &self,
+        profile: &str,
+        request: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let request_id = request.get("payload")?.get("requestId")?.as_str()?;
+        if request_id.is_empty() || request_id.len() > 128 {
+            return None;
+        }
+        let last = self
+            .last_dictation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let text = last
+            .as_ref()
+            .filter(|(owner, _)| owner == profile)
+            .map(|(_, text)| text);
+        Some(
+            serde_json::json!({"type": "repeat_last_dictation", "requestId": request_id, "text": text}),
+        )
+    }
+
     fn remember_admitted_settings(
         &self,
         id: &str,
@@ -2505,6 +2571,16 @@ pub fn set_dictation_language(
     })
 }
 
+fn validate_renderer_dictation_command(command: &serde_json::Value) -> Result<(), AppError> {
+    if command.get("type").and_then(serde_json::Value::as_str) == Some("repeat_last_dictation") {
+        return Err(AppError::new(
+            "invalid_input",
+            "Dictation reinsertion requires its native shortcut.",
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn dictation_helper_command(
     app: AppHandle,
@@ -2522,6 +2598,7 @@ fn dictation_helper_command_with_authority(
     command: serde_json::Value,
     authority: Option<&crate::domain::turn_authority::TurnAuthority>,
 ) -> Result<(), AppError> {
+    validate_renderer_dictation_command(&command)?;
     if command.get("type").and_then(serde_json::Value::as_str) == Some("agent_composer_delivered") {
         if window.label() != "main" {
             return Err(AppError::new(
@@ -5730,6 +5807,20 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
     let event_type = event_type.as_deref();
+    #[cfg(target_os = "macos")]
+    if event_type == Some("repeat_last_dictation_requested") {
+        if let Some(request) = event.as_ref() {
+            let state = app.state::<DictationTakeState>();
+            let _guard = state.lock_helper_commands();
+            let profile = crate::commands::active_profile(app);
+            if let Some(response) = state.last_dictation_response(&profile, request) {
+                if let Err(error) = send_helper_command(&app.state::<HelperState>(), response) {
+                    tracing::warn!(code = %error.code, "dictation repeat response could not be sent");
+                }
+            }
+        }
+        return;
+    }
     #[cfg(target_os = "windows")]
     if let Some(event) = event.as_mut() {
         complete_windows_target(event, |hwnd, pid| {
@@ -6480,6 +6571,9 @@ fn deliver_dictation_outcome(
             let _ = std::fs::remove_file(audio_path);
             return;
         };
+        #[cfg(target_os = "macos")]
+        app.state::<DictationTakeState>()
+            .remember_last_dictation(&claim, history.0, &outcome);
         set_agent_dictation_phase(
             &app.state::<HelperState>(),
             &target.take_id,
@@ -6516,6 +6610,9 @@ fn deliver_dictation_outcome(
             object.insert("composerRequestId".into(), serde_json::json!(request_id));
         }
     }
+    #[cfg(target_os = "macos")]
+    app.state::<DictationTakeState>()
+        .remember_last_dictation(&claim, history.0, &outcome);
     if let Err(error) = send_claimed_dictation_take_command(app, &claim, helper_command) {
         update_shortcut_helper_finalizing(app, false);
         emit_dictation_take_event(app, &claim.take, app_error_event(error));
@@ -9287,6 +9384,192 @@ pub fn key_code_for_code(code: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn last_dictation_outcome(text: &str) -> DictationTranscriptionOutcome {
+        DictationTranscriptionOutcome {
+            helper_command: serde_json::json!({"type":"paste_text", "text":text}),
+            event: None,
+            transcript: Some(TranscriptionProviderResult {
+                text: text.into(),
+                language: None,
+                provider: "test".into(),
+            }),
+            quarantine_transcript: None,
+        }
+    }
+
+    fn last_dictation_read(state: &DictationTakeState, profile: &str) -> serde_json::Value {
+        state
+            .last_dictation_response(
+                profile,
+                &serde_json::json!({"payload":{"requestId":"request-1"}}),
+            )
+            .unwrap()["text"]
+            .clone()
+    }
+
+    fn last_dictation_claim(
+        state: &DictationTakeState,
+        take: &DictationTakeToken,
+        delivery_claim: Option<DictationDeliveryClaim>,
+        profile: &str,
+        outcome: &DictationTranscriptionOutcome,
+    ) -> Option<DictationDeliveryClaim> {
+        let claim = delivery_claim.or_else(|| take.try_begin_delivery())?;
+        state.remember_last_dictation(&claim, profile, outcome);
+        Some(claim)
+    }
+
+    #[test]
+    fn last_dictation_renderer_cannot_supply_repeat_text() {
+        assert!(validate_renderer_dictation_command(&serde_json::json!({"type":"repeat_last_dictation","requestId":"guessed","text":"untrusted"})).is_err());
+        assert!(validate_renderer_dictation_command(
+            &serde_json::json!({"type":"start_listening"})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn last_dictation_preclaimed_stale_result_cannot_overwrite_new_take() {
+        let state = DictationTakeState::default();
+        let old = state.begin("old".into());
+        assert!(old.try_begin_processing());
+        let old_claim = old.try_begin_delivery().unwrap();
+        last_dictation_deliver(&state, "new", "a", &last_dictation_outcome("new"));
+        state.remember_last_dictation(&old_claim, "a", &last_dictation_outcome("old"));
+        assert_eq!(last_dictation_read(&state, "a"), "new");
+    }
+
+    fn last_dictation_deliver(
+        state: &DictationTakeState,
+        id: &str,
+        profile: &str,
+        outcome: &DictationTranscriptionOutcome,
+    ) {
+        let take = state.begin(id.into());
+        assert!(take.try_begin_processing());
+        assert!(last_dictation_claim(state, &take, None, profile, outcome).is_some());
+    }
+
+    #[test]
+    fn last_dictation_initial_and_restart_are_empty() {
+        assert!(last_dictation_read(&DictationTakeState::default(), "a").is_null());
+    }
+
+    #[test]
+    fn last_dictation_valid_result_replaces_and_paste_failure_retains() {
+        let state = DictationTakeState::default();
+        last_dictation_deliver(&state, "one", "a", &last_dictation_outcome("primeiro"));
+        assert_eq!(last_dictation_read(&state, "a"), "primeiro");
+        // Cache admission precedes helper I/O: no successful paste acknowledgement is needed.
+        last_dictation_deliver(&state, "two", "a", &last_dictation_outcome("segundo"));
+        assert_eq!(last_dictation_read(&state, "a"), "segundo");
+        assert!(last_dictation_read(&DictationTakeState::default(), "a").is_null());
+    }
+
+    #[test]
+    fn last_dictation_cancelled_and_late_results_do_not_replace() {
+        let state = DictationTakeState::default();
+        last_dictation_deliver(&state, "one", "a", &last_dictation_outcome("keep"));
+        let cancelled = state.begin("cancelled".into());
+        assert!(cancelled.try_begin_processing());
+        assert!(cancelled.cancel());
+        assert!(last_dictation_claim(
+            &state,
+            &cancelled,
+            None,
+            "a",
+            &last_dictation_outcome("lost")
+        )
+        .is_none());
+        let late = state.begin("late".into());
+        assert!(late.try_begin_processing());
+        state.begin("replacement".into());
+        assert!(
+            last_dictation_claim(&state, &late, None, "a", &last_dictation_outcome("late"))
+                .is_none()
+        );
+        assert_eq!(last_dictation_read(&state, "a"), "keep");
+    }
+
+    #[test]
+    fn last_dictation_empty_rejected_and_quarantined_do_not_replace() {
+        let state = DictationTakeState::default();
+        last_dictation_deliver(&state, "one", "a", &last_dictation_outcome("keep"));
+        let mut empty = last_dictation_outcome("  ");
+        let mut rejected = last_dictation_outcome("rejected");
+        rejected.helper_command = serde_json::json!({"type":"discard_recording"});
+        let mut quarantined = last_dictation_outcome("quarantined");
+        quarantined.quarantine_transcript = quarantined.transcript.take();
+        for (id, outcome) in [
+            ("empty", &mut empty),
+            ("rejected", &mut rejected),
+            ("quarantined", &mut quarantined),
+        ] {
+            last_dictation_deliver(&state, id, "a", outcome);
+            assert_eq!(last_dictation_read(&state, "a"), "keep");
+        }
+    }
+
+    #[test]
+    fn last_dictation_profile_isolation_and_single_slot() {
+        let state = DictationTakeState::default();
+        last_dictation_deliver(&state, "one", "a", &last_dictation_outcome("private a"));
+        assert!(last_dictation_read(&state, "b").is_null());
+        last_dictation_deliver(&state, "two", "b", &last_dictation_outcome("private b"));
+        assert!(last_dictation_read(&state, "a").is_null());
+        assert_eq!(last_dictation_read(&state, "b"), "private b");
+    }
+
+    #[test]
+    fn last_dictation_response_is_correlated_and_does_not_start_take() {
+        let state = DictationTakeState::default();
+        last_dictation_deliver(
+            &state,
+            "one",
+            "a",
+            &last_dictation_outcome("ação 🧑🏽‍💻\n".repeat(5000).as_str()),
+        );
+        let request = serde_json::json!({"payload":{"requestId":"fresh"}});
+        let response = state.last_dictation_response("a", &request).unwrap();
+        assert_eq!(response["requestId"], "fresh");
+        assert_eq!(response["text"], "ação 🧑🏽‍💻\n".repeat(5000));
+        assert_eq!(
+            state.last_dictation_response("a", &request).unwrap(),
+            response
+        );
+        assert_eq!(state.current_take_id().as_deref(), Some("one"));
+        assert_eq!(
+            state.current.lock().unwrap().as_ref().unwrap().state(),
+            DICTATION_TAKE_DELIVERING
+        );
+        assert!(state
+            .last_dictation_response("a", &serde_json::json!({"payload":{"requestId":""}}))
+            .is_none());
+        assert!(state
+            .last_dictation_response(
+                "a",
+                &serde_json::json!({"payload":{"requestId":"x".repeat(129)}})
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn last_dictation_voice_command_repeats_as_literal_text() {
+        let state = DictationTakeState::default();
+        let mut outcome = last_dictation_outcome("Hey Clovy faça algo");
+        outcome.helper_command = serde_json::json!({"type":"discard_recording"});
+        outcome.event = Some(
+            serde_json::json!({"type":"agent_session_prompt", "payload":{"prompt":"faça algo"}}),
+        );
+        last_dictation_deliver(&state, "one", "a", &outcome);
+        let response = state
+            .last_dictation_response("a", &serde_json::json!({"payload":{"requestId":"fresh"}}))
+            .unwrap();
+        assert_eq!(response["type"], "repeat_last_dictation");
+        assert_eq!(response["text"], "Hey Clovy faça algo");
+        assert!(response.get("event").is_none());
+    }
 
     #[test]
     fn dictation_hud_drag_start_does_not_replace_the_last_completed_drag() {

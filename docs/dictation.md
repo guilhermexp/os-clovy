@@ -59,6 +59,54 @@ History displays the installed app icon when available and the microphone
 otherwise. Dictation excerpts can also be sent to the activity provider as
 bounded, fenced context; see [day intelligence](day-intelligence.md#gating-and-privacy).
 
+## Reinsert the last dictation on macOS
+
+**Control+V** reinserts the last eligible dictation into the currently focused
+field using Unicode keyboard events. It never reads or writes the clipboard,
+activates the old paste target, starts a take, runs transcription or cleanup,
+adds history, or invokes a voice command. A remembered voice command is
+inserted as literal text. **Command+V** and automatic paste, including its
+700 ms clipboard restoration, keep their existing behavior.
+
+Rust retains one result in memory, qualified by the data partition that owned
+processing. A valid final result replaces it only after winning the delivery
+claim, before helper I/O, so an automatic paste failure does not lose it.
+Empty, rejected, quarantined, cancelled and stale results do not replace it.
+Another data partition receives no text; a new eligible result replaces the
+single slot. Restarting the app clears the memory. Nothing is loaded from
+history. A helper restart alone does not clear the app's in-memory slot.
+
+The macOS helper registers Control+V through the existing Carbon monitor,
+suspends it during shortcut capture, and suppresses held-key repeats and use
+during recording/finalization. Configured recording shortcuts take priority
+over Control+V; a conflict or failed Carbon registration reports
+`shortcut_register_failed`. Reinsertion uses the existing Accessibility grant
+and never requests Input Monitoring. Missing Accessibility reports
+`accessibility_permission_missing` without copying text.
+
+A keyboard press creates a one-second request bound to the current app and
+focused Accessibility element. Only its matching internal Rust reply can
+start insertion. Duplicate replies, expired requests, app activation changes,
+and a changed focused element are refused. Modifiers must be released within
+that same deadline. Text is emitted without modifier flags in blocks of at
+most 20 UTF-16 units, keeping surrogate pairs intact. Streaming long text has
+no time-based truncation; focus, permission, capture, new recording and
+modifier changes can interrupt delivery between blocks. An interrupted stream
+may already have inserted a prefix. There is no clipboard fallback.
+
+Focus queries through Accessibility are synchronous and can block. Each block
+is prepared before the final query; after that query returns, the helper checks
+Accessibility, modifiers, target/element identity, the frontmost process and
+request authority/deadline again before posting. The initial deadline still
+does not expire a stream already started. The final check and event submission
+are not atomic with WindowServer focus changes, so a residual check-to-post
+race remains; submission does not guarantee which field consumed the events.
+
+Some apps do not expose a focused Accessibility element or accept Unicode
+keyboard events. In that case reinsertion cannot guarantee delivery. Event
+submission is not evidence that a native or web field consumed the text;
+both require native QA on macOS. This shortcut is macOS-only.
+
 ## Settings
 
 `dictation-settings.json` holds `cleanupEnabled` (default `false`),
@@ -127,6 +175,14 @@ From the `dictation-events.log` of the app being measured:
 | `paste_target` to `paste_completed`, target already frontmost | 50 ms |
 
 ## Tests
+
+- `cargo test --lib dictation::tests::last_dictation` - volatile memory,
+  replacement, paste failure recovery, cancellation, stale preclaimed results,
+  data partition isolation, Unicode payloads and private response authority.
+- Compile the real macOS helper with the frameworks and targets in
+  `src-tauri/build.rs`, then run it with `--self-test-last-dictation` for
+  28 policy and UTF-16 checks without posting input events. These checks do
+  not qualify Carbon registration, Accessibility or actual field insertion.
 
 - `cargo test dictation` - settings migration, the pipeline with a fake
   transcriber and cleaner (cleanup off, on, failed, timed out, parallel

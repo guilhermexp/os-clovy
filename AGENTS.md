@@ -251,6 +251,14 @@ build scripts in `pnpm-workspace.yaml` — live in
   [ADR-0073](docs/adr/0073-desktop-calls-user-providers-without-a-clovy-server.md).
 - **Clovy presents as Clovy.** CLI execution is an implementation detail;
   product instructions assert Clovy's identity.
+- **macOS dictation reinsertion:** Control+V inserts the last eligible dictation
+  into the current focus using Unicode events, independently of the clipboard.
+  Rust owns one volatile, data-partition-qualified slot, updated only after
+  delivery authorization; cancelled, empty, quarantined and stale results cannot
+  replace it. Internal helper replies are correlated to a native key request;
+  the renderer cannot supply reinsertion text. Preserve Command+V, automatic
+  paste/700 ms restoration, Carbon capture suspension and recording-shortcut
+  priority. No Input Monitoring or clipboard fallback. See [docs/dictation.md](docs/dictation.md).
 - **Tool terminality is evidence-based.** `agent_sessions::terminal` atomically
   settles unresolved running calls as `interrupted` in the exact session/run,
   including when Stop already won. This means no final result was observed,

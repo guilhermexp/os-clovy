@@ -638,6 +638,7 @@ final class ShortcutKeyMonitor {
     /// which both summon the Input Monitoring ("keylogger") dialog.
     private var carbonHotKeys: [UInt32: (identity: ShortcutIdentity, ref: EventHotKeyRef)] = [:]
     private var nextCarbonHotKeyId: UInt32 = 1
+    private var repeatHotKey: (id: UInt32, ref: EventHotKeyRef)?
     private var shortcuts: [ShortcutKind: MonitoredShortcut] = [
         .pushToTalk: .defaultPushToTalk,
         .toggle: MonitoredShortcut(
@@ -831,6 +832,9 @@ final class ShortcutKeyMonitor {
     }
 
     private func unregisterCarbonHotKeys() {
+        LastDictationInserter.shared.invalidate()
+        if let repeatHotKey { UnregisterEventHotKey(repeatHotKey.ref) }
+        repeatHotKey = nil
         for entry in carbonHotKeys.values {
             UnregisterEventHotKey(entry.ref)
         }
@@ -881,10 +885,39 @@ final class ShortcutKeyMonitor {
             }
             nextCarbonHotKeyId += 1
         }
+        // Recording owns conflicts, even when its own registration failed.
+        guard !RepeatShortcutState.conflicts(with: Array(shortcuts.values)) else {
+            emitRepeatRegistrationFailure()
+            return
+        }
+        var ref: EventHotKeyRef?
+        let id = nextCarbonHotKeyId
+        nextCarbonHotKeyId += 1
+        let status = RegisterEventHotKey(9, UInt32(controlKey),
+            EventHotKeyID(signature: shortcutHotKeySignature, id: id),
+            GetEventDispatcherTarget(), 0, &ref)
+        if status == noErr, let ref {
+            repeatHotKey = (id, ref)
+        } else {
+            emitRepeatRegistrationFailure()
+        }
+    }
+
+    private func emitRepeatRegistrationFailure() {
+        emit("fn_monitor_unavailable", [
+            "code": "shortcut_register_failed",
+            "shortcut": "Ctrl+V",
+            "message": "Could not register Ctrl+V to reinsert the last dictation. Recording shortcuts take priority.",
+        ])
     }
 
     fileprivate func handleCarbonHotKey(id: UInt32, pressed: Bool) {
-        guard !isCapturingShortcut, let entry = carbonHotKeys[id] else {
+        guard !isCapturingShortcut else { return }
+        if id == repeatHotKey?.id {
+            LastDictationInserter.shared.handleKey(pressed: pressed)
+            return
+        }
+        guard let entry = carbonHotKeys[id] else {
             return
         }
         if pressed {
@@ -1151,6 +1184,191 @@ private let carbonHotKeyCallback: EventHandlerUPP = { _, eventRef, userInfo in
     // (setShortcut) could clear the hot-key table and drop this press.
     monitor.handleCarbonHotKey(id: hotKeyId.id, pressed: pressed)
     return noErr
+}
+
+/// Main-thread state: a physical press owns at most one expiring request.
+struct RepeatShortcutState {
+    private(set) var held = false
+    private(set) var requestID: String?
+    private var deadline: TimeInterval = 0
+    private var insertionStarted = false
+
+    mutating func press(id: String, now: TimeInterval, busy: Bool) -> Bool {
+        guard !held else { return false }
+        held = true
+        invalidatePending()
+        guard !busy else { return false }
+        requestID = id
+        deadline = now + 1
+        return true
+    }
+
+    mutating func release() { held = false }
+    mutating func invalidatePending() { requestID = nil; insertionStarted = false }
+    mutating func reset() { held = false; invalidatePending() }
+
+    func matches(_ id: String?, now: TimeInterval) -> Bool {
+        guard let id, let requestID else { return false }
+        return id == requestID && (insertionStarted || now < deadline)
+    }
+
+    mutating func beginDelivery(responseID: String?, deliveryID: String, now: TimeInterval) -> Bool {
+        guard matches(responseID, now: now) else { return false }
+        requestID = deliveryID
+        return true
+    }
+
+    mutating func didStartInsertion() { insertionStarted = true }
+
+    static func conflicts(with shortcuts: [MonitoredShortcut]) -> Bool {
+        shortcuts.contains { !$0.isModifierOnly && $0.keyCode == 9
+            && $0.modifiers == ShortcutModifiers(control: true) }
+    }
+
+    static func canInsert(trusted: Bool, sameTarget: Bool, busy: Bool, modifiers: Bool) -> Bool {
+        trusted && sameTarget && !busy && !modifiers
+    }
+}
+
+/// Quartz keyboard Unicode payloads are bounded; never split a surrogate pair.
+func repeatUnicodeChunks(_ text: String) -> [ArraySlice<UniChar>] {
+    let units = Array(text.utf16)
+    var chunks: [ArraySlice<UniChar>] = []
+    var start = 0
+    while start < units.count {
+        var end = min(start + 20, units.count)
+        if end < units.count && (0xD800...0xDBFF).contains(units[end - 1]) { end -= 1 }
+        chunks.append(units[start..<end])
+        start = end
+    }
+    return chunks
+}
+
+final class LastDictationInserter {
+    static let shared = LastDictationInserter()
+    private var state = RepeatShortcutState()
+    private var target: NSRunningApplication?
+    private var element: AXUIElement?
+    private var activationObserver: NSObjectProtocol?
+
+    private init() {
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.invalidatePending() }
+    }
+
+    func invalidatePending() {
+        state.invalidatePending()
+        target = nil
+        element = nil
+    }
+
+    func invalidate() { invalidatePending(); state.reset() }
+
+    private func checkAccessibility() -> Bool {
+        guard AXIsProcessTrusted() else {
+            emit("permission_status", permissionPayload())
+            emit("error", ["code": "accessibility_permission_missing",
+                "message": "Accessibility permission is required to reinsert dictation."])
+            return false
+        }
+        return true
+    }
+
+    private func focusedElement(_ app: NSRunningApplication) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(app.processIdentifier),
+            kAXFocusedUIElementAttribute as CFString, &value) == .success,
+            let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
+    }
+
+    private func sameTarget(id: String) -> Bool {
+        // AX is synchronous and may block while focus, authority or the deadline changes.
+        // Query first; sample native readiness and the frontmost app only after it returns.
+        guard let target, let element, let current = focusedElement(target) else { return false }
+        let same = CFEqual(element, current)
+        let trusted = checkAccessibility()
+        let modifiers = !CGEventSource.flagsState(.combinedSessionState)
+            .intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn]).isEmpty
+        return RepeatShortcutState.canInsert(trusted: trusted, sameTarget: same, busy: dictation.listening, modifiers: modifiers)
+            && self.target === target
+            && self.element.map { CFEqual($0, element) } == true
+            && !target.isTerminated
+            && NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier
+            && state.matches(id, now: ProcessInfo.processInfo.systemUptime)
+    }
+
+    func handleKey(pressed: Bool) {
+        if !pressed { state.release(); return }
+        let id = UUID().uuidString
+        guard state.press(id: id, now: ProcessInfo.processInfo.systemUptime, busy: dictation.listening) else { return }
+        guard checkAccessibility(), let app = NSWorkspace.shared.frontmostApplication,
+            let focused = focusedElement(app) else { invalidatePending(); return }
+        target = app
+        element = focused
+        emit("repeat_last_dictation_requested", ["requestId": id])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.state.requestID == id else { return }
+            self.invalidatePending()
+        }
+    }
+
+    func receive(requestID: String?, text: String?) {
+        guard state.matches(requestID, now: ProcessInfo.processInfo.systemUptime) else { return }
+        guard let text, !text.isEmpty else { invalidatePending(); return }
+        // Retire response authority before waiting. Duplicate IPC replies cannot type twice.
+        let deliveryID = UUID().uuidString
+        guard state.beginDelivery(responseID: requestID, deliveryID: deliveryID,
+            now: ProcessInfo.processInfo.systemUptime) else { return }
+        insert(repeatUnicodeChunks(text), index: 0, id: deliveryID)
+    }
+
+    private func insert(_ chunks: [ArraySlice<UniChar>], index: Int, id: String) {
+        guard state.matches(id, now: ProcessInfo.processInfo.systemUptime) else {
+            if state.requestID == id { invalidatePending() }
+            return
+        }
+        guard checkAccessibility() else { invalidatePending(); return }
+        guard !dictation.listening else { invalidatePending(); return }
+        let modifiers = !CGEventSource.flagsState(.combinedSessionState)
+            .intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn]).isEmpty
+        guard !modifiers else {
+            // Wait only before the first chunk; a new chord during delivery interrupts it.
+            guard index == 0 else { invalidatePending(); return }
+            // The original request deadline bounds modifier release.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
+                self?.insert(chunks, index: index, id: id)
+            }
+            return
+        }
+        guard index < chunks.count else { invalidatePending(); return }
+        let source = CGEventSource(stateID: .privateState)
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+            let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
+            invalidatePending(); return
+        }
+        down.flags = []
+        up.flags = []
+        chunks[index].withUnsafeBufferPointer { buffer in
+            if let pointer = buffer.baseAddress {
+                down.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: pointer)
+            }
+        }
+        // All event preparation precedes the final AX/readiness/target/authority check.
+        // The remaining check-to-post interval is not an atomic WindowServer guarantee.
+        guard sameTarget(id: id) else {
+            if state.requestID == id { invalidatePending() }
+            return
+        }
+        state.didStartInsertion()
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+        // Yield between chunks so focus/capture/start invalidation can run on the main queue.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.001) { [weak self] in
+            self?.insert(chunks, index: index + 1, id: id)
+        }
+    }
 }
 
 final class FocusTargetController {
@@ -1857,6 +2075,7 @@ final class DictationController {
     private var dictationStartGeneration = 0
 
     func start(takeID: String? = nil) {
+        LastDictationInserter.shared.invalidatePending()
         if startPending {
             if takeID != activeTakeID {
                 emit("error", takePayload([
@@ -1991,6 +2210,7 @@ final class DictationController {
     }
 
     func toggle(shortcut: String, takeID: String? = nil) {
+        LastDictationInserter.shared.invalidatePending()
         if isListening || startPending {
             emit("hotkey_trigger", ["action": "stop", "shortcut": shortcut])
             stop(takeID: takeID)
@@ -2008,6 +2228,7 @@ final class DictationController {
     }
 
     func startMicTest(durationSeconds: Double) {
+        LastDictationInserter.shared.invalidatePending()
         guard !listening else {
             emit("mic_test_error", ["code": "already_listening", "message": "Audio capture is already running."])
             return
@@ -2910,6 +3131,12 @@ func handleCommandLine(_ line: String) {
         runOnMain {
             dictation.emitMicrophones()
         }
+    case "repeat_last_dictation":
+        let requestID = command?["requestId"] as? String
+        let text = command?["text"] as? String
+        runOnMain {
+            LastDictationInserter.shared.receive(requestID: requestID, text: text)
+        }
     case "start_listening":
         let takeID = command?["takeId"] as? String
         runOnMain {
@@ -2994,6 +3221,56 @@ func handleCommandLine(_ line: String) {
     default:
         emit("error", ["code": "unknown_command", "message": "Unknown helper command."])
     }
+}
+
+func runLastDictationSelfTests() {
+    var count = 0
+    func check(_ value: @autoclosure () -> Bool, _ name: String) {
+        guard value() else { fatalError("Last dictation self-test failed: \(name)") }
+        count += 1
+    }
+    var state = RepeatShortcutState()
+    check(!state.matches("empty", now: 0), "initial state")
+    check(state.press(id: "one", now: 0, busy: false), "first physical down")
+    check(!state.press(id: "repeat", now: 0.1, busy: false), "held key repeat suppressed")
+    state.release()
+    check(state.press(id: "two", now: 0.2, busy: false), "second deliberate press")
+    check(!state.matches("one", now: 0.3), "old response rejected")
+    check(!state.matches("two", now: 1.2), "modifier or IPC timeout")
+    state.reset()
+    check(!state.matches("two", now: 0.4), "capture invalidation")
+    check(!state.press(id: "busy", now: 0, busy: true), "recording suppression")
+    state.release()
+    check(state.press(id: "request", now: 0, busy: false), "request")
+    check(state.beginDelivery(responseID: "request", deliveryID: "delivery", now: 0.1), "response consumed")
+    check(!state.beginDelivery(responseID: "request", deliveryID: "duplicate", now: 0.2), "duplicate response")
+    state.didStartInsertion()
+    check(state.matches("delivery", now: 50), "long text does not expire mid-stream")
+    state.invalidatePending()
+    check(!state.matches("delivery", now: 50), "focus change interrupts stream")
+    check(RepeatShortcutState.conflicts(with: [MonitoredShortcut(keyCode: 9, code: "KeyV", label: "Ctrl+V",
+        modifiers: ShortcutModifiers(control: true))]), "recording chord owns conflict")
+    check(!RepeatShortcutState.conflicts(with: [MonitoredShortcut(keyCode: 9, code: "KeyV", label: "Cmd+V",
+        modifiers: ShortcutModifiers(command: true))]), "command paste is independent")
+    check(!RepeatShortcutState.canInsert(trusted: false, sameTarget: true, busy: false, modifiers: false), "accessibility")
+    check(!RepeatShortcutState.canInsert(trusted: true, sameTarget: false, busy: false, modifiers: false), "target changed")
+    check(!RepeatShortcutState.canInsert(trusted: true, sameTarget: true, busy: true, modifiers: false), "capture or recording")
+    check(!RepeatShortcutState.canInsert(trusted: true, sameTarget: true, busy: false, modifiers: true), "held modifiers")
+    check(RepeatShortcutState.canInsert(trusted: true, sameTarget: true, busy: false, modifiers: false), "ready")
+    for text in ["", "ação\ne\u{301} 🧑🏽‍💻", String(repeating: "a", count: 19) + "😀",
+        String(repeating: "ação\n🧑🏽‍💻", count: 5000)] {
+        let chunks = repeatUnicodeChunks(text)
+        check(chunks.flatMap { $0 } == Array(text.utf16), "all UTF-16 units preserved")
+        check(chunks.allSatisfy { !$0.isEmpty && $0.count <= 20
+            && !(0xD800...0xDBFF).contains($0.last!)
+            && !(0xDC00...0xDFFF).contains($0.first!) }, "surrogate boundaries")
+    }
+    print("Last dictation self-tests: \(count) passed")
+}
+
+if CommandLine.arguments.contains("--self-test-last-dictation") {
+    runLastDictationSelfTests()
+    exit(0)
 }
 
 let app = NSApplication.shared
