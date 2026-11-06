@@ -128,26 +128,12 @@ describe("Home conversation on the default CLI engine", () => {
     mockInvoke();
   });
 
-  it("updates the approval mode of the Home conversation", async () => {
-    const user = userEvent.setup();
-    let storedSession = { ...homeSession };
-    mockInvoke({
-      set_agent_session_approval_mode: (args) => {
-        const { approvalMode } = args as { approvalMode: AgentSessionDto["approvalMode"] };
-        storedSession = { ...storedSession, approvalMode };
-        return storedSession;
-      },
-      list_agent_sessions: () => [storedSession],
-      get_agent_session: () => storedSession,
-    });
+  it("keeps Home sandboxed without a separate approval control", async () => {
     render(<AgentWorkspace homeMode initialSession={homeSession} />);
-    const control = await screen.findByRole("combobox", { name: "Tool approval" });
-    await user.selectOptions(control, "bypass");
-    await waitFor(() => expect(control).toHaveValue("bypass"));
-    expect(calls("set_agent_session_approval_mode")[0][1]).toEqual({
-      sessionId: homeSession.id,
-      approvalMode: "bypass",
-    });
+    await screen.findByRole("textbox", { name: "Message Clovy" });
+    expect(screen.queryByRole("combobox", { name: "Tool approval" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sandboxed" })).not.toBeInTheDocument();
+    expect(calls("set_agent_session_approval_mode")).toHaveLength(0);
   });
 
   it("runs a message from an old Home session as a turn of the default CLI", async () => {

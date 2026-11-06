@@ -1,7 +1,6 @@
 use super::skill_identity::{canonical_skill_id, canonical_skill_ids};
 use super::{
-    AgentApprovalMode, AgentItemDto, AgentItemPayload, AgentRepository, AgentSafetyMode,
-    MessageAttachmentPayload,
+    AgentItemDto, AgentItemPayload, AgentRepository, AgentSafetyMode, MessageAttachmentPayload,
 };
 use crate::domain::types::AppError;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -292,20 +291,6 @@ pub async fn rename_agent_session(
             .rename_session(&request.session_id, &request.title)
             .await?,
     ))
-}
-
-#[tauri::command]
-pub async fn set_agent_session_approval_mode(
-    app: AppHandle,
-    session_id: String,
-    approval_mode: AgentApprovalMode,
-) -> Result<Value, AppError> {
-    let profile = crate::commands::active_profile(&app);
-    let session = repository(&app)
-        .await?
-        .set_approval_mode_in_profile(&session_id, &profile, approval_mode)
-        .await?;
-    Ok(session_json(session))
 }
 
 #[tauri::command]
@@ -1570,7 +1555,7 @@ fn normalize_agent_model(model: &str) -> String {
 }
 
 fn session_json(session: super::AgentSessionDto) -> Value {
-    json!({ "id": session.id, "title": session.title, "status": session.status, "model": session.model, "safetyMode": session.safety_mode, "approvalMode": session.approval_mode, "workspacePath": session.workspace_path.unwrap_or_default(), "source": match session.source.as_str() { "legacy_routine" => "legacy_routine", "routine" => "routine", "user" => "user", _ => "legacy_task" }, "createdAt": session.created_at, "updatedAt": session.updated_at, "error": session.last_error })
+    json!({ "id": session.id, "title": session.title, "status": session.status, "model": session.model, "safetyMode": session.safety_mode, "workspacePath": session.workspace_path.unwrap_or_default(), "source": match session.source.as_str() { "legacy_routine" => "legacy_routine", "routine" => "routine", "user" => "user", _ => "legacy_task" }, "createdAt": session.created_at, "updatedAt": session.updated_at, "error": session.last_error })
 }
 pub(crate) fn run_json(run: super::AgentRunDto) -> Value {
     json!({ "id": run.id, "sessionId": run.session_id, "status": run.status, "model": run.model, "approvalMode": run.approval_mode, "reasoningEffort": run.reasoning_effort, "startedAt": run.started_at, "completedAt": run.completed_at, "usage": run.usage, "error": run.error_message })
@@ -2478,10 +2463,6 @@ mod tests {
             )
             .await
             .expect("source");
-        repository
-            .set_approval_mode_in_profile(&source.id, "private", AgentApprovalMode::Bypass)
-            .await
-            .unwrap();
         let branch = repository
             .create_session("Branch", "auto", AgentSafetyMode::Sandboxed, None)
             .await
@@ -2504,8 +2485,8 @@ mod tests {
                 .get_session(&branch.id)
                 .await
                 .unwrap()
-                .approval_mode,
-            AgentApprovalMode::Approvals
+                .safety_mode,
+            AgentSafetyMode::Sandboxed
         );
     }
 
@@ -2763,7 +2744,7 @@ mod selection41_tests {
                 .await
                 .unwrap();
             let session:super::super::AgentSessionDto=serde_json::from_value(json!({"id":id,"title":"Synthetic","status":"idle","model":model,
-                "safetyMode":"sandboxed","approvalMode":"approvals","workspacePath":null,"source":"user","createdAt":"now","updatedAt":"now","completedAt":null,"lastError":null})).unwrap();
+                "safetyMode":"sandboxed","workspacePath":null,"source":"user","createdAt":"now","updatedAt":"now","completedAt":null,"lastError":null})).unwrap();
             assert_eq!(
                 persist_retry_session(&repository, &session, "/synthetic/workspace")
                     .await

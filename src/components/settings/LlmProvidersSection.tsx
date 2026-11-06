@@ -4,14 +4,16 @@ import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import { IconTrashCan } from "central-icons/IconTrashCan";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { type TFunction, useT } from "../../i18n";
-import { messageFromError } from "../../lib/errors";
+import { errorCode, messageFromError, rawMessageFromError } from "../../lib/errors";
 import {
   type LlmCliStatusDto,
   type LlmEndpointDto,
   type LlmProviderRef,
+  type LlmProviderTestResultDto,
   type LlmProvidersDto,
   type LlmUsage,
   type StructuredOutputLevel,
+  isActivityEligible,
   llmDeleteEndpoint,
   llmDetectClis,
   llmProviders,
@@ -156,6 +158,56 @@ export function LlmProvidersSection({
     setBusyUsage((prev) => ({ ...prev, [usage]: true }));
 
     try {
+      if (
+        usage === "activity" &&
+        providerRef.kind === "cli" &&
+        data?.cliLevels[providerRef.id] === undefined &&
+        clis.some((cli) => cli.id === providerRef.id && cli.installed && cli.oneShot)
+      ) {
+        setTestingTarget(`cli:${providerRef.id}`);
+        let result: LlmProviderTestResultDto;
+        try {
+          result = await llmTestProvider(providerRef);
+        } catch (err) {
+          // CLI failures have one native code. Preserve the actual cause and
+          // offer the managed-profile action only for Antigravity login errors.
+          const detail = rawMessageFromError(err);
+          const cliFailure = errorCode(err) === "llm_cli_failed";
+          const message =
+            cliFailure && /quota|rate[ -]?limit|resource.exhausted|usage limit/i.test(detail)
+              ? t("lib.errors.llm.usageLimit")
+              : cliFailure &&
+                  providerRef.id === "agy" &&
+                  /not authenticated|unauthenticated|unauthorized|\b401\b|not logged in|login required|authentication (?:required|failed)|please (?:log ?in|authenticate)|run .{0,30}agy login/i.test(
+                    detail,
+                  )
+                ? t("lib.errors.llm.agyAuthenticationRequired")
+                : messageFromError(err);
+          setUsageErrors((prev) => ({ ...prev, [usage]: message }));
+          return;
+        } finally {
+          setTestingTarget(undefined);
+        }
+        setCliTestResults((prev) => ({
+          ...prev,
+          [providerRef.id]: t("settingsPanels.llm.testSuccess", {
+            ms: result.latencyMs,
+            level: formatLevel(result.structuredOutput, t),
+          }),
+        }));
+        setData((prev) =>
+          prev
+            ? {
+                ...prev,
+                cliLevels: { ...prev.cliLevels, [providerRef.id]: result.structuredOutput },
+              }
+            : prev,
+        );
+        if (!isActivityEligible(result.structuredOutput)) {
+          setUsageErrors((prev) => ({ ...prev, [usage]: t("lib.errors.llm.structuredOutput") }));
+          return;
+        }
+      }
       const updated = await llmSetUsage(usage, providerRef);
       setData(updated);
       if (usage === "chat") {
@@ -479,6 +531,11 @@ export function LlmProvidersSection({
               <p className="settings-row-description">
                 {t("settingsPanels.llm.usageActivityDescription")}
               </p>
+              {busyUsage.activity && testingTarget ? (
+                <p className="settings-row-description" role="status">
+                  {t("settingsPanels.llm.testing")}
+                </p>
+              ) : null}
               {usageErrors.activity ? (
                 <p className="settings-row-error" role="alert">
                   {usageErrors.activity}
@@ -491,7 +548,7 @@ export function LlmProvidersSection({
                 className="dialog-input"
                 aria-label={t("settingsPanels.llm.usageActivity")}
                 value={providerRefKey(usage.activity)}
-                disabled={busyUsage.activity}
+                disabled={busyUsage.activity || testingTarget !== undefined}
                 onChange={(e) => void handleUsageChange("activity", e.target.value)}
               >
                 {getOptionsForUsage("activity").map((opt) => (
@@ -580,7 +637,11 @@ export function LlmProvidersSection({
                     <button
                       type="button"
                       className="btn btn-secondary"
-                      disabled={isTesting || (cli.id === "agy" && agyLoginOpening)}
+                      disabled={
+                        testingTarget !== undefined ||
+                        busyUsage.activity ||
+                        (cli.id === "agy" && agyLoginOpening)
+                      }
                       onClick={() => void handleTestCli(cli)}
                     >
                       <IconArrowRotateClockwise size={14} />
@@ -613,7 +674,6 @@ export function LlmProvidersSection({
           ) : (
             endpoints.map((endpoint) => {
               const testResult = endpointTestResults[endpoint.id];
-              const isTesting = testingTarget === `endpoint:${endpoint.id}`;
 
               const badges: string[] = [`${endpoint.baseUrl} (${endpoint.modelId})`];
               if (endpoint.hasApiKey) {
@@ -644,7 +704,7 @@ export function LlmProvidersSection({
                       type="button"
                       className="icon-button"
                       aria-label={t("settingsPanels.llm.testEndpoint", { name: endpoint.name })}
-                      disabled={isTesting}
+                      disabled={testingTarget !== undefined || busyUsage.activity}
                       onClick={() => void handleTestEndpoint(endpoint)}
                     >
                       <IconArrowRotateClockwise size={14} />

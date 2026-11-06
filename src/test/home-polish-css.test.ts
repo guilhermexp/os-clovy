@@ -20,6 +20,19 @@ function cssRuleFor(selector: string, css = appCss) {
 }
 
 describe("Home polish styles", () => {
+  it("keeps the hero as compact as the routine composer while allowing draft growth", () => {
+    expect(appCss).not.toMatch(/\.agent-composer\[data-hero="true"\] \.agent-composer-editor\s*\{/);
+    const editor = cssRuleFor(".agent-composer-editor");
+    const routine = cssRuleFor(".routines-describe-composer textarea");
+    for (const rule of [editor, routine]) {
+      expect(rule).toContain("min-height: var(--control-lg);");
+      expect(rule).toContain("padding: 6px var(--sp-5);");
+      expect(rule).toContain("font-size: var(--fs-lg);");
+    }
+    expect(editor).toContain("max-height: 200px;");
+    expect(appCss).not.toContain(".agent-approval-control");
+  });
+
   it("lets the background surfaces fit a narrow window without clipping the hero controls", () => {
     expect(cssRuleFor('body[data-agent-surface="true"]')).toContain("min-width: 0;");
     expect(cssRuleFor(".agent-hero-chips")).toContain("flex-wrap: wrap;");

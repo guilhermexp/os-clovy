@@ -59,7 +59,6 @@ pub struct AgentSessionDto {
     pub status: String,
     pub model: String,
     pub safety_mode: AgentSafetyMode,
-    pub approval_mode: AgentApprovalMode,
     pub workspace_path: Option<String>,
     pub source: String,
     pub created_at: String,

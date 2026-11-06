@@ -185,7 +185,7 @@ fn policy_claude_unattended_turns_keep_approve_action_from_the_model() {
 }
 
 #[test]
-fn policy_codex_rows_keep_writes_in_the_workspace_and_open_the_network_only_unrestricted() {
+fn policy_codex_full_access_requires_unrestricted_including_routines() {
     let mcp = strings(&[
         "-c",
         "mcp_servers.clovy.default_tools_approval_mode=\"approve\"",
@@ -203,11 +203,7 @@ fn policy_codex_rows_keep_writes_in_the_workspace_and_open_the_network_only_unre
         ),
         (
             permissions(AgentSafetyMode::Unrestricted, true),
-            [
-                "sandbox_mode=\"workspace-write\"",
-                "sandbox_workspace_write.network_access=true",
-            ]
-            .as_slice(),
+            ["sandbox_mode=\"danger-full-access\""].as_slice(),
         ),
         (
             permissions(AgentSafetyMode::Sandboxed, false),
@@ -215,7 +211,7 @@ fn policy_codex_rows_keep_writes_in_the_workspace_and_open_the_network_only_unre
         ),
         (
             permissions(AgentSafetyMode::Unrestricted, false),
-            ["sandbox_mode=\"read-only\""].as_slice(),
+            ["sandbox_mode=\"danger-full-access\""].as_slice(),
         ),
     ];
     for (permissions, sandbox) in cases {
@@ -319,7 +315,12 @@ fn policy_no_turn_ever_carries_a_forbidden_flag() {
                 for interaction in [false, true] {
                     let policy = policy_with(kind, permissions, interaction);
                     for arg in policy.args.iter().chain(&policy.mcp_args) {
-                        assert_eq!(forbidden_in(arg), None, "{kind:?} {permissions:?}: {arg}");
+                        if arg == "sandbox_mode=\"danger-full-access\"" {
+                            assert_eq!(kind, CliKind::Codex);
+                            assert_eq!(mode, AgentSafetyMode::Unrestricted);
+                        } else {
+                            assert_eq!(forbidden_in(arg), None, "{kind:?} {permissions:?}: {arg}");
+                        }
                     }
                 }
                 for mcp in [None, Some(launch())] {
@@ -337,7 +338,16 @@ fn policy_no_turn_ever_carries_a_forbidden_flag() {
                         // The prompt is data: only agy, cursor-agent, and
                         // copilot take it as an argument.
                         for arg in args.iter().filter(|arg| !arg.contains("hello")) {
-                            assert_eq!(forbidden_in(arg), None, "{kind:?} {permissions:?}: {arg}");
+                            if arg == "sandbox_mode=\"danger-full-access\"" {
+                                assert_eq!(kind, CliKind::Codex);
+                                assert_eq!(mode, AgentSafetyMode::Unrestricted);
+                            } else {
+                                assert_eq!(
+                                    forbidden_in(arg),
+                                    None,
+                                    "{kind:?} {permissions:?}: {arg}"
+                                );
+                            }
                         }
                         for mode in values_of(args, "--permission-mode") {
                             assert!(
@@ -355,7 +365,7 @@ fn policy_no_turn_ever_carries_a_forbidden_flag() {
                             }
                             assert!(!args.contains(&"--strict-mcp-config".to_string()));
                         }
-                        // Codex never leaves the workspace sandbox.
+                        // Every Codex turn explicitly selects its sandbox policy.
                         if kind == CliKind::Codex {
                             assert!(args.iter().any(|arg| arg.starts_with("sandbox_mode=")));
                         }

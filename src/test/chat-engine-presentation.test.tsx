@@ -157,27 +157,13 @@ describe("chat engine presentation", () => {
     expect(setModel).toHaveBeenCalledTimes(3);
   });
 
-  it("changes the approval mode of the selected conversation", async () => {
-    const user = userEvent.setup();
-    let storedSession = { ...session };
-    mocks.invoke.mockImplementation(
-      (command: string, args: { approvalMode: AgentSessionDto["approvalMode"] }) => {
-        if (command === "set_agent_session_approval_mode") {
-          storedSession = { ...storedSession, approvalMode: args.approvalMode };
-          return Promise.resolve(storedSession);
-        }
-        return answer(command, [storedSession]);
-      },
-    );
+  it("keeps the mode control exclusive to new conversations", async () => {
+    mocks.invoke.mockImplementation((command: string) => answer(command, [session]));
     render(<AgentWorkspace initialSession={session} />);
-    const control = await screen.findByRole("combobox", { name: "Tool approval" });
-    expect(control).toHaveValue("approvals");
-    await user.selectOptions(control, "bypass");
-    await waitFor(() => expect(control).toHaveValue("bypass"));
-    expect(mocks.invoke).toHaveBeenCalledWith("set_agent_session_approval_mode", {
-      sessionId: session.id,
-      approvalMode: "bypass",
-    });
+    await screen.findByRole("textbox", { name: "Message Clovy" });
+    expect(screen.queryByRole("combobox", { name: "Tool approval" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sandboxed" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Unrestricted" })).not.toBeInTheDocument();
   });
 
   it("shows the hero suggestions without a privacy footnote", async () => {

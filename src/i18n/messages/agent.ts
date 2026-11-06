@@ -2,15 +2,6 @@ import { defineMessages } from "../define";
 
 export default defineMessages({
   en: {
-    "agent.approval.label": "Tool approval",
-    "agent.approval.approvals": "Approvals",
-    "agent.approval.bypass": "Bypass",
-    "agent.approval.current": "Current run:",
-    "agent.approval.loading": "Checking",
-    "agent.approval.unsaved": "Not saved. Retry before starting the run.",
-    "agent.approval.next": "Changes apply to the next run. Stop ends the current run.",
-    "agent.approval.description":
-      "Bypass authorizes approval requests for this conversation. Other permissions still apply.",
     // Hero
     "agent.hero.greeting1": "What can Clovy do for you?",
     "agent.hero.greeting2": "What should we work on?",
@@ -40,13 +31,14 @@ export default defineMessages({
     "agent.safety.sandboxedDescription":
       "Clovy can read your files but only change its own workspace.",
     "agent.safety.unrestricted": "Unrestricted",
-    "agent.safety.unrestrictedDescription": "Clovy can change any file your account can.",
+    "agent.safety.unrestrictedDescription":
+      "Clovy can change any file your account can without asking for tool approval.",
     "agent.safety.menuLabel": "Safety mode",
     "agent.safety.menuTitle": "Choose what Clovy can touch",
     "agent.safety.triggerTitle": "Change what Clovy can touch",
     "agent.safety.confirmTitle": "Turn on unrestricted?",
     "agent.safety.confirmDescription":
-      "Clovy will be able to change any file your account can, not just its own workspace. This comes with risks like data loss if something goes wrong.",
+      "Clovy will be able to change any file your account can without asking for tool approval. This comes with risks like data loss if something goes wrong.",
     "agent.safety.confirmAction": "Turn on unrestricted",
 
     // Workspace
@@ -207,15 +199,6 @@ export default defineMessages({
     "agent.sessions.deleteSession": "Delete session",
   },
   "pt-BR": {
-    "agent.approval.label": "Aprovação de ferramentas",
-    "agent.approval.approvals": "Aprovações",
-    "agent.approval.bypass": "Dispensar aprovações",
-    "agent.approval.current": "Execução atual:",
-    "agent.approval.loading": "Verificando",
-    "agent.approval.unsaved": "Não foi salvo. Tente novamente antes de iniciar a execução.",
-    "agent.approval.next": "Alterações valem na próxima execução. Parar encerra a execução atual.",
-    "agent.approval.description":
-      "Dispensar aprovações autoriza pedidos nesta conversa. Outras permissões continuam valendo.",
     // Hero
     "agent.hero.greeting1": "O que o Clovy pode fazer por você?",
     "agent.hero.greeting2": "No que vamos trabalhar?",
@@ -250,13 +233,13 @@ export default defineMessages({
       "O Clovy pode ler seus arquivos, mas só altera o próprio espaço de trabalho.",
     "agent.safety.unrestricted": "Sem restrições",
     "agent.safety.unrestrictedDescription":
-      "O Clovy pode alterar qualquer arquivo que sua conta pode alterar.",
+      "O Clovy pode alterar qualquer arquivo que sua conta pode alterar, sem pedir aprovação de ferramentas.",
     "agent.safety.menuLabel": "Modo de segurança",
     "agent.safety.menuTitle": "Escolha o que o Clovy pode alterar",
     "agent.safety.triggerTitle": "Mudar o que o Clovy pode alterar",
     "agent.safety.confirmTitle": "Ativar o modo sem restrições?",
     "agent.safety.confirmDescription":
-      "O Clovy poderá alterar qualquer arquivo que sua conta pode alterar, não apenas o próprio espaço de trabalho. Isso traz riscos, como perda de dados se algo der errado.",
+      "O Clovy poderá alterar qualquer arquivo que sua conta pode alterar, sem pedir aprovação de ferramentas. Isso traz riscos, como perda de dados se algo der errado.",
     "agent.safety.confirmAction": "Ativar sem restrições",
 
     // Workspace

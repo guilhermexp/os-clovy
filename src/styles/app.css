@@ -5431,24 +5431,6 @@ button.agent-user-attachment:hover {
   pointer-events: none;
 }
 
-.agent-approval-control {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  width: 100%;
-  max-width: min(var(--chat-max), var(--content-max));
-  padding: var(--sp-2);
-  color: var(--muted-foreground);
-  font-size: var(--fs-sm);
-  background: var(--card);
-  pointer-events: auto;
-}
-
-.agent-approval-control select {
-  font: inherit;
-  color: inherit;
-}
-
 /* Docked-chat bottom dissolve. It cannot live as .agent-scroll::after
  * (generated flex content participates in the scroll column and can show up
  * as a clipped patch at the content edge), so it hangs off the fixed composer
@@ -7100,9 +7082,9 @@ button.agent-user-attachment:hover {
     0 0 0 1px color-mix(in oklch, var(--border-subtle) 60%, transparent);
 }
 
-/* Track the hero box's deliberate 640px cap so their edges align. */
+/* Track the hero box's --content-max cap so their edges align. */
 .agent-composer[data-hero="true"] .agent-composer-image-warning {
-  max-width: 640px;
+  max-width: var(--content-max);
 }
 
 .agent-composer-image-warning-icon {
@@ -8049,8 +8031,7 @@ button.agent-user-attachment:hover {
 }
 
 /* In the hero the composer leaves its fixed bottom dock and sits inline at
- * the column's center — taller at rest and a touch narrower than the reading
- * column, so it reads as "start here" rather than "reply here". Relative so
+ * the column's center, with the shared compact editor height. Relative so
  * the sandbox menu can anchor to it; the dock's left/right/bottom offsets
  * must be cleared or relative re-applies them as a visual shift (static
  * ignored them for free). */
@@ -8071,16 +8052,14 @@ button.agent-user-attachment:hover {
 }
 
 .agent-composer[data-hero="true"] .agent-composer-box {
-  /* Deliberately compact — the hero box is an invitation, not a reading
-   * column, so it does not track --chat-max up on larger displays. */
-  max-width: 640px;
+  /* Match the routine composer's content measure. */
+  max-width: var(--content-max);
   box-shadow: var(--shadow-md), var(--composer-ring);
 }
 
-/* Big-box at rest: same two-row anatomy as the docked composer, just a
- * taller field so it reads as "start here". */
-.agent-composer[data-hero="true"] .agent-composer-editor {
-  min-height: 76px;
+/* Engine/model menus right-align to the hero box's --content-max column. */
+.agent-composer[data-hero="true"] .agent-composer-model-popover {
+  right: max(0px, calc(50% - var(--content-max) / 2));
 }
 
 /* Rotating suggestion chips under the hero composer. Three at a time from the
@@ -8227,11 +8206,11 @@ button.agent-user-attachment:hover {
 }
 
 /* The menu drops below the composer box (a sibling, since the box clips its
- * overflow for the FLIP glide), left-aligned to the box's 640px column. */
+ * overflow for the FLIP glide), left-aligned to the box's --content-max column. */
 .agent-sandbox-menu {
   position: absolute;
   top: calc(100% + var(--sp-1));
-  left: max(0px, calc(50% - 320px));
+  left: max(0px, calc(50% - var(--content-max) / 2));
   z-index: 30;
   width: min(400px, 100%);
   padding: var(--sp-1);
