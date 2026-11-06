@@ -93,6 +93,46 @@ describe("HUD windows in pt-BR", () => {
     expect(document.querySelector("#hud-status")).toHaveTextContent("Meeting detected");
   });
 
+  it("keeps the selected meeting window title when the language changes", async () => {
+    const meetingWindow = {
+      windowId: 42,
+      appName: "Chrome",
+      bundleId: "com.google.Chrome",
+      title: "Meet - Product review",
+    };
+    mocks.invoke.mockImplementation(async (command: string) =>
+      command === "detect_meeting_window" ? meetingWindow : undefined,
+    );
+    loadPage("hud.html");
+    await import("../hud");
+    await flush();
+    await mocks.listeners.get("meeting-detection-event")?.({
+      payload: JSON.stringify({ type: "meeting_detected", payload: { appLabels: ["Chrome"] } }),
+    });
+    document.querySelector<HTMLButtonElement>("#hud-meeting-video")?.click();
+    expect(document.querySelector("#hud-meeting-app")).toHaveTextContent(
+      "Chrome: Meet - Product review",
+    );
+
+    await switchLocale("en");
+    expect(document.querySelector("#hud-meeting-app")).toHaveTextContent(
+      "Chrome: Meet - Product review",
+    );
+    expect(document.querySelector("#hud-meeting-video")).toHaveAttribute(
+      "aria-label",
+      "Record meeting video",
+    );
+    expect(document.querySelector("#hud-meeting-video")).toHaveAttribute("aria-checked", "true");
+    await switchLocale("pt-BR");
+    expect(document.querySelector("#hud-meeting-app")).toHaveTextContent(
+      "Chrome: Meet - Product review",
+    );
+    expect(document.querySelector("#hud-meeting-video")).toHaveAttribute(
+      "aria-label",
+      "Gravar vídeo da reunião",
+    );
+  });
+
   it("translates dictation status lines, including interpolation", async () => {
     loadPage("hud.html");
     await import("../hud");

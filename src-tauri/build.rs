@@ -2,6 +2,7 @@ const SYSTEM_AUDIO_MIN_MACOS_VERSION_FILE: &str = "system-audio-min-macos-versio
 const DICTATION_HELPER_MIN_MACOS_VERSION: &str = "14.0";
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
     println!("cargo:rerun-if-changed=tauri.conf.json");
     println!("cargo:rerun-if-changed=Entitlements.plist");
     println!("cargo:rerun-if-changed=icons/icon.icns");
@@ -31,6 +32,7 @@ fn main() {
         println!("cargo:rustc-link-arg-bins=/MANIFEST:NO");
     }
     build_system_audio_helper();
+    build_video_capture_helper();
     build_dictation_helper();
     prepare_computer_use_driver();
     ensure_local_transcriber_resource();
@@ -629,6 +631,75 @@ fn ensure_mcp_relay_placeholder() {
     }
 }
 
+fn build_video_capture_helper() {
+    if std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() != Some("macos") {
+        return;
+    }
+    let manifest_dir =
+        std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest directory"));
+    let source = manifest_dir.join("native/mac-video-capture/main.swift");
+    println!("cargo:rerun-if-changed={}", source.display());
+    let app_dir = manifest_dir
+        .parent()
+        .expect("repository directory")
+        .join(".tauri-helper/Clovy Video Capture.app");
+    let executable = app_dir.join("Contents/MacOS/clovy-video-capture");
+    std::fs::create_dir_all(executable.parent().expect("helper executable directory"))
+        .expect("create video helper directory");
+    let rebuilt = !swift_helper_executable_current(&source, &executable);
+    if rebuilt {
+        // This resource is packaged unconditionally. Continuing after a failed
+        // rebuild could ship a stale helper with a different control protocol.
+        assert!(
+            build_universal_swift_executable(
+                "video capture",
+                &manifest_dir,
+                &source,
+                &executable,
+                "14.0",
+                &[
+                    "Foundation",
+                    "AppKit",
+                    "AVFoundation",
+                    "ScreenCaptureKit",
+                    "CoreMedia"
+                ]
+            ),
+            "video capture helper must compile"
+        );
+    }
+    let identifier = helper_bundle_identifier(&manifest_dir, "dev.guilhermexp.clovy.video-capture");
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>clovy-video-capture</string>
+<key>CFBundleIdentifier</key><string>{identifier}</string>
+<key>CFBundleName</key><string>Clovy Video Capture</string>
+<key>CFBundleDisplayName</key><string>Clovy Video Capture</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>LSUIElement</key><true/>
+<key>NSScreenCaptureUsageDescription</key><string>Clovy records the meeting window you choose to include visible slides and shared content in your notes.</string>
+</dict></plist>"#
+    );
+    let plist_path = app_dir.join("Contents/Info.plist");
+    let changed = std::fs::read_to_string(&plist_path).ok().as_deref() != Some(&plist);
+    if changed {
+        std::fs::write(&plist_path, plist).expect("write video helper plist");
+    }
+    let signing = helper_signing();
+    if rebuilt
+        || changed
+        || !signing.is_satisfied_by(&app_dir)
+        || matches!(signing, HelperSigning::Release(_))
+    {
+        sign_helper_app(&manifest_dir, &app_dir, &signing);
+    }
+}
+
 fn build_system_audio_helper() {
     if std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() != Some("macos") {
         return;
@@ -1096,8 +1167,7 @@ fn build_universal_swift_executable(
         println!("cargo:warning={helper_name} executable path has no file name");
         return false;
     };
-    let slice_dir = manifest_dir
-        .join("target")
+    let slice_dir = helper_target_dir(manifest_dir)
         .join("swift-helper-slices")
         .join(format!("{executable_name}-{}", std::process::id()));
     if let Err(error) = std::fs::create_dir_all(&slice_dir) {
@@ -1138,13 +1208,38 @@ fn build_universal_swift_executable(
     if let Ok(permissions) = std::fs::metadata(&slices[0]).map(|metadata| metadata.permissions()) {
         let _ = std::fs::set_permissions(&universal, permissions);
     }
-    if let Err(error) = std::fs::rename(&universal, executable) {
+    if let Err(error) = install_helper_executable(&universal, executable) {
         println!("cargo:warning={helper_name} universal binary could not be installed: {error}");
         let _ = std::fs::remove_dir_all(&slice_dir);
         return false;
     }
     let _ = std::fs::remove_dir_all(&slice_dir);
     true
+}
+
+/// Stage on the bundle's filesystem, then atomically replace its executable.
+/// The configured Cargo target may live on a different volume.
+fn install_helper_executable(
+    universal: &std::path::Path,
+    executable: &std::path::Path,
+) -> std::io::Result<()> {
+    let staged = executable.with_extension(format!("install-{}", std::process::id()));
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)?;
+    let result = (|| {
+        let mut input = std::fs::File::open(universal)?;
+        std::io::copy(&mut input, &mut output)?;
+        output.set_permissions(input.metadata()?.permissions())?;
+        output.sync_all()?;
+        drop(output);
+        std::fs::rename(&staged, executable)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    result
 }
 
 /// Bundle identifier for a helper built here. Release builds keep the published
@@ -1309,6 +1404,12 @@ fn sign_helper_app(
     }
 }
 
+fn helper_target_dir(manifest_dir: &std::path::Path) -> std::path::PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("target"))
+}
+
 fn configure_swift_command(
     command: &mut std::process::Command,
     manifest_dir: &std::path::Path,
@@ -1318,7 +1419,7 @@ fn configure_swift_command(
     command
         .arg("-target")
         .arg(format!("{swift_arch}-apple-macosx{macos_version}"));
-    let module_cache = manifest_dir.join("target").join("swift-module-cache");
+    let module_cache = helper_target_dir(manifest_dir).join("swift-module-cache");
     std::fs::create_dir_all(&module_cache).expect("swift module cache dir should be created");
     command.arg("-module-cache-path").arg(module_cache);
 }

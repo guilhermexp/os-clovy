@@ -166,6 +166,15 @@ The capture scope chosen before recording starts: `MicrophoneOnly` or
 `MicrophonePlusSystem` (meeting mode).
 _Avoid_: recording type.
 
+**Meeting video (vídeo da reunião)**:
+An optional, silent recording of the detected meeting window, owned by a
+**recording session** alongside its audio artifacts. It follows the session's
+pause and resume and records an offset against audio time. Only the Claude
+Notes engine can analyze it through the local `video-analysis` skill; other
+engines produce a transcript-only note with a persisted notice.
+_Avoid_: screen recording (it captures one window, not the display), video
+Source (a Source is an audio lane), meeting object.
+
 **Source**:
 A single audio lane — `Microphone` or `System` — each captured to its own
 file and transcribed independently.

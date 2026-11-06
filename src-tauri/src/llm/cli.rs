@@ -298,6 +298,278 @@ pub fn build_invocation(
     })
 }
 
+/// Quote a single shell argument. No path is evaluated as shell syntax.
+pub(crate) fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// CLI allow rules alone do not restrict default read-only tools. The
+/// Clovy-owned hook enforces an exact command and canonical Read paths before
+/// Claude's permission defaults can auto-approve them.
+pub fn build_video_invocation(
+    kind: CliKind,
+    request: &GenerateRequest,
+    grant: &super::VideoToolGrant,
+) -> Result<CliInvocation, LlmError> {
+    if kind != CliKind::Claude {
+        return Err(LlmError::CliToolsNotDisabled(kind));
+    }
+    if request.schema.is_some() {
+        return Err(LlmError::InvalidOutput(
+            "Video notes require a text answer.".into(),
+        ));
+    }
+    let mut invocation = build_invocation(kind, request)?;
+    let tools = invocation
+        .args
+        .iter()
+        .position(|arg| arg == "--tools")
+        .expect("Claude tools flag");
+    invocation.args[tools + 1] = "Bash,Read".into();
+    let config = serde_json::json!({
+        "command": grant.command(),
+        "argv": ["python3", grant.script, grant.video, "--no-transcript", "--out", grant.evidence],
+        "video": grant.video,
+        "evidence": grant.evidence,
+    });
+    let config_literal = serde_json::to_string(&config.to_string()).expect("JSON string");
+    let guard = format!(
+        r#"import base64, json, os, pathlib, shlex, sys
+cfg = json.loads({config_literal})
+if sys.argv[1:] == ["probe"]:
+    pathlib.Path("video_hook_ready").write_text("ready")
+    sys.exit(0)
+if sys.argv[1:] == ["post"]:
+    try:
+        event = json.load(sys.stdin)
+        evidence = pathlib.Path(cfg["evidence"]).resolve(strict=True)
+        path = pathlib.Path(event.get("tool_input", {{}}).get("file_path", "")).resolve(strict=True)
+        response = event.get("tool_response", {{}})
+        file = response.get("file", {{}})
+        kind = None
+        if (event.get("hook_event_name") == "PostToolUse" and event.get("tool_name") == "Read"
+                and evidence in path.parents and path.is_file() and not response.get("is_error", False)):
+            if (path == evidence / "summary.json" and response.get("type") == "text"
+                    and not file.get("truncatedByTokenCap", False)
+                    and file.get("startLine") == 1 and file.get("numLines", 0) >= file.get("totalLines", 1)
+                    and json.loads(file.get("content", "")) == json.loads(path.read_text())):
+                kind = "summary"
+            elif (response.get("type") == "image" and file.get("type") in
+                    ["image/jpeg", "image/png", "image/gif", "image/webp"]
+                    and file.get("originalSize", 0) > 0
+                    and base64.b64decode(file.get("base64", ""), validate=True)):
+                kind = "image"
+        if kind:
+            owner = pathlib.Path(__file__).resolve().parent
+            token = (owner / "video_read_key").read_text()
+            receipt = json.dumps({{"token": token, "path": str(path), "kind": kind}}) + "\n"
+            fd = os.open(owner / "video_read_receipts.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+            try:
+                os.write(fd, receipt.encode())
+            finally:
+                os.close(fd)
+    except BaseException:
+        pass
+    print("{{}}")
+    sys.exit(0)
+allowed = False
+try:
+    event = json.load(sys.stdin)
+    tool = event.get("tool_name")
+    inp = event.get("tool_input", {{}})
+    if tool == "Bash":
+        command = inp.get("command", "")
+        allowed = (command == cfg["command"] and shlex.split(command) == cfg["argv"]
+                   and not inp.get("run_in_background", False))
+    elif tool == "Read":
+        path = pathlib.Path(inp.get("file_path", "")).resolve(strict=True)
+        video = pathlib.Path(cfg["video"]).resolve(strict=True)
+        evidence = pathlib.Path(cfg["evidence"]).resolve(strict=True)
+        allowed = path.is_file() and (path == video or evidence in path.parents)
+except BaseException:
+    allowed = False
+print(json.dumps({{"hookSpecificOutput": {{"hookEventName": "PreToolUse",
+    "permissionDecision": "allow" if allowed else "deny",
+    "permissionDecisionReason": "Clovy recording video and evidence only"}}}}))
+"#
+    );
+    let settings = serde_json::json!({
+        "claudeMdExcludes": ["**"],
+        "autoMemoryEnabled": false,
+        "disableAllHooks": false,
+        "hooks": {
+            "PreToolUse": [{"matcher": ".*", "hooks": [{
+                "type": "command", "command": grant.python,
+                "args": ["video_guard.py"], "onFailure": "block", "timeout": 10,
+            }]}],
+            "PostToolUse": [{"matcher": "Read", "hooks": [{
+                "type": "command", "command": grant.python,
+                "args": ["video_guard.py", "post"], "onFailure": "block", "timeout": 10,
+            }]}],
+            "Setup": [{"matcher": "init", "hooks": [{
+                "type": "command", "command": grant.python,
+                "args": ["video_guard.py", "probe"], "onFailure": "block", "timeout": 10,
+            }]}],
+        },
+    });
+    invocation.files.push(("video_guard.py".into(), guard));
+    invocation
+        .files
+        .push(("video_read_key".into(), uuid::Uuid::new_v4().to_string()));
+    invocation.args.extend(strings(&[
+        "--permission-mode",
+        "dontAsk",
+        "--permission-prompts",
+        "none",
+        "--no-chrome",
+    ]));
+    invocation.args.extend(strings(&[
+        "--settings",
+        &settings.to_string(),
+        "--add-dir",
+        &grant.evidence.to_string_lossy(),
+    ]));
+    // Read absolute path rules use //, not / (which is project-relative).
+    invocation.args.extend(strings(&[
+        "--allowedTools",
+        &format!(
+            "Bash(python3 {} {}:*)",
+            shell_quote(&grant.script.to_string_lossy()),
+            shell_quote(&grant.video.to_string_lossy())
+        ),
+        &format!("Read(/{})", grant.video.to_string_lossy()),
+        &format!("Read(/{}/**)", grant.evidence.to_string_lossy()),
+    ]));
+    if let Some(system) = &request.system {
+        invocation
+            .args
+            .extend(strings(&["--system-prompt", system]));
+        invocation.stdin = Some(compose_prompt(
+            kind,
+            &GenerateRequest {
+                system: None,
+                ..request.clone()
+            },
+        ));
+    }
+    invocation.set_env.extend([
+        ("CLAUDE_CODE_DISABLE_AUTO_MEMORY".into(), "1".into()),
+        (
+            "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD".into(),
+            "0".into(),
+        ),
+    ]);
+    // These inherited modes would disable our explicit enforcement hook.
+    invocation.remove_env.extend([
+        "CLAUDE_CODE_SIMPLE",
+        "CLAUDE_CODE_SAFE_MODE",
+        "CLAUDE_CODE_DISABLE_HOOKS",
+    ]);
+    Ok(invocation)
+}
+
+/// A private receipt can only be emitted by our successful Read hook. The
+/// model can neither read its key nor write the ledger through its grant.
+/// Installed video-analysis requires the summary, every overview page, and
+/// relevant full-resolution detail: require at least one listed frame.
+pub(crate) fn validate_video_read_receipts(
+    grant: &super::VideoToolGrant,
+    scratch: &std::path::Path,
+) -> Result<(), LlmError> {
+    let invalid = || LlmError::InvalidOutput("Video evidence was not successfully read.".into());
+    let root = std::fs::canonicalize(&grant.evidence).map_err(|_| invalid())?;
+    let scratch = std::fs::canonicalize(scratch).map_err(|_| invalid())?;
+    if scratch.starts_with(&root) || root.starts_with(&scratch) {
+        return Err(invalid());
+    }
+    let summary_path = std::fs::canonicalize(root.join("summary.json")).map_err(|_| invalid())?;
+    if !summary_path.starts_with(&root) {
+        return Err(invalid());
+    }
+    let summary: Value =
+        serde_json::from_slice(&std::fs::read(&summary_path).map_err(|_| invalid())?)
+            .map_err(|_| invalid())?;
+    let paths = |field: &str| -> Result<Vec<std::path::PathBuf>, LlmError> {
+        let values = summary
+            .get(field)
+            .and_then(Value::as_array)
+            .filter(|values| !values.is_empty())
+            .ok_or_else(invalid)?;
+        values
+            .iter()
+            .map(|value| {
+                let path = std::fs::canonicalize(value.as_str().ok_or_else(invalid)?)
+                    .map_err(|_| invalid())?;
+                if !path.starts_with(&root)
+                    || !path.is_file()
+                    || std::fs::metadata(&path).map_err(|_| invalid())?.len() == 0
+                {
+                    return Err(invalid());
+                }
+                Ok(path)
+            })
+            .collect()
+    };
+    let frames = paths("frames")?;
+    let contacts = paths("contact_sheets")?;
+    let key = std::fs::read_to_string(scratch.join("video_read_key")).map_err(|_| invalid())?;
+    if key.is_empty() {
+        return Err(invalid());
+    }
+    let ledger_path = scratch.join("video_read_receipts.jsonl");
+    let metadata = std::fs::symlink_metadata(&ledger_path).map_err(|_| invalid())?;
+    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        return Err(invalid());
+    }
+    let ledger = std::fs::read_to_string(ledger_path).map_err(|_| invalid())?;
+    let mut summary_read = false;
+    let mut images = std::collections::BTreeSet::new();
+    for line in ledger.lines() {
+        let receipt: Value = serde_json::from_str(line).map_err(|_| invalid())?;
+        if receipt.get("token").and_then(Value::as_str) != Some(key.as_str()) {
+            return Err(invalid());
+        }
+        let path = std::fs::canonicalize(
+            receipt
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?,
+        )
+        .map_err(|_| invalid())?;
+        if !path.starts_with(&root) {
+            return Err(invalid());
+        }
+        match receipt.get("kind").and_then(Value::as_str) {
+            Some("summary") if path == summary_path => summary_read = true,
+            Some("image") => {
+                images.insert(path);
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    if summary_read
+        && contacts.iter().all(|path| images.contains(path))
+        && frames.iter().any(|path| images.contains(path))
+    {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
+}
+
+/// onFailure:block was introduced in 2.1.295. Older CLIs can silently ignore
+/// an unknown settings field, so they never receive a video tool grant.
+pub(crate) fn video_guard_version_supported(version: &str) -> bool {
+    let Some(version) = version.split_whitespace().next() else {
+        return false;
+    };
+    let parts = version
+        .split('.')
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>();
+    matches!(parts, Ok(parts) if parts.len() == 3 && (parts[0], parts[1], parts[2]) >= (2, 1, 295))
+}
+
 /// Lists the MCP servers a one-shot codex call would start, resolved by
 /// codex itself across every config layer, with plugins and apps already
 /// off as in the call.
@@ -662,6 +934,243 @@ mod tests {
             schema,
             timeout: None,
         }
+    }
+
+    #[test]
+    fn llm_video_grant_is_claude_only_and_keeps_isolation() {
+        let grant = super::super::VideoToolGrant {
+            script: "/skill/video_evidence.py".into(),
+            video: "/recording/window.mp4".into(),
+            evidence: "/tmp/evidence".into(),
+            python: "/usr/bin/python3".into(),
+        };
+        for cli in CliKind::ALL {
+            let invocation = build_video_invocation(cli, &request(None), &grant);
+            if cli != CliKind::Claude {
+                assert!(invocation.is_err(), "{cli:?}");
+                continue;
+            }
+            let invocation = invocation.unwrap();
+            let args = &invocation.args;
+            let settings_at = args.iter().position(|arg| arg == "--settings").unwrap();
+            let settings: Value = serde_json::from_str(&args[settings_at + 1]).unwrap();
+            let hook = &settings["hooks"]["PreToolUse"][0]["hooks"][0];
+            assert_eq!(hook["onFailure"], "block");
+            assert_eq!(hook["args"], json!(["video_guard.py"]));
+            assert_eq!(settings["disableAllHooks"], false);
+
+            for flag in [
+                "--strict-mcp-config",
+                "--no-session-persistence",
+                "--disable-slash-commands",
+            ] {
+                assert!(args.iter().any(|arg| arg == flag));
+            }
+            assert!(args.windows(2).any(|pair| pair == ["--tools", "Bash,Read"]));
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["--permission-mode", "dontAsk"]));
+            assert!(invocation
+                .stdin
+                .unwrap()
+                .starts_with(CLOVY_AUTHORSHIP_MARKER));
+            assert!(args
+                .iter()
+                .any(|arg| arg.contains("Read(//recording/window.mp4)")));
+        }
+    }
+
+    #[test]
+    fn llm_video_guard_requires_a_version_with_blocking_hooks() {
+        assert!(!video_guard_version_supported("2.1.294 (Claude Code)"));
+        assert!(!video_guard_version_supported("not a version"));
+        assert!(!video_guard_version_supported("2.1.312-preview"));
+        assert!(video_guard_version_supported("2.1.295 (Claude Code)"));
+        assert!(video_guard_version_supported("2.1.312 (Claude Code)"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn llm_video_guard_denies_unrelated_reads_shell_and_symlink_escape() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let dir = tempfile::tempdir().unwrap();
+        let evidence = dir.path().join("evidence");
+        std::fs::create_dir(&evidence).unwrap();
+        let video = dir.path().join("window.mp4");
+        std::fs::write(&video, "video").unwrap();
+        let frame = evidence.join("frame.png");
+        std::fs::write(&frame, "frame").unwrap();
+        let outside = dir.path().join("private");
+        std::fs::write(&outside, "private").unwrap();
+        std::os::unix::fs::symlink(&outside, evidence.join("escape")).unwrap();
+        let grant = super::super::VideoToolGrant {
+            script: dir.path().join("video_evidence.py"),
+            video: video.clone(),
+            evidence: evidence.clone(),
+            python: "/usr/bin/python3".into(),
+        };
+        let invocation = build_video_invocation(CliKind::Claude, &request(None), &grant).unwrap();
+        let guard = dir.path().join("guard.py");
+        let source = &invocation
+            .files
+            .iter()
+            .find(|(name, _)| name == "video_guard.py")
+            .unwrap()
+            .1;
+        std::fs::write(&guard, source).unwrap();
+        let check = |name: &str, input: Value| {
+            let mut child = Command::new("/usr/bin/python3")
+                .arg(&guard)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(
+                    json!({"tool_name":name,"tool_input":input})
+                        .to_string()
+                        .as_bytes(),
+                )
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            let answer: Value = serde_json::from_slice(&out.stdout).unwrap();
+            answer["hookSpecificOutput"]["permissionDecision"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(check("Bash", json!({"command":grant.command()})), "allow");
+        for command in [
+            "cat /etc/passwd".to_string(),
+            "head /etc/passwd".to_string(),
+            format!("{} --language en", grant.command()),
+            format!("{}; cat /etc/passwd", grant.command()),
+            format!("{} > /tmp/leak", grant.command()),
+        ] {
+            assert_eq!(check("Bash", json!({"command":command})), "deny");
+        }
+        for path in [video, frame] {
+            assert_eq!(check("Read", json!({"file_path":path})), "allow");
+        }
+        for path in [outside, evidence.join("escape"), dir.path().join("missing")] {
+            assert_eq!(check("Read", json!({"file_path":path})), "deny");
+        }
+        assert_eq!(
+            check("Write", json!({"file_path":evidence.join("write")})),
+            "deny"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn llm_video_successful_image_reads_have_private_receipts() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let dir = tempfile::tempdir().unwrap();
+        let evidence = dir.path().join("evidence");
+        let scratch = dir.path().join("scratch");
+        std::fs::create_dir(&evidence).unwrap();
+        std::fs::create_dir(&scratch).unwrap();
+        let frame = evidence.join("frame.png");
+        let contact = evidence.join("contact-1.png");
+        let contact2 = evidence.join("contact-2.png");
+        for path in [&frame, &contact, &contact2] {
+            std::fs::write(path, b"image bytes").unwrap();
+        }
+        let video = dir.path().join("window.mp4");
+        std::fs::write(&video, b"video").unwrap();
+        let summary_path = evidence.join("summary.json");
+        let summary = json!({"frames":[frame],"contact_sheets":[contact,contact2]});
+        std::fs::write(&summary_path, summary.to_string()).unwrap();
+        let grant = super::super::VideoToolGrant {
+            script: dir.path().join("video_evidence.py"),
+            video,
+            evidence: evidence.clone(),
+            python: "/usr/bin/python3".into(),
+        };
+        let invocation = build_video_invocation(CliKind::Claude, &request(None), &grant).unwrap();
+        for (name, text) in invocation.files {
+            std::fs::write(scratch.join(name), text).unwrap();
+        }
+        let ledger = scratch.join("video_read_receipts.jsonl");
+        let check = || validate_video_read_receipts(&grant, &scratch);
+        assert!(check().is_err(), "extracted files alone are insufficient");
+        std::fs::write(evidence.join("video_read_receipts.jsonl"), "forged receipt").unwrap();
+        assert!(
+            check().is_err(),
+            "model-writable evidence cannot provide receipts"
+        );
+        std::fs::write(
+            &ledger,
+            json!({"token":"forged","path":frame,"kind":"image"}).to_string(),
+        )
+        .unwrap();
+        assert!(check().is_err(), "private receipts require the run's token");
+        std::fs::remove_file(&ledger).unwrap();
+        let post = |event: Value| {
+            let mut child = Command::new("/usr/bin/python3")
+                .arg(scratch.join("video_guard.py"))
+                .arg("post")
+                .current_dir(&scratch)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(event.to_string().as_bytes())
+                .unwrap();
+            assert!(child.wait().unwrap().success());
+        };
+        let image = |path: &std::path::Path| {
+            json!({
+                "hook_event_name":"PostToolUse", "tool_name":"Read", "tool_input":{"file_path":path},
+                "tool_response":{"type":"image","file":{"base64":"aW1hZ2U=","type":"image/png","originalSize":11}}
+            })
+        };
+        let mut failure = image(&frame);
+        failure["hook_event_name"] = json!("PostToolUseFailure");
+        post(failure);
+        let mut text = image(&frame);
+        text["tool_response"]["type"] = json!("text");
+        post(text);
+        let mut empty = image(&frame);
+        empty["tool_response"]["file"]["base64"] = json!("");
+        post(empty);
+        post(image(&grant.video));
+        assert!(
+            !ledger.exists(),
+            "failed, nonimage, empty, or unauthorized reads do not count"
+        );
+        post(image(&frame));
+        assert!(
+            ledger.is_file(),
+            "successful image Read must be recorded outside evidence"
+        );
+        assert!(
+            check().is_err(),
+            "frame alone lacks summary and overview coverage"
+        );
+        post(
+            json!({"hook_event_name":"PostToolUse","tool_name":"Read","tool_input":{"file_path":summary_path},
+            "tool_response":{"type":"text","file":{"filePath":summary_path,"content":summary.to_string(),"startLine":1,"numLines":1,"totalLines":1}}}),
+        );
+        post(image(&contact));
+        assert!(check().is_err(), "every overview page must be read");
+        post(image(&contact2));
+        assert!(check().is_ok());
+        std::fs::remove_file(&contact2).unwrap();
+        std::os::unix::fs::symlink(&grant.video, &contact2).unwrap();
+        assert!(
+            check().is_err(),
+            "receipt coverage cannot authorize a symlink escape"
+        );
     }
 
     fn agy_args(prompt: &str) -> Vec<String> {

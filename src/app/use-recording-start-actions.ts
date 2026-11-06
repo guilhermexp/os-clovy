@@ -14,7 +14,7 @@ import { playRecordingSound } from "../lib/recording-sounds";
 import { mergeSourceReadiness } from "../lib/source-readiness";
 import { errorCode, messageFromError } from "../lib/errors";
 import { getCurrentDataPartitionName } from "../lib/data-partition";
-import type { RecordingSourceMode } from "../lib/tauri";
+import type { MeetingVideoRequest, RecordingSourceMode } from "../lib/tauri";
 import {
   recordingToStatus,
   revealMainWindowForMeetingStartError,
@@ -58,6 +58,7 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
         sourceMode?: RecordingSourceMode;
         expectedProfile?: string;
         agentRequestId?: string;
+        video?: MeetingVideoRequest;
       } = {},
     ): Promise<boolean> => {
       const startAlreadyClaimed = options.startAlreadyClaimed ?? false;
@@ -111,14 +112,22 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
           throw new Error("The requested recording sources are unavailable.");
         }
         if (options.agentRequestId) await validateAgentRecorderRequest(options.agentRequestId);
-        const recording = options.expectedProfile
+        const recording = options.video
           ? await startRecording(
               noteId,
               effectiveMode,
               options.expectedProfile,
               options.agentRequestId,
+              options.video,
             )
-          : await startRecording(noteId, effectiveMode);
+          : options.expectedProfile
+            ? await startRecording(
+                noteId,
+                effectiveMode,
+                options.expectedProfile,
+                options.agentRequestId,
+              )
+            : await startRecording(noteId, effectiveMode);
         setRecordingNote(noteId);
         const status = recordingToStatus(recording);
         recordingStatusRef.current = status;
@@ -156,10 +165,13 @@ export function useRecordingStartActions(dependencies: UseRecordingStartActionsD
     [setRecordingNote, sourceMode],
   );
 
-  const handleStartRecording = useCallback(async () => {
-    if (!selectedNoteId) return;
-    await handleStartRecordingForNote(selectedNoteId);
-  }, [handleStartRecordingForNote, selectedNoteId]);
+  const handleStartRecording = useCallback(
+    async (video?: MeetingVideoRequest) => {
+      if (!selectedNoteId) return;
+      await handleStartRecordingForNote(selectedNoteId, { video });
+    },
+    [handleStartRecordingForNote, selectedNoteId],
+  );
 
   const meetingStartReadyRef = useRef(false);
   const meetingStartListenerRegisteredRef = useRef(false);

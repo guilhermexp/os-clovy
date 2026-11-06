@@ -1,5 +1,6 @@
 use crate::domain::types::{
     AppError, NoteDto, RecordingOrigin, RecordingOriginMetadata, RecordingSessionDto,
+    RecordingVideoRequest, StartMeetingRecordingRequest,
 };
 use serde::Serialize;
 use std::{
@@ -34,6 +35,8 @@ pub struct PendingMeetingStartRequest {
     note_id: String,
     requested_at_ms: u64,
     expired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    video: Option<RecordingVideoRequest>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -61,6 +64,7 @@ struct MeetingStartRequest {
     note_id: String,
     requested_at_ms: u64,
     bundle_families: Vec<String>,
+    video: Option<RecordingVideoRequest>,
     phase: MeetingStartRequestPhase,
 }
 
@@ -79,7 +83,16 @@ pub struct MeetingStartRequestState {
 }
 
 impl MeetingStartRequestState {
+    #[cfg(test)]
     fn queue_at(&self, requested_at_ms: u64) -> Result<String, String> {
+        self.queue_with_video_at(requested_at_ms, None)
+    }
+
+    fn queue_with_video_at(
+        &self,
+        requested_at_ms: u64,
+        video: Option<RecordingVideoRequest>,
+    ) -> Result<String, String> {
         let mut mailbox = self
             .mailbox
             .lock()
@@ -106,6 +119,7 @@ impl MeetingStartRequestState {
                 .iter()
                 .cloned()
                 .collect(),
+            video,
             phase: MeetingStartRequestPhase::Queued,
         });
         Ok(request_id)
@@ -123,6 +137,7 @@ impl MeetingStartRequestState {
                 request_id: pending.request_id.clone(),
                 note_id: pending.note_id.clone(),
                 requested_at_ms: pending.requested_at_ms,
+                video: pending.video.clone(),
                 expired: matches!(pending.phase, MeetingStartRequestPhase::Queued)
                     && now_ms.saturating_sub(pending.requested_at_ms)
                         > MEETING_START_REQUEST_TTL_MS,
@@ -213,6 +228,31 @@ impl MeetingStartRequestState {
                 )
             })?;
         Ok(pending.bundle_families.clone())
+    }
+
+    pub fn start_video(
+        &self,
+        request: &StartMeetingRecordingRequest,
+    ) -> Result<Option<RecordingVideoRequest>, AppError> {
+        let mailbox = self.mailbox.lock().map_err(|_| {
+            AppError::new(
+                "meeting_start_unavailable",
+                "The meeting start request is unavailable.",
+            )
+        })?;
+        let pending = mailbox
+            .pending
+            .as_ref()
+            .filter(|pending| pending.request_id == request.request_id)
+            .ok_or_else(|| {
+                AppError::new(
+                    "meeting_start_not_found",
+                    "The meeting start request was not found.",
+                )
+            })?;
+        // The HUD owns the opt-in and selected window. Renderer retries may carry
+        // stale data, so they cannot enable video or replace that retained choice.
+        Ok(pending.video.clone())
     }
 
     pub fn finished_outcome(
@@ -691,8 +731,9 @@ fn wall_clock_millis() -> Result<u64, String> {
 pub fn queue_meeting_start_request(
     app: AppHandle,
     state: State<'_, MeetingStartRequestState>,
+    video: Option<RecordingVideoRequest>,
 ) -> Result<(), String> {
-    state.queue_at(wall_clock_millis()?)?;
+    state.queue_with_video_at(wall_clock_millis()?, video)?;
     app.emit(MEETING_START_REQUEST_EVENT_NAME, ())
         .map_err(|error| format!("failed to wake the meeting-start listener: {error}"))?;
     Ok(())
@@ -1527,6 +1568,74 @@ mod macos {
 mod tests {
     use super::*;
 
+    fn start_request(request_id: &str) -> StartMeetingRecordingRequest {
+        StartMeetingRecordingRequest {
+            request_id: request_id.to_owned(),
+            source_mode: None,
+            video: None,
+        }
+    }
+
+    #[test]
+    fn meeting_video_native_choice_rejects_renderer_retarget_and_unrequested_opt_in() {
+        for retained in [Some(RecordingVideoRequest { window_id: 42 }), None] {
+            let state = MeetingStartRequestState::default();
+            let id = state.queue_with_video_at(1000, retained.clone()).unwrap();
+            let rendered = crate::domain::types::StartMeetingRecordingRequest {
+                request_id: id,
+                source_mode: None,
+                video: Some(RecordingVideoRequest { window_id: 99 }),
+            };
+            assert_eq!(state.start_video(&rendered).unwrap(), retained);
+        }
+    }
+
+    #[test]
+    fn meeting_video_request_is_retained_and_forwarded_without_retargeting() {
+        let state = MeetingStartRequestState::default();
+        let video = crate::domain::types::RecordingVideoRequest { window_id: 7331 };
+        let id = state.queue_with_video_at(1000, Some(video)).unwrap();
+        let pending = state.peek_at(1001).unwrap().unwrap();
+        assert_eq!(pending.video.as_ref().map(|v| v.window_id), Some(7331));
+        assert_eq!(
+            serde_json::to_value(&pending).unwrap()["video"]["windowId"],
+            7331
+        );
+        state.begin_start(&id, 1001).unwrap();
+        assert_eq!(
+            state
+                .queue_with_video_at(
+                    1002,
+                    Some(crate::domain::types::RecordingVideoRequest { window_id: 42 })
+                )
+                .unwrap(),
+            id
+        );
+        assert_eq!(
+            state
+                .start_video(&start_request(&id))
+                .unwrap()
+                .map(|v| v.window_id),
+            Some(7331)
+        );
+    }
+
+    #[test]
+    fn meeting_video_opt_out_and_acknowledgement_do_not_reuse_an_old_window() {
+        let state = MeetingStartRequestState::default();
+        let id = state
+            .queue_with_video_at(
+                1000,
+                Some(crate::domain::types::RecordingVideoRequest { window_id: 7331 }),
+            )
+            .unwrap();
+        assert!(state.acknowledge(&id).unwrap());
+        let next = state.queue_with_video_at(2000, None).unwrap();
+        assert!(state.peek_at(2001).unwrap().unwrap().video.is_none());
+        assert!(state.start_video(&start_request(&next)).unwrap().is_none());
+        assert!(state.start_video(&start_request(&id)).is_err());
+    }
+
     #[test]
     fn pending_meeting_start_request_is_retained_until_matching_ack() {
         let state = MeetingStartRequestState::default();
@@ -1541,6 +1650,7 @@ mod tests {
             note_id,
             requested_at_ms: 1_000,
             expired: false,
+            video: None,
         });
 
         assert_eq!(state.peek_at(1_100).expect("peek request"), expected);
@@ -1570,6 +1680,7 @@ mod tests {
                 note_id,
                 requested_at_ms: 2_000,
                 expired: false,
+                video: None,
             })
         );
     }
@@ -1593,6 +1704,7 @@ mod tests {
                 note_id,
                 requested_at_ms: 1_000,
                 expired: true,
+                video: None,
             })
         );
         assert_eq!(

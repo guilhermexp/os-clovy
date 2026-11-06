@@ -67,6 +67,7 @@ const mocks = vi.hoisted(() => ({
   updateNote: vi.fn(),
   patchNote: vi.fn(),
   completeNoteSaveFlush: vi.fn(async () => true),
+  detectMeetingWindow: vi.fn(),
   checkRecordingSourceReadiness: vi.fn(),
   openPrivacySettings: vi.fn(),
   startRecording: vi.fn(),
@@ -162,6 +163,7 @@ vi.mock("../lib/tauri", () => ({
   patchNote: mocks.patchNote,
   completeNoteSaveFlush: mocks.completeNoteSaveFlush,
   NOTE_SAVE_FLUSH_REQUESTED_EVENT: "clovy://flush-pending-note-saves",
+  detectMeetingWindow: mocks.detectMeetingWindow,
   checkRecordingSourceReadiness: mocks.checkRecordingSourceReadiness,
   openPrivacySettings: mocks.openPrivacySettings,
   startRecording: mocks.startRecording,
@@ -331,6 +333,32 @@ describe("meeting start transcription event", () => {
       });
     });
   }
+
+  it("passes an opted-in video window through the editor start action", async () => {
+    const user = userEvent.setup();
+    mocks.detectMeetingWindow.mockResolvedValue({
+      windowId: 42,
+      appName: "Chrome",
+      bundleId: "com.google.Chrome",
+      title: "Meet - Review",
+    });
+    render(<App />);
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+    await user.click(await screen.findByRole("button", { name: "Meeting notes" }));
+    await user.click(screen.getByRole("button", { name: "First note Preview" }));
+    await user.click(await screen.findByRole("button", { name: "Recording options" }));
+    await user.click(await screen.findByRole("switch", { name: "Record meeting video" }));
+    await user.click(screen.getByRole("button", { name: "Record" }));
+    await waitFor(() =>
+      expect(mocks.startRecording).toHaveBeenCalledWith(
+        "note-1",
+        "microphonePlusSystem",
+        undefined,
+        undefined,
+        { windowId: 42 },
+      ),
+    );
+  });
 
   it("creates a fresh note before recording from the meeting prompt", async () => {
     const fresh = note({

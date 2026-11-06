@@ -1411,6 +1411,27 @@ const MIGRATIONS: &[Migration] = &[
             "../../migrations/038_interrupt_unresolved_tool_calls.sql"
         ))],
     },
+    Migration {
+        version: 57,
+        name: "meeting_video",
+        requirements: &[
+            SchemaRequirement::Table("video_artifacts"),
+            SchemaRequirement::Column {
+                table: "generation_results",
+                column: "video_analysis",
+            },
+        ],
+        steps: &[
+            MigrationStep::Sql(include_str!("../../migrations/039_meeting_video.sql")),
+            MigrationStep::EnsureColumns {
+                table: "generation_results",
+                columns: &[ColumnDefinition {
+                    name: "video_analysis",
+                    definition: "TEXT",
+                }],
+            },
+        ],
+    },
 ];
 
 const NOTE_REVISION_COLUMN: &[ColumnDefinition] = &[ColumnDefinition {
@@ -2377,6 +2398,7 @@ mod tests {
                 (54, "dictation_app_bundle_id".to_string()),
                 (55, "agent_session_approval_mode".to_string()),
                 (56, "interrupt_unresolved_tool_calls".to_string()),
+                (57, "meeting_video".to_string()),
             ]
         );
         assert_latest_stamp(&pool).await;
@@ -2399,19 +2421,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn meeting_video_upgrades_retired_main_without_replaying_history() {
+        let pool = test_pool().await;
+        run_migration_catalog(&pool, &MIGRATIONS[..56])
+            .await
+            .unwrap();
+        let stamps: Vec<(i64, String, String)> = sqlx::query_as::query_as(
+            "SELECT version, name, applied_at FROM schema_migrations ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        install_runtime_non_replay_guard(&pool).await;
+        let repos = crate::db::repositories::Repositories::new(pool.clone());
+        query("INSERT INTO notes (id, title, processing_status, profile, created_at, updated_at) VALUES ('video-upgrade-note', 'Retained note', 'draft', 'default', 'now', 'now')")
+            .execute(&pool).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let after: Vec<(i64, String, String)> = sqlx::query_as::query_as(
+            "SELECT version, name, applied_at FROM schema_migrations WHERE version <= 56 ORDER BY version",
+        ).fetch_all(&pool).await.unwrap();
+        assert_eq!(
+            stamps, after,
+            "applied main migrations must remain immutable"
+        );
+        assert!(table_exists(&pool, "video_artifacts").await);
+        let notice: Option<String> = sqlx::query_scalar::query_scalar(
+            "SELECT video_analysis FROM generation_results LIMIT 1",
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap()
+        .flatten();
+        assert!(notice.is_none());
+        assert_eq!(
+            repos.get_note("video-upgrade-note").await.unwrap().title,
+            "Retained note"
+        );
+        let count: i64 = sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM agent_items")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+        run_migrations(&pool).await.unwrap();
+        assert_latest_stamp(&pool).await;
+        assert_eq!(MIGRATIONS.last().unwrap().version, 57);
+    }
+
+    #[tokio::test]
     async fn retired_sharing_keys_are_purged_without_changing_notes_or_history() {
         let pool = test_pool().await;
         run_migration_catalog(&pool, &MIGRATIONS[..52])
             .await
             .expect("pre-cut schema");
         let repos = crate::db::repositories::Repositories::new(pool.clone());
-        let note = repos
-            .create_note("default", None)
-            .await
-            .expect("synthetic note");
+        // This fixture predates the video column, so insert with its historical schema.
+        let note_id = "sharing-retirement-note";
+        query("INSERT INTO notes (id, title, processing_status, profile, created_at, updated_at) VALUES (?, 'Retained note', 'draft', 'default', 'now', 'now')")
+            .bind(note_id).execute(&pool).await.expect("synthetic historical note");
         install_runtime_non_replay_guard(&pool).await;
         query("INSERT INTO share_keys (share_id, item_kind, item_id, content_key, created_at) VALUES ('old-share', 'note', ?, X'010203', 'now')")
-            .bind(&note.id).execute(&pool).await.expect("synthetic content key");
+            .bind(note_id).execute(&pool).await.expect("synthetic content key");
         query("INSERT INTO share_invite_keys (invite_id, share_id, invite_key, created_at) VALUES ('old-invite', 'old-share', X'040506', 'now')")
             .execute(&pool).await.expect("synthetic invite key");
         run_migrations(&pool).await.expect("retire sharing");
@@ -2424,8 +2493,8 @@ mod tests {
             assert_eq!(count, 0, "retired key material remains in {table}");
         }
         assert_eq!(
-            repos.get_note(&note.id).await.expect("note remains").id,
-            note.id
+            repos.get_note(note_id).await.expect("note remains").id,
+            note_id
         );
         assert_eq!(
             query("SELECT COUNT(*) AS count FROM agent_items")
@@ -2760,6 +2829,7 @@ mod tests {
                 (54, "dictation_app_bundle_id".to_string()),
                 (55, "agent_session_approval_mode".to_string()),
                 (56, "interrupt_unresolved_tool_calls".to_string()),
+                (57, "meeting_video".to_string()),
             ]
         );
 

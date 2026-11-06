@@ -9,6 +9,6 @@
   <key>NSAudioCaptureUsageDescription</key>
   <string>Clovy records system audio locally when you choose microphone plus system audio for a note.</string>
   <key>NSScreenCaptureUsageDescription</key>
-  <string>Clovy captures only the app windows you ask it to operate so Clovy can understand and complete your task.</string>
+  <string>Clovy captures the app windows you ask it to operate and, when you choose, records the meeting window so notes can include visible slides and shared content.</string>
 </dict>
 </plist>

@@ -461,6 +461,60 @@ body {
   white-space: nowrap;
 }
 
+.hud-meeting-video {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.hud-meeting-video[hidden] {
+  display: none;
+}
+
+.hud-meeting-video-toggle {
+  width: var(--control-sm);
+  height: calc(var(--control-xs) * 0.65);
+  padding: var(--sp-px);
+  border-radius: var(--r-pill);
+  background: var(--muted-foreground);
+}
+
+.hud-meeting-video-toggle::before {
+  display: block;
+  content: "";
+  width: 50%;
+  height: 100%;
+  border-radius: var(--r-pill);
+  background: var(--background);
+}
+
+.hud-meeting-video[aria-checked="true"] .hud-meeting-video-toggle {
+  background: var(--attention);
+}
+
+.hud-meeting-video[aria-checked="true"] .hud-meeting-video-toggle::before {
+  margin-left: 50%;
+}
+
+.hud-meeting-video:focus-visible {
+  outline: var(--focus-outline-width) solid var(--ring);
+  outline-offset: var(--sp-1);
+}
+
+.hud[data-state="meeting"][data-meeting-video="true"],
+.hud[data-state="exiting"][data-exit-state="meeting"][data-meeting-video="true"] {
+  height: auto;
+  padding-block: var(--sp-3);
+}
+
 /* Primary action: a clear lime Clovy action with an ink icon and label so it
  * stays unambiguous at HUD size. A capsule, not a rounded rect: the button sits
  * 13px inside the card's 10px corner, far too deep for a concentric

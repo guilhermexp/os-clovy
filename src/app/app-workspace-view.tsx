@@ -537,7 +537,7 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
               activeTab,
             })
           }
-          onStartRecording={() => void handleStartRecording()}
+          onStartRecording={(video) => void handleStartRecording(video)}
           onPauseRecording={(sessionId) => void handlePauseRecording(sessionId)}
           onResumeRecording={(sessionId) => void handleResumeRecording(sessionId)}
           onFinishRecording={(sessionId) => void handleFinishRecording(sessionId)}

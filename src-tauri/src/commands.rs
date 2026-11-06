@@ -339,9 +339,9 @@ async fn delete_profile_records(
     if profile == "default" {
         return Ok(Vec::new());
     }
-    let audio_paths = repos.audio_artifact_paths_for_profile(profile).await?;
-    repos.delete_profile_data(profile).await?;
-    Ok(audio_paths)
+    Ok(repos
+        .delete_profile_data_with_artifact_paths(profile)
+        .await?)
 }
 
 #[tauri::command]
@@ -349,9 +349,8 @@ pub async fn delete_note(app: AppHandle, request: DeleteNoteRequest) -> Result<(
     let paths = app_paths(&app)?;
     let repos = repositories(&app).await?;
     let audio_paths = repos
-        .audio_artifact_paths_for_note(&request.note_id)
+        .delete_note_with_artifact_paths(&request.note_id)
         .await?;
-    repos.delete_note(&request.note_id).await?;
     for path in audio_paths {
         if path.trim().is_empty() {
             continue;
@@ -381,8 +380,7 @@ pub async fn delete_notes(app: AppHandle, request: DeleteNotesRequest) -> Result
 
     let paths = app_paths(&app)?;
     let repos = repositories(&app).await?;
-    let audio_paths = repos.audio_artifact_paths_for_notes(&note_ids).await?;
-    repos.delete_notes(&note_ids).await?;
+    let audio_paths = repos.delete_notes_with_artifact_paths(&note_ids).await?;
     for path in audio_paths {
         if path.trim().is_empty() {
             continue;
@@ -498,10 +496,20 @@ pub fn sticky_active_profile(app: AppHandle) -> String {
 
 #[tauri::command]
 pub async fn delete_folder(app: AppHandle, request: DeleteFolderRequest) -> Result<(), AppError> {
-    repositories(&app)
+    let paths = request.delete_notes.then(|| app_paths(&app)).transpose()?;
+    let files = repositories(&app)
         .await?
-        .delete_folder(&request.folder_id, request.delete_notes)
+        .delete_folder_with_artifact_paths(&request.folder_id, request.delete_notes)
         .await?;
+    if let Some(paths) = paths {
+        for path in files {
+            if let Err(error) = paths.remove_recording_file(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("failed to remove deleted folder recording {path}: {error}");
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1262,6 +1270,7 @@ pub async fn start_meeting_recording(
         Err(error) => return Err(error),
     };
     let bundle_families = state.start_bundle_families(&request.request_id)?;
+    let video = state.start_video(&request)?;
     let mut completion =
         MeetingStartCompletionGuard::new(state.inner(), request.request_id.clone());
 
@@ -1270,6 +1279,7 @@ pub async fn start_meeting_recording(
         &note_id,
         request.source_mode.unwrap_or_default(),
         bundle_families,
+        video,
     )
     .await
     {
@@ -1288,6 +1298,7 @@ async fn execute_meeting_recording(
     note_id: &str,
     requested_source_mode: RecordingSourceMode,
     bundle_families: Vec<String>,
+    video: Option<crate::domain::types::RecordingVideoRequest>,
 ) -> Result<(NoteDto, RecordingSessionDto), AppError> {
     let repos = repositories(&app).await?;
     let profile = active_profile(&app);
@@ -1329,6 +1340,7 @@ async fn execute_meeting_recording(
                 source_mode: Some(source_mode),
                 expected_profile: None,
                 agent_request_id: None,
+                video,
             },
             false,
             origin.clone(),
@@ -1376,6 +1388,14 @@ async fn execute_meeting_recording(
             Err(error)
         }
     }
+}
+
+#[tauri::command]
+pub async fn detect_meeting_window(
+) -> Result<Option<crate::domain::types::MeetingWindowDto>, AppError> {
+    tokio::task::spawn_blocking(crate::audio::capture::video::detect_meeting_window)
+        .await
+        .map_err(|error| AppError::new("window_detection_failed", error.to_string()))?
 }
 
 #[tauri::command]
@@ -1576,6 +1596,39 @@ async fn start_recording_inner(
     // The capture now has all rows required for reload/recovery. Optional
     // diagnostics below must not roll it back if their future is cancelled.
     startup_guard.disarm();
+    if let Some(video) = request.video {
+        let partial = started.partial_path.with_file_name("window.partial.mp4");
+        let final_path = partial.with_file_name("window.mp4");
+        match repos
+            .create_video_artifact(
+                &note.id,
+                &started.session_id,
+                &partial.to_string_lossy(),
+                &final_path.to_string_lossy(),
+            )
+            .await
+        {
+            Ok(()) => {
+                if let Err(_error) = crate::audio::capture::attach_video(
+                    &started.session_id,
+                    repos.clone(),
+                    partial,
+                    final_path,
+                    video.window_id,
+                    tokio::runtime::Handle::current(),
+                ) {
+                    let result = crate::audio::capture::video::VideoResult {
+                        failure_reason: Some("capture_failed".into()),
+                        ..Default::default()
+                    };
+                    let _ = repos
+                        .finalize_video_artifact(&started.session_id, &result)
+                        .await;
+                }
+            }
+            Err(error) => eprintln!("failed to persist optional video: {error}"),
+        }
+    }
     spawn_recording_recovery_checkpoint_worker(repos.clone(), started.session_id.clone());
     if let Err(error) = repos
         .add_checkpoint(
@@ -2123,6 +2176,7 @@ pub async fn finish_recording(
     request: SessionRequest,
 ) -> Result<FinishRecordingResponse, AppError> {
     let timing = ProcessingTiming::from_done(Instant::now());
+    let paths = app_paths(&app)?;
     let repos = repositories(&app).await?;
     let finalization_started = Instant::now();
     let session_id = request.session_id.clone();
@@ -2136,6 +2190,7 @@ pub async fn finish_recording(
         run_blocking_capture(move || finish_capture(&session_id, authorization.as_ref())).await?;
     let response = finish_recording_session_with_timing(
         &repos,
+        paths,
         finished,
         finalization_started,
         timing,
@@ -2163,6 +2218,7 @@ async fn finish_active_capture_before_start(
     if let Some(finished) = run_blocking_capture(finish_active_capture).await? {
         finish_recording_session_with_timing(
             repos,
+            app_paths(app)?,
             finished,
             finalization_started,
             ProcessingTiming::untracked(),
@@ -2179,8 +2235,13 @@ async fn finish_recording_session(
     finished: crate::audio::capture::FinishedRecording,
     finalization_started: Instant,
 ) -> Result<FinishRecordingResponse, AppError> {
+    let temp = tempfile::tempdir()
+        .map_err(|error| AppError::new("storage_unavailable", error.to_string()))?;
+    let paths = AppPaths::from_data_dir(temp.path().join("data"))
+        .map_err(|error| AppError::new("storage_unavailable", error.to_string()))?;
     finish_recording_session_with_timing(
         repos,
+        paths,
         finished,
         finalization_started,
         ProcessingTiming::untracked(),
@@ -2191,6 +2252,7 @@ async fn finish_recording_session(
 
 async fn finish_recording_session_with_timing(
     repos: &Repositories,
+    paths: AppPaths,
     finished: crate::audio::capture::FinishedRecording,
     finalization_started: Instant,
     timing: ProcessingTiming,
@@ -2558,8 +2620,11 @@ async fn finish_recording_session_with_timing(
         let title = note.title.clone();
         let existing_generated_note = note.generated_content.clone();
         let manual_notes = manual_notes_for_generation(&note);
+        // Audio files and artifact rows are durable before waiting for optional video.
+        task_repos.wait_for_video_capture(&task_session_id).await;
         let result = process_saved_source_audio_with_progress(
             &task_repos,
+            &paths,
             &task_note_id,
             &task_session_id,
             task_source_mode,
@@ -2921,6 +2986,7 @@ async fn retry_processing_from(
         let manual_notes = manual_notes_for_generation(&note);
         let effect = process_saved_source_audio_with_progress(
             &task_repos,
+            &paths,
             &task_note_id,
             &task_recording_session_id,
             task_source_mode,
@@ -3101,6 +3167,37 @@ async fn revalidate_saved_recorder_request(
     Ok(())
 }
 
+pub(crate) async fn discard_recoverable_recording(
+    repos: &Repositories,
+    paths: &crate::app_paths::AppPaths,
+    info: &crate::db::repositories::RecordingRecoveryInfo,
+    authorization: impl std::future::Future<Output = Result<(), AppError>>,
+) -> Result<NoteDto, AppError> {
+    let video_paths = repos
+        .video_artifact_paths_for_session(&info.session_id)
+        .await?;
+    let source_paths = repos
+        .source_artifact_paths_for_session(&info.session_id)
+        .await?;
+    authorization.await?;
+    // Revoke database ownership before unlinking. A worker that renames after
+    // cleanup then sees the missing row and removes its own late output.
+    repos
+        .commit_recording_discard(&info.session_id, &info.note_id)
+        .await?;
+    // Hydration is intentionally after cleanup: commit success is independent of
+    // whether a concurrently deleted note can still be returned to the caller.
+    let files: Vec<String> = source_paths
+        .into_iter()
+        .flat_map(|artifact| [artifact.partial_path, artifact.final_path])
+        .chain([info.partial_path.clone(), info.final_path.clone()])
+        .flatten()
+        .chain(video_paths)
+        .collect();
+    discard_recovery_files(paths, &files)?;
+    Ok(repos.get_note(&info.note_id).await?)
+}
+
 #[tauri::command]
 pub async fn recover_recording(
     app: AppHandle,
@@ -3159,10 +3256,7 @@ pub async fn recover_recording(
         ));
     }
     if request.action == "discard" {
-        let artifacts = repos
-            .source_artifact_paths_for_session(&request.session_id)
-            .await?;
-        revalidate_saved_recorder_request(
+        let authorization = revalidate_saved_recorder_request(
             &app,
             &repos,
             request.agent_request_id.as_deref(),
@@ -3171,19 +3265,12 @@ pub async fn recover_recording(
             &info.session_id,
             crate::agent_recorder::AgentRecorderAction::Recover,
             Some(recovery_action),
-        )
-        .await?;
-        let files: Vec<String> = artifacts
-            .into_iter()
-            .flat_map(|artifact| [artifact.partial_path, artifact.final_path])
-            .chain([info.partial_path.clone(), info.final_path.clone()])
-            .flatten()
-            .collect();
-        discard_recovery_files(&paths, &files)?;
-        return Ok(repos
-            .mark_recording_discarded(&info.session_id, &info.note_id)
-            .await?);
+        );
+        return discard_recoverable_recording(&repos, &paths, &info, authorization).await;
     }
+    let _ =
+        crate::domain::processing::optional_note_video_input(&repos, &paths, &request.session_id)
+            .await;
     let source_paths = repos
         .source_artifact_paths_for_session(&request.session_id)
         .await?;
@@ -3288,6 +3375,7 @@ pub async fn recover_recording(
                 .as_deref()
                 .zip(request.expected_profile.as_deref()),
             &repos,
+            &paths,
             &info.note_id,
             &info.session_id,
             info.source_mode,
@@ -3383,6 +3471,7 @@ pub async fn recover_recording(
             .as_deref()
             .zip(request.expected_profile.as_deref()),
         &repos,
+        &paths,
         &info.note_id,
         &info.session_id,
         RecordingSourceMode::MicrophoneOnly,
@@ -3402,6 +3491,7 @@ async fn process_recovered_source_audio(
     app: &AppHandle,
     authorization: Option<(&str, &str)>,
     repos: &Repositories,
+    paths: &AppPaths,
     note_id: &str,
     session_id: &str,
     source_mode: RecordingSourceMode,
@@ -3462,6 +3552,7 @@ async fn process_recovered_source_audio(
     };
     let effect = process_saved_source_audio_with_cancellation(
         repos,
+        paths,
         note_id,
         session_id,
         source_mode,

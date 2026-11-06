@@ -33,6 +33,26 @@ struct ListNotesCursor {
     rowid: i64,
 }
 
+type VideoRecoveryLock = std::sync::Arc<tokio::sync::Mutex<()>>;
+
+// File repair/rename and its database transition are one operation per session,
+// including requests from separate Repositories handles over the same database.
+fn video_recovery_lock(session_id: &str) -> VideoRecoveryLock {
+    type Locks = std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>;
+    static LOCKS: std::sync::OnceLock<std::sync::Mutex<Locks>> = std::sync::OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(session_id).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(session_id.to_owned(), std::sync::Arc::downgrade(&lock));
+    lock
+}
+
 #[derive(Clone)]
 pub struct Repositories {
     pub pool: SqlitePool,
@@ -1883,6 +1903,8 @@ impl Repositories {
         self.hydrate_note_row(note_id, row).await
     }
 
+    const NOTE_VIDEO_ANALYSIS_QUERY: &str = "SELECT video_analysis FROM generation_results WHERE note_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1";
+
     async fn hydrate_note_row(
         &self,
         note_id: &str,
@@ -1921,6 +1943,11 @@ impl Repositories {
             revision: row.get::<i64, _>("revision").try_into().unwrap_or(1),
             duration_ms: None,
             calendar_event: note_calendar_event_from_row(&row),
+            video_analysis: query(Self::NOTE_VIDEO_ANALYSIS_QUERY)
+                .bind(note_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .and_then(|r| r.get("video_analysis")),
             generated_content: row.get("generated_content"),
             edited_content: row.get("edited_content"),
             transcript: self.latest_transcript(note_id).await?,
@@ -2393,11 +2420,57 @@ impl Repositories {
     }
 
     pub async fn delete_profile_data(&self, profile: &str) -> Result<(), sqlx::error::Error> {
+        self.delete_profile_data_with_artifact_paths(profile)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn delete_profile_data_with_artifact_paths(
+        &self,
+        profile: &str,
+    ) -> Result<Vec<String>, sqlx::error::Error> {
         if profile == "default" {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let rows = query(
+            "SELECT path
+             FROM (
+               SELECT v.path AS path FROM video_artifacts v JOIN notes n ON n.id=v.note_id WHERE n.profile=?
+               UNION SELECT v.partial_path AS path FROM video_artifacts v JOIN notes n ON n.id=v.note_id WHERE n.profile=?
+               UNION
+               SELECT a.path AS path
+               FROM audio_artifacts a
+               JOIN notes n ON n.id = a.note_id
+               WHERE n.profile = ?
+               UNION
+               SELECT a.partial_path AS path
+               FROM audio_artifacts a
+               JOIN notes n ON n.id = a.note_id
+               WHERE n.profile = ? AND a.partial_path IS NOT NULL
+               UNION
+               SELECT rs.final_path AS path
+               FROM recording_sessions rs
+               JOIN notes n ON n.id = rs.note_id
+               WHERE n.profile = ? AND rs.final_path IS NOT NULL
+               UNION
+               SELECT rs.partial_path AS path
+               FROM recording_sessions rs
+               JOIN notes n ON n.id = rs.note_id
+               WHERE n.profile = ? AND rs.partial_path IS NOT NULL
+             )
+             WHERE path IS NOT NULL AND trim(path) != ''",
+        )
+        .bind(profile)
+        .bind(profile)
+        .bind(profile)
+        .bind(profile)
+        .bind(profile)
+        .bind(profile)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let artifact_paths = rows.into_iter().map(|row| row.get("path")).collect();
         query("DELETE FROM notes WHERE profile = ?")
             .bind(profile)
             .execute(&mut *transaction)
@@ -2437,7 +2510,7 @@ impl Repositories {
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
-        Ok(())
+        Ok(with_video_capture_metadata(artifact_paths))
     }
 
     pub async fn remove_session_from_folder(
@@ -2797,11 +2870,13 @@ impl Repositories {
         &self,
         note_id: &str,
     ) -> Result<Vec<String>, sqlx::error::Error> {
-        let rows = query("SELECT path FROM audio_artifacts WHERE note_id = ?")
-            .bind(note_id)
+        let rows = query("SELECT path FROM audio_artifacts WHERE note_id = ? UNION SELECT partial_path AS path FROM video_artifacts WHERE note_id=? UNION SELECT path FROM video_artifacts WHERE note_id=?")
+            .bind(note_id).bind(note_id).bind(note_id)
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows.into_iter().map(|row| row.get("path")).collect())
+        Ok(with_video_capture_metadata(
+            rows.into_iter().map(|row| row.get("path")).collect(),
+        ))
     }
 
     /// Recording files owned by a profile's notes, for the delete-permanently
@@ -2813,6 +2888,9 @@ impl Repositories {
         let rows = query(
             "SELECT path
              FROM (
+               SELECT v.path AS path FROM video_artifacts v JOIN notes n ON n.id=v.note_id WHERE n.profile=?
+               UNION SELECT v.partial_path AS path FROM video_artifacts v JOIN notes n ON n.id=v.note_id WHERE n.profile=?
+               UNION
                SELECT a.path AS path
                FROM audio_artifacts a
                JOIN notes n ON n.id = a.note_id
@@ -2839,9 +2917,13 @@ impl Repositories {
         .bind(profile)
         .bind(profile)
         .bind(profile)
+        .bind(profile)
+        .bind(profile)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|row| row.get("path")).collect())
+        Ok(with_video_capture_metadata(
+            rows.into_iter().map(|row| row.get("path")).collect(),
+        ))
     }
 
     pub(crate) async fn note_audio_export_selection(
@@ -2899,9 +2981,22 @@ impl Repositories {
     }
 
     pub async fn delete_note(&self, note_id: &str) -> Result<(), sqlx::error::Error> {
-        let mut tx = self.pool.begin().await?;
+        self.delete_note_with_artifact_paths(note_id)
+            .await
+            .map(|_| ())
+    }
+
+    /// Take the write lock before reading paths so a concurrent video checkpoint
+    /// cannot invalidate the WAL snapshot when the transaction starts deleting.
+    pub async fn delete_note_with_artifact_paths(
+        &self,
+        note_id: &str,
+    ) -> Result<Vec<String>, sqlx::error::Error> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let files = note_artifact_paths_for_deletion(&mut tx, note_id).await?;
         delete_note_records(&mut tx, note_id).await?;
-        tx.commit().await
+        tx.commit().await?;
+        Ok(with_video_capture_metadata(files))
     }
 
     pub(crate) async fn delete_note_in_profile(
@@ -2932,19 +3027,10 @@ impl Repositories {
                 "Stop the recording before deleting its note.",
             ));
         }
-        let paths = query("SELECT path FROM audio_artifacts WHERE note_id = ? UNION SELECT partial_path AS path FROM audio_artifacts WHERE note_id = ? AND partial_path IS NOT NULL UNION SELECT final_path AS path FROM recording_sessions WHERE note_id = ? AND final_path IS NOT NULL UNION SELECT partial_path AS path FROM recording_sessions WHERE note_id = ? AND partial_path IS NOT NULL")
-            .bind(note_id)
-            .bind(note_id)
-            .bind(note_id)
-            .bind(note_id)
-            .fetch_all(&mut *tx)
-            .await?
-            .into_iter()
-            .map(|row| row.get("path"))
-            .collect();
+        let paths = note_artifact_paths_for_deletion(&mut tx, note_id).await?;
         delete_note_records(&mut tx, note_id).await?;
         tx.commit().await?;
-        Ok(paths)
+        Ok(with_video_capture_metadata(paths))
     }
 
     /// Deletes a deterministic meeting-start draft only while it is still the
@@ -2980,11 +3066,23 @@ impl Repositories {
     }
 
     pub async fn delete_notes(&self, note_ids: &[String]) -> Result<(), sqlx::error::Error> {
-        let mut tx = self.pool.begin().await?;
+        self.delete_notes_with_artifact_paths(note_ids)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn delete_notes_with_artifact_paths(
+        &self,
+        note_ids: &[String],
+    ) -> Result<Vec<String>, sqlx::error::Error> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut files = Vec::new();
         for note_id in note_ids {
+            files.extend(note_artifact_paths_for_deletion(&mut tx, note_id).await?);
             delete_note_records(&mut tx, note_id).await?;
         }
-        tx.commit().await
+        tx.commit().await?;
+        Ok(with_video_capture_metadata(files))
     }
 
     pub async fn delete_folder(
@@ -2992,8 +3090,34 @@ impl Repositories {
         folder_id: &str,
         delete_notes: bool,
     ) -> Result<(), sqlx::error::Error> {
+        self.delete_folder_with_artifact_paths(folder_id, delete_notes)
+            .await
+            .map(|_| ())
+    }
+
+    /// Snapshot the exact deleted notes' files in the same transaction; expose paths only after commit.
+    pub async fn delete_folder_with_artifact_paths(
+        &self,
+        folder_id: &str,
+        delete_notes: bool,
+    ) -> Result<Vec<String>, sqlx::error::Error> {
         let now = timestamp();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+
+        let mut artifact_paths = Vec::new();
+        if delete_notes {
+            let rows = query("SELECT path FROM (
+                SELECT a.path AS path FROM audio_artifacts a JOIN note_folders nf ON nf.note_id=a.note_id WHERE nf.folder_id=?
+                UNION SELECT a.partial_path AS path FROM audio_artifacts a JOIN note_folders nf ON nf.note_id=a.note_id WHERE nf.folder_id=?
+                UNION SELECT v.path AS path FROM video_artifacts v JOIN note_folders nf ON nf.note_id=v.note_id WHERE nf.folder_id=?
+                UNION SELECT v.partial_path AS path FROM video_artifacts v JOIN note_folders nf ON nf.note_id=v.note_id WHERE nf.folder_id=?
+                UNION SELECT rs.final_path AS path FROM recording_sessions rs JOIN note_folders nf ON nf.note_id=rs.note_id WHERE nf.folder_id=?
+                UNION SELECT rs.partial_path AS path FROM recording_sessions rs JOIN note_folders nf ON nf.note_id=rs.note_id WHERE nf.folder_id=?
+            ) WHERE path IS NOT NULL AND trim(path) != ''")
+                .bind(folder_id).bind(folder_id).bind(folder_id).bind(folder_id).bind(folder_id).bind(folder_id)
+                .fetch_all(&mut *tx).await?;
+            artifact_paths = rows.into_iter().map(|row| row.get("path")).collect();
+        }
 
         if delete_notes {
             query(
@@ -3079,7 +3203,8 @@ impl Repositories {
             .execute(&mut *tx)
             .await?;
 
-        tx.commit().await
+        tx.commit().await?;
+        Ok(with_video_capture_metadata(artifact_paths))
     }
 
     pub async fn set_note_status(
@@ -5317,6 +5442,229 @@ impl Repositories {
         })
     }
 
+    /// Capture metadata exists even if permission was denied, so generation can explain the fallback.
+    pub async fn create_video_artifact(
+        &self,
+        note_id: &str,
+        session_id: &str,
+        partial_path: &str,
+        path: &str,
+    ) -> Result<(), sqlx::Error> {
+        query("INSERT INTO video_artifacts (recording_session_id,note_id,partial_path,path,status) VALUES (?,?,?,?,'recording')")
+            .bind(session_id).bind(note_id).bind(partial_path).bind(path).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn finalize_video_artifact(
+        &self,
+        session_id: &str,
+        result: &crate::audio::capture::video::VideoResult,
+    ) -> Result<bool, sqlx::Error> {
+        let result = query("UPDATE video_artifacts SET status=?,offset_ms=?,app=?,title=?,width=?,height=?,duration_ms=?,failure_reason=? WHERE recording_session_id=?")
+            .bind(if result.failure_reason.is_some() { "failed" } else { "valid" })
+            .bind(result.offset_ms).bind(&result.app).bind(&result.title).bind(result.width).bind(result.height)
+            .bind(result.duration_ms).bind(&result.failure_reason).bind(session_id).execute(&self.pool).await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn video_artifact_exists(&self, session_id: &str) -> Result<bool, sqlx::Error> {
+        Ok(
+            query("SELECT 1 FROM video_artifacts WHERE recording_session_id=?")
+                .bind(session_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .is_some(),
+        )
+    }
+
+    /// Processing may wait for video; the audio finalization path never does.
+    pub async fn wait_for_video_capture(&self, session_id: &str) {
+        let wait = async {
+            loop {
+                let state =
+                    query("SELECT status FROM video_artifacts WHERE recording_session_id=?")
+                        .bind(session_id)
+                        .fetch_optional(&self.pool)
+                        .await;
+                if !matches!(state, Ok(Some(row)) if row.get::<String,_>("status") == "recording") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        };
+        if tokio::time::timeout(std::time::Duration::from_secs(12), wait)
+            .await
+            .is_err()
+        {
+            let _=tokio::time::timeout(std::time::Duration::from_secs(2),
+                query("UPDATE video_artifacts SET status='failed',failure_reason='capture_failed' WHERE recording_session_id=? AND status='recording'")
+                    .bind(session_id).execute(&self.pool)).await;
+        }
+    }
+
+    pub async fn note_video_input(
+        &self,
+        session_id: &str,
+        paths: &crate::app_paths::AppPaths,
+    ) -> Result<Option<crate::providers::notes::NoteVideoInput>, AppError> {
+        let _recovery = video_recovery_lock(session_id).lock_owned().await;
+        self.note_video_input_locked(session_id, paths).await
+    }
+
+    async fn note_video_input_locked(
+        &self,
+        session_id: &str,
+        paths: &crate::app_paths::AppPaths,
+    ) -> Result<Option<crate::providers::notes::NoteVideoInput>, AppError> {
+        let Some(row) = query("SELECT * FROM video_artifacts WHERE recording_session_id=?")
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let mut input = crate::providers::notes::NoteVideoInput {
+            path: String::new(),
+            offset_ms: row.get("offset_ms"),
+            app: row.get("app"),
+            title: row.get("title"),
+            failure_reason: row.get("failure_reason"),
+        };
+        // Failed captures are deliberately transcript-only, even if their partial file is readable.
+        if input.failure_reason.is_some() {
+            return Ok(Some(input));
+        }
+        let note_id: String = row.get("note_id");
+        let stored_final: String = row.get("path");
+        let stored_partial: String = row.get("partial_path");
+        let contained = contained_session_video_paths(
+            paths,
+            &note_id,
+            session_id,
+            &stored_partial,
+            &stored_final,
+        );
+        let Ok((partial, final_path)) = contained else {
+            input.failure_reason = Some("capture_failed".into());
+            return Ok(Some(input));
+        };
+        if row.get::<String, _>("status") == "recording" {
+            match crate::audio::capture::video::video_recovery_state(&partial, &stored_partial) {
+                crate::audio::capture::video::VideoRecoveryState::Active => {
+                    input.failure_reason = Some("capture_failed".into());
+                    return Ok(Some(input));
+                }
+                crate::audio::capture::video::VideoRecoveryState::Finished(Some(reason)) => {
+                    input.failure_reason = Some(reason);
+                    let changed = query("UPDATE video_artifacts SET status='failed',failure_reason=? WHERE recording_session_id=? AND status='recording'")
+                        .bind(&input.failure_reason).bind(session_id).execute(&self.pool).await?;
+                    if changed.rows_affected() == 0 {
+                        return Box::pin(self.note_video_input_locked(session_id, paths)).await;
+                    }
+                    return Ok(Some(input));
+                }
+                crate::audio::capture::video::VideoRecoveryState::Finished(None) => {}
+            }
+            let Some(timing) = crate::audio::capture::video::recovery_timing(
+                &partial,
+                session_id,
+                &stored_partial,
+            ) else {
+                input.failure_reason = Some("capture_failed".into());
+                let changed = query("UPDATE video_artifacts SET status='failed',failure_reason='capture_failed' WHERE recording_session_id=? AND status='recording'")
+                    .bind(session_id).execute(&self.pool).await?;
+                if changed.rows_affected() == 0 {
+                    // The worker may have committed and removed sidecars after our
+                    // initial read. Re-read its terminal row, never overwrite it.
+                    return Box::pin(self.note_video_input_locked(session_id, paths)).await;
+                }
+                return Ok(Some(input));
+            };
+            input.offset_ms = timing.offset_ms;
+            input.app = timing.app.clone();
+            input.title = timing.title.clone();
+            let recovered = if crate::audio::capture::video::mp4_recovery::recover(&final_path) {
+                true
+            } else if crate::audio::capture::video::mp4_recovery::recover(&partial) {
+                std::fs::rename(&partial, &final_path).is_ok()
+            } else {
+                false
+            };
+            input.failure_reason = (!recovered).then(|| "capture_failed".into());
+            if !self
+                .complete_video_recovery(
+                    session_id,
+                    paths,
+                    &partial,
+                    &final_path,
+                    &timing,
+                    recovered,
+                )
+                .await?
+            {
+                // A competing finalizer/deletion won the recording -> terminal
+                // transition. Re-read that settled result instead of inventing a failure.
+                return Box::pin(self.note_video_input_locked(session_id, paths)).await;
+            }
+        }
+        if input.failure_reason.is_none() {
+            // Revalidate after rename before a CLI may receive the path. Never expose an outside path.
+            match paths.contained_recording_file(&final_path) {
+                Ok(canonical)
+                    if canonical.is_file()
+                        && canonical.parent() == final_path.parent()
+                        && !std::fs::symlink_metadata(&final_path)
+                            .is_ok_and(|m| m.file_type().is_symlink()) =>
+                {
+                    input.path = canonical.to_string_lossy().into_owned();
+                }
+                _ => input.failure_reason = Some("capture_failed".into()),
+            }
+        }
+        Ok(Some(input))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_video_recovery(
+        &self,
+        session_id: &str,
+        paths: &crate::app_paths::AppPaths,
+        partial: &std::path::Path,
+        final_path: &std::path::Path,
+        timing: &crate::audio::capture::video::VideoResult,
+        recovered: bool,
+    ) -> Result<bool, AppError> {
+        let updated=query("UPDATE video_artifacts SET status=?,failure_reason=?,offset_ms=?,app=?,title=?,width=?,height=? WHERE recording_session_id=? AND status='recording' AND failure_reason IS NULL")
+            .bind(if recovered {"recovered"}else{"failed"})
+            .bind((!recovered).then_some("capture_failed"))
+            .bind(timing.offset_ms).bind(&timing.app).bind(&timing.title).bind(timing.width).bind(timing.height)
+            .bind(session_id).execute(&self.pool).await?;
+        if updated.rows_affected() > 0 {
+            return Ok(true);
+        }
+        // A concurrent capture failure keeps its bytes and reason. Definitive deletion revokes all paths.
+        if !self.video_artifact_exists(session_id).await? {
+            for file in with_video_capture_metadata(vec![
+                partial.to_string_lossy().into_owned(),
+                final_path.to_string_lossy().into_owned(),
+            ]) {
+                let _ = paths.remove_recording_file(file);
+            }
+        }
+        Ok(false)
+    }
+
+    pub async fn video_artifact_paths_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        let rows = query("SELECT path FROM video_artifacts WHERE recording_session_id=? UNION SELECT partial_path FROM video_artifacts WHERE recording_session_id=?")
+            .bind(session_id).bind(session_id).fetch_all(&self.pool).await?;
+        Ok(with_video_capture_metadata(
+            rows.into_iter().map(|row| row.get("path")).collect(),
+        ))
+    }
+
     pub async fn create_generation_result(
         &self,
         note_id: &str,
@@ -5326,11 +5674,34 @@ impl Repositories {
         provider: &str,
         prompt_version: &str,
     ) -> Result<String, sqlx::error::Error> {
+        self.create_generation_result_with_video_analysis(
+            note_id,
+            transcript_id,
+            content,
+            title_suggestion,
+            provider,
+            prompt_version,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_generation_result_with_video_analysis(
+        &self,
+        note_id: &str,
+        transcript_id: &str,
+        content: &str,
+        title_suggestion: Option<String>,
+        provider: &str,
+        prompt_version: &str,
+        analysis: Option<&str>,
+    ) -> Result<String, sqlx::error::Error> {
         let now = timestamp();
         let id = Uuid::new_v4().to_string();
         query(
-            "INSERT INTO generation_results (id, note_id, transcript_id, content, title_suggestion, provider, prompt_version, status, retry_count, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'succeeded', 0, ?, ?)",
+            "INSERT INTO generation_results (id, note_id, transcript_id, content, title_suggestion, provider, prompt_version, video_analysis, status, retry_count, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'succeeded', 0, ?, ?)",
         )
         .bind(&id)
         .bind(note_id)
@@ -5339,6 +5710,7 @@ impl Repositories {
         .bind(title_suggestion)
         .bind(provider)
         .bind(prompt_version)
+        .bind(analysis)
         .bind(&now)
         .bind(&now)
         .execute(&self.pool)
@@ -5368,29 +5740,36 @@ impl Repositories {
         }))
     }
 
+    /// Commit ownership revocation independently from file cleanup and note hydration.
+    pub async fn commit_recording_discard(
+        &self,
+        session_id: &str,
+        note_id: &str,
+    ) -> Result<(), sqlx::error::Error> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        query("UPDATE recording_sessions SET status = 'failed', last_error = 'Discarded by user' WHERE id = ?")
+            .bind(session_id).execute(&mut *transaction).await?;
+        query("UPDATE audio_artifacts SET status = 'discarded', last_error = 'Discarded by user' WHERE recording_session_id = ?")
+            .bind(session_id).execute(&mut *transaction).await?;
+        query("DELETE FROM video_artifacts WHERE recording_session_id=?")
+            .bind(session_id)
+            .execute(&mut *transaction)
+            .await?;
+        query("UPDATE notes SET processing_status=?, last_error=?, updated_at=? WHERE id=? RETURNING id")
+            .bind(ProcessingStatus::Failed.as_db())
+            .bind("Recording discarded")
+            .bind(timestamp())
+            .bind(note_id)
+            .fetch_one(&mut *transaction).await?;
+        transaction.commit().await
+    }
+
     pub async fn mark_recording_discarded(
         &self,
         session_id: &str,
         note_id: &str,
     ) -> Result<NoteDto, sqlx::error::Error> {
-        query("UPDATE recording_sessions SET status = 'failed', last_error = 'Discarded by user' WHERE id = ?")
-            .bind(session_id)
-            .execute(&self.pool)
-            .await?;
-        query(
-            "UPDATE audio_artifacts
-             SET status = 'discarded', last_error = 'Discarded by user'
-             WHERE recording_session_id = ?",
-        )
-        .bind(session_id)
-        .execute(&self.pool)
-        .await?;
-        self.set_note_status(
-            note_id,
-            ProcessingStatus::Failed,
-            Some("Recording discarded".to_string()),
-        )
-        .await?;
+        self.commit_recording_discard(session_id, note_id).await?;
         self.get_note(note_id).await
     }
 
@@ -5886,6 +6265,159 @@ async fn insert_browser_approval_event(
     Ok(())
 }
 
+/// Validate the exact session and every existing path before reading or repairing video bytes.
+fn contained_session_video_paths(
+    paths: &crate::app_paths::AppPaths,
+    note_id: &str,
+    session_id: &str,
+    partial: &str,
+    final_path: &str,
+) -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    use std::io::{Error, ErrorKind};
+    let dir = paths.recording_session_dir(note_id, session_id)?;
+    let expected_partial = dir.join("window.partial.mp4");
+    let expected_final = dir.join("window.mp4");
+    if std::path::Path::new(partial) != expected_partial
+        || std::path::Path::new(final_path) != expected_final
+    {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "video path does not belong to this recording session",
+        ));
+    }
+    if std::fs::symlink_metadata(&paths.recordings_dir)?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "recordings root is a symlink",
+        ));
+    }
+    let mut targets = vec![expected_partial.clone(), expected_final.clone()];
+    targets.extend(
+        [
+            "pid",
+            "status.json",
+            "lease",
+            "control.json",
+            "control.tmp",
+            "control.pipe",
+            "timing.json",
+            "capture.json",
+            "capture.tmp",
+        ]
+        .map(|extension| expected_partial.with_extension(extension)),
+    );
+    // Reject symlink components before canonicalization, including linked sidecars/session directories.
+    for target in &targets {
+        let relative = target.strip_prefix(&paths.recordings_dir).map_err(|_| {
+            Error::new(
+                ErrorKind::PermissionDenied,
+                "video path is outside recordings",
+            )
+        })?;
+        let mut current = paths.recordings_dir.clone();
+        for component in relative.components() {
+            current.push(component);
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(Error::new(
+                        ErrorKind::PermissionDenied,
+                        "video path contains a symlink",
+                    ))
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    let canonical_dir = paths.contained_recording_file(&dir)?;
+    for target in &targets {
+        match paths.contained_recording_file(target) {
+            Ok(canonical) if canonical.parent() == Some(canonical_dir.as_path()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    "video path is outside its session",
+                ))
+            }
+        }
+    }
+    Ok((
+        canonical_dir.join("window.partial.mp4"),
+        canonical_dir.join("window.mp4"),
+    ))
+}
+
+async fn note_artifact_paths_for_deletion(
+    tx: &mut sqlx::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
+    note_id: &str,
+) -> Result<Vec<String>, sqlx::error::Error> {
+    let rows = query(
+        "SELECT path FROM (
+        SELECT path FROM audio_artifacts WHERE note_id=?
+        UNION SELECT partial_path AS path FROM audio_artifacts WHERE note_id=?
+        UNION SELECT path FROM video_artifacts WHERE note_id=?
+        UNION SELECT partial_path AS path FROM video_artifacts WHERE note_id=?
+        UNION SELECT final_path AS path FROM recording_sessions WHERE note_id=?
+        UNION SELECT partial_path AS path FROM recording_sessions WHERE note_id=?
+    ) WHERE path IS NOT NULL AND trim(path) != ''",
+    )
+    .bind(note_id)
+    .bind(note_id)
+    .bind(note_id)
+    .bind(note_id)
+    .bind(note_id)
+    .bind(note_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows.into_iter().map(|row| row.get("path")).collect())
+}
+
+fn with_video_capture_metadata(paths: Vec<String>) -> Vec<String> {
+    let partials = paths
+        .iter()
+        .filter(|path| path.ends_with(".partial.mp4"))
+        .collect::<Vec<_>>();
+    // Revoke every capture before unlinking MP4s, including a helper that starts late.
+    let mut all = partials
+        .iter()
+        .map(|path| {
+            std::path::Path::new(path)
+                .with_extension("lease")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    let metadata = partials
+        .iter()
+        .flat_map(|path| {
+            [
+                "status.json",
+                "pid",
+                "control.json",
+                "control.tmp",
+                "control.pipe",
+                "timing.json",
+                "capture.json",
+                "capture.tmp",
+            ]
+            .map(|extension| {
+                std::path::Path::new(path)
+                    .with_extension(extension)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        })
+        .collect::<Vec<_>>();
+    all.extend(paths);
+    all.extend(metadata);
+    all
+}
+
 fn nonnegative_u64(value: i64) -> u64 {
     value.max(0) as u64
 }
@@ -6168,6 +6700,553 @@ mod tests {
             .await
             .expect("migrations");
         Repositories::new(pool)
+    }
+
+    #[tokio::test]
+    async fn authorized_note_deletion_removes_video_and_preserves_refusal_guards() {
+        let repos = test_repositories().await;
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::app_paths::AppPaths::from_data_dir(temp.path().join("data")).unwrap();
+        let note = repos.create_note("default", None).await.unwrap();
+        let recording = "video-authorized-delete";
+        let dir = paths.recording_session_dir(&note.id, recording).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let partial = dir.join("window.partial.mp4");
+        let final_path = dir.join("window.mp4");
+        repos
+            .create_recording_session(
+                &note.id,
+                recording,
+                RecordingSourceMode::MicrophoneOnly,
+                "",
+                "",
+                None,
+            )
+            .await
+            .unwrap();
+        repos
+            .create_video_artifact(
+                &note.id,
+                recording,
+                &partial.to_string_lossy(),
+                &final_path.to_string_lossy(),
+            )
+            .await
+            .unwrap();
+        let files = [
+            partial.clone(),
+            final_path.clone(),
+            partial.with_extension("lease"),
+            partial.with_extension("status.json"),
+            partial.with_extension("pid"),
+            partial.with_extension("control.json"),
+            partial.with_extension("control.tmp"),
+            partial.with_extension("control.pipe"),
+            partial.with_extension("timing.json"),
+            partial.with_extension("capture.json"),
+            partial.with_extension("capture.tmp"),
+        ];
+        for file in &files {
+            std::fs::write(file, b"synthetic fixture").unwrap();
+        }
+        query("INSERT INTO agent_sessions(id,title,model,status,created_at,updated_at) VALUES ('delete-session','Fixture','test','running','now','now')")
+            .execute(&repos.pool).await.unwrap();
+        query("INSERT INTO agent_runs(id,session_id,model,status,started_at,updated_at,run_config_json) VALUES ('delete-run','delete-session','test','running','now','now','{\"dataPartition\":\"default\"}')")
+            .execute(&repos.pool).await.unwrap();
+        let authority = crate::domain::turn_authority::TurnAuthority::new();
+        for (profile, run, expected) in [
+            ("other", "delete-run", "turn_expired"),
+            ("default", "missing-run", "turn_expired"),
+            ("default", "delete-run", "note_recording_active"),
+        ] {
+            let error = repos
+                .delete_note_in_profile(
+                    profile,
+                    &note.id,
+                    Some(("delete-session", run, &authority)),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, expected);
+            assert!(files.iter().all(|file| file.exists()));
+            assert!(repos.video_artifact_exists(recording).await.unwrap());
+            assert!(repos.get_note(&note.id).await.is_ok());
+        }
+        let error = repos
+            .delete_note_in_profile("other", &note.id, None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "note_not_found");
+        query("UPDATE recording_sessions SET status='validated' WHERE id=?")
+            .bind(recording)
+            .execute(&repos.pool)
+            .await
+            .unwrap();
+        let revoked = crate::domain::turn_authority::TurnAuthority::new();
+        revoked.revoke();
+        let error = repos
+            .delete_note_in_profile(
+                "default",
+                &note.id,
+                Some(("delete-session", "delete-run", &revoked)),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "turn_expired");
+        assert!(files.iter().all(|file| file.exists()));
+        assert!(repos.video_artifact_exists(recording).await.unwrap());
+        let deleted = repos
+            .delete_note_in_profile(
+                "default",
+                &note.id,
+                Some(("delete-session", "delete-run", &authority)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::path::Path::new(&deleted[0]),
+            partial.with_extension("lease")
+        );
+        for file in &files {
+            assert!(deleted
+                .iter()
+                .any(|path| std::path::Path::new(path) == file));
+        }
+        for file in deleted {
+            paths.remove_recording_file(file).unwrap();
+        }
+        assert!(files.iter().all(|file| !file.exists()));
+        assert!(!repos.video_artifact_exists(recording).await.unwrap());
+        assert!(repos.get_note(&note.id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn video_deletion_waits_for_concurrent_writer_before_snapshotting_paths() {
+        for mode in ["note", "batch", "folder", "profile"] {
+            let temp = tempfile::tempdir().unwrap();
+            let pool = SqlitePoolOptions::new()
+                .max_connections(2)
+                .connect_with(
+                    SqliteConnectOptions::new()
+                        .filename(temp.path().join("notes.sqlite3"))
+                        .create_if_missing(true)
+                        .journal_mode(SqliteJournalMode::Wal)
+                        .busy_timeout(StdDuration::from_secs(5)),
+                )
+                .await
+                .unwrap();
+            crate::db::migrations::run_migrations(&pool).await.unwrap();
+            let repos = Repositories::new(pool.clone());
+            let folder = repos
+                .create_folder("video-contention", "Fixture", None)
+                .await
+                .unwrap();
+            let note = repos
+                .create_note("video-contention", Some(folder.id.clone()))
+                .await
+                .unwrap();
+            repos
+                .create_recording_session(
+                    &note.id,
+                    "capture",
+                    RecordingSourceMode::MicrophoneOnly,
+                    "mic.partial.wav",
+                    "mic.wav",
+                    None,
+                )
+                .await
+                .unwrap();
+            repos
+                .create_video_artifact(&note.id, "capture", "window.partial.mp4", "before.mp4")
+                .await
+                .unwrap();
+            let mut writer = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+            query("UPDATE video_artifacts SET path='committed.mp4' WHERE recording_session_id='capture'")
+                .execute(&mut *writer).await.unwrap();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let deleting = tokio::spawn(async move {
+                let _ = started.send(());
+                match mode {
+                    "note" => repos.delete_note_with_artifact_paths(&note.id).await,
+                    "batch" => repos.delete_notes_with_artifact_paths(&[note.id]).await,
+                    "folder" => {
+                        repos
+                            .delete_folder_with_artifact_paths(&folder.id, true)
+                            .await
+                    }
+                    _ => {
+                        repos
+                            .delete_profile_data_with_artifact_paths("video-contention")
+                            .await
+                    }
+                }
+            });
+            ready.await.unwrap();
+            tokio::time::sleep(StdDuration::from_millis(100)).await;
+            let waited = !deleting.is_finished();
+            writer.commit().await.unwrap();
+            let result = tokio::time::timeout(StdDuration::from_secs(5), deleting)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                waited,
+                "{mode} must wait for the write lock before reading artifact paths: {result:?}"
+            );
+            let paths = result.unwrap();
+            assert!(
+                paths.iter().any(|p| p == "committed.mp4"),
+                "{mode}: {paths:?}"
+            );
+            assert!(
+                !paths.iter().any(|p| p == "before.mp4"),
+                "{mode}: stale snapshot"
+            );
+            let remaining = query("SELECT COUNT(*) AS count FROM video_artifacts")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(remaining.get::<i64, _>("count"), 0);
+            pool.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn video_analysis_is_atomic_and_latest_generation_hydrates_note() {
+        let repos = test_repositories().await;
+        let note = repos.create_note("default", None).await.unwrap();
+        assert!(repos
+            .get_note(&note.id)
+            .await
+            .unwrap()
+            .video_analysis
+            .is_none());
+        let plan = query(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            Repositories::NOTE_VIDEO_ANALYSIS_QUERY,
+        ))
+        .bind(&note.id)
+        .fetch_all(&repos.pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get::<String, _>("detail"))
+        .collect::<Vec<_>>();
+        assert!(
+            plan.iter().any(|step| step.starts_with("SEARCH ")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|step| step.contains("SCAN ") || step.contains("TEMP B-TREE")),
+            "latest video notice must seek without scanning history or sorting: {plan:?}",
+        );
+        repos
+            .create_recording_session(
+                &note.id,
+                "video-analysis",
+                RecordingSourceMode::MicrophoneOnly,
+                "mic.partial.wav",
+                "mic.wav",
+                None,
+            )
+            .await
+            .unwrap();
+        let artifact = repos
+            .create_pending_source_artifact(
+                &note.id,
+                "video-analysis",
+                "microphone",
+                "mic.partial.wav",
+                "mic.wav",
+            )
+            .await
+            .unwrap();
+        let transcript = repos
+            .create_transcript(&note.id, &artifact.id, "spoken", None, "test")
+            .await
+            .unwrap();
+        repos
+            .create_generation_result_with_video_analysis(
+                &note.id,
+                &transcript.id,
+                "visual",
+                None,
+                "claude",
+                "video-v1",
+                Some("analyzed"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            repos
+                .get_note(&note.id)
+                .await
+                .unwrap()
+                .video_analysis
+                .as_deref(),
+            Some("analyzed")
+        );
+        repos
+            .create_generation_result(
+                &note.id,
+                &transcript.id,
+                "audio only",
+                None,
+                "test",
+                "note-v1",
+            )
+            .await
+            .unwrap();
+        // Equal timestamps must still prefer the last inserted result, including
+        // its absent notice, rather than retain an older analyzed generation.
+        query(
+            "UPDATE generation_results SET created_at='2026-10-28T12:00:00.000Z' WHERE note_id=?",
+        )
+        .bind(&note.id)
+        .execute(&repos.pool)
+        .await
+        .unwrap();
+        assert!(repos
+            .get_note(&note.id)
+            .await
+            .unwrap()
+            .video_analysis
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn video_recovery_commit_cleans_late_rename_when_note_was_deleted() {
+        for deleted in [false, true] {
+            let repos = test_repositories().await;
+            let temp = tempfile::tempdir().unwrap();
+            let paths =
+                crate::app_paths::AppPaths::from_data_dir(temp.path().join("data")).unwrap();
+            let note = repos.create_note("default", None).await.unwrap();
+            let session = "video-recovery-race";
+            let dir = paths.recording_session_dir(&note.id, session).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            let partial = dir.join("window.partial.mp4");
+            let final_path = dir.join("window.mp4");
+            repos
+                .create_recording_session(
+                    &note.id,
+                    session,
+                    RecordingSourceMode::MicrophoneOnly,
+                    "mic.partial.wav",
+                    "mic.wav",
+                    None,
+                )
+                .await
+                .unwrap();
+            repos
+                .create_video_artifact(
+                    &note.id,
+                    session,
+                    &partial.to_string_lossy(),
+                    &final_path.to_string_lossy(),
+                )
+                .await
+                .unwrap();
+            if deleted {
+                let files = repos
+                    .delete_note_with_artifact_paths(&note.id)
+                    .await
+                    .unwrap();
+                for file in files {
+                    let _ = paths.remove_recording_file(file);
+                }
+            }
+            // The deletion snapshot already unlinked final, then recovery's rename wins the filesystem race.
+            std::fs::write(&partial, b"owned late recovery").unwrap();
+            std::fs::rename(&partial, &final_path).unwrap();
+            std::fs::write(partial.with_extension("capture.json"), b"owned manifest").unwrap();
+            let result = crate::audio::capture::video::VideoResult {
+                offset_ms: 1250,
+                ..Default::default()
+            };
+            let retained = repos
+                .complete_video_recovery(session, &paths, &partial, &final_path, &result, true)
+                .await
+                .unwrap();
+            assert_eq!(retained, !deleted);
+            assert_eq!(final_path.exists(), !deleted);
+            assert_eq!(partial.with_extension("capture.json").exists(), !deleted);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn video_partial_is_recovered_and_deleted_with_note() {
+        let _settings_lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let repos = test_repositories().await;
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::app_paths::AppPaths::from_data_dir(temp.path().join("data")).unwrap();
+        let note = repos.create_note("default", None).await.unwrap();
+        let session = "video-recovery";
+        let dir = paths.recording_session_dir(&note.id, session).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let partial = dir.join("window.partial.mp4");
+        let final_path = dir.join("window.mp4");
+        repos
+            .create_recording_session(
+                &note.id,
+                session,
+                RecordingSourceMode::MicrophoneOnly,
+                "mic.partial.wav",
+                "mic.wav",
+                None,
+            )
+            .await
+            .unwrap();
+        repos
+            .create_video_artifact(
+                &note.id,
+                session,
+                &partial.to_string_lossy(),
+                &final_path.to_string_lossy(),
+            )
+            .await
+            .unwrap();
+        let env = crate::llm::shell_env::login_env().await;
+        let Some(ffmpeg) = env.which("ffmpeg") else {
+            eprintln!("video fixture needs ffmpeg; skipped");
+            return;
+        };
+        assert!(tokio::process::Command::new(ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=64x64:rate=5",
+                "-t",
+                "2",
+                "-c:v",
+                "libx264",
+                "-movflags",
+                "frag_keyframe+empty_moov+default_base_moof",
+                "-frag_duration",
+                "500000",
+                "-f",
+                "mp4"
+            ])
+            .arg(&partial)
+            .status()
+            .await
+            .unwrap()
+            .success());
+        let nonce = "d0bee8db-9cf8-4fc3-94d9-e0c911e6db13";
+        crate::audio::capture::video::write_capture_binding(&partial, session, nonce, 1000)
+            .unwrap();
+        std::fs::write(
+            partial.with_extension("pid"),
+            serde_json::json!({"pid":2147483647,"captureNonce":nonce}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(partial.with_extension("timing.json"),serde_json::json!({"schema":1,"recordingSessionId":session,"partialPath":partial,"captureNonce":nonce,"audioStartedHostMs":1000,"startedAtHostMs":2250,"pausedBeforeFirstMs":0,"offsetMs":1250,"app":"Chrome","title":"Meet - recovery","width":64,"height":64}).to_string()).unwrap();
+        let paths = std::sync::Arc::new(paths);
+        let held = super::video_recovery_lock(session).lock_owned().await;
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+        let spawn_recovery = || {
+            let repos = Repositories::new(repos.pool.clone());
+            let paths = std::sync::Arc::clone(&paths);
+            let barrier = std::sync::Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                repos
+                    .note_video_input(session, &paths)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            })
+        };
+        let first = spawn_recovery();
+        let second = spawn_recovery();
+        barrier.wait().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!first.is_finished() && !second.is_finished());
+        assert!(!final_path.exists() && partial.exists());
+        drop(held);
+        let input = first.await.unwrap();
+        let concurrent = second.await.unwrap();
+        assert!(concurrent.failure_reason.is_none());
+        assert_eq!(input.path, concurrent.path);
+        assert_eq!(
+            input.path,
+            final_path.canonicalize().unwrap().to_string_lossy()
+        );
+        assert!(input.failure_reason.is_none());
+        assert_eq!(input.offset_ms, 1250);
+        assert!(final_path.exists());
+        assert!(!partial.exists());
+        let files = repos.audio_artifact_paths_for_note(&note.id).await.unwrap();
+        assert!(files
+            .iter()
+            .any(|p| std::path::Path::new(p).canonicalize().ok().as_ref()
+                == Some(&std::path::PathBuf::from(&input.path))));
+        repos.delete_note(&note.id).await.unwrap();
+        for file in files {
+            let _ = paths.remove_recording_file(&file);
+        }
+        assert!(!final_path.exists());
+        assert!(repos
+            .note_video_input(session, &paths)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_video_keeps_fallback_reason_without_a_file() {
+        let repos = test_repositories().await;
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::app_paths::AppPaths::from_data_dir(temp.path().join("data")).unwrap();
+        let note = repos.create_note("default", None).await.unwrap();
+        repos
+            .create_recording_session(
+                &note.id,
+                "video-denied",
+                RecordingSourceMode::MicrophoneOnly,
+                "mic.partial.wav",
+                "mic.wav",
+                None,
+            )
+            .await
+            .unwrap();
+        repos
+            .create_video_artifact(
+                &note.id,
+                "video-denied",
+                "/missing/video.partial.mp4",
+                "/missing/video.mp4",
+            )
+            .await
+            .unwrap();
+        let result = crate::audio::capture::video::VideoResult {
+            failure_reason: Some("permission_denied".into()),
+            ..Default::default()
+        };
+        repos
+            .finalize_video_artifact("video-denied", &result)
+            .await
+            .unwrap();
+        let input = repos
+            .note_video_input("video-denied", &paths)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(input.failure_reason.as_deref(), Some("permission_denied"));
+        repos
+            .mark_recording_discarded("video-denied", &note.id)
+            .await
+            .unwrap();
+        assert!(repos
+            .note_video_input("video-denied", &paths)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     async fn concurrent_test_repositories() -> (tempfile::TempDir, Repositories) {
