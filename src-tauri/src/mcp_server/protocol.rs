@@ -186,7 +186,7 @@ async fn read_resource(
                 ctx.revalidate()
                     .await
                     .map_err(|e| (SERVER_UNAVAILABLE, e.message))?;
-                let row = sqlx::query::query("SELECT COALESCE(json_extract(r.run_config_json, '$.workspace'), s.workspace_path) AS workspace_path, s.safety_mode, s.approval_mode FROM agent_sessions s JOIN agent_runs r ON r.session_id = s.id WHERE s.id = ? AND r.id = ?")
+                let row = sqlx::query::query("SELECT COALESCE(json_extract(r.run_config_json, '$.workspace'), s.workspace_path) AS workspace_path, s.safety_mode, CASE WHEN s.safety_mode = 'unrestricted' THEN 'bypass' ELSE 'approvals' END AS approval_mode FROM agent_sessions s JOIN agent_runs r ON r.session_id = s.id WHERE s.id = ? AND r.id = ?")
                     .bind(&binding.session_id).bind(&binding.run_id).fetch_optional(&ctx.data.notes).await
                     .map_err(|_| (SERVER_UNAVAILABLE, "Session context unavailable".into()))?
                     .ok_or((SERVER_UNAVAILABLE, "Session context unavailable".into()))?;

@@ -2232,7 +2232,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_mode_migration_defaults_existing_sessions_to_approvals() {
+    async fn legacy_approval_mode_column_is_retained_with_its_original_default() {
         let pool = test_pool().await;
         run_migration_catalog(&pool, &MIGRATIONS[..53])
             .await

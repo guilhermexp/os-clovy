@@ -336,6 +336,127 @@ describe("LlmProvidersSection", () => {
     expect(activitySelect.value).toBe("none");
   });
 
+  it("tests an unmeasured Activity CLI before applying it, showing pending feedback", async () => {
+    mocks.llmDetectClis.mockResolvedValue(
+      sampleClis.map((cli) => (cli.id === "agy" ? { ...cli, installed: true } : cli)),
+    );
+    let finish: (value: { latencyMs: number; structuredOutput: "json_schema" }) => void = () =>
+      undefined;
+    mocks.llmTestProvider.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    const onProvidersChanged = vi.fn();
+    render(<LlmProvidersSection onProvidersChanged={onProvidersChanged} />);
+    const select = await screen.findByRole("combobox", { name: "Activity" });
+    await user.selectOptions(select, "cli:agy");
+    expect(mocks.llmTestProvider).toHaveBeenCalledWith({ kind: "cli", id: "agy" });
+    expect(mocks.llmSetUsage).not.toHaveBeenCalled();
+    expect(select).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Testing...");
+    expect(screen.getByRole("button", { name: "Test Local Ollama" })).toBeDisabled();
+    for (const button of screen.getAllByRole("button", { name: /^Test(?:ing\.\.\.)?$/ })) {
+      expect(button).toBeDisabled();
+    }
+    await act(async () => finish({ latencyMs: 42, structuredOutput: "json_schema" }));
+    await waitFor(() => expect(select).toHaveValue("cli:agy"));
+    expect(mocks.llmSetUsage).toHaveBeenCalledWith("activity", { kind: "cli", id: "agy" });
+    expect(select).toBeEnabled();
+    expect(onProvidersChanged).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        usage: expect.objectContaining({ activity: { kind: "cli", id: "agy" } }),
+      }),
+    );
+    expect(mocks.openAntigravityLogin).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "llm_cli_failed",
+      "Antigravity failed: Not authenticated. Please login.",
+      "Use Authenticate in Clovy",
+    ],
+    ["llm_cli_failed", "Antigravity failed: Authentication failed", "Use Authenticate in Clovy"],
+    ["llm_cli_failed", "Antigravity failed: Please log in", "Use Authenticate in Clovy"],
+    ["llm_cli_failed", "Antigravity failed: HTTP 401 Unauthorized", "Use Authenticate in Clovy"],
+    [
+      "llm_cli_failed",
+      "Antigravity failed: quota exhausted; please login again",
+      "provider's usage limit",
+    ],
+    [
+      "llm_cli_failed",
+      "Antigravity failed: synthetic executable unavailable",
+      "synthetic executable unavailable",
+    ],
+    ["llm_cli_failed", "Antigravity failed: quota exhausted", "provider's usage limit"],
+    ["llm_timeout", "The provider timed out.", "did not answer in time"],
+  ])("keeps Activity unchanged on a failed automatic test (%s: %s)", async (code, message, expected) => {
+    mocks.llmDetectClis.mockResolvedValue(
+      sampleClis.map((cli) => (cli.id === "agy" ? { ...cli, installed: true } : cli)),
+    );
+    mocks.llmTestProvider.mockRejectedValueOnce({ code, message });
+    const user = userEvent.setup();
+    render(<LlmProvidersSection />);
+    const select = await screen.findByRole("combobox", { name: "Activity" });
+    await user.selectOptions(select, "cli:agy");
+    expect(await screen.findByRole("alert")).toHaveTextContent(expected);
+    expect(screen.getByRole("alert")).not.toHaveTextContent("JSON schema");
+    expect(select).toHaveValue("none");
+    expect(select).toBeEnabled();
+    expect(mocks.llmSetUsage).not.toHaveBeenCalled();
+    expect(mocks.openAntigravityLogin).not.toHaveBeenCalled();
+  });
+
+  it("explains missing managed-profile login in Portuguese without opening authentication", async () => {
+    applyInterfaceLocale("pt-BR");
+    mocks.llmDetectClis.mockResolvedValue(
+      sampleClis.map((cli) => (cli.id === "agy" ? { ...cli, installed: true } : cli)),
+    );
+    mocks.llmTestProvider.mockRejectedValueOnce({
+      code: "llm_cli_failed",
+      message: "Antigravity failed: not logged in",
+    });
+    const user = userEvent.setup();
+    render(<LlmProvidersSection />);
+    await user.selectOptions(await screen.findByRole("combobox", { name: "Atividade" }), "cli:agy");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Use Autenticar no Clovy");
+    expect(mocks.openAntigravityLogin).not.toHaveBeenCalled();
+  });
+
+  it("keeps an insufficient measured result and does not retest it on another choice", async () => {
+    mocks.llmTestProvider.mockResolvedValueOnce({ latencyMs: 42, structuredOutput: "none" });
+    const user = userEvent.setup();
+    render(<LlmProvidersSection />);
+    const select = await screen.findByRole("combobox", { name: "Activity" });
+    await user.selectOptions(select, "cli:claude");
+    expect(await screen.findByRole("alert")).toHaveTextContent("JSON schema support");
+    expect(select).toHaveValue("none");
+    expect(mocks.llmSetUsage).not.toHaveBeenCalled();
+    mocks.llmSetUsage.mockRejectedValueOnce({
+      code: "llm_structured_output_insufficient",
+      message: "Insufficient",
+    });
+    await user.selectOptions(select, "cli:claude");
+    await waitFor(() => expect(select).toBeEnabled());
+    expect(mocks.llmTestProvider).toHaveBeenCalledTimes(1);
+    expect(await screen.findByRole("alert")).toHaveTextContent("JSON schema support");
+  });
+
+  it("does not automatically test an already measured CLI or a Notes choice", async () => {
+    mocks.llmProviders.mockResolvedValue({ ...sampleProviders, cliLevels: { claude: "strict" } });
+    const user = userEvent.setup();
+    render(<LlmProvidersSection />);
+    const select = await screen.findByRole("combobox", { name: "Activity" });
+    await user.selectOptions(select, "cli:claude");
+    await waitFor(() => expect(select).toHaveValue("cli:claude"));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Notes" }), "cli:claude");
+    expect(mocks.llmTestProvider).not.toHaveBeenCalled();
+  });
+
   it("default activity selection renders as None", async () => {
     render(<LlmProvidersSection />);
     expect(await screen.findByRole("heading", { name: "Local Ollama" })).toBeInTheDocument();

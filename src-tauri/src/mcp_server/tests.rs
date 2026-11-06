@@ -468,6 +468,12 @@ async fn context_uses_bound_session_and_hides_it_from_external_clients() {
     let broker = TestBroker::new([]).await;
     let mut binding = broker.turn(CliKind::Claude, true).await;
     binding.surface = "home".into();
+    // A retained legacy preference is not the current configured policy.
+    sqlx::query::query("UPDATE agent_sessions SET approval_mode = 'bypass' WHERE id = ?")
+        .bind(&binding.session_id)
+        .execute(broker.pool())
+        .await
+        .unwrap();
     let data = data(broker.pool().clone(), ActivityAccess::Off);
     let message = json!({"jsonrpc":"2.0", "id":1, "method":"resources/read", "params":{"uri":"clovy://context"}});
     let external = protocol::handle(&data, &message).await.unwrap();
@@ -486,7 +492,24 @@ async fn context_uses_bound_session_and_hides_it_from_external_clients() {
     assert_eq!(bound["session"]["id"], binding.session_id);
     assert_eq!(bound["session"]["runId"], binding.run_id);
     assert_eq!(bound["session"]["surface"], "home");
+    assert_eq!(bound["session"]["approvalMode"], "approvals");
     assert_eq!(bound["session"]["effectiveApprovalMode"], "approvals");
+
+    // Configuration changes apply to the next run, not this run's snapshot.
+    sqlx::query::query("UPDATE agent_sessions SET safety_mode = 'unrestricted' WHERE id = ?")
+        .bind(&binding.session_id)
+        .execute(broker.pool())
+        .await
+        .unwrap();
+    let changed = protocol::handle_in(&ctx, &message).await.unwrap();
+    let changed: Value =
+        serde_json::from_str(changed["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        changed["session"]["configuredExecutionPolicy"],
+        "unrestricted"
+    );
+    assert_eq!(changed["session"]["approvalMode"], "bypass");
+    assert_eq!(changed["session"]["effectiveApprovalMode"], "approvals");
 }
 
 #[test]

@@ -1,7 +1,6 @@
 export const AGENT_RUNTIME_PROTOCOL_VERSION = 1 as const;
 
 export type AgentSafetyMode = "sandboxed" | "unrestricted";
-export type AgentApprovalMode = "approvals" | "bypass";
 export type AgentSessionStatus =
   | "idle"
   | "running"
@@ -18,7 +17,6 @@ export type AgentSessionDto = {
   status: AgentSessionStatus;
   model: string;
   safetyMode: AgentSafetyMode;
-  approvalMode?: AgentApprovalMode;
   workspacePath: string;
   source: AgentSessionSource;
   createdAt: string;
@@ -50,7 +48,7 @@ export type AgentRunDto = {
   sessionId: string;
   status: AgentRunStatus;
   model: string;
-  approvalMode?: AgentApprovalMode;
+  approvalMode?: "approvals" | "bypass";
   reasoningEffort?: "minimal" | "medium" | "high";
   startedAt?: string;
   completedAt?: string;
@@ -356,7 +354,6 @@ export type AgentRuntimeBindings = {
     profile?: string;
   }): Promise<AgentSessionDto>;
   renameSession(sessionId: string, title: string): Promise<AgentSessionDto>;
-  setApprovalMode(sessionId: string, approvalMode: AgentApprovalMode): Promise<AgentSessionDto>;
   branchSession?(sessionId: string, itemId: string): Promise<AgentSessionDto>;
   deleteSession(sessionId: string): Promise<void>;
   listItems(sessionId: string): Promise<AgentItemDto[]>;

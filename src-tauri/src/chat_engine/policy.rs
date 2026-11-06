@@ -7,8 +7,8 @@
 //! | Turn | Claude Code | Codex |
 //! |---|---|---|
 //! | attended, `sandboxed` | `--permission-mode default`; with Clovy's server `--allowedTools mcp__clovy__*` | `sandbox_mode="workspace-write"`, no network, `approval_policy="never"` |
-//! | attended, `unrestricted` | `--permission-mode acceptEdits` (edits in the workspace; shell still asks) | as `sandboxed` with network |
-//! | unattended (routines) | `--permission-mode default`, `--tools`/`--allowedTools` of the read-only set, `--strict-mcp-config`; with Clovy's server `--disallowedTools mcp__clovy__approve_action` | `sandbox_mode="read-only"`, `approval_policy="never"` |
+//! | attended, `unrestricted` | `--permission-mode acceptEdits` (edits in the workspace; shell still asks) | `sandbox_mode="danger-full-access"`, `approval_policy="never"` |
+//! | unattended (routines) | `--permission-mode default`, `--tools`/`--allowedTools` of the read-only set, `--strict-mcp-config`; with Clovy's server `--disallowedTools mcp__clovy__approve_action` | `sandbox_mode="read-only"` in `sandboxed`; `danger-full-access` in `unrestricted`; `approval_policy="never"` |
 //!
 //! Every Codex turn gets `web_search="live"` (spike S5) and, with Clovy's
 //! server, `default_tools_approval_mode="approve"` for that server only (S2:
@@ -19,7 +19,8 @@
 //! Attended turns never get `--strict-mcp-config`, so the MCP servers the
 //! user configured in the CLI still load (D7).
 //!
-//! Never, in any combination: the flags in [`FORBIDDEN`].
+//! The fragments in [`FORBIDDEN`] stay forbidden except the exact Codex
+//! `sandbox_mode="danger-full-access"` setting in `unrestricted` turns.
 
 use crate::agent_sessions::AgentSafetyMode;
 use crate::approval_broker::APPROVAL_TIMEOUT;
@@ -70,8 +71,8 @@ impl RoutineBuiltinTools {
     }
 }
 
-/// Arguments (and argument fragments) no turn may ever carry: each skips or
-/// pre-grants approvals, or lifts the sandbox.
+/// Unsafe argument fragments. Only the exact Codex sandbox setting generated
+/// for `unrestricted` turns is allowed to contain `danger-full-access`.
 pub const FORBIDDEN: &[&str] = &[
     "--dangerously-skip-permissions",
     "--allow-dangerously-skip-permissions",
@@ -186,16 +187,17 @@ fn claude(permissions: TurnPermissions, interaction_tools: bool) -> TurnPolicy {
 
 fn codex(permissions: TurnPermissions) -> TurnPolicy {
     let mut config = Vec::new();
-    if permissions.attended {
+    if permissions.safety_mode == AgentSafetyMode::Unrestricted {
+        config.push("sandbox_mode=\"danger-full-access\"".to_string());
+    } else if permissions.attended {
         config.push("sandbox_mode=\"workspace-write\"".to_string());
-        let network = permissions.safety_mode == AgentSafetyMode::Unrestricted;
-        config.push(format!("sandbox_workspace_write.network_access={network}"));
+        config.push("sandbox_workspace_write.network_access=false".to_string());
     } else {
         // Commands may read but never write or reach the network.
         config.push("sandbox_mode=\"read-only\"".to_string());
     }
-    // `exec` never waits for an approval; Codex's own actions stay inside
-    // the sandbox.
+    // `exec` never waits for native approval. The explicit safety mode above
+    // selects Codex's restrictions; Clovy tools retain their broker policy.
     config.push("approval_policy=\"never\"".to_string());
     config.push("web_search=\"live\"".to_string());
     let mcp_config = [

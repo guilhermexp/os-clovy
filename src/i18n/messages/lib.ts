@@ -118,6 +118,10 @@ export default defineMessages({
     "lib.errors.llm.cliEmpty": "{cli} returned an empty answer.",
     "lib.errors.llm.cliInvalidJson": "{cli} did not return valid JSON.",
     "lib.errors.llm.timeout": "The provider did not answer in time.",
+    "lib.errors.llm.agyAuthenticationRequired":
+      "Antigravity is not authenticated in Clovy's profile. Use Authenticate in Clovy, then choose it again.",
+    "lib.errors.llm.usageLimit":
+      "The provider's usage limit was reached. Check its quota and try again later.",
     "lib.errors.llm.structuredOutput":
       "Activity features need a provider with JSON schema support. Test the provider first, or choose one that supports JSON schema.",
     "lib.errors.llm.activityProviderMissing":
@@ -531,6 +535,10 @@ export default defineMessages({
     "lib.errors.llm.cliEmpty": "{cli} devolveu uma resposta vazia.",
     "lib.errors.llm.cliInvalidJson": "{cli} não devolveu um JSON válido.",
     "lib.errors.llm.timeout": "O provedor não respondeu a tempo.",
+    "lib.errors.llm.agyAuthenticationRequired":
+      "O Antigravity não está autenticado no perfil do Clovy. Use Autenticar no Clovy e escolha o provedor novamente.",
+    "lib.errors.llm.usageLimit":
+      "O limite de uso do provedor foi atingido. Confira a cota e tente novamente mais tarde.",
     "lib.errors.llm.structuredOutput":
       "Os recursos de atividade precisam de um provedor com suporte a JSON schema. Teste o provedor primeiro ou escolha um que suporte JSON schema.",
     "lib.errors.llm.activityProviderMissing":

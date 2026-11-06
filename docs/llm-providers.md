@@ -79,6 +79,15 @@ when the answer does not validate).
 A level is stored only if the endpoint still has the URL and model that were
 tested. Features that need JSON must refuse levels below `json_schema`.
 
+When selecting an installed, one-shot-capable CLI for Activity without a measured
+level, Settings runs the provider test automatically and shows its testing state.
+A successful test persists the measured level before the selection is applied;
+only `json_schema` or `strict` qualifies. Authentication failures point to
+"Authenticate in Clovy" for Antigravity's private profile; quota and timeout
+failures retain their own messages. A measured insufficient level uses the JSON
+schema error. This does not change the CLI catalog level, schema flags, or the
+backend's validation, and it never authenticates automatically.
+
 ## CLI isolation contract
 
 A one-shot prompt carries untrusted text (meeting transcripts, notes,
@@ -283,16 +292,18 @@ argument: its installer ships `agy.exe`.
   turn builder only places them. The rule is: never a flag that skips or
   pre-grants approvals (`--dangerously-skip-permissions`,
   `--allow-dangerously-skip-permissions`, `--permission-mode bypassPermissions`,
-  `--dangerously-bypass-approvals-and-sandbox`, `danger-full-access`,
+  `--dangerously-bypass-approvals-and-sandbox`,
   `--approve-for-me`, `--yolo`, `--full-auto`, `--always-approve`,
   `--allow-all*`, `--approve-mcps`; `policy::FORBIDDEN`, swept over every
-  combination by a test), and in an attended turn `--allowedTools` only for
+  combination by a test). The sole full-access exception is Codex with
+  `unrestricted`: it uses `danger-full-access` and `approval_policy="never"`,
+  including a routine explicitly configured with that mode. In an attended turn `--allowedTools` only for
   `mcp__clovy__*`:
 
   | Turn | claude | codex |
   |---|---|---|
   | attended, `sandboxed` | `--permission-mode default`; with Clovy's server `--allowedTools mcp__clovy__*` | `sandbox_mode="workspace-write"`, `sandbox_workspace_write.network_access=false`, `approval_policy="never"` |
-  | attended, `unrestricted` | `--permission-mode acceptEdits` (edits in the workspace without asking; shell and the rest still ask), same `--allowedTools` | as `sandboxed` with `network_access=true` |
+  | attended, `unrestricted` | `--permission-mode acceptEdits` (edits in the workspace without asking; shell and the rest still ask), same `--allowedTools` | `sandbox_mode="danger-full-access"`, `approval_policy="never"` |
   | unattended (routines) | see below | see below |
 
   Every codex turn also gets `web_search="live"` and, with Clovy's server,
@@ -312,6 +323,12 @@ argument: its installer ships `agy.exe`.
   connections. MCP servers configured in Clovy use the Clovy gateway;
   their stored credentials are not copied into the CLI configuration
   ([ADR-0063](adr/0063-cli-turns-get-write-tools-through-an-approval-broker.md)).
+  Clovy tool approval is derived from the runtime mode at run creation:
+  `sandboxed` requires approval and `unrestricted` bypasses it for attended runs.
+  There is one mode control, offered only before a new focused conversation.
+  Home remains sandboxed. The legacy session `approval_mode` column has no
+  authority; retries also derive a fresh run snapshot. Clarifications still
+  require a person, and unattended tools never inherit bypass.
   Approval events keep the run's event cursor in the envelope and the persisted
   session-wide item position in `data.itemSequence`. Requested and updated cards
   use that same item position, so live approval does not move into older turns
@@ -325,7 +342,7 @@ argument: its installer ships `agy.exe`.
   call that tool itself, and it asks questions through Clovy's
   `request_clarification` instead of `AskUserQuestion`
   ([mcp-server.md](mcp-server.md#approval-broker)). Codex has no such hook
-  in `exec`: its own actions stay inside its sandbox. On codex, and on claude
+  in `exec`: its own actions use the selected sandbox policy. On codex, and on claude
   without Clovy's server, an action the
   CLI refuses for lack of approval becomes a failed tool item whose error
   says so (`needsApproval: true` in the event). Measured: claude answers the
@@ -347,7 +364,8 @@ argument: its installer ships `agy.exe`.
   `--strict-mcp-config` (Clovy's server only), plus, with Clovy's server,
   `--disallowedTools mcp__clovy__approve_action` (no permission prompt to
   answer, so the model never sees that tool); codex gets
-  `sandbox_mode="read-only"`, `approval_policy="never"`, and the same web
+  `sandbox_mode="read-only"` for `sandboxed`, or `sandbox_mode="danger-full-access"`
+  for `unrestricted`, with `approval_policy="never"`, and the same web
   search and server settings as an attended turn. Clovy's write tools reach
   the broker, which refuses them at once (`unattended_requires_approval`).
   `chat_engine::check_policy` refuses an unattended turn on any other CLI

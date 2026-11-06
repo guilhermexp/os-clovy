@@ -185,3 +185,29 @@ well. Native OAuth remains separate from API-key billing. These settings and a
 private HOME do not establish an OS sandbox or unattended admission. Native
 app/terminal/Stop/browser and Windows acceptance remain separate evidence
 requirements. The broker, canonical history and routine policy stay unchanged.
+
+
+## 2026-11-06 addendum: one runtime-mode control
+
+The approved change `composer-modo-unico-e-agy-atividade` supersedes the separate
+conversation approval setting described on 2026-11-01. Each new run, including a
+retry, derives its immutable approval snapshot from the session runtime mode:
+`unrestricted` means `bypass`, and `sandboxed` means `approvals`. The old session
+`approval_mode` column remains as legacy data without authority; its setter and
+the second composer control are removed. The mode selector stays on new focused
+conversations only. Home remains sandboxed.
+
+This makes "Unrestricted" a single explicit choice for attended Clovy tool
+authority. It avoids two controls whose independent combinations obscured that
+choice. Policy-origin receipts, active-run checks, clarification prompts,
+connector grants, login and operating-system permissions stay intact. Unattended
+runs always require approval and still fail write requests without a person.
+
+By the owner's explicit decision, Codex alone also uses `danger-full-access`
+with `approval_policy="never"` in `unrestricted`, including routines configured
+with that mode. This supersedes the original sandbox-only Codex consequence for
+that mode: native Codex actions have full filesystem access, while unattended
+Clovy writes remain refused by the broker. Sandboxed Codex retains its restricted
+policy. Claude and Antigravity keep their existing flags; `bypassPermissions`,
+`--yolo` and other approval-skipping flags remain prohibited. The trade-off is
+full native Codex authority in return for an explicit unrestricted choice.

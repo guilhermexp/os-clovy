@@ -44,28 +44,25 @@ async fn user_sessions_are_created_in_the_active_data_partition_atomically() {
 #[tokio::test]
 async fn run_configuration_and_streamed_reasoning_survive_resume_and_hydration() {
     let pool = memory_database().await;
-    let repository = AgentRepository::new(pool);
+    let repository = AgentRepository::new(pool.clone());
     let session = repository
         .create_session(
             "Durable run",
             "private-auto",
-            clovy_lib::agent_sessions::AgentSafetyMode::Sandboxed,
+            clovy_lib::agent_sessions::AgentSafetyMode::Unrestricted,
             None,
         )
         .await
         .expect("session");
-    repository
-        .set_approval_mode_in_profile(&session.id, "default", AgentApprovalMode::Bypass)
-        .await
-        .expect("set approval preference");
     let run = repository
         .create_run(&session.id, "private-auto", Some("medium"))
         .await
         .expect("run");
-    repository
-        .set_approval_mode_in_profile(&session.id, "default", AgentApprovalMode::Approvals)
+    query("UPDATE agent_sessions SET safety_mode = 'sandboxed' WHERE id = ?")
+        .bind(&session.id)
+        .execute(&pool)
         .await
-        .expect("change next run preference");
+        .expect("change next run safety mode");
     let config = serde_json::json!({
         "model": "private-auto",
         "instructions": "Unattended routine instructions",

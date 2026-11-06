@@ -189,15 +189,22 @@ routines `false`), and the surface (`chat` or `routine`).
 
 ## Approval broker
 
-Each conversation has an approval mode, initially `approvals`. The desktop
-can set `bypass` for that conversation; the host snapshots the mode at the
-start of each run, so a change during a run applies to the next one. Bypass
-authorizes approval requests for that run, while clarifications still require
-a person. It does not change the CLI's execution policy, connector grants,
-authentication, or operating-system permissions. Unattended turns do not
-inherit bypass. Automatic authorizations are recorded before the tool may
-continue, with `authorizationOrigin: "session_bypass"`; one-shot decisions
-have `authorizationOrigin: "user_once"`. Both identify the policy run.
+Each run derives its approval mode from the session's runtime mode when the
+run is created: `unrestricted` snapshots `bypass`, and `sandboxed` snapshots
+`approvals`. There is no separate approval control or setter command. The
+legacy session `approval_mode` column is retained without authority, so even a
+legacy `bypass` value in a sandboxed conversation requires approval. Retries
+capture the current runtime mode through the same run-creation path.
+
+For attended runs, bypass authorizes Clovy tool approval requests, while
+clarifications still require a person. Unattended turns always require approval
+and cannot inherit bypass. Connector grants, authentication and operating-system
+permissions remain independent. Automatic authorizations are recorded before
+the tool may continue, with `authorizationOrigin: "session_bypass"`; one-shot
+decisions have `authorizationOrigin: "user_once"`. Both identify the policy run.
+Codex in `unrestricted` separately uses `danger-full-access`, including routines
+explicitly configured with that mode; the broker still refuses unattended write
+requests. See [LLM providers](llm-providers.md#cli-chat-engine).
 For a bound turn, `clovy://context` includes the host-bound session and run,
 engine, surface, data partition, project assignments, workspace and execution
 and approval policies. An external client receives temporal context only.

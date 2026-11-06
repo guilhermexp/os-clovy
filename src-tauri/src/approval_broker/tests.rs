@@ -65,9 +65,9 @@ struct Harness {
 #[tokio::test]
 async fn bypass_uses_run_snapshot_and_records_a_receipt() {
     let harness = Harness::new().await;
-    harness
-        .repository
-        .set_approval_mode_in_profile(&harness.session_id, "default", AgentApprovalMode::Bypass)
+    sqlx::query::query("UPDATE agent_sessions SET safety_mode = 'unrestricted' WHERE id = ?")
+        .bind(&harness.session_id)
+        .execute(&harness.io.pool)
         .await
         .unwrap();
     assert_eq!(
@@ -85,10 +85,11 @@ async fn bypass_uses_run_snapshot_and_records_a_receipt() {
         .await
         .unwrap();
     let mut turn = harness.turn();
+    turn.safety_mode = AgentSafetyMode::Unrestricted;
     turn.run_id = run.id.clone();
-    harness
-        .repository
-        .set_approval_mode_in_profile(&harness.session_id, "default", AgentApprovalMode::Approvals)
+    sqlx::query::query("UPDATE agent_sessions SET safety_mode = 'sandboxed' WHERE id = ?")
+        .bind(&harness.session_id)
+        .execute(&harness.io.pool)
         .await
         .unwrap();
     assert_eq!(
@@ -131,9 +132,9 @@ async fn bypass_uses_run_snapshot_and_records_a_receipt() {
 #[tokio::test]
 async fn bypass_does_not_authorize_when_receipt_cannot_be_written() {
     let harness = Harness::new().await;
-    harness
-        .repository
-        .set_approval_mode_in_profile(&harness.session_id, "default", AgentApprovalMode::Bypass)
+    sqlx::query::query("UPDATE agent_sessions SET safety_mode = 'unrestricted' WHERE id = ?")
+        .bind(&harness.session_id)
+        .execute(&harness.io.pool)
         .await
         .unwrap();
     let run = harness
@@ -144,6 +145,7 @@ async fn bypass_does_not_authorize_when_receipt_cannot_be_written() {
     sqlx::query::query("CREATE TRIGGER deny_receipt BEFORE INSERT ON agent_items BEGIN SELECT RAISE(FAIL, 'receipt unavailable'); END")
         .execute(&harness.io.pool).await.unwrap();
     let mut turn = harness.turn();
+    turn.safety_mode = AgentSafetyMode::Unrestricted;
     turn.run_id = run.id;
     assert!(matches!(
         harness
@@ -210,12 +212,12 @@ async fn legacy_or_cancelled_run_never_inherits_bypass() {
 }
 
 #[tokio::test]
-async fn changing_preference_does_not_settle_a_pending_request() {
+async fn changing_safety_mode_does_not_settle_a_pending_request() {
     let harness = Harness::new().await;
     let (task, id) = harness.ask(approval("save_memory", json!({}))).await;
-    harness
-        .repository
-        .set_approval_mode_in_profile(&harness.session_id, "default", AgentApprovalMode::Bypass)
+    sqlx::query::query("UPDATE agent_sessions SET safety_mode = 'unrestricted' WHERE id = ?")
+        .bind(&harness.session_id)
+        .execute(&harness.io.pool)
         .await
         .unwrap();
     assert_eq!(harness.item(&id).await["status"], "pending");
@@ -231,6 +233,7 @@ async fn changing_preference_does_not_settle_a_pending_request() {
         .await
         .unwrap();
     let mut turn = harness.turn();
+    turn.safety_mode = AgentSafetyMode::Unrestricted;
     turn.run_id = next.id;
     assert_eq!(
         harness.broker.effective_policy(&turn).await.unwrap().mode,

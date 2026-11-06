@@ -337,6 +337,17 @@ the only remote). Issues and branches use the harness tickets, not `JUN-*`.
   only at the protocol boundary and resolve once after the managed-origin guard.
   Unknown/unpublished aliases and raw names needing encoding are refused.
   Public/unbound MCP and other CLI kinds retain their existing behavior.
+- **One runtime-mode control:** each run (including retries) derives Clovy tool
+  approval from the saved safety mode: `sandboxed` requires approval;
+  `unrestricted` bypasses it only when attended. The legacy session
+  `approval_mode` column has no authority and no setter command. Home stays
+  sandboxed; the selector stays on new focused conversations. Clarifications
+  still require a person, and unattended Clovy write requests remain refused.
+  Only Codex + `unrestricted` uses `danger-full-access`, including routines
+  explicitly configured with that mode. Other approval-skipping flags remain
+  forbidden. Activity selection of an installed one-shot CLI without a measured
+  structured-output level runs the provider test before applying the selection;
+  authentication remains an explicit user action (docs/llm-providers.md).
 - **CLI approval ordering:** the event envelope's `sequence` is run-local;
   `data.itemSequence` is the persisted session-wide item position. Keep the
   same item position when settling a card; hydration must not repair live
