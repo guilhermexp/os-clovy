@@ -53,6 +53,12 @@ the desktop engine's pinned Rust 1.89.0 (`agent-desktop` source commit
 the universal targets only on stable does not supply them to the engine.
 The subsequent stable setup remains the default for the Clovy host.
 
+The MCP relay's architecture check passes the binary path before
+`-verify_arch` and its architecture list. Xcode 16's `lipo` treats a trailing
+path as another architecture, even though newer Xcode versions accept it.
+Keep that check enabled: both real slices must validate before combining
+and signing the universal relay.
+
 To roll back, delete the bad release (`gh release delete vX.Y.Z`): `latest`
 falls back to the previous one. Installs that already updated reinstall the
 previous `.dmg` by hand.

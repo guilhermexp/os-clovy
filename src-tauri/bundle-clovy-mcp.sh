@@ -74,7 +74,7 @@ const [executable] = paths;
 if (paths.size !== 1 || !expected.includes(executable) || !statSync(executable).isFile())
   throw new Error("Cargo did not report exactly the requested target/profile MCP relay");
 // Reject placeholders, non-Mach-O files and a conflicting Cargo default target.
-step("lipo", ["-verify_arch", arch, executable]);
+step("lipo", [executable, "-verify_arch", arch]);
 process.stdout.write(executable);
 NODE
 }
