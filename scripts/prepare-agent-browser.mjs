@@ -440,6 +440,13 @@ function signMac(directory) {
     }
   };
   visit(directory);
+  // Sign inside-out: a bundle's main executable seals its nested code, so
+  // deeper items (e.g. framework helper apps that ship unsigned in some
+  // Chrome for Testing builds) must be signed before the binaries and
+  // bundles that contain them. At equal depth, bundles go before files.
+  const depth = (file) => file.split(path.sep).length;
+  const isBundle = (file) => /\.(app|framework|xpc)$/.test(file);
+  targets.sort((a, b) => depth(b) - depth(a) || Number(isBundle(b)) - Number(isBundle(a)));
   for (const file of targets)
     run("/usr/bin/codesign", [
       "--force",

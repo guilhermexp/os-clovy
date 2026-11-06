@@ -157,6 +157,16 @@ For a universal bundle, pass `--target universal-apple-darwin` to prepare both
 native platform subtrees. Each architecture keeps its matching Chrome tree and
 engine executable under `native/agent-browser/<platform>/`.
 
+The macOS overlay removes the inherited browser entry from `bundle.resources`
+with a JSON merge patch `null` and copies `../resources/agent-browser` through
+`bundle.macOS.files` to `Resources/native/agent-browser`. Tauri CLI 2.11.3
+preserves file and directory symlinks on this copy path, including the versioned
+Chrome framework links; the generic resources copier does not. Other native
+helpers keep their existing resource entries. Runtime paths stay the same.
+Tauri copies these files before signing the enclosing app, then uses that same
+final app for the DMG and updater tar archive (which does not follow symlinks).
+Do not repair or re-sign just one packaged artifact after bundling.
+
 Preparation signs Mach-O files, nested frameworks and apps from the inside out
 with `APPLE_SIGNING_IDENTITY`, or ad hoc when absent, preserving Chrome's
 entitlements. The engine is signed with the same build identity. The staged

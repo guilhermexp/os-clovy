@@ -15,7 +15,7 @@
       "../.tauri-helper/Clovy Dictation Helper.app": "native/bin/Clovy Dictation Helper.app",
       "../.tauri-helper/clovy-mcp": "native/bin/clovy-mcp",
       "../.tauri-helper/Clovy Computer Use Driver.app": "native/bin/Clovy Computer Use Driver.app",
-      "../resources/agent-browser": "native/agent-browser",
+      "../resources/agent-browser": null,
       "resources/agent-skills": "native/agent-skills",
       "../.tauri-helper/Clovy Local Transcriber.app": "native/bin/Clovy Local Transcriber.app"
     },
@@ -24,6 +24,9 @@
       "entitlements": "Entitlements.plist",
       "exceptionDomain": "",
       "frameworks": [],
+      "files": {
+        "Resources/native/agent-browser": "../resources/agent-browser"
+      },
       "infoPlist": "Info.plist",
       "minimumSystemVersion": "14.0"
     }
