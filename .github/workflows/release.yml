@@ -1,6 +1,6 @@
 name: release
 
-# A tag vX.Y.Z (or a manual run naming one) builds Clovy for macOS and Windows,
+# A tag vX.Y.Z (or a manual run naming one) builds the selected Clovy platforms,
 # signs the updater packages with the owner's key and publishes a GitHub
 # release with latest.json (ADR-0069). A manual run defaults to dry_run: it
 # builds and uploads the files as run artifacts and publishes nothing.
@@ -34,6 +34,8 @@ jobs:
   version:
     name: Tag matches the version
     runs-on: ubuntu-latest
+    outputs:
+      platforms: ${{ steps.release_platforms.outputs.platforms }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -41,6 +43,19 @@ jobs:
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 24
+
+      - name: Select release platforms
+        id: release_platforms
+        env:
+          REQUESTED_PLATFORMS: ${{ vars.CLOVY_RELEASE_PLATFORMS }}
+        shell: bash
+        run: |
+          platforms="${REQUESTED_PLATFORMS:-all}"
+          case "$platforms" in
+            all|macos) ;;
+            *) echo "Invalid CLOVY_RELEASE_PLATFORMS: expected all or macos." >&2; exit 1 ;;
+          esac
+          echo "platforms=$platforms" >> "$GITHUB_OUTPUT"
 
       - name: Check the tag against the four version files
         env:
@@ -120,6 +135,7 @@ jobs:
   windows:
     name: Windows NSIS build
     needs: version
+    if: needs.version.outputs.platforms == 'all'
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -181,8 +197,13 @@ jobs:
 
   publish:
     name: Publish the release
-    # Both builds must pass: a failed platform publishes nothing.
+    # Only the selected platforms may succeed; failures/cancellations never publish.
     needs: [version, macos, windows]
+    if: >-
+      ${{ always() && !cancelled() &&
+          needs.version.result == 'success' && needs.macos.result == 'success' &&
+          ((needs.version.outputs.platforms == 'macos' && needs.windows.result == 'skipped') ||
+           (needs.version.outputs.platforms == 'all' && needs.windows.result == 'success')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -202,9 +223,11 @@ jobs:
           merge-multiple: true
 
       - name: Write latest.json
+        env:
+          RELEASE_PLATFORMS: ${{ needs.version.outputs.platforms }}
         run: |
           node scripts/release-manifest.mjs --tag "$RELEASE_TAG" --dir release-assets \
-            --out release-assets/latest.json --repo "$GITHUB_REPOSITORY"
+            --out release-assets/latest.json --repo "$GITHUB_REPOSITORY" --platforms "$RELEASE_PLATFORMS"
           ls -l release-assets
 
       - name: Keep the manifest as a run artifact (dry run)

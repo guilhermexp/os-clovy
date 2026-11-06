@@ -8,6 +8,19 @@ installer and its `.sig`. You can also build the installer locally with
 `scripts/build-windows.ps1` (prerequisites in `AGENTS.md`) and validate it
 with the checks below.
 
+The workflow defaults to both platforms (`CLOVY_RELEASE_PLATFORMS=all`, also
+when the non-secret repository variable is unset). For the temporary macOS-only
+0.1.6 publication, the owner selects `macos` and preserves/restores the previous
+variable state. The version job validates this choice once and passes its
+output to the build/publication jobs and manifest generator. In `macos`, the
+entire Windows job, including certificate preparation, is skipped. Windows
+awaits a valid signing certificate; its signing and verification requirements
+remain unchanged. This release has no Windows 0.1.6 installer or updater entry
+and does not reuse the Windows 0.1.5 package under a newer version. In `all`,
+Windows must build successfully with its certificate and updater signature;
+a skipped, failed or cancelled required job cannot publish a partial release.
+See [release-macos.md](release-macos.md) for the selection and restoration steps.
+
 The canonical installer directory is `artifacts/windows-signed`; the desktop
 workflow uploads `clovy-windows-signed-release-nsis` from that directory. There
 is no unsigned output alias.

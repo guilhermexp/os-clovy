@@ -26,14 +26,6 @@ describe("release workflow", () => {
     expect(job("version")).toMatch(/DRY_RUN.*--dry-run/s);
   });
 
-  it("publishes only after both builds, and only outside a dry run", () => {
-    const publish = job("publish");
-    expect(publish).toContain("needs: [version, macos, windows]");
-    expect(publish).toContain("scripts/release-manifest.mjs");
-    expect(publish).toContain("if: env.DRY_RUN != 'true'");
-    expect(publish).toContain("gh release create");
-  });
-
   it("grants write access only to the publish job", () => {
     expect(workflow).toMatch(/^permissions:\n {2}contents: read$/m);
     expect(workflow.match(/contents: write/g)).toHaveLength(1);

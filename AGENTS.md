@@ -479,6 +479,10 @@ for the installed app's updater. A local build is not a publication. Do not
 produce or install a local bundle with the production identity unless explicitly
 requested. Local proof uses an isolated debug identity; choose a fresh id for
 each run, replacing both occurrences in the example below.
+For an owner-approved macOS-only publication, preserve the full repository
+variable `CLOVY_RELEASE_PLATFORMS`, select `macos` before pushing the tag, then
+restore its previous value or absence after the run. The default `all` still
+requires a valid Windows signing certificate. See `docs/release-macos.md`.
 
 ```json
 {

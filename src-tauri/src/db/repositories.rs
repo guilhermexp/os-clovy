@@ -5507,14 +5507,16 @@ impl Repositories {
         session_id: &str,
         paths: &crate::app_paths::AppPaths,
     ) -> Result<Option<crate::providers::notes::NoteVideoInput>, AppError> {
-        let _recovery = video_recovery_lock(session_id).lock_owned().await;
-        self.note_video_input_locked(session_id, paths).await
+        let recovery = std::sync::Arc::new(video_recovery_lock(session_id).lock_owned().await);
+        self.note_video_input_locked(session_id, paths, recovery)
+            .await
     }
 
     async fn note_video_input_locked(
         &self,
         session_id: &str,
         paths: &crate::app_paths::AppPaths,
+        recovery: std::sync::Arc<tokio::sync::OwnedMutexGuard<()>>,
     ) -> Result<Option<crate::providers::notes::NoteVideoInput>, AppError> {
         let Some(row) = query("SELECT * FROM video_artifacts WHERE recording_session_id=?")
             .bind(session_id)
@@ -5544,7 +5546,7 @@ impl Repositories {
             &stored_partial,
             &stored_final,
         );
-        let Ok((partial, final_path)) = contained else {
+        let Ok((mut partial, mut final_path)) = contained else {
             input.failure_reason = Some("capture_failed".into());
             return Ok(Some(input));
         };
@@ -5559,7 +5561,8 @@ impl Repositories {
                     let changed = query("UPDATE video_artifacts SET status='failed',failure_reason=? WHERE recording_session_id=? AND status='recording'")
                         .bind(&input.failure_reason).bind(session_id).execute(&self.pool).await?;
                     if changed.rows_affected() == 0 {
-                        return Box::pin(self.note_video_input_locked(session_id, paths)).await;
+                        return Box::pin(self.note_video_input_locked(session_id, paths, recovery))
+                            .await;
                     }
                     return Ok(Some(input));
                 }
@@ -5576,20 +5579,31 @@ impl Repositories {
                 if changed.rows_affected() == 0 {
                     // The worker may have committed and removed sidecars after our
                     // initial read. Re-read its terminal row, never overwrite it.
-                    return Box::pin(self.note_video_input_locked(session_id, paths)).await;
+                    return Box::pin(self.note_video_input_locked(session_id, paths, recovery))
+                        .await;
                 }
                 return Ok(Some(input));
             };
             input.offset_ms = timing.offset_ms;
             input.app = timing.app.clone();
             input.title = timing.title.clone();
-            let recovered = if crate::audio::capture::video::mp4_recovery::recover(&final_path) {
-                true
-            } else if crate::audio::capture::video::mp4_recovery::recover(&partial) {
-                std::fs::rename(&partial, &final_path).is_ok()
-            } else {
-                false
-            };
+            let repair_guard = std::sync::Arc::clone(&recovery);
+            let recovered;
+            (partial, final_path, recovered) = tokio::task::spawn_blocking(move || {
+                // Keep the session locked even if the async caller is cancelled during repair.
+                let _recovery = repair_guard;
+                let recovered = if crate::audio::capture::video::mp4_recovery::recover(&final_path)
+                {
+                    true
+                } else if crate::audio::capture::video::mp4_recovery::recover(&partial) {
+                    std::fs::rename(&partial, &final_path).is_ok()
+                } else {
+                    false
+                };
+                (partial, final_path, recovered)
+            })
+            .await
+            .map_err(|error| AppError::new("video_recovery_failed", error.to_string()))?;
             input.failure_reason = (!recovered).then(|| "capture_failed".into());
             if !self
                 .complete_video_recovery(
@@ -5604,7 +5618,7 @@ impl Repositories {
             {
                 // A competing finalizer/deletion won the recording -> terminal
                 // transition. Re-read that settled result instead of inventing a failure.
-                return Box::pin(self.note_video_input_locked(session_id, paths)).await;
+                return Box::pin(self.note_video_input_locked(session_id, paths, recovery)).await;
             }
         }
         if input.failure_reason.is_none() {

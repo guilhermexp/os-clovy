@@ -1576,6 +1576,65 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn native_start_caches_preparation_errors_before_audio_and_allows_ack() {
+        for boundary in ["bundle", "video"] {
+            let state = MeetingStartRequestState::default();
+            let request_id = state.queue_at(1_000).unwrap();
+            state.begin_start(&request_id, 1_100).unwrap();
+            let audio_started = std::cell::Cell::new(false);
+            let outcome = crate::commands::finish_meeting_start(&state, &request_id, async {
+                if boundary == "bundle" {
+                    state.start_bundle_families("stale-request")?;
+                } else {
+                    state.start_video(&start_request("stale-request"))?;
+                }
+                audio_started.set(true);
+                unreachable!("preparation failure must not start audio")
+            })
+            .await
+            .unwrap();
+            assert!(!audio_started.get());
+            let MeetingStartRecordingOutcome::Failed { error } = outcome else {
+                panic!("expected a terminal preparation failure");
+            };
+            assert_eq!(error.code, "meeting_start_not_found");
+            for _ in 0..2 {
+                let Some(MeetingStartRecordingOutcome::Failed { error }) =
+                    state.finished_outcome(&request_id).unwrap()
+                else {
+                    panic!("expected a replayable failure");
+                };
+                assert_eq!(error.code, "meeting_start_not_found");
+            }
+            assert_eq!(
+                state.begin_start(&request_id, 1_200).unwrap_err().code,
+                "meeting_start_already_finished"
+            );
+            assert!(state.acknowledge(&request_id).unwrap());
+            assert!(state.peek_at(1_200).unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_native_preparation_caches_interruption() {
+        let state = MeetingStartRequestState::default();
+        let request_id = state.queue_at(1_000).unwrap();
+        state.begin_start(&request_id, 1_100).unwrap();
+        let operation =
+            crate::commands::finish_meeting_start(&state, &request_id, std::future::pending());
+        assert!(tokio::time::timeout(Duration::from_millis(10), operation)
+            .await
+            .is_err());
+        let Some(MeetingStartRecordingOutcome::Failed { error }) =
+            state.finished_outcome(&request_id).unwrap()
+        else {
+            panic!("expected a cached cancellation");
+        };
+        assert_eq!(error.code, "meeting_start_interrupted");
+        assert!(state.acknowledge(&request_id).unwrap());
+    }
+
     #[test]
     fn meeting_video_native_choice_rejects_renderer_retarget_and_unrequested_opt_in() {
         for retained in [Some(RecordingVideoRequest { window_id: 42 }), None] {

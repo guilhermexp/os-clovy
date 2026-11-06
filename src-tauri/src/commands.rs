@@ -1269,20 +1269,28 @@ pub async fn start_meeting_recording(
         }
         Err(error) => return Err(error),
     };
-    let bundle_families = state.start_bundle_families(&request.request_id)?;
-    let video = state.start_video(&request)?;
-    let mut completion =
-        MeetingStartCompletionGuard::new(state.inner(), request.request_id.clone());
-
-    let outcome = match execute_meeting_recording(
-        app,
-        &note_id,
-        request.source_mode.unwrap_or_default(),
-        bundle_families,
-        video,
-    )
+    finish_meeting_start(state.inner(), &request.request_id, async {
+        let bundle_families = state.start_bundle_families(&request.request_id)?;
+        let video = state.start_video(&request)?;
+        execute_meeting_recording(
+            app,
+            &note_id,
+            request.source_mode.unwrap_or_default(),
+            bundle_families,
+            video,
+        )
+        .await
+    })
     .await
-    {
+}
+
+pub(crate) async fn finish_meeting_start(
+    state: &MeetingStartRequestState,
+    request_id: &str,
+    operation: impl std::future::Future<Output = Result<(NoteDto, RecordingSessionDto), AppError>>,
+) -> Result<MeetingStartRecordingOutcome, AppError> {
+    let mut completion = MeetingStartCompletionGuard::new(state, request_id.to_owned());
+    let outcome = match operation.await {
         Ok((note, recording)) => MeetingStartRecordingOutcome::Started {
             note: Box::new(note),
             recording: Box::new(recording),

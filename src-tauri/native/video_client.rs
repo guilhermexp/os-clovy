@@ -2594,6 +2594,51 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn video_recovery_yields_while_repair_is_blocked_on_io() {
+        use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+
+        let f = OwnerFixture::new().await;
+        f.seed_timing();
+        std::fs::write(&f.partial, torn_container_fixture()).unwrap();
+        let fifo = std::ffi::CString::new(f.final_path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let (release, waiting) = mpsc::channel();
+        let final_path = f.final_path.clone();
+        let writer = thread::spawn(move || {
+            let timed_out = waiting.recv_timeout(Duration::from_secs(2)).is_err();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let _writer = loop {
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&final_path)
+                {
+                    Ok(writer) => break writer,
+                    Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {
+                        assert!(Instant::now() < deadline, "recovery never opened the FIFO");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("could not release repair: {error}"),
+                }
+            };
+            timed_out
+        });
+        let heartbeat = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            release.send(()).unwrap();
+        };
+        let (input, ()) =
+            tokio::join!(f.repos.note_video_input(&f.session_id, &f.paths), heartbeat);
+        assert!(!writer.join().unwrap(), "repair blocked the Tokio worker");
+        let input = input.unwrap().unwrap();
+        assert!(input.failure_reason.is_none());
+        assert_eq!(input.offset_ms, 1250);
+        assert!(mp4_recovery::recoverable(&f.final_path));
+        assert!(!f.partial.exists());
+    }
+
     struct OwnerFixture {
         _temp: tempfile::TempDir,
         paths: crate::app_paths::AppPaths,

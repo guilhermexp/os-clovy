@@ -2,8 +2,8 @@
 
 Releases come from `.github/workflows/release.yml`
 ([ADR-0069](adr/0069-the-owner-publishes-own-releases-with-a-one-channel-updater.md)):
-a tag `vX.Y.Z` (or a manual run naming it) builds the universal Mac app and the
-Windows installer, signs the updater packages with the owner's key and publishes
+by default, a tag `vX.Y.Z` (or a manual run naming it) builds the universal Mac
+app and the Windows installer, signs the updater packages with the owner's key and publishes
 a GitHub release on `guilhermexp/os-clovy` with `Clovy_universal.dmg`,
 `Clovy.app.tar.gz`, its `.sig`, the Windows `*-setup.exe`, its `.sig` and
 `latest.json`. A manual run defaults to `dry_run=true`: it builds and keeps the
@@ -21,8 +21,31 @@ an empty profile: only a development build migrates the June-era dev profile.
 1. On `main`: `pnpm version:bump X.Y.Z`, commit `release: vX.Y.Z`.
 2. Push the tag `vX.Y.Z`. The `version` job fails before any build when the tag
    differs from the four version files or a release for it already exists.
-3. When both builds pass, `publish` creates the release; if either fails,
-   nothing is published and the tag can be pushed again after the fix.
+3. When all selected builds pass, `publish` creates the release. A failed or
+   cancelled required job publishes nothing; fix it before retrying.
+
+The non-secret repository variable `CLOVY_RELEASE_PLATFORMS` selects `all`
+(the default when unset) or `macos`. The `version` job captures and validates it
+once. Windows job selection, publication eligibility and manifest generation
+all use that validated output, even if the variable changes during the run.
+Unknown values stop the workflow before building. In `all`, both platform jobs
+must succeed. In `macos`, macOS must succeed and Windows must be skipped;
+Windows certificate preparation does not run. Manual `dry_run=true` still
+builds and keeps artifacts without publishing.
+
+Version 0.1.6 is temporarily selected for macOS only while Windows awaits a
+valid signing certificate. Before triggering that publication, the owner records
+the previous value (or absence) of `CLOVY_RELEASE_PLATFORMS`, selects `macos`,
+and restores the recorded state after the run. This is a CI selection, with no
+change to signing requirements. The release contains `Clovy_universal.dmg`,
+`Clovy.app.tar.gz`, its `.sig` and `latest.json` with exactly `darwin-aarch64`
+and `darwin-x86_64`. It contains no new Windows installer or Windows manifest
+entry, and never relabels a previous Windows package as 0.1.6.
+
+For local metadata generation, `scripts/release-manifest.mjs --platforms macos`
+requires all three Mac artifacts. Omitting the option uses `all` and still
+requires the Windows installer and its signature; missing artifacts never
+silently reduce the selected platforms. Updater signing remains required in CI.
 
 The macOS job installs both Apple target standard libraries for stable and for
 the desktop engine's pinned Rust 1.89.0 (`agent-desktop` source commit
