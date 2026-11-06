@@ -24,6 +24,12 @@ an empty profile: only a development build migrates the June-era dev profile.
 3. When both builds pass, `publish` creates the release; if either fails,
    nothing is published and the tag can be pushed again after the fix.
 
+The macOS job installs both Apple target standard libraries for stable and for
+the desktop engine's pinned Rust 1.89.0 (`agent-desktop` source commit
+`9eb9b296`). Its own `rust-toolchain.toml` selects that version: installing
+the universal targets only on stable does not supply them to the engine.
+The subsequent stable setup remains the default for the Clovy host.
+
 To roll back, delete the bad release (`gh release delete vX.Y.Z`): `latest`
 falls back to the previous one. Installs that already updated reinstall the
 previous `.dmg` by hand.

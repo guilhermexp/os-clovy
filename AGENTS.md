@@ -361,6 +361,13 @@ the only remote). Issues and branches use the harness tickets, not `JUN-*`.
   `data.itemSequence` is the persisted session-wide item position. Keep the
   same item position when settling a card; hydration must not repair live
   ordering (`docs/llm-providers.md`).
+- **Meeting video:** the default-off macOS capture uses a separate
+  `Clovy Video Capture.app`; capture or analysis failure must preserve the
+  audio/transcript path. Only Claude note generation receives the scoped video
+  tools grant; other CLI invocations retain their existing isolation. See
+  ADR-0071. Real ScreenCaptureKit/Meet capture and paid visual acceptance remain
+  explicitly pending in `gravacao-video-reuniao/tasks.md`; do not infer them
+  from portable tests or compilation.
 
 ## Verification
 
@@ -465,10 +472,18 @@ tests do not prove live inference or an account's price.
 
 ### Build
 
+**Publish a release:** on `main`, run `pnpm version:bump X.Y.Z`, commit
+`release: vX.Y.Z`, then push `main` and tag `vX.Y.Z`.
+`.github/workflows/release.yml` publishes the GitHub assets and `latest.json`
+for the installed app's updater. A local build is not a publication. Do not
+produce or install a local bundle with the production identity unless explicitly
+requested. Local proof uses an isolated debug identity; choose a fresh id for
+each run, replacing both occurrences in the example below.
+
 ```json
 {
   "command": {
-    "argv": ["sh", "-c", "PATH=\"$HOME/.local/share/node-official/node24/bin:$PATH\" CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none pnpm tauri:build -- --bundles app"],
+    "argv": ["sh", "-c", "PATH=\"$HOME/.local/share/node-official/node24/bin:$PATH\" CLOVY_DEV_APP_IDENTIFIER=dev.clovy.buildproof CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP=none CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none pnpm tauri:build -- --debug --bundles app --config src-tauri/tauri.macos.conf.json --config '{\"identifier\":\"dev.clovy.buildproof\"}'"],
     "cwd": "."
   }
 }

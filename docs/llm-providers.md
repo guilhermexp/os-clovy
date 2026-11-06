@@ -158,6 +158,59 @@ Every allowed one-shot call also:
 
 ## Settings and routing
 
+### Meeting video exception
+
+An opt-in recording session can include a silent video of its detected meeting
+window on macOS. Only the `claude` Notes engine may analyze that video.
+See [ADR-0071](adr/0071-meeting-window-video-and-scoped-claude-analysis.md).
+This exception does not change ordinary one-shot calls or grant tools to
+Codex, agy, other CLIs or endpoints. A video tool grant on a different engine
+is refused before invocation.
+
+Prerequisites are `~/.agents/skills/video-analysis/SKILL.md`, its
+`scripts/video_evidence.py`, and `python3`, `ffmpeg` and `ffprobe` on the
+login-shell PATH. The note system prompt embeds the skill text, treats screen
+contents and speech as data, and asks for visual findings with timestamps
+adjusted by the recorded video/audio offset. Evidence extraction runs with
+`--no-transcript --out <empty temporary directory>`; the existing transcript
+remains the speech source.
+
+The installed Claude flags retain `--no-session-persistence`,
+`--strict-mcp-config`, `--setting-sources ""` and
+`--disable-slash-commands`, plus the Clovy authorship marker. Only
+`--tools Bash,Read` is enabled. `--allowedTools` grants
+`Bash(python3 <script> <session video>:*)`, `Read(<session video>)` and
+`Read(<evidence>/**)`, with `--permission-mode dontAsk` and
+`--add-dir <evidence>`. A Clovy-owned per-call `PreToolUse` guard also denies
+every other Bash command and canonical Read path: the allow rules alone do
+not exclude Claude's automatically permitted reads and read-only commands.
+No user MCP server or hook is loaded. These are CLI permissions, not an OS
+sandbox around Claude.
+
+The explicit guard uses `onFailure: "block"`; its failure, timeout or invalid
+output blocks the tool rather than restoring default permissions. Claude Code
+2.1.295 or newer is required for that setting. Older or unrecognized versions
+produce a notice asking for a CLI update and use the transcript-only route.
+See the [Claude hook contract](https://code.claude.com/docs/en/hooks#block-the-action-when-a-hook-fails).
+
+Extraction alone does not count as analysis. A Clovy-owned `PostToolUse` hook
+records successful `Read` results in private per-call scratch space outside
+the evidence grant. Completion requires the full matching `summary.json`,
+every contact sheet and at least one listed full-resolution frame. Failed,
+non-image or missing reads produce `analysis_failed`; files placed in the
+evidence directory cannot forge the private receipts. The receipt key and
+ledger are removed with the scratch directory.
+
+Video analysis has a twenty-minute process-tree timeout. Its temporary
+evidence directory is removed on completion or error. A missing prerequisite,
+different Notes engine, capture error, analysis failure or timeout falls back
+to the ordinary transcript-only route. `generation_results.video_analysis`
+persists `analyzed` or the failure reason, and the note displays the localized
+outcome. Video paths and frames never enter an OpenRouter or endpoint
+generation request.
+
+### Provider settings
+
 The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
 `baseUrl`, `modelId`, `hasApiKey`, measured `structuredOutput`, optional
 `rpmLimit`), `llmUsage` (`chat`, `notes`, `activity`, each

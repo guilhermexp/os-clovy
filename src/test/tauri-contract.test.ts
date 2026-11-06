@@ -10,6 +10,8 @@ import {
   recoverRecording,
   retryProcessing,
   startRecording,
+  startMeetingRecording,
+  detectMeetingWindow,
   setClovyPersona,
   updateNote,
 } from "../lib/tauri";
@@ -97,6 +99,23 @@ describe("Tauri command contracts", () => {
     });
     expect(mocks.invoke).toHaveBeenNthCalledWith(3, "finish_recording", {
       request: { sessionId: "session-1" },
+    });
+  });
+
+  it("detects meeting windows and adds video only to opted-in starts", async () => {
+    await detectMeetingWindow();
+    await startRecording("note-video", "microphoneOnly", undefined, undefined, { windowId: 42 });
+    await startMeetingRecording("request-video", "microphonePlusSystem", { windowId: 42 });
+    expect(mocks.invoke).toHaveBeenNthCalledWith(1, "detect_meeting_window");
+    expect(mocks.invoke).toHaveBeenNthCalledWith(2, "start_recording", {
+      request: { noteId: "note-video", sourceMode: "microphoneOnly", video: { windowId: 42 } },
+    });
+    expect(mocks.invoke).toHaveBeenNthCalledWith(3, "start_meeting_recording", {
+      request: {
+        requestId: "request-video",
+        sourceMode: "microphonePlusSystem",
+        video: { windowId: 42 },
+      },
     });
   });
 

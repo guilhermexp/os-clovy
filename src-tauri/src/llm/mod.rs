@@ -83,6 +83,58 @@ pub struct GenerateRequest {
     pub timeout: Option<Duration>,
 }
 
+/// One narrowly scoped exception to tool-free one-shot generation. Only Claude
+/// accepts it; paths belong to the current recording and temporary evidence.
+#[derive(Clone, Debug)]
+pub struct VideoToolGrant {
+    pub script: std::path::PathBuf,
+    pub video: std::path::PathBuf,
+    pub evidence: std::path::PathBuf,
+    pub python: std::path::PathBuf,
+}
+
+impl VideoToolGrant {
+    pub fn command(&self) -> String {
+        format!(
+            "python3 {} {} --no-transcript --out {}",
+            cli::shell_quote(&self.script.to_string_lossy()),
+            cli::shell_quote(&self.video.to_string_lossy()),
+            cli::shell_quote(&self.evidence.to_string_lossy())
+        )
+    }
+}
+
+/// Kept separate from GenerateRequest so existing text-only callers cannot
+/// accidentally pass the exception to an endpoint or a different CLI.
+pub async fn generate_with_video_grant(
+    provider: &ProviderRef,
+    mut request: GenerateRequest,
+    grant: &VideoToolGrant,
+) -> Result<GenerateOutput, LlmError> {
+    if !matches!(
+        provider,
+        ProviderRef::Cli {
+            id: CliKind::Claude
+        }
+    ) {
+        return Err(LlmError::InvalidOutput(
+            "Video tools require Claude Code.".into(),
+        ));
+    }
+    let timeout = Duration::from_secs(20 * 60);
+    request.timeout = Some(request.timeout.unwrap_or(timeout).min(timeout));
+    let started = Instant::now();
+    let env = shell_env::login_env().await;
+    let text =
+        run_cli_in_context(CliKind::Claude, &request, env.as_ref(), None, Some(grant)).await?;
+    Ok(GenerateOutput {
+        text,
+        json: None,
+        provider: provider.key(),
+        latency: started.elapsed(),
+    })
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct GenerateOutput {
     pub text: String,
@@ -100,6 +152,7 @@ pub enum LlmError {
     /// The CLI cannot run a one-shot call with every tool turned off, so it is
     /// never given content (see [`cli::CliKind::one_shot_allowed`]).
     CliToolsNotDisabled(CliKind),
+    VideoEngineUnsupported,
     CliFailed {
         cli: CliKind,
         detail: String,
@@ -129,6 +182,9 @@ impl From<LlmError> for AppError {
                     "{} cannot run with its tools turned off, so Clovy does not send it content. Choose Claude Code, Codex, Pi, Antigravity, or an endpoint.",
                     cli.display_name()
                 ),
+            ),
+            LlmError::VideoEngineUnsupported => AppError::new(
+                "llm_video_engine_unsupported", "Update Claude Code to enable safely scoped video analysis.",
             ),
             LlmError::CliFailed { cli, detail } => AppError::new(
                 "llm_cli_failed",
@@ -292,7 +348,7 @@ pub async fn run_cli(
     } else {
         None
     };
-    run_cli_in_context(kind, request, env, host.as_ref()).await
+    run_cli_in_context(kind, request, env, host.as_ref(), None).await
 }
 
 async fn run_cli_in_context(
@@ -300,8 +356,12 @@ async fn run_cli_in_context(
     request: &GenerateRequest,
     env: &shell_env::LoginEnv,
     host: Option<&agy::HostContext>,
+    grant: Option<&VideoToolGrant>,
 ) -> Result<String, LlmError> {
-    let mut invocation = cli::build_invocation(kind, request)?;
+    let mut invocation = match grant {
+        Some(grant) => cli::build_video_invocation(kind, request, grant)?,
+        None => cli::build_invocation(kind, request)?,
+    };
     let program = env
         .which(kind.id())
         .ok_or(LlmError::CliNotInstalled(kind))?;
@@ -351,6 +411,15 @@ async fn run_cli_in_context(
             cli: kind,
             detail: format!("could not write {name}: {error}"),
         })?;
+        #[cfg(unix)]
+        if name == "video_guard.py" || name == "video_read_key" {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(cwd.join(name), std::fs::Permissions::from_mode(0o400))
+                .map_err(|error| LlmError::CliFailed {
+                    cli: kind,
+                    detail: error.to_string(),
+                })?;
+        }
     }
     let mut child_env = shell_env::cli_environment(env.vars());
     for name in &invocation.remove_env {
@@ -367,6 +436,44 @@ async fn run_cli_in_context(
         invocation
             .args
             .extend(["--settings".into(), execution.settings()]);
+    }
+    if grant.is_some() {
+        let version = process::run(process::ProcessSpec {
+            program: program.clone(),
+            args: vec!["--version".into()],
+            env: child_env.clone(),
+            cwd: cwd.to_path_buf(),
+            stdin: None,
+            timeout: Duration::from_secs(10),
+        })
+        .await
+        .map_err(|_| LlmError::VideoEngineUnsupported)?;
+        if !version.success || !cli::video_guard_version_supported(&version.stdout) {
+            return Err(LlmError::VideoEngineUnsupported);
+        }
+        // Managed policy can disable even explicitly supplied hooks. Setup
+        // runs with the identical settings and exits without a conversation;
+        // require its receipt before sending the video/transcript to Claude.
+        let mut args = invocation.args.clone();
+        args.push("--init-only".into());
+        let probe = process::run(process::ProcessSpec {
+            program: program.clone(),
+            args,
+            env: child_env.clone(),
+            cwd: cwd.to_path_buf(),
+            stdin: None,
+            timeout: Duration::from_secs(10),
+        })
+        .await
+        .map_err(|_| LlmError::VideoEngineUnsupported)?;
+        if !probe.success
+            || std::fs::read_to_string(cwd.join("video_hook_ready"))
+                .ok()
+                .as_deref()
+                != Some("ready")
+        {
+            return Err(LlmError::VideoEngineUnsupported);
+        }
     }
     if kind == CliKind::Codex {
         let off = codex_mcp_off_args(kind, &program, &child_env, cwd).await?;
@@ -394,7 +501,11 @@ async fn run_cli_in_context(
         output.stdout = process::read_output_file(&cwd.join(name))
             .map_err(|detail| LlmError::CliFailed { cli: kind, detail })?;
     }
-    cli::parse_output(kind, &output, request.schema.is_some())
+    let text = cli::parse_output(kind, &output, request.schema.is_some())?;
+    if let Some(grant) = grant {
+        cli::validate_video_read_receipts(grant, cwd)?;
+    }
+    Ok(text)
 }
 
 /// Asks codex which MCP servers the call would start and returns the

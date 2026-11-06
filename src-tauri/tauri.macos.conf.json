@@ -11,6 +11,7 @@
       "dmg"
     ],
     "resources": {
+      "../.tauri-helper/Clovy Video Capture.app": "native/bin/Clovy Video Capture.app",
       "../.tauri-helper/Clovy Audio Capture.app": "native/bin/Clovy Audio Capture.app",
       "../.tauri-helper/Clovy Dictation Helper.app": "native/bin/Clovy Dictation Helper.app",
       "../.tauri-helper/clovy-mcp": "native/bin/clovy-mcp",

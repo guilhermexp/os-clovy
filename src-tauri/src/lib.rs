@@ -303,6 +303,7 @@ pub fn run() {
             commands::clovy_open_external_url,
             commands::june_open_external_url,
             commands::start_meeting_recording,
+            commands::detect_meeting_window,
             commands::start_recording,
             commands::pause_recording,
             commands::resume_recording,

@@ -128,6 +128,8 @@ async fn assert_done_origin_checkpoints_are_monotonic_and_single_shot() {
     let timing = ProcessingTiming::from_done(Instant::now());
     let response = finish_recording_session_with_timing(
         &repos,
+        crate::app_paths::AppPaths::from_data_dir(dir.path().join("video-data"))
+            .expect("owned timing paths"),
         timing_finished_recording(&note.id, &recording_session_id, audio_path),
         Instant::now(),
         timing,

@@ -28,6 +28,7 @@ fn turn_request(directory: &tempfile::TempDir, preview: bool) -> TranscriptionRe
 
 fn generation_request() -> GenerationRequest {
     GenerationRequest {
+        video: None,
         provider: "openrouter".to_string(),
         operation_id: Some("note-1".to_string()),
         title: "Weekly sync".to_string(),

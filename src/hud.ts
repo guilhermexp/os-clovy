@@ -3,7 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { IconWindow } from "central-icons/IconWindow";
 import { activityAppIcon } from "./lib/activity-timeline";
-import type { DictationTarget } from "./lib/tauri";
+import { detectMeetingWindow, type DictationTarget, type MeetingWindowDto } from "./lib/tauri";
+import { isMacLikePlatform } from "./lib/platform";
 import { IconCrossMedium } from "central-icons/IconCrossMedium";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { IconExclamationCircle } from "central-icons/IconExclamationCircle";
@@ -140,6 +141,39 @@ const stopButton = document.querySelector<HTMLButtonElement>("#hud-stop");
 const cancelButton = document.querySelector<HTMLButtonElement>("#hud-cancel");
 const meetingStartButton = document.querySelector<HTMLButtonElement>("#hud-meeting-start");
 const meetingAppLabel = document.querySelector<HTMLElement>("#hud-meeting-app");
+const meetingVideoButton = document.querySelector<HTMLButtonElement>("#hud-meeting-video");
+const meetingVideoLabel = document.querySelector<HTMLElement>("#hud-meeting-video-label");
+let meetingVideoWindow: MeetingWindowDto | null = null;
+let meetingVideoSelected = false;
+let meetingPromptGeneration = 0;
+let meetingVideoDetectionGeneration: number | undefined;
+
+function renderMeetingVideo() {
+  if (meetingVideoButton) {
+    meetingVideoButton.hidden = !meetingVideoWindow;
+    meetingVideoButton.setAttribute("aria-label", t("notes.editor.video.record"));
+    meetingVideoButton.setAttribute("aria-checked", String(meetingVideoSelected));
+    meetingVideoButton.title = t("notes.editor.video.permission");
+  }
+  if (meetingVideoLabel) meetingVideoLabel.textContent = t("notes.editor.video.record");
+  if (hud) hud.dataset.meetingVideo = String(Boolean(meetingVideoWindow));
+  if (meetingAppLabel && meetingVideoWindow) {
+    meetingAppLabel.textContent = t("notes.editor.video.window", {
+      app: meetingVideoWindow.appName,
+      title: meetingVideoWindow.title,
+    });
+    meetingAppLabel.title = meetingAppLabel.textContent;
+  } else {
+    meetingAppLabel?.removeAttribute("title");
+  }
+}
+meetingVideoButton?.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  if (hud?.dataset.state !== "meeting" || !meetingVideoWindow) return;
+  meetingVideoSelected = !meetingVideoSelected;
+  renderMeetingVideo();
+});
 const meetingDismissButton = document.querySelector<HTMLButtonElement>("#hud-meeting-dismiss");
 const statusText = document.querySelector<HTMLElement>("#hud-status");
 const escTip = document.querySelector<HTMLElement>("#hud-esc-tip");
@@ -159,6 +193,7 @@ function setOwnText(element: HTMLElement | null, text: string) {
 // The static page chrome from hud.html, in the current language.
 function applyStaticLabels() {
   renderTargetLabel();
+  renderMeetingVideo();
   document.title = t("hud.dictation.windowTitle");
   cancelButton?.setAttribute("aria-label", t("hud.dictation.cancel"));
   stopButton?.setAttribute("aria-label", t("hud.dictation.stop"));
@@ -1455,16 +1490,54 @@ async function showMeetingPrompt(meetingEvent: DictationHudEvent) {
     hideBlankWindowIfNeeded();
     return;
   }
+  const opening = hud?.dataset.state !== "meeting";
+  const generation = opening ? ++meetingPromptGeneration : meetingPromptGeneration;
+  if (opening) {
+    meetingVideoSelected = false;
+    meetingVideoWindow = null;
+  }
+  let detection: Promise<MeetingWindowDto | null> | undefined;
+  if (
+    !meetingVideoWindow &&
+    meetingVideoDetectionGeneration !== generation &&
+    isMacLikePlatform()
+  ) {
+    meetingVideoDetectionGeneration = generation;
+    detection = detectMeetingWindow().catch(() => null);
+  }
   // Set the app line before the pill is measured so the window is sized
   // for it. Heartbeats refresh it (the mic can move between apps).
   meetingAppLabels = meetingEvent.payload?.appLabels;
   if (meetingAppLabel) {
     meetingAppLabel.textContent = meetingAppLine(meetingAppLabels);
   }
+  renderMeetingVideo();
   const transition = setHud("meeting", () => t("hud.meeting.detected"));
-  await showHud(showOptionsForTransition(transition));
-  if (lifecycle.signal.aborted) return;
-  startMeetingPromptTimer();
+  try {
+    await showHud(showOptionsForTransition(transition));
+    if (lifecycle.signal.aborted || generation !== meetingPromptGeneration) return;
+    startMeetingPromptTimer();
+    if (detection) {
+      const window = await detection;
+      if (
+        lifecycle.signal.aborted ||
+        generation !== meetingPromptGeneration ||
+        hud?.dataset.state !== "meeting" ||
+        meetingPromptSuppressed ||
+        meetingVideoWindow
+      )
+        return;
+      meetingVideoWindow = window;
+      renderMeetingVideo();
+      if (window) await syncWindowToPill({ animate: false });
+    }
+  } finally {
+    // Hold the slot through rendering. An old prompt must not release a
+    // lookup belonging to its replacement, nor can heartbeats overlap retries.
+    if (detection && meetingVideoDetectionGeneration === generation) {
+      meetingVideoDetectionGeneration = undefined;
+    }
+  }
 }
 
 let meetingAppLabels: unknown;
@@ -1699,7 +1772,15 @@ meetingStartButton?.addEventListener("click", async (event) => {
 
   meetingStartButton.disabled = true;
   try {
-    await invoke("queue_meeting_start_request");
+    if (meetingVideoSelected && meetingVideoWindow) {
+      // Native capture validates the opted-in id and persists a video failure
+      // if it disappeared, while preserving the audio recording.
+      const windowId = meetingVideoWindow.windowId;
+      // Queue immediately: the helper revalidates after audio starts.
+      await invoke("queue_meeting_start_request", { video: { windowId } });
+    } else {
+      await invoke("queue_meeting_start_request");
+    }
   } catch {
     if (lifecycle.signal.aborted) return;
     // The request was not durably queued, so leave the prompt available for
@@ -1819,7 +1900,7 @@ function rerenderForLocale() {
   const status = resolveStatus(currentStatus);
   if (statusText) statusText.textContent = status;
   if (errorText && state === "error") errorText.textContent = status;
-  if (meetingAppLabel && state === "meeting") {
+  if (meetingAppLabel && state === "meeting" && !meetingVideoWindow) {
     meetingAppLabel.textContent = meetingAppLine(meetingAppLabels);
   }
   if (state && state !== "idle" && state !== "exiting") {

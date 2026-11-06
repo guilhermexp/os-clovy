@@ -1,5 +1,6 @@
 use crate::providers::transcription::TranscriptionBackend;
 use crate::{
+    app_paths::AppPaths,
     audio::{
         live_preview::PREVIEW_CHUNK_MS,
         turns::{
@@ -1046,6 +1047,7 @@ pub(crate) async fn process_saved_audio(
     let (generation_transcript, transcript_source_labels) =
         authoritative_generation_transcript(repos, note_id).await?;
     let generated = match generate_note_from_transcript(GenerationRequest {
+        video: None,
         provider: crate::providers::generation_provider(),
         operation_id: Some(note_id.to_string()),
         title,
@@ -1101,13 +1103,14 @@ pub(crate) async fn process_saved_audio(
     )
     .await;
     let generation_result_id = match repos
-        .create_generation_result(
+        .create_generation_result_with_video_analysis(
             note_id,
             &transcript_row.id,
             &generated.content,
             generated.title_suggestion.clone(),
             &generated.provider,
             &generated.prompt_version,
+            generated.video_analysis.as_deref(),
         )
         .await
     {
@@ -1167,8 +1170,13 @@ pub(crate) async fn process_saved_source_audio(
     manual_notes: Option<String>,
     timing: ProcessingTiming,
 ) -> Result<NoteDto, AppError> {
+    let video_temp = tempfile::tempdir()
+        .map_err(|error| AppError::new("storage_unavailable", error.to_string()))?;
+    let paths = AppPaths::from_data_dir(video_temp.path().join("data"))
+        .map_err(|error| AppError::new("storage_unavailable", error.to_string()))?;
     process_saved_source_audio_with_progress(
         repos,
+        &paths,
         note_id,
         session_id,
         source_mode,
@@ -1182,9 +1190,32 @@ pub(crate) async fn process_saved_source_audio(
     .await
 }
 
+/// Video is optional even when its repository lookup or recovery bookkeeping fails.
+/// Keep a failure input so successful transcript-only notes retain the notice.
+pub(crate) async fn optional_note_video_input(
+    repos: &Repositories,
+    paths: &AppPaths,
+    session_id: &str,
+) -> Option<crate::providers::notes::NoteVideoInput> {
+    match repos.note_video_input(session_id, paths).await {
+        Ok(video) => video,
+        Err(error) => {
+            tracing::warn!(%session_id, error_code = %error.code, error_message = %error.message, "could not load meeting video input; generating from transcript");
+            Some(crate::providers::notes::NoteVideoInput {
+                path: String::new(),
+                offset_ms: 0,
+                app: String::new(),
+                title: String::new(),
+                failure_reason: Some("capture_failed".into()),
+            })
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_saved_source_audio_with_progress(
     repos: &Repositories,
+    paths: &AppPaths,
     note_id: &str,
     session_id: &str,
     source_mode: RecordingSourceMode,
@@ -1197,6 +1228,7 @@ pub(crate) async fn process_saved_source_audio_with_progress(
 ) -> Result<NoteDto, AppError> {
     process_saved_source_audio_with_cancellation(
         repos,
+        paths,
         note_id,
         session_id,
         source_mode,
@@ -1216,6 +1248,7 @@ pub(crate) async fn process_saved_source_audio_with_progress(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_saved_source_audio_with_cancellation(
     repos: &Repositories,
+    paths: &AppPaths,
     note_id: &str,
     session_id: &str,
     source_mode: RecordingSourceMode,
@@ -1243,6 +1276,7 @@ pub(crate) async fn process_saved_source_audio_with_cancellation(
             let outcome = {
                 let pipeline = process_saved_source_audio_pipeline(
                     repos,
+                    paths,
                     note_id,
                     session_id,
                     source_mode,
@@ -1280,6 +1314,7 @@ pub(crate) async fn process_saved_source_audio_with_cancellation(
 #[allow(clippy::too_many_arguments)]
 async fn process_saved_source_audio_pipeline(
     repos: &Repositories,
+    paths: &AppPaths,
     note_id: &str,
     session_id: &str,
     source_mode: RecordingSourceMode,
@@ -1962,6 +1997,7 @@ async fn process_saved_source_audio_pipeline(
     }
     let generation_started = Instant::now();
     let generated = match generate_note_from_transcript(GenerationRequest {
+        video: optional_note_video_input(repos, paths, session_id).await,
         provider: crate::providers::generation_provider(),
         operation_id: Some(note_id.to_string()),
         title,
@@ -2019,13 +2055,14 @@ async fn process_saved_source_audio_pipeline(
     .await;
     let transcript_id = first_transcript_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let generation_result_id = match repos
-        .create_generation_result(
+        .create_generation_result_with_video_analysis(
             note_id,
             &transcript_id,
             &generated.content,
             generated.title_suggestion.clone(),
             &generated.provider,
             &generated.prompt_version,
+            generated.video_analysis.as_deref(),
         )
         .await
     {
@@ -5612,6 +5649,197 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn video_lookup_failure_keeps_transcript_generation_and_persisted_notice() {
+        use crate::llm::{
+            cli::CliKind,
+            registry::ProviderRef,
+            shell_env::{set_login_env_for_tests, LoginEnv},
+        };
+        use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
+
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                crate::providers::replace_current_settings_for_tests(
+                    crate::providers::default_settings_for_tests(),
+                );
+                set_login_env_for_tests(None);
+            }
+        }
+        let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let _restore = Restore;
+        let bin = tempfile::tempdir().unwrap();
+        let prompt_log = bin.path().join("prompt.txt");
+        let cli = bin.path().join("claude");
+        std::fs::write(&cli, format!(
+            "#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"## Summary\\\\n- Preserve the transcript\"}}'\n",
+            prompt_log.display(),
+        )).unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        set_login_env_for_tests(Some(LoginEnv::from_vars(BTreeMap::from([(
+            "PATH".into(),
+            format!("{}:/usr/bin:/bin", bin.path().display()),
+        )]))));
+        let mut settings = crate::providers::default_settings_for_tests();
+        settings.transcription_provider = TEST_TRANSCRIPTION_PROVIDER.into();
+        settings.llm_usage.notes = ProviderRef::Cli {
+            id: CliKind::Claude,
+        };
+        crate::providers::replace_current_settings_for_tests(settings);
+
+        // Exercise finished-session and recovery-preflight database states. The
+        // same pipeline is called after finishing, retrying, and recovering audio.
+        for recovering in [false, true] {
+            for case in ["video_sql_failure", "no_video", "permission_denied"] {
+                let directory = tempfile::tempdir().unwrap();
+                let paths = AppPaths::from_data_dir(directory.path().join("data")).unwrap();
+                let pool = sqlx_sqlite::SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect("sqlite::memory:")
+                    .await
+                    .unwrap();
+                crate::db::migrations::run_migrations(&pool).await.unwrap();
+                let repos = Repositories::new(pool);
+                let note = repos.create_note("default", None).await.unwrap();
+                let session_id = format!("video-lookup-{}", uuid::Uuid::new_v4());
+                let session_dir = paths.recording_session_dir(&note.id, &session_id).unwrap();
+                std::fs::create_dir_all(&session_dir).unwrap();
+                let microphone = session_dir.join("microphone.wav");
+                write_loud_wav(&microphone, 16_000, 32_000);
+                repos
+                    .create_recording_session(
+                        &note.id,
+                        &session_id,
+                        RecordingSourceMode::MicrophoneOnly,
+                        &session_dir.join("microphone.partial.wav").to_string_lossy(),
+                        &microphone.to_string_lossy(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let artifact = repos
+                    .create_audio_artifact(
+                        &note.id,
+                        &session_id,
+                        &microphone.to_string_lossy(),
+                        2_000,
+                        std::fs::metadata(&microphone).unwrap().len() as i64,
+                        "checksum",
+                    )
+                    .await
+                    .unwrap();
+                if recovering {
+                    repos
+                        .mark_recording_recoverable(&session_id, &note.id)
+                        .await
+                        .unwrap();
+                }
+                if case != "no_video" {
+                    repos
+                        .create_video_artifact(
+                            &note.id,
+                            &session_id,
+                            &session_dir.join("window.partial.mp4").to_string_lossy(),
+                            &session_dir.join("window.mp4").to_string_lossy(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                if case == "permission_denied" {
+                    repos
+                        .finalize_video_artifact(
+                            &session_id,
+                            &crate::audio::capture::video::VideoResult {
+                                failure_reason: Some("permission_denied".into()),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                } else if case == "video_sql_failure" {
+                    // Missing critical timing causes a video-only UPDATE. Abort
+                    // that operation while leaving audio and note writes healthy.
+                    sqlx::query::query("CREATE TRIGGER fail_video_update BEFORE UPDATE ON video_artifacts BEGIN SELECT RAISE(ABORT, 'video-only failure'); END")
+                        .execute(&repos.pool).await.unwrap();
+                    let error = repos
+                        .note_video_input(&session_id, &paths)
+                        .await
+                        .unwrap_err();
+                    assert!(error.message.contains("video-only failure"), "{error:?}");
+                }
+                let expected = match case {
+                    "no_video" => None,
+                    "permission_denied" => Some("permission_denied"),
+                    _ => Some("capture_failed"),
+                };
+                if recovering {
+                    let preflight = optional_note_video_input(&repos, &paths, &session_id).await;
+                    assert_eq!(
+                        preflight
+                            .as_ref()
+                            .and_then(|video| video.failure_reason.as_deref()),
+                        expected,
+                    );
+                    assert_eq!(preflight.is_some(), case != "no_video");
+                }
+                let transcriber: TurnTranscriber = Arc::new(|_| {
+                    Box::pin(async { Ok(test_provider_result("We will preserve the transcript.")) })
+                });
+                let result = TEST_NOTE_TRANSCRIPTION
+                    .scope(
+                        (
+                            transcriber,
+                            Arc::new(RequestPacer::new(18, Duration::from_secs(60))),
+                        ),
+                        process_saved_source_audio_with_progress(
+                            &repos,
+                            &paths,
+                            &note.id,
+                            &session_id,
+                            RecordingSourceMode::MicrophoneOnly,
+                            vec![(artifact.id, "microphone".into(), microphone, false)],
+                            "Video lookup".into(),
+                            None,
+                            None,
+                            ProcessingTiming::untracked(),
+                            NoteProcessingProgressReporter::default(),
+                        ),
+                    )
+                    .await;
+                let generated = result
+                    .unwrap_or_else(|error| panic!("{case}, recovering={recovering}: {error:?}"));
+                assert_eq!(generated.processing_status, ProcessingStatus::Ready);
+                assert!(generated
+                    .generated_content
+                    .as_deref()
+                    .unwrap()
+                    .contains("Preserve the transcript"));
+                let stored = repos.get_note(&note.id).await.unwrap();
+                assert_eq!(stored.video_analysis.as_deref(), expected);
+                assert_eq!(stored.processing_status, ProcessingStatus::Ready);
+                let transcripts = repos
+                    .certified_source_turn_transcripts_for_session(&session_id)
+                    .await
+                    .unwrap();
+                assert!(transcripts
+                    .iter()
+                    .any(|row| row.text.contains("preserve the transcript")));
+                let prompt = std::fs::read_to_string(&prompt_log).unwrap();
+                assert!(prompt.contains("We will preserve the transcript."));
+                assert!(!prompt.contains("window.mp4"));
+                let complete: String = sqlx::query_scalar::query_scalar(
+                    "SELECT details FROM recording_checkpoints WHERE recording_session_id=? AND kind='processing_complete' ORDER BY rowid DESC LIMIT 1",
+                ).bind(&session_id).fetch_one(&repos.pool).await.unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&complete).unwrap()["status"],
+                    "succeeded"
+                );
+            }
+        }
+    }
+
     async fn test_source_processing_repositories() -> (Repositories, String) {
         let pool = sqlx_sqlite::SqlitePoolOptions::new()
             .max_connections(1)
@@ -5655,6 +5883,7 @@ mod tests {
             .await
             .unwrap();
             let directory = tempfile::tempdir().unwrap();
+            let paths = AppPaths::from_data_dir(directory.path().join("data")).unwrap();
             let wav = directory.path().join("source.wav");
             write_three_turn_microphone(&wav);
             let bytes = std::fs::read(&wav).unwrap();
@@ -5693,6 +5922,7 @@ mod tests {
                     ),
                     process_saved_source_audio_with_cancellation(
                         &repos,
+                        &paths,
                         &note_id,
                         &session_id,
                         RecordingSourceMode::MicrophonePlusSystem,
@@ -5738,6 +5968,8 @@ mod tests {
 
     #[tokio::test]
     async fn revoked_recovery_before_admission_leaves_the_real_note_untouched() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_data_dir(directory.path().join("data")).unwrap();
         let (repos, session_id) = test_source_processing_repositories().await;
         let note_id: String =
             sqlx::query_scalar::query_scalar("SELECT note_id FROM recording_sessions WHERE id = ?")
@@ -5766,6 +5998,7 @@ mod tests {
         let captured = Arc::clone(&events);
         let effect = process_saved_source_audio_with_cancellation(
             &repos,
+            &paths,
             &note_id,
             &session_id,
             RecordingSourceMode::MicrophonePlusSystem,
@@ -5823,6 +6056,7 @@ mod tests {
                 .await
                 .unwrap();
         let directory = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_data_dir(directory.path().join("data")).unwrap();
         let wav = directory.path().join("source.wav");
         write_three_turn_microphone(&wav);
         let artifact = repos
@@ -5856,6 +6090,7 @@ mod tests {
                     ),
                     process_saved_source_audio_with_cancellation(
                         &repos,
+                        &paths,
                         &note_id,
                         &session_id,
                         RecordingSourceMode::MicrophonePlusSystem,
