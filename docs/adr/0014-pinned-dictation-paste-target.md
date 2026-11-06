@@ -210,3 +210,48 @@ Once the main window has claimed insertion, cancellation reports
 matching insertion completes its acknowledgement. Failure of this explicit
 composer route is reported with its correlation and delivery state, without
 an OS-paste fallback that could duplicate or misdirect the transcript.
+
+## macOS start-time destination addendum (2026-11-06)
+
+For macOS automatic dictation paste, this addendum supersedes the stop-time
+pin above. Real QA showed that another window can become frontmost while
+the shortcut is held: both the indicator and stop-time pin then followed it.
+Capturing at stop protects transcription latency but leaves the capture
+itself exposed to destination drift.
+
+The helper now captures the exact app when it accepts a take's start, where
+`startPending` becomes true and the take id is assigned, before microphone
+permission or recorder setup. With Accessibility it also captures the focused
+AX window and that app's focused field, accepting a field only from that
+app's PID and, when captured, that window. AX messages use at most 20 ms each
+within a shared 50 ms capture budget. Missing permission or unreadable AX
+metadata keeps the start-time app-only fallback; it never requests another
+permission. Native latency still requires measurement on the QA app.
+
+Field lookup is scoped to the captured app rather than the system-wide AX
+object. Setting a messaging timeout on the system-wide object changes the
+helper's global default and could affect the independent Control+V path.
+App-scoped lookup keeps the timeout local; PID and window checks still refuse
+an element that belongs to another destination.
+
+The take-owned destination is passed explicitly through the start reset.
+Live candidate changes remain available for the next take but cannot change
+this take's metadata, indicator or cleanup app. Stop does not pin again.
+Cancel, rejection, no-speech discard and delivery clear the destination.
+An asynchronous paste holds its own snapshot after the recorder state resets.
+
+Before automatic Command+V, the helper activates the captured app, raises
+the original window and makes it main, then tries to focus the original
+field. A captured window must be restored and read back as focused; failure
+or expiry leaves the text on the clipboard with `paste_target_unavailable`.
+Field focus is best effort as specified in the approved design: a field
+that rejects focus does not authorize another window, and its failure is
+recorded as `dictation_focus_restore`. The existing activation/poll/settle
+constants and 700 ms clipboard restoration remain; window work uses the
+same activation deadline rather than extending it.
+
+The final app/window/deadline check follows event construction and potentially
+blocking AX queries. Check and submission are still not atomic with the
+WindowServer and do not confirm consumption by a field. Control+V retains
+its independent current-focus Unicode path. Windows and bound composer
+delivery keep their existing contracts.

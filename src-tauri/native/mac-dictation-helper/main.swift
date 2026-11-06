@@ -1371,11 +1371,96 @@ final class LastDictationInserter {
     }
 }
 
+/// One take's native destination. Optional AX references never become a late lookup target.
+struct DictationPasteTarget {
+    let takeID: String
+    let app: NSRunningApplication?
+    let window: AXUIElement?
+    let field: AXUIElement?
+
+    private static let messageTimeout: Float = 0.02
+    private static let captureBudget: TimeInterval = 0.05
+
+    private static func boundMessaging(_ element: AXUIElement, until deadline: DispatchTime) -> Bool {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now < deadline.uptimeNanoseconds else { return false }
+        let remaining = Float(Double(deadline.uptimeNanoseconds - now) / 1_000_000_000)
+        return AXUIElementSetMessagingTimeout(element, min(messageTimeout, remaining)) == .success
+    }
+
+    private static func readElement(_ element: AXUIElement, attribute: String, until deadline: DispatchTime) -> AXUIElement? {
+        guard boundMessaging(element, until: deadline) else { return nil }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
+    }
+
+    static func capture(takeID: String, app: NSRunningApplication?) -> DictationPasteTarget {
+        guard let app, !app.isTerminated, AXIsProcessTrusted() else {
+            return DictationPasteTarget(takeID: takeID, app: app, window: nil, field: nil)
+        }
+        // One budget shared by all queries; slow AX cannot add one full timeout per attribute.
+        let deadline = DispatchTime.now() + captureBudget
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        let window = readElement(appElement, attribute: kAXFocusedWindowAttribute, until: deadline)
+        // A timeout on the system-wide AX object changes the helper's global default,
+        // including Control+V. Query the captured app instead, keeping this budget local.
+        var field = readElement(appElement, attribute: kAXFocusedUIElementAttribute, until: deadline)
+        if let candidate = field {
+            var owner: pid_t = 0
+            if !boundMessaging(candidate, until: deadline)
+                || AXUIElementGetPid(candidate, &owner) != .success || owner != app.processIdentifier {
+                field = nil
+            } else if let window {
+                // A same-app window switch during capture must not attach the new field to the old window.
+                let fieldWindow = readElement(candidate, attribute: kAXWindowAttribute, until: deadline)
+                if fieldWindow.map({ CFEqual($0, window) }) != true { field = nil }
+            }
+        }
+        return DictationPasteTarget(takeID: takeID, app: app, window: window, field: field)
+    }
+
+    func restoreFocus(until deadline: DispatchTime) -> Bool {
+        guard let app, !app.isTerminated else { return false }
+        if let window {
+            guard AXIsProcessTrusted(), Self.boundMessaging(window, until: deadline) else { return false }
+            let raised = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            guard Self.boundMessaging(window, until: deadline) else { return false }
+            let madeMain = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            guard raised == .success || madeMain == .success else { return false }
+        }
+        if let field {
+            let restored = Self.boundMessaging(field, until: deadline)
+                && AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+            if !restored {
+                emit("dictation_focus_restore", takePayload([
+                    "message": "The original dictation field did not accept focus; keeping the original window.",
+                ], takeID: takeID))
+            }
+        }
+        return true
+    }
+
+    func isFrontmost(until deadline: DispatchTime) -> Bool {
+        guard let app else { return false }
+        if let window {
+            guard AXIsProcessTrusted(), let current = Self.readElement(
+                AXUIElementCreateApplication(app.processIdentifier), attribute: kAXFocusedWindowAttribute, until: deadline
+            ), CFEqual(window, current) else { return false }
+        }
+        // Read app identity and time after potentially blocking AX, immediately before authorization.
+        return !app.isTerminated && app.isActive
+            && NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
+            && DispatchTime.now().uptimeNanoseconds < deadline.uptimeNanoseconds
+    }
+}
+
 final class FocusTargetController {
     static let shared = FocusTargetController()
 
     private var lastExternalApp: NSRunningApplication?
-    private var pinnedTarget: NSRunningApplication?
+    private var pinnedTarget: DictationPasteTarget?
     // Debug builds carry `<published>.dev.w<worktree>` (src-tauri/build.rs), so
     // ignore this helper by its own bundle identifier as well as the release one.
     private let ignoredBundleIdentifiers: Set<String> = Set(
@@ -1403,9 +1488,19 @@ final class FocusTargetController {
         }
     }
 
-    func pinCurrentTarget() {
+    func pinCurrentTarget(takeID: String) {
         refreshCandidate()
-        pinnedTarget = lastExternalApp
+        // Freeze the app before any synchronous AX query can observe a later activation.
+        pinnedTarget = DictationPasteTarget.capture(takeID: takeID, app: lastExternalApp)
+    }
+
+    func targetForTake(_ takeID: String?) -> DictationPasteTarget? {
+        guard let pinnedTarget, takeID == nil || pinnedTarget.takeID == takeID else { return nil }
+        return pinnedTarget
+    }
+
+    func restorePinnedTarget(_ target: DictationPasteTarget?) {
+        pinnedTarget = target
     }
 
     func clearPinnedTarget() {
@@ -1413,7 +1508,7 @@ final class FocusTargetController {
     }
 
     func pasteTarget() -> NSRunningApplication? {
-        guard let app = pinnedTarget, !app.isTerminated else {
+        guard let app = pinnedTarget?.app, !app.isTerminated else {
             return nil
         }
         return app
@@ -1422,8 +1517,9 @@ final class FocusTargetController {
     /// Presentation only. Paste retains the exact NSRunningApplication, not
     /// a lookup by these metadata. Keep the pinned identity even if it quits.
     func targetMetadata(pinned: Bool = false) -> Any {
-        guard let app = pinned ? pinnedTarget : lastExternalApp,
-              pinned || !app.isTerminated else {
+        let usePinned = pinned || pinnedTarget != nil
+        guard let app = usePinned ? pinnedTarget?.app : lastExternalApp,
+              usePinned || !app.isTerminated else {
             return NSNull()
         }
         return [
@@ -1443,11 +1539,9 @@ final class FocusTargetController {
     /// Rust cleanup needs the same target that paste will use, so a pinned
     /// dictation target must win over later activation drift.
     func targetBundleIdentifier() -> String? {
-        if let app = pinnedTarget {
-            guard !app.isTerminated else {
-                return nil
-            }
-            return app.bundleIdentifier
+        if let pinnedTarget {
+            // Identity remains pinned even if the app quits; cleanup must not sample another app.
+            return pinnedTarget.app?.bundleIdentifier
         }
         guard let app = lastExternalApp, !app.isTerminated else {
             return nil
@@ -2095,9 +2189,11 @@ final class DictationController {
 
         startPending = true
         let requestedTakeID = takeID?.trimmingCharacters(in: .whitespacesAndNewlines)
-        activeTakeID = requestedTakeID
+        let startedTakeID = requestedTakeID
             .flatMap { !$0.isEmpty && $0.utf8.count <= 128 ? $0 : nil }
             ?? UUID().uuidString.lowercased()
+        activeTakeID = startedTakeID
+        FocusTargetController.shared.pinCurrentTarget(takeID: startedTakeID)
         dictationStartGeneration += 1
         let generation = dictationStartGeneration
         // The common case: access was granted before, so capture starts on
@@ -2122,6 +2218,7 @@ final class DictationController {
                     let rejectedTakeID = self.activeTakeID
                     self.startPending = false
                     self.activeTakeID = nil
+                    FocusTargetController.shared.clearPinnedTarget()
                     emit("error", takePayload([
                         "code": "microphone_permission_missing",
                         "message": "Microphone permission is required.",
@@ -2394,7 +2491,9 @@ final class DictationController {
 
     private func startRecording(purpose: RecordingPurpose, durationSeconds: Double?) {
         let pendingDictationTakeID = purpose == .dictation ? activeTakeID : nil
-        resetRecordingState()
+        let pendingTarget = purpose == .dictation
+            ? FocusTargetController.shared.targetForTake(pendingDictationTakeID) : nil
+        resetRecordingState(preservingPasteTarget: pendingTarget)
         activeTakeID = pendingDictationTakeID
         cleanupMicTestSample()
         recordingPurpose = purpose
@@ -2608,11 +2707,6 @@ final class DictationController {
             return
         }
         let purpose = recordingPurpose
-        if purpose == .dictation {
-            // Selected-device recorder teardown is asynchronous, so the paste
-            // target must be pinned before focus can drift during finalization.
-            FocusTargetController.shared.pinCurrentTarget()
-        }
         isListening = false
         isFinalizing = true
         DictationEscapeCancelMonitor.shared.stop()
@@ -2854,9 +2948,12 @@ final class DictationController {
         return wasListening
     }
 
-    private func resetRecordingState(keepRecordingFile: Bool = false) {
+    private func resetRecordingState(
+        keepRecordingFile: Bool = false,
+        preservingPasteTarget: DictationPasteTarget? = nil
+    ) {
         RecordingCuePlayer.cancel(.start)
-        FocusTargetController.shared.clearPinnedTarget()
+        FocusTargetController.shared.restorePinnedTarget(preservingPasteTarget)
         isListening = false
         isFinalizing = false
         startPending = false
@@ -2955,11 +3052,13 @@ enum PasteboardInserter {
             return
         }
 
-        guard let target = FocusTargetController.shared.pasteTarget() else {
+        guard let destination = FocusTargetController.shared.targetForTake(takeID),
+              let target = destination.app, !target.isTerminated else {
             emitPasteTargetUnavailable(takeID: takeID)
             return
         }
 
+        let activationDeadline = DispatchTime.now() + activationTimeout
         let targetWasActive = target.isActive
         let targetActivated = targetWasActive ? true : target.activate(options: [])
         var targetPayload: [String: Any] = [
@@ -2972,7 +3071,7 @@ enum PasteboardInserter {
 
         waitForActivation(
             of: target,
-            deadline: DispatchTime.now() + activationTimeout,
+            deadline: activationDeadline,
             settleAfterActivation: !targetWasActive
         ) { targetIsFrontmost in
             // Cmd+V goes wherever the window server thinks focus is, so posting
@@ -2980,17 +3079,22 @@ enum PasteboardInserter {
             // into somebody else's window. If the activation never landed,
             // abandon the paste rather than guess: the transcript is already on
             // the clipboard, and a manual Cmd+V beats text in the wrong app.
-            guard targetIsFrontmost else {
+            guard targetIsFrontmost, destination.restoreFocus(until: activationDeadline) else {
                 emitPasteTargetUnavailable(takeID: takeID)
                 return
             }
 
-            postPasteShortcut()
-            emit("paste_completed", takePayload(takeID: takeID))
+            waitForWindow(destination, deadline: activationDeadline) { ready in
+                guard ready, postPasteShortcut(to: destination, until: activationDeadline) else {
+                    emitPasteTargetUnavailable(takeID: takeID)
+                    return
+                }
+                emit("paste_completed", takePayload(takeID: takeID))
 
-            DispatchQueue.global().asyncAfter(deadline: .now() + pasteboardRestoreDelay) {
-                if pasteboard.string(forType: .string) == text {
-                    restore(snapshot, to: pasteboard)
+                DispatchQueue.global().asyncAfter(deadline: .now() + pasteboardRestoreDelay) {
+                    if pasteboard.string(forType: .string) == text {
+                        restore(snapshot, to: pasteboard)
+                    }
                 }
             }
         }
@@ -3066,6 +3170,25 @@ enum PasteboardInserter {
         }
     }
 
+    private static func waitForWindow(
+        _ destination: DictationPasteTarget,
+        deadline: DispatchTime,
+        completion: @escaping (Bool) -> Void
+    ) {
+        if destination.isFrontmost(until: deadline) {
+            completion(true)
+            return
+        }
+        guard DispatchTime.now().uptimeNanoseconds < deadline.uptimeNanoseconds,
+              destination.app?.isTerminated == false else {
+            completion(false)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + activationPollInterval) {
+            waitForWindow(destination, deadline: deadline, completion: completion)
+        }
+    }
+
     private static func capture(_ pasteboard: NSPasteboard) -> PasteboardSnapshot {
         let items = pasteboard.pasteboardItems?.map { item in
             item.types.reduce(into: [NSPasteboard.PasteboardType: Data]()) { result, type in
@@ -3090,15 +3213,18 @@ enum PasteboardInserter {
         pasteboard.writeObjects(restoredItems)
     }
 
-    private static func postPasteShortcut() {
+    private static func postPasteShortcut(to destination: DictationPasteTarget, until deadline: DispatchTime) -> Bool {
         let source = CGEventSource(stateID: .hidSystemState)
-        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true)
-        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false)
+        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false) else { return false }
 
-        keyDown?.flags = .maskCommand
-        keyUp?.flags = .maskCommand
-        keyDown?.post(tap: .cghidEventTap)
-        keyUp?.post(tap: .cghidEventTap)
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        // Event construction precedes the last potentially blocking window query.
+        guard destination.isFrontmost(until: deadline) else { return false }
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+        return true
     }
 }
 

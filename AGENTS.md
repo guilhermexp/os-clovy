@@ -251,6 +251,15 @@ build scripts in `pnpm-workspace.yaml` — live in
   [ADR-0073](docs/adr/0073-desktop-calls-user-providers-without-a-clovy-server.md).
 - **Clovy presents as Clovy.** CLI execution is an implementation detail;
   product instructions assert Clovy's identity.
+- **macOS automatic dictation destination:** fix the exact app and available
+  AX window/field when the helper accepts the take's start, before microphone
+  permission and recorder reset. Carry the take-owned snapshot through that
+  reset; stop must not repin, and indicator/cleanup metadata must use the pin.
+  Keep updating the idle candidate for the next take. Restore the original
+  window and try to focus its field before automatic Command+V; unavailable
+  window or expired activation means clipboard recovery, never another window.
+  Preserve the existing deadlines and 700 ms clipboard restoration. See the
+  macOS start-time addendum in [ADR-0014](docs/adr/0014-pinned-dictation-paste-target.md).
 - **macOS dictation reinsertion:** Control+V inserts the last eligible dictation
   into the current focus using Unicode events, independently of the clipboard.
   Rust owns one volatile, data-partition-qualified slot, updated only after

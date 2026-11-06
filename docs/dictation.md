@@ -15,14 +15,21 @@ takes never deliver), and
    on macOS) reports `shortcut_key_down`; `ShortcutActivationController` in
    `src-tauri/src/dictation.rs` answers `start_listening` with a take id. The
    same key-down also rewarms the network route when it has been idle for a
-   minute (`warm_dictation_route_if_idle` in the Groq provider).
+   minute (`warm_dictation_route_if_idle` in the Groq provider). On macOS,
+   accepting that start fixes the take's paste target before microphone
+   permission or recorder setup: the exact app plus its focused AX window
+   and field when available. Capture uses a shared 50 ms AX query budget,
+   with at most 20 ms per message, and otherwise keeps the app alone.
 2. **Capture.** The helper starts recording at once: microphone permission is
    only requested when it is not already granted, and the recorder for the
    next take is prepared after each take and at launch. The start cue plays in
    parallel and is cut from the recording before it is handed over (see
    [Start cue](#start-cue)). `listening_started` follows the key-down.
-3. **Stop.** On release the helper pins the paste target, stops the recorder,
-   and emits `recording_ready` with the `.m4a` path and the peak meter level.
+3. **Stop.** On release the helper stops the recorder and emits
+   `recording_ready` with the `.m4a` path and peak meter level. macOS retains
+   the start-time target throughout capture and finalization; stop never
+   selects it again. Candidate app changes remain available for the next
+   take, while this take's indicator and cleanup app remain fixed.
    No speech analysis runs before the upload.
 4. **Transcription** (`dictate_transcribe` in the Groq provider). With the user's own
    Groq key it posts straight to `api.groq.com/openai/v1/audio/transcriptions`
@@ -48,9 +55,25 @@ takes never deliver), and
    CLI or endpoint. The output style (standard, casual, formal) applies only
    while cleanup is on.
 7. **Paste.** The helper writes the text to the clipboard and posts Cmd+V into
-   the pinned target. When the target is already frontmost it pastes at once;
-   otherwise it activates the target, polls every 20 ms for up to 1 s, and
-   waits a short settle delay after activation lands.
+   the pinned target. On macOS it activates that app, raises the captured
+   window and makes it main, then tries to focus the captured field. App
+   activation still polls every 20 ms for up to 1 s with the existing 180 ms
+   settle delay. Window restoration and verification use that same deadline,
+   without a new activation budget. After preparing the key events, the
+   helper checks the original AX window, frontmost app and deadline again.
+   A closed or unrestorable window means `paste_target_unavailable`, with
+   no Cmd+V and the text left on the clipboard. Field focus is best effort:
+   if the original window is valid but its field refuses focus, paste stays
+   in that window and `dictation_focus_restore` records the failure. Without
+   a captured AX window, delivery keeps the start-time app-only fallback.
+
+The macOS destination is owned by the take id and passed explicitly through
+the recorder's start reset. Cancel, rejected start, no-speech discard and
+delivery clear it. An asynchronous paste retains its own snapshot, so a reset
+cannot redirect it to the next take. No part of this changes Control+V, which
+continues to use the current focus. Clipboard restoration still runs 700 ms
+after the automatic shortcut. The final check and WindowServer delivery are
+not atomic; event submission does not prove which field consumed the text.
 
 The seven-day dictation history stores the target bundle identifier captured at
 `recording_ready`, when available, with both ordinary and low-speech recovery
