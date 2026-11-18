@@ -67,6 +67,8 @@ export type AgentChatNoticePart = {
   type: "notice";
   kind: "context-overflow" | "upstream-provider" | "tool" | "runtime";
   text: string;
+  /** Sanitized workspace recovery observation; never a model or tool result. */
+  diagnostic?: string;
   retryable?: boolean;
 };
 export type AgentChatSteeringPart = { type: "steering"; text: string };

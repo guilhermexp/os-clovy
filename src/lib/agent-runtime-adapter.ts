@@ -17,6 +17,8 @@ export type AgentRuntimeProjection = {
   items: AgentItemDto[];
   lastSequenceByRun: Record<string, number>;
   processedEventIds: Set<string>;
+  /** Provenance of live diagnostics, not a second transcript. */
+  diagnosticEventIds: ReadonlyMap<string, string>;
   /** Terminal authority retained across stale snapshots and late CLI starts. */
   terminalRunKeys: Set<string>;
 };
@@ -30,6 +32,7 @@ export function createAgentRuntimeProjection(
     items: [...(input.items ?? [])].sort(compareAgentItems),
     lastSequenceByRun: {},
     processedEventIds: new Set(),
+    diagnosticEventIds: new Map(),
     terminalRunKeys: new Set([
       ...(input.run && isTerminalRun(input.run) ? [runKey(input.run.sessionId, input.run.id)] : []),
       ...(input.items ?? [])
@@ -94,13 +97,14 @@ export function reconcileAgentInterruptionResolution(
 
 /**
  * Hydrates a persisted transcript without dropping deltas that arrived while
- * the snapshot request was in flight. Only streamed text from the active run
- * is carried across, so switching sessions cannot leak items from the previous
- * transcript.
+ * the snapshot request was in flight. The read-start event IDs distinguish
+ * newly observed diagnostics from older omitted items. Session identity gates
+ * all live state; existing tool settlements and active text retain their rules.
  */
 export function mergeAgentRuntimeSnapshot(
   current: AgentRuntimeProjection,
   input: { session: AgentSessionDto; run?: AgentRunDto; items: AgentItemDto[] },
+  readStartedEventIds: ReadonlySet<string>,
 ): AgentRuntimeProjection {
   if (
     current.session?.id === input.session.id &&
@@ -117,6 +121,14 @@ export function mergeAgentRuntimeSnapshot(
   const snapshot = createAgentRuntimeProjection(input);
   if (current.session?.id === input.session.id) {
     snapshot.terminalRunKeys = new Set([...snapshot.terminalRunKeys, ...current.terminalRunKeys]);
+    snapshot.processedEventIds = new Set(current.processedEventIds);
+    snapshot.lastSequenceByRun = { ...current.lastSequenceByRun };
+    snapshot.diagnosticEventIds = new Map(
+      [...current.diagnosticEventIds].filter(([id]) =>
+        snapshot.items.some((item) => item.id === id),
+      ),
+    );
+
     // A request begun before Stop may return running calls after its terminal
     // event. Keep that exact call's settlement and any genuinely observed result.
     for (const liveItem of current.items) {
@@ -135,6 +147,28 @@ export function mergeAgentRuntimeSnapshot(
         !snapshot.items.some((item) => item.kind === "tool_result" && sameToolCall(item, liveItem))
       ) {
         snapshot.items = upsertItem(snapshot.items, liveItem);
+      }
+    }
+  }
+  // During first hydration the selected session is known by the consumer,
+  // while its full session DTO is still pending. Only event-backed cleanup
+  // diagnostics can cross that gap, scoped by each item's session identity.
+  if (!current.session || current.session.id === input.session.id) {
+    // Carry only an actual diagnostic event received after this read began.
+    // An older omitted item is authoritative deletion/compaction, not a delta.
+    for (const item of current.items) {
+      const eventId = current.diagnosticEventIds.get(item.id);
+      if (
+        item.sessionId === input.session.id &&
+        item.kind === "error" &&
+        item.code === "agent_workspace_mcp_cleanup" &&
+        eventId &&
+        current.processedEventIds.has(eventId) &&
+        !readStartedEventIds.has(eventId)
+      ) {
+        snapshot.items = upsertItem(snapshot.items, item);
+        snapshot.diagnosticEventIds = new Map(snapshot.diagnosticEventIds).set(item.id, eventId);
+        snapshot.processedEventIds.add(eventId);
       }
     }
   }
@@ -294,6 +328,24 @@ export function applyAgentRuntimeEvent(
         createdAt: event.data.createdAt,
         kind: "steering",
         text: event.data.text,
+      });
+      break;
+    case "run.diagnostic":
+      next.diagnosticEventIds = new Map(next.diagnosticEventIds).set(
+        event.data.itemId,
+        event.eventId,
+      );
+      next.items = upsertItem(next.items, {
+        id: event.data.itemId,
+        sessionId: event.sessionId,
+        runId: event.runId,
+        sequence: event.data.itemSequence,
+        createdAt: event.data.createdAt,
+        kind: "error",
+        message: event.data.message,
+        category: event.data.category,
+        code: event.data.code,
+        retryable: event.data.retryable,
       });
       break;
     case "tool.started":
@@ -582,7 +634,13 @@ export function agentItemsToChatTurns(items: AgentItemDto[]): AgentChatTurn[] {
                     : item.category === "runtime"
                       ? "runtime"
                       : "upstream-provider",
-                text: t("lib.upstream.noticeBody"),
+                text:
+                  item.code === "agent_workspace_mcp_cleanup"
+                    ? item.message
+                    : t("lib.upstream.noticeBody"),
+                ...(item.code === "agent_workspace_mcp_cleanup"
+                  ? { diagnostic: item.message }
+                  : {}),
                 retryable: item.retryable,
               },
             ],

@@ -11,6 +11,7 @@ use tokio::sync::watch;
 struct TestIo {
     pool: SqlitePool,
     events: Arc<StdMutex<Vec<(String, Value)>>>,
+    sequences: Arc<StdMutex<Vec<i64>>>,
 }
 
 impl BrokerIo for TestIo {
@@ -18,7 +19,8 @@ impl BrokerIo for TestIo {
         Box::pin(async move { Ok(self.pool.clone()) })
     }
 
-    fn emit(&self, _session_id: &str, _run_id: &str, _sequence: i64, method: &str, data: Value) {
+    fn emit(&self, _session_id: &str, _run_id: &str, sequence: i64, method: &str, data: Value) {
+        self.sequences.lock().unwrap().push(sequence);
         self.events.lock().unwrap().push((method.to_string(), data));
     }
 }
@@ -267,6 +269,7 @@ impl Harness {
         let io = TestIo {
             pool,
             events: Arc::default(),
+            sequences: Arc::default(),
         };
         let clock = ManualClock::new();
         Self {
@@ -383,6 +386,281 @@ fn clarification() -> ApprovalRequest {
             question: "Which calendar?".into(),
             choices: vec!["Work".into(), "Personal".into()],
         },
+    }
+}
+
+async fn f16_history() -> Harness {
+    use crate::agent_sessions::{AgentItemPayload, MessagePayload};
+    let mut harness = Harness::new().await;
+    for sequence in 1..=18 {
+        harness
+            .repository
+            .append_item(
+                &harness.session_id,
+                Some(&harness.run_id),
+                sequence,
+                &AgentItemPayload::AssistantMessage(MessagePayload {
+                    role: "assistant".into(),
+                    content: format!("Earlier run answer {sequence}"),
+                    attachments: vec![],
+                }),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    harness
+        .repository
+        .update_run_status(&harness.run_id, "completed", None, None, None)
+        .await
+        .unwrap();
+    harness.run_id = harness
+        .repository
+        .create_run(&harness.session_id, "__clovy_cli_engine__:claude", None)
+        .await
+        .unwrap()
+        .id;
+    harness
+        .repository
+        .append_item(
+            &harness.session_id,
+            Some(&harness.run_id),
+            1,
+            &AgentItemPayload::UserMessage(MessagePayload {
+                role: "user".into(),
+                content: "Current request".into(),
+                attachments: vec![],
+            }),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    harness
+}
+
+async fn f16_events(harness: &Harness, count: usize) -> Vec<(String, Value)> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let events = harness.io.events.lock().unwrap().clone();
+            if events.len() >= count {
+                return events;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("broker public events")
+}
+
+async fn f16_following_item(harness: &Harness) -> crate::agent_sessions::AgentItemDto {
+    use crate::agent_sessions::{AgentItemPayload, MessagePayload};
+    harness
+        .repository
+        .append_item(
+            &harness.session_id,
+            Some(&harness.run_id),
+            2,
+            &AgentItemPayload::AssistantMessage(MessagePayload {
+                role: "assistant".into(),
+                content: "CLI continued after the pending card".into(),
+                attachments: vec![],
+            }),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+fn f16_visible_order(
+    history: &[crate::agent_sessions::AgentItemDto],
+    card: &Value,
+    following: &crate::agent_sessions::AgentItemDto,
+) -> Vec<String> {
+    // Compare the public item's coordinate with real history, using the same
+    // session-wide order consumed by the frontend, never timestamps or append.
+    let mut order: Vec<_> = history
+        .iter()
+        .chain(std::iter::once(following))
+        .map(|item| {
+            (
+                item.sequence,
+                item.external_id.clone().unwrap_or_else(|| item.id.clone()),
+            )
+        })
+        .collect();
+    order.push((
+        card["itemSequence"].as_i64().unwrap(),
+        card["itemId"].as_str().unwrap().to_string(),
+    ));
+    order.sort_by_key(|(sequence, _)| *sequence);
+    order.into_iter().map(|(_, id)| id).collect()
+}
+
+#[tokio::test]
+async fn f16_pending_card_public_order_matches_real_history_before_hydration() {
+    let harness = f16_history().await;
+    let history = harness.repository.items(&harness.session_id).await.unwrap();
+    let user = history.last().unwrap();
+    let cursor = harness
+        .repository
+        .get_run(&harness.run_id)
+        .await
+        .unwrap()
+        .last_sequence;
+    assert!(
+        user.sequence > cursor + 10,
+        "fixture must separate item order from the new run cursor"
+    );
+    let (task, id) = harness
+        .ask(approval("update_note", json!({"id":"synthetic-note"})))
+        .await;
+    let events = f16_events(&harness, 1).await;
+    assert_eq!(
+        harness
+            .repository
+            .get_run(&harness.run_id)
+            .await
+            .unwrap()
+            .last_sequence,
+        cursor
+    );
+    let following = f16_following_item(&harness).await;
+    let public = &events[0].1;
+    let persisted = harness.repository.items(&harness.session_id).await.unwrap();
+    let expected: Vec<_> = persisted
+        .iter()
+        .map(|item| item.external_id.clone().unwrap_or_else(|| item.id.clone()))
+        .collect();
+    assert_eq!(
+        f16_visible_order(&history, public, &following),
+        expected,
+        "live pending must have its canonical position before any hydration"
+    );
+    assert!(public["itemSequence"].as_i64().unwrap() > user.sequence);
+    assert!(public["itemSequence"].as_i64().unwrap() < following.sequence);
+    assert_eq!(*harness.io.sequences.lock().unwrap(), vec![cursor]);
+    harness
+        .resolve(&id, json!({"kind":"approval","choice":"deny"}))
+        .await
+        .unwrap();
+    assert_eq!(task.await.unwrap(), Err(ApprovalDenial::UserDenied));
+}
+
+#[tokio::test]
+async fn f16_updated_card_keeps_original_position_and_one_decision_effect() {
+    for outcome in ["approve", "deny", "clarify", "retire"] {
+        let harness = f16_history().await;
+        sqlx::query::query("INSERT INTO notes(id,title,edited_content,processing_status,profile,created_at,updated_at,revision) VALUES ('f16-note','Synthetic','Before approval','draft','default','now','now',6)").execute(&harness.io.pool).await.unwrap();
+        let history = harness.repository.items(&harness.session_id).await.unwrap();
+        let (task, id) = harness
+            .ask(if outcome == "clarify" {
+                clarification()
+            } else {
+                approval("update_note", json!({"id":"f16-note"}))
+            })
+            .await;
+        f16_events(&harness, 1).await;
+        let pending = harness
+            .repository
+            .items(&harness.session_id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let following = f16_following_item(&harness).await;
+        let revision = || async {
+            use sqlx::row::Row;
+            sqlx::query::query("SELECT revision FROM notes WHERE id='f16-note'")
+                .fetch_one(&harness.io.pool)
+                .await
+                .unwrap()
+                .get::<i64, _>("revision")
+        };
+        assert_eq!(revision().await, 6, "no effect before the decision");
+        let pool = harness.io.pool.clone();
+        let effect = tokio::spawn(async move {
+            let result = task.await.unwrap();
+            if matches!(result, Ok(ApprovalOutcome::Approved)) {
+                sqlx::query::query("UPDATE notes SET edited_content='After approval',revision=revision+1 WHERE id='f16-note'").execute(&pool).await.unwrap();
+            }
+            result
+        });
+        match outcome {
+            "approve" => {
+                harness
+                    .resolve(&id, json!({"kind":"approval","choice":"once"}))
+                    .await
+                    .unwrap();
+            }
+            "deny" => {
+                harness
+                    .resolve(&id, json!({"kind":"approval","choice":"deny"}))
+                    .await
+                    .unwrap();
+            }
+            "clarify" => {
+                harness
+                    .resolve(&id, json!({"kind":"clarification","answer":"Work"}))
+                    .await
+                    .unwrap();
+            }
+            _ => {
+                assert_eq!(harness.broker.cancel_run(&harness.run_id).await, 1);
+            }
+        }
+        let result = effect.await.unwrap();
+        match outcome {
+            "approve" => assert_eq!(result, Ok(ApprovalOutcome::Approved)),
+            "deny" => assert_eq!(result, Err(ApprovalDenial::UserDenied)),
+            "clarify" => assert_eq!(result, Ok(ApprovalOutcome::Answered("Work".into()))),
+            _ => assert_eq!(result, Err(ApprovalDenial::RunCancelled)),
+        }
+        let events = f16_events(&harness, 2).await;
+        assert_eq!(events[1].0, "interruption.updated");
+        let persisted = harness.repository.items(&harness.session_id).await.unwrap();
+        let updated = persisted.iter().find(|item| item.id == pending.id).unwrap();
+        assert_eq!(
+            (updated.sequence, &updated.external_id, &updated.created_at),
+            (pending.sequence, &pending.external_id, &pending.created_at)
+        );
+        let expected: Vec<_> = persisted
+            .iter()
+            .map(|item| item.external_id.clone().unwrap_or_else(|| item.id.clone()))
+            .collect();
+        assert_eq!(
+            f16_visible_order(&history, &events[1].1, &following),
+            expected,
+            "updated card must remain at its original position: {outcome}"
+        );
+        assert_eq!(events[0].1["itemId"], events[1].1["itemId"]);
+        assert_eq!(
+            harness
+                .repository
+                .get_run(&harness.run_id)
+                .await
+                .unwrap()
+                .last_sequence,
+            2
+        );
+        assert_eq!(*harness.io.sequences.lock().unwrap(), vec![1, 2]);
+        let again = if outcome == "clarify" {
+            json!({"kind":"clarification","answer":"Personal"})
+        } else {
+            json!({"kind":"approval","choice":"once"})
+        };
+        assert_eq!(
+            harness.resolve(&id, again).await.unwrap_err().code,
+            "agent_interruption_expired"
+        );
+        assert_eq!(revision().await, if outcome == "approve" { 7 } else { 6 });
+        assert_eq!(
+            f16_events(&harness, 2).await.len(),
+            2,
+            "one requested and one update only"
+        );
     }
 }
 

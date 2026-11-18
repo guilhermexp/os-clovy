@@ -353,16 +353,52 @@ pub fn migrate_legacy_local_generation(
     settings
 }
 
-/// The CLIs that become the default chat engine, in order of preference.
-pub const DEFAULT_CHAT_CLIS: [CliKind; 2] = [CliKind::Claude, CliKind::Codex];
+/// Existing unattended eligibility, kept separate from automatic chat choice.
+/// Do not admit another engine until its unattended policy is qualified.
+pub const UNATTENDED_CLIS: [CliKind; 2] = [CliKind::Claude, CliKind::Codex];
 
-/// The available default: Claude Code first, then the existing Codex fallback.
+/// Resolve unattended work independently of chat and Notes. Explicit choices
+/// must be both eligible and installed; they never fall back to another engine.
+pub fn resolve_unattended_cli(
+    model: &str,
+    installed: impl Fn(CliKind) -> bool,
+) -> Result<CliKind, AppError> {
+    if matches!(model, "" | "auto" | "open-software/auto") {
+        return UNATTENDED_CLIS
+            .into_iter()
+            .find(|kind| installed(*kind))
+            .ok_or_else(|| {
+                AppError::new(
+                    "routine_engine_unavailable",
+                    "Install an eligible CLI engine before starting this routine.",
+                )
+            });
+    }
+    let kind = crate::chat_engine::cli_for_model(model)
+        .filter(|kind| UNATTENDED_CLIS.contains(kind))
+        .ok_or_else(|| {
+            AppError::new(
+                "routine_engine_not_allowed",
+                "This engine is not eligible for unattended routines.",
+            )
+        })?;
+    if !installed(kind) {
+        return Err(LlmError::CliNotInstalled(kind).into());
+    }
+    Ok(kind)
+}
+
+/// Automatic chat preference follows catalog order: Claude Code, Codex, then
+/// Antigravity. This selection never starts a CLI or changes an explicit choice.
 pub fn default_chat_cli(installed: impl Fn(CliKind) -> bool) -> Option<CliKind> {
-    DEFAULT_CHAT_CLIS.into_iter().find(|kind| installed(*kind))
+    CliKind::ALL
+        .into_iter()
+        .filter(|kind| matches!(kind, CliKind::Claude | CliKind::Codex | CliKind::Agy))
+        .find(|kind| installed(*kind))
 }
 
 /// Retire native/endpoint chat selections even if the earlier CLI-default
-/// migration was recorded. A CLI choice survives. When neither CLI is installed,
+/// migration was recorded. A CLI choice survives. When no eligible CLI is installed,
 /// select Claude Code so its normal setup error is shown without another route.
 pub fn apply_cli_default(
     settings: &mut ProviderModelSettings,
@@ -1124,6 +1160,101 @@ mod tests {
             let mut reloaded: ProviderModelSettings = serde_json::from_str(&saved).unwrap();
             assert_eq!(apply_cli_default(&mut reloaded, |_| false), None);
             assert_eq!(reloaded, settings);
+        }
+    }
+
+    #[test]
+    fn selection_single_installed_cli_becomes_the_persisted_chat_engine() {
+        for only in [CliKind::Claude, CliKind::Codex, CliKind::Agy] {
+            let mut settings = crate::providers::default_settings_for_tests();
+            let notes = settings.llm_usage.notes.clone();
+            let text_model = settings.generation_model.clone();
+            apply_cli_default(&mut settings, |kind| kind == only);
+            assert_eq!(
+                crate::chat_engine::default_engine_of(&settings).model_id,
+                crate::chat_engine::engine_model_id(only),
+                "only {only:?} is installed"
+            );
+            let saved = serde_json::to_string(&settings).unwrap();
+            let mut reloaded: ProviderModelSettings = serde_json::from_str(&saved).unwrap();
+            assert_eq!(apply_cli_default(&mut reloaded, |_| false), None);
+            assert_eq!(reloaded.llm_usage.chat, ProviderRef::Cli { id: only });
+            assert_eq!(reloaded.llm_usage.notes, notes);
+            assert_eq!(reloaded.generation_model, text_model);
+        }
+    }
+
+    #[test]
+    fn selection_explicit_switch_and_unavailability_never_select_another_cli() {
+        let mut settings = crate::providers::default_settings_for_tests();
+        apply_cli_default(&mut settings, |_| true);
+        for chosen in [CliKind::Agy, CliKind::Codex, CliKind::Claude] {
+            set_usage(
+                &mut settings,
+                LlmUsage::Chat,
+                ProviderRef::Cli { id: chosen },
+                |_| true,
+            )
+            .unwrap();
+            let before = settings.clone();
+            // A later launch with no CLI available preserves the explicit choice.
+            assert_eq!(apply_cli_default(&mut settings, |_| false), None);
+            assert_eq!(settings, before);
+            let unavailable = if chosen == CliKind::Claude {
+                CliKind::Agy
+            } else {
+                CliKind::Claude
+            };
+            let error = set_usage(
+                &mut settings,
+                LlmUsage::Chat,
+                ProviderRef::Cli { id: unavailable },
+                |kind| kind == chosen,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "llm_cli_not_installed");
+            assert_eq!(settings, before);
+            assert_eq!(crate::chat_engine::default_engine_of(&settings).cli, chosen);
+        }
+    }
+
+    #[test]
+    fn selection_note_provider_is_independent_of_chat_for_each_installed_cli() {
+        for only in [CliKind::Claude, CliKind::Codex, CliKind::Agy] {
+            let mut settings = crate::providers::default_settings_for_tests();
+            let chat = settings.llm_usage.chat.clone();
+            let text_model = settings.generation_model.clone();
+            set_usage(
+                &mut settings,
+                LlmUsage::Notes,
+                ProviderRef::Cli { id: only },
+                |kind| kind == only,
+            )
+            .unwrap();
+            assert_eq!(
+                LlmRegistry::from(&settings).usage.get(LlmUsage::Notes),
+                &ProviderRef::Cli { id: only }
+            );
+            assert_eq!(settings.llm_usage.chat, chat);
+            assert_eq!(settings.generation_model, text_model);
+            let before = settings.clone();
+            let missing = if only == CliKind::Claude {
+                CliKind::Codex
+            } else {
+                CliKind::Claude
+            };
+            assert_eq!(
+                set_usage(
+                    &mut settings,
+                    LlmUsage::Notes,
+                    ProviderRef::Cli { id: missing },
+                    |kind| kind == only
+                )
+                .unwrap_err()
+                .code,
+                "llm_cli_not_installed"
+            );
+            assert_eq!(settings, before);
         }
     }
 

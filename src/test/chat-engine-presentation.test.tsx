@@ -94,6 +94,69 @@ describe("chat engine presentation", () => {
     mocks.invoke.mockReset();
   });
 
+  it.each([
+    "claude",
+    "codex",
+    "agy",
+  ])("selects the only installed engine %s and disables unavailable alternatives", async (only) => {
+    const user = userEvent.setup();
+    const setModel = vi.fn();
+    const clis = [
+      { id: "claude", name: "Claude Code" },
+      { id: "codex", name: "Codex" },
+      { id: "agy", name: "Antigravity" },
+    ].map((cli) => ({
+      ...cli,
+      installed: cli.id === only,
+      reason: null,
+      modelId: `__clovy_cli_engine__:${cli.id}`,
+    }));
+    mocks.invoke.mockResolvedValue({ clis });
+    render(<ChatEnginePicker model="historical-model" setModel={setModel} catalog={{ clis }} />);
+    const chosen = clis.find((cli) => cli.id === only);
+    await user.click(screen.getByRole("button", { name: `Chat engine: ${chosen?.name}` }));
+    for (const cli of clis) {
+      const row = screen.getByRole("menuitemradio", { name: new RegExp(`^${cli.name}`) });
+      if (cli.id !== only) {
+        expect(row).toBeDisabled();
+        await user.click(row);
+        expect(setModel).not.toHaveBeenCalled();
+      } else {
+        expect(row).toHaveAttribute("aria-checked", "true");
+        expect(row).toHaveTextContent("Default");
+      }
+    }
+    await user.click(screen.getByRole("menuitemradio", { name: new RegExp(`^${chosen?.name}`) }));
+    expect(setModel).toHaveBeenCalledExactlyOnceWith(`__clovy_cli_engine__:${only}`);
+  });
+
+  it("switches among all three installed engines without replacing an explicit choice", async () => {
+    const user = userEvent.setup();
+    const setModel = vi.fn();
+    const clis = [
+      { id: "claude", name: "Claude Code" },
+      { id: "codex", name: "Codex" },
+      { id: "agy", name: "Antigravity" },
+    ].map((cli) => ({
+      ...cli,
+      installed: true,
+      reason: null,
+      modelId: `__clovy_cli_engine__:${cli.id}`,
+    }));
+    mocks.invoke.mockResolvedValue({ clis });
+    const { rerender } = render(
+      <ChatEnginePicker model="__clovy_cli_engine__:agy" setModel={setModel} catalog={{ clis }} />,
+    );
+    for (const cli of clis) {
+      await user.click(screen.getByRole("button", { name: /Chat engine:/ }));
+      await user.click(screen.getByRole("menuitemradio", { name: new RegExp(`^${cli.name}`) }));
+      expect(setModel).toHaveBeenLastCalledWith(cli.modelId);
+      rerender(<ChatEnginePicker model={cli.modelId} setModel={setModel} catalog={{ clis }} />);
+      expect(screen.getByRole("button", { name: `Chat engine: ${cli.name}` })).toBeInTheDocument();
+    }
+    expect(setModel).toHaveBeenCalledTimes(3);
+  });
+
   it("changes the approval mode of the selected conversation", async () => {
     const user = userEvent.setup();
     let storedSession = { ...session };

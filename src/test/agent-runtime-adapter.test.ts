@@ -254,7 +254,11 @@ describe("agent runtime adapter", () => {
       { type: "tool", text: "First result" },
       { type: "text", text: "First answer" },
     ]);
-    const hydrated = mergeAgentRuntimeSnapshot(projection, { session, run, items: persisted });
+    const hydrated = mergeAgentRuntimeSnapshot(
+      projection,
+      { session, run, items: persisted },
+      new Set(),
+    );
     expect(hydrated.items.map((item) => item.id)).toEqual(expectedIds);
     expect(agentItemsToChatTurns(hydrated.items)).toEqual(turns);
     expect(hydrated.items[4]).toMatchObject({ sequence: 10, text: "Second answer" });
@@ -596,23 +600,27 @@ describe("agent runtime adapter", () => {
       },
     });
 
-    const hydrated = mergeAgentRuntimeSnapshot(current, {
-      session,
-      run,
-      items: [
-        {
-          id: "assistant:run-1",
-          sessionId: session.id,
-          runId: run.id,
-          sequence: 1,
-          createdAt: "2026-07-22T12:00:01Z",
-          kind: "message",
-          role: "assistant",
-          text: "Everything said before opening",
-          status: "streaming",
-        },
-      ],
-    });
+    const hydrated = mergeAgentRuntimeSnapshot(
+      current,
+      {
+        session,
+        run,
+        items: [
+          {
+            id: "assistant:run-1",
+            sessionId: session.id,
+            runId: run.id,
+            sequence: 1,
+            createdAt: "2026-07-22T12:00:01Z",
+            kind: "message",
+            role: "assistant",
+            text: "Everything said before opening",
+            status: "streaming",
+          },
+        ],
+      },
+      new Set(),
+    );
 
     expect(hydrated.items).toMatchObject([
       {
@@ -1086,5 +1094,234 @@ describe("agent runtime adapter", () => {
     expect(() => applyAgentRuntimeEvent(createAgentRuntimeProjection(), event)).toThrow(
       "Unsupported agent runtime protocol version: 2",
     );
+  });
+});
+
+describe("workspace MCP cleanup diagnostics", () => {
+  const message =
+    "Workspace MCP cleanup needs recovery: configuration changed; private receipt retained.";
+  const run = {
+    id: "run-1",
+    sessionId: "session-1",
+    status: "cancelled" as const,
+    model: "__clovy_cli_engine__:agy",
+  };
+  const event = {
+    ...frame,
+    eventId: "cleanup-diagnostic",
+    sequence: 51,
+    method: "run.diagnostic",
+    data: {
+      ...itemData,
+      itemId: "cleanup-item",
+      itemSequence: 11,
+      message,
+      category: "runtime",
+      code: "agent_workspace_mcp_cleanup",
+      retryable: false,
+    },
+  } satisfies AgentRuntimeEvent;
+
+  it("shows a real cleanup warning live and after reopening while cancellation remains final", () => {
+    const projection = applyAgentRuntimeEvent(createAgentRuntimeProjection({ run }), event);
+    expect(projection.run?.status).toBe("cancelled");
+    const turns = agentItemsToChatTurns(projection.items);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].status).toBe("complete");
+    expect(turns[0].parts).toContainEqual(
+      expect.objectContaining({ type: "notice", text: message, retryable: false }),
+    );
+    const reopened = createAgentRuntimeProjection({ run, items: projection.items });
+    expect(agentItemsToChatTurns(reopened.items)).toEqual(turns);
+    expect(applyAgentRuntimeEvent(projection, event)).toBe(projection);
+  });
+
+  it("keeps a different active run unchanged and emits no warning for clean cancellation", () => {
+    const other = { ...run, id: "run-2", status: "running" as const };
+    const projection = applyAgentRuntimeEvent(createAgentRuntimeProjection({ run: other }), event);
+    expect(projection.run).toEqual(other);
+    expect(projection.items).toHaveLength(1);
+    expect(projection.items[0].runId).toBe(run.id);
+    const clean = applyAgentRuntimeEvent(createAgentRuntimeProjection({ run: other }), {
+      ...frame,
+      eventId: "clean-cancel",
+      sequence: 1,
+      method: "run.cancelled",
+      data: { completedAt: itemData.createdAt },
+    });
+    expect(clean.run).toEqual(other);
+    expect(clean.items).toEqual([]);
+  });
+});
+
+describe("F10 diagnostic snapshot provenance", () => {
+  it("carries only live arrivals since the read, respects later deletion and scopes to the session", () => {
+    const session = {
+      id: "session-1",
+      title: "Synthetic",
+      status: "idle" as const,
+      model: "__clovy_cli_engine__:agy",
+      safetyMode: "sandboxed" as const,
+      workspacePath: "/tmp/f10",
+      source: "user" as const,
+      createdAt: "now",
+      updatedAt: "now",
+    };
+    const run = {
+      id: "run-1",
+      sessionId: session.id,
+      status: "cancelled" as const,
+      model: session.model,
+    };
+    const start = createAgentRuntimeProjection({ session, run });
+    const event = {
+      ...frame,
+      eventId: "f10-diagnostic",
+      sequence: 51,
+      method: "run.diagnostic" as const,
+      data: {
+        itemId: "f10-warning",
+        itemSequence: 2,
+        createdAt: "now",
+        message: "Recovery needed",
+        category: "runtime" as const,
+        code: "agent_workspace_mcp_cleanup" as const,
+        retryable: false as const,
+      },
+    };
+    const live = applyAgentRuntimeEvent(start, event);
+    const hydrated = mergeAgentRuntimeSnapshot(
+      live,
+      { session, run, items: [] },
+      start.processedEventIds,
+    );
+    expect(hydrated.items).toHaveLength(1);
+    expect(hydrated.run?.status).toBe("cancelled");
+    expect(applyAgentRuntimeEvent(hydrated, event)).toBe(hydrated);
+    // A new authoritative read omitting an already known diagnostic wins.
+    expect(
+      mergeAgentRuntimeSnapshot(hydrated, { session, run, items: [] }, hydrated.processedEventIds)
+        .items,
+    ).toEqual([]);
+    // A later compaction/deletion removed the item from the live projection.
+    expect(
+      mergeAgentRuntimeSnapshot(
+        { ...live, items: [] },
+        { session, run, items: [] },
+        start.processedEventIds,
+      ).items,
+    ).toEqual([]);
+    const other = { ...session, id: "session-2" };
+    expect(
+      mergeAgentRuntimeSnapshot(live, { session: other, items: [] }, start.processedEventIds).items,
+    ).toEqual([]);
+    expect(
+      mergeAgentRuntimeSnapshot(start, { session, run, items: [] }, start.processedEventIds).items,
+    ).toEqual([]);
+  });
+
+  it("F10b admits only proven diagnostics before session metadata and keeps identity, deletion and terminal boundaries", () => {
+    const session = {
+      id: "session-1",
+      title: "Synthetic",
+      status: "idle" as const,
+      model: "__clovy_cli_engine__:agy",
+      safetyMode: "sandboxed" as const,
+      workspacePath: "/tmp/f10b",
+      source: "user" as const,
+      createdAt: "now",
+      updatedAt: "now",
+    };
+    const run = {
+      id: "run-1",
+      sessionId: session.id,
+      status: "cancelled" as const,
+      model: session.model,
+    };
+    const start = createAgentRuntimeProjection();
+    const event = {
+      ...frame,
+      sessionId: session.id,
+      runId: run.id,
+      eventId: "initial-diagnostic",
+      sequence: 51,
+      method: "run.diagnostic" as const,
+      data: {
+        itemId: "initial-warning",
+        itemSequence: 2,
+        createdAt: "now",
+        message: "Recovery needed",
+        category: "runtime" as const,
+        code: "agent_workspace_mcp_cleanup" as const,
+        retryable: false as const,
+      },
+    };
+    const live = applyAgentRuntimeEvent(start, event);
+    expect(live.session).toBeUndefined();
+    const input = { session, run, items: [] };
+    const hydrated = mergeAgentRuntimeSnapshot(live, input, start.processedEventIds);
+    expect(hydrated.items).toEqual(live.items);
+    expect(hydrated.processedEventIds.has(event.eventId)).toBe(true);
+    expect(applyAgentRuntimeEvent(hydrated, event)).toBe(hydrated);
+    expect(start.processedEventIds.size).toBe(0);
+    const lateStart = applyAgentRuntimeEvent(hydrated, {
+      ...frame,
+      sessionId: session.id,
+      runId: run.id,
+      eventId: "late-start",
+      sequence: 52,
+      method: "run.started",
+      data: { model: session.model, startedAt: "now" },
+    });
+    expect(lateStart.run?.status).toBe("cancelled");
+    // Omission in a newer read and explicit removal from the live projection win.
+    expect(mergeAgentRuntimeSnapshot(live, input, live.processedEventIds).items).toEqual([]);
+    expect(
+      mergeAgentRuntimeSnapshot({ ...live, items: [] }, input, start.processedEventIds).items,
+    ).toEqual([]);
+    // An orphan item alone is not event provenance, even with the same code.
+    expect(
+      mergeAgentRuntimeSnapshot(
+        createAgentRuntimeProjection({ items: live.items }),
+        input,
+        start.processedEventIds,
+      ).items,
+    ).toEqual([]);
+    const orphanMessage = {
+      id: "orphan-message",
+      sessionId: session.id,
+      runId: run.id,
+      kind: "message" as const,
+      sequence: 3,
+      createdAt: "now",
+      role: "assistant" as const,
+      text: "Orphan",
+      status: "complete" as const,
+    };
+    expect(
+      mergeAgentRuntimeSnapshot({ ...live, items: [orphanMessage] }, input, start.processedEventIds)
+        .items,
+    ).toEqual([]);
+    const other = { ...session, id: "session-2" };
+    expect(
+      mergeAgentRuntimeSnapshot(live, { session: other, items: [] }, start.processedEventIds).items,
+    ).toEqual([]);
+    expect(
+      mergeAgentRuntimeSnapshot({ ...live, session: other }, input, start.processedEventIds).items,
+    ).toEqual([]);
+    const foreign = applyAgentRuntimeEvent(start, {
+      ...event,
+      sessionId: other.id,
+      runId: "foreign-run",
+    });
+    expect(mergeAgentRuntimeSnapshot(foreign, input, start.processedEventIds).items).toEqual([]);
+    const otherRun = { ...run, id: "run-2", status: "running" as const };
+    const historical = mergeAgentRuntimeSnapshot(
+      live,
+      { session, run: otherRun, items: [] },
+      start.processedEventIds,
+    );
+    expect(historical.run).toBe(otherRun);
+    expect(historical.items[0].runId).toBe(run.id);
   });
 });

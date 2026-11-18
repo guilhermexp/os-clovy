@@ -47,6 +47,8 @@ pub struct TurnContext {
     pub program: PathBuf,
     /// The complete child environment (the login-shell environment).
     pub env: BTreeMap<String, String>,
+    /// App paths captured from the real host, independent of LoginEnv/HOME.
+    pub agy: Option<crate::llm::agy::HostContext>,
     pub workspace: PathBuf,
     pub input: String,
     /// Clovy's MCP server, for CLIs that accept it.
@@ -123,6 +125,38 @@ impl std::fmt::Debug for TurnGrant {
     }
 }
 
+// Revocation must precede filesystem cleanup on every early return/unwind.
+#[derive(Default)]
+struct TurnResources {
+    grant: Option<TurnGrant>,
+    execution: Option<crate::llm::agy::Execution>,
+}
+impl TurnResources {
+    fn finish_terminal(&mut self, mut params: Value) -> Value {
+        if let Err(error) = self.finish() {
+            let cleanup = error.to_string();
+            if let Some(cause) = params.get("error").and_then(Value::as_str) {
+                params["error"] = json!(format!("{cause} Workspace MCP cleanup: {cleanup}"));
+            }
+            params["cleanupError"] = json!(cleanup);
+        }
+        params
+    }
+
+    fn finish(&mut self) -> std::io::Result<()> {
+        drop(self.grant.take());
+        if let Some(mut execution) = self.execution.take() {
+            execution.finish()?;
+        }
+        Ok(())
+    }
+}
+impl Drop for TurnResources {
+    fn drop(&mut self) {
+        let _ = self.finish();
+    }
+}
+
 enum TurnEnd {
     Exited { success: bool, code: Option<i32> },
     Cancelled,
@@ -139,6 +173,19 @@ struct RunFrames<'a, S: FrameSink> {
 
 impl<S: FrameSink> RunFrames<'_, S> {
     async fn emit(&mut self, method: &str, params: Value) {
+        if matches!(method, "run.completed" | "run.failed" | "run.cancelled") {
+            self.cleanup_diagnostic(&params).await;
+        }
+        self.publish(method, params).await;
+    }
+    async fn cleanup_diagnostic(&mut self, params: &Value) {
+        if let Some(error) = params.get("cleanupError").and_then(Value::as_str) {
+            self.publish("run.diagnostic", json!({"message": format!(
+                "Workspace MCP cleanup needs recovery: {error} Inspect the retained workspace configuration before retrying."
+            )})).await;
+        }
+    }
+    async fn publish(&mut self, method: &str, params: Value) {
         self.sequence += 1;
         self.sink
             .publish(RpcFrame {
@@ -180,6 +227,7 @@ pub async fn execute_turn<S: FrameSink>(
         text: String::new(),
         reported_failure: None,
         conversation_saved: false,
+        runtime_profile_id: None,
     };
     let frames = &mut state.frames;
     let name = context.kind.display_name();
@@ -206,7 +254,36 @@ pub async fn execute_turn<S: FrameSink>(
         }
     }
 
-    let resumed = match previous_conversation(repository, &context).await {
+    let mut resources = TurnResources::default();
+    if context.kind == CliKind::Agy {
+        let prepared = context
+            .agy
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Clovy's Antigravity profile context is missing."))
+            .and_then(|host| host.chat(&context.session_id));
+        match prepared {
+            Ok(execution) => {
+                state.runtime_profile_id = Some(execution.profile_id().to_string());
+                resources.execution = Some(execution);
+            }
+            Err(error) => {
+                frames
+                    .emit(
+                        "run.failed",
+                        failure(&format!("Could not prepare {name}: {error}")),
+                    )
+                    .await;
+                return;
+            }
+        }
+    }
+    let resumed = match previous_conversation(
+        repository,
+        &context,
+        state.runtime_profile_id.as_deref(),
+    )
+    .await
+    {
         Ok(found) => found,
         Err(error) => {
             tracing::warn!(%error, run_id = %context.run_id, "could not read the previous CLI conversation id");
@@ -221,7 +298,13 @@ pub async fn execute_turn<S: FrameSink>(
     let conversation = resumed
         .or_else(|| cli::preassigns_conversation(context.kind).then(|| Uuid::new_v4().to_string()));
     if let Some(id) = conversation.as_deref() {
-        state.conversation_saved = save_conversation(repository, &context, id).await;
+        state.conversation_saved = save_conversation(
+            repository,
+            &context,
+            id,
+            state.runtime_profile_id.as_deref(),
+        )
+        .await;
     }
     let frames = &mut state.frames;
 
@@ -239,18 +322,42 @@ pub async fn execute_turn<S: FrameSink>(
     };
     // The token lives exactly as long as this turn: every return below
     // drops it, which revokes it.
-    let mut grant = None;
     let mcp = context
         .mcp
         .as_ref()
         .filter(|_| cli::accepts_mcp(context.kind))
         .map(|launch| match &context.turns {
             Some(turns) => {
-                let issued = grant.insert(TurnGrant::issue(turns, context.binding()));
+                let issued = resources
+                    .grant
+                    .insert(TurnGrant::issue(turns, context.binding()));
                 launch.for_turn(issued.token())
             }
             None => launch.clone(),
         });
+    if context.kind == CliKind::Agy {
+        if let Some(launch) = &mcp {
+            match resources
+                .execution
+                .as_mut()
+                .expect("prepared Agy execution")
+                .install_mcp(launch)
+            {
+                Ok(()) => {}
+                Err(error) => {
+                    frames
+                        .emit(
+                            "run.failed",
+                            resources.finish_terminal(failure(&format!(
+                                "Could not prepare {name}: {error}"
+                            ))),
+                        )
+                        .await;
+                    return;
+                }
+            }
+        }
+    }
     let mut invocation = cli::turn_invocation(
         context.kind,
         &prompt,
@@ -268,7 +375,8 @@ pub async fn execute_turn<S: FrameSink>(
             frames
                 .emit(
                     "run.failed",
-                    failure(&format!("Could not prepare {name}: {error}")),
+                    resources
+                        .finish_terminal(failure(&format!("Could not prepare {name}: {error}"))),
                 )
                 .await;
             return;
@@ -280,6 +388,12 @@ pub async fn execute_turn<S: FrameSink>(
     }
     for (name, value) in &invocation.set_env {
         env.insert((*name).to_string(), value.clone());
+    }
+    if let Some(execution) = &resources.execution {
+        env = execution.environment(&env);
+        invocation
+            .args
+            .extend(["--settings".into(), execution.settings()]);
     }
     // A cancel may have arrived while the turn was being prepared; nothing is
     // spawned for a cancelled or already settled run.
@@ -294,11 +408,14 @@ pub async fn execute_turn<S: FrameSink>(
         .as_deref()
         .is_some_and(|status| matches!(status, "queued" | "running"));
     if *cancel.borrow() || !run_open {
+        let terminal = resources.finish_terminal(json!({}));
         drop(scratch);
         // Remote cancellation persists first and leaves terminal publication to
         // this registered host task. Preparation still owes the matching event.
         if run_open || (*cancel.borrow() && run_status.as_deref() == Some("cancelled")) {
-            frames.emit("run.cancelled", json!({})).await;
+            frames.emit("run.cancelled", terminal).await;
+        } else {
+            frames.cleanup_diagnostic(&terminal).await;
         }
         return;
     }
@@ -317,19 +434,47 @@ pub async fn execute_turn<S: FrameSink>(
     // spawn and stdin. Stop can win after SQLite read an active snapshot,
     // including when the query itself returns an error.
     if *cancel.borrow() {
-        frames.emit("run.cancelled", json!({})).await;
+        frames
+            .emit("run.cancelled", resources.finish_terminal(json!({})))
+            .await;
         return;
     }
     if let Err(error) = partition {
-        frames.emit("run.failed", failure(&error.message)).await;
+        frames
+            .emit(
+                "run.failed",
+                resources.finish_terminal(failure(&error.message)),
+            )
+            .await;
         return;
     }
 
-    let mut translator = StreamTranslator::new(context.kind);
+    let mut translator = StreamTranslator::new(context.kind).with_turn_mcp_server(
+        resources
+            .execution
+            .as_ref()
+            .and_then(|execution| execution.server()),
+    );
+    if let Some(execution) = &resources.execution {
+        if let Err(error) = execution.validate() {
+            frames
+                .emit(
+                    "run.failed",
+                    resources.finish_terminal(failure(&error.to_string())),
+                )
+                .await;
+            return;
+        }
+    }
     let mut stderr_tail = String::new();
     let end = run_process(
         &invocation,
         env,
+        resources
+            .execution
+            .as_ref()
+            .map(|execution| execution.cwd())
+            .unwrap_or(&context.workspace),
         &mut translator,
         &mut cancel,
         &mut stderr_tail,
@@ -337,7 +482,7 @@ pub async fn execute_turn<S: FrameSink>(
     )
     .await;
     drop(scratch);
-    drop(grant);
+    let cleanup_error = resources.finish().err().map(|error| error.to_string());
 
     let TurnState {
         mut frames,
@@ -351,14 +496,21 @@ pub async fn execute_turn<S: FrameSink>(
             .await;
     }
     match end {
-        TurnEnd::Cancelled => frames.emit("run.cancelled", json!({})).await,
-        TurnEnd::SpawnFailed(error) => {
+        TurnEnd::Cancelled => {
             frames
-                .emit(
-                    "run.failed",
-                    failure(&format!("Could not start {name}: {error}")),
-                )
+                .emit("run.cancelled", json!({"cleanupError": cleanup_error}))
                 .await
+        }
+        TurnEnd::SpawnFailed(error) => {
+            let mut params = failure(&format!(
+                "Could not start {name}: {error}{}",
+                cleanup_error
+                    .as_ref()
+                    .map(|error| format!(" Workspace MCP cleanup: {error}"))
+                    .unwrap_or_default()
+            ));
+            params["cleanupError"] = json!(cleanup_error);
+            frames.emit("run.failed", params).await
         }
         TurnEnd::Exited { success, code } => {
             let failed = reported_failure
@@ -374,6 +526,13 @@ pub async fn execute_turn<S: FrameSink>(
                         )
                     })
                 });
+            let cleanup_diagnostic = cleanup_error.clone();
+            let failed = match (failed, cleanup_error) {
+                (Some(error), Some(cleanup)) => {
+                    Some(format!("{error} Workspace MCP cleanup: {cleanup}"))
+                }
+                (error, cleanup) => error.or(cleanup),
+            };
             // A Windows sandbox failure may reach only stderr; it says more
             // than the stream's own "ended without completing".
             let sandbox_line = last_line(&stderr_tail)
@@ -389,7 +548,11 @@ pub async fn execute_turn<S: FrameSink>(
                 _ => message,
             });
             match failed {
-                Some(message) => frames.emit("run.failed", failure(&message)).await,
+                Some(message) => {
+                    let mut params = failure(&message);
+                    params["cleanupError"] = json!(cleanup_diagnostic);
+                    frames.emit("run.failed", params).await;
+                }
                 None => frames.emit("run.completed", json!({})).await,
             }
         }
@@ -412,26 +575,32 @@ fn last_line(text: &str) -> Option<&str> {
 async fn run_process<S: FrameSink>(
     invocation: &cli::TurnInvocation,
     env: BTreeMap<String, String>,
+    cwd: &std::path::Path,
     translator: &mut StreamTranslator,
     cancel: &mut watch::Receiver<bool>,
     stderr_tail: &mut String,
     state: &mut TurnState<'_, S>,
 ) -> TurnEnd {
     let context = state.context;
-    if let Err(crate::llm::LlmError::CliFailed { detail, .. }) = crate::llm::cli::check_command_line(
-        context.kind,
-        &context.program,
-        &invocation.args,
-        cfg!(windows),
-    ) {
+    let program = if context.kind == CliKind::Agy {
+        match std::fs::canonicalize(&context.program) {
+            Ok(program) => program,
+            Err(error) => return TurnEnd::SpawnFailed(error.to_string()),
+        }
+    } else {
+        context.program.clone()
+    };
+    if let Err(crate::llm::LlmError::CliFailed { detail, .. }) =
+        crate::llm::cli::check_command_line(context.kind, &program, &invocation.args, cfg!(windows))
+    {
         return TurnEnd::SpawnFailed(detail);
     }
-    let mut command = crate::hide_console::tokio_command(&context.program);
+    let mut command = crate::hide_console::tokio_command(&program);
     command
         .args(&invocation.args)
         .env_clear()
         .envs(&env)
-        .current_dir(&context.workspace)
+        .current_dir(cwd)
         .stdin(if invocation.stdin.is_some() {
             Stdio::piped()
         } else {
@@ -562,6 +731,7 @@ struct TurnState<'a, S: FrameSink> {
     text: String,
     reported_failure: Option<String>,
     conversation_saved: bool,
+    runtime_profile_id: Option<String>,
 }
 
 impl<S: FrameSink> TurnState<'_, S> {
@@ -570,8 +740,13 @@ impl<S: FrameSink> TurnState<'_, S> {
         match event {
             EngineEvent::Conversation(id) => {
                 if !self.conversation_saved {
-                    self.conversation_saved =
-                        save_conversation(self.repository, self.context, &id).await;
+                    self.conversation_saved = save_conversation(
+                        self.repository,
+                        self.context,
+                        &id,
+                        self.runtime_profile_id.as_deref(),
+                    )
+                    .await;
                 }
             }
             EngineEvent::TextDelta(delta) => {
@@ -613,7 +788,7 @@ impl<S: FrameSink> TurnState<'_, S> {
             EngineEvent::ToolFinished {
                 call_id,
                 name: tool,
-                output: _,
+                output,
                 error: Some(error),
                 needs_approval,
             } => {
@@ -628,7 +803,8 @@ impl<S: FrameSink> TurnState<'_, S> {
                 self.frames
                     .emit(
                         "tool.failed",
-                        json!({ "callId": call_id, "name": tool, "error": error, "needsApproval": needs_approval }),
+                        json!({ "callId": call_id, "name": tool, "error": error, "needsApproval": needs_approval,
+                            "output": if output.is_null() { Value::String(error.clone()) } else { output } }),
                     )
                     .await;
             }
@@ -718,6 +894,7 @@ async fn stop_group(child: &mut tokio::process::Child, tree: &ProcessTree) {
 async fn previous_conversation(
     repository: &AgentRepository,
     context: &TurnContext,
+    profile_id: Option<&str>,
 ) -> Result<Option<String>, sqlx::Error> {
     // A resume would restore the rejected answer from the CLI's own history,
     // even if it is excluded from the local replay below.
@@ -747,6 +924,12 @@ async fn previous_conversation(
         if config.get("engine").and_then(Value::as_str) == Some("cli")
             && config.get("cli").and_then(Value::as_str) == Some(context.kind.id())
         {
+            if context.kind == CliKind::Agy
+                && (profile_id.is_none()
+                    || config.get("cliProfileId").and_then(Value::as_str) != profile_id)
+            {
+                return Ok(None);
+            }
             if let Some(id) = config.get("conversationId").and_then(Value::as_str) {
                 return Ok(Some(id.to_string()));
             }
@@ -765,9 +948,15 @@ async fn save_conversation(
     repository: &AgentRepository,
     context: &TurnContext,
     conversation_id: &str,
+    profile_id: Option<&str>,
 ) -> bool {
     match repository
-        .set_cli_conversation(&context.run_id, context.kind.id(), conversation_id)
+        .set_cli_conversation(
+            &context.run_id,
+            context.kind.id(),
+            conversation_id,
+            profile_id,
+        )
         .await
     {
         Ok(()) => true,
@@ -796,14 +985,32 @@ async fn with_earlier_messages(repository: &AgentRepository, context: &TurnConte
             return context.input.clone();
         }
     };
+    // Results and starts are separate canonical items. Join only within the
+    // exact persisted run/call/name; CLIs reuse step ids in later turns.
+    let call_arguments: BTreeMap<_, _> = items
+        .iter()
+        .filter_map(|item| {
+            let AgentItemPayload::ToolCall(tool) = &item.payload else {
+                return None;
+            };
+            Some((
+                (
+                    item.run_id.as_deref()?,
+                    tool.tool_call_id.as_deref()?,
+                    tool.tool_name.as_deref(),
+                ),
+                tool.arguments.as_ref()?,
+            ))
+        })
+        .collect();
     let mut lines = Vec::new();
-    for item in items {
+    for item in &items {
         if item.run_id.as_deref() == Some(context.run_id.as_str())
             || item.run_id.as_ref().is_some_and(|id| excluded.contains(id))
         {
             continue;
         }
-        match item.payload {
+        match &item.payload {
             AgentItemPayload::UserMessage(message) => {
                 let message = crate::agent_sessions::api::cli_message_with_attachments(
                     message.content.trim(),
@@ -820,6 +1027,22 @@ async fn with_earlier_messages(repository: &AgentRepository, context: &TurnConte
                 );
                 if !message.trim().is_empty() {
                     lines.push(format!("Assistant: {message}"));
+                }
+            }
+            AgentItemPayload::ToolResult(tool) | AgentItemPayload::ToolCall(tool)
+                if matches!(tool.status.as_deref(), Some("complete" | "completed")) =>
+            {
+                let arguments = item
+                    .run_id
+                    .as_deref()
+                    .zip(tool.tool_call_id.as_deref())
+                    .and_then(|(run, call)| {
+                        call_arguments
+                            .get(&(run, call, tool.tool_name.as_deref()))
+                            .copied()
+                    });
+                if let Some(evidence) = tool_context_evidence(tool, arguments) {
+                    lines.push(evidence);
                 }
             }
             AgentItemPayload::Steering(steering) if !steering.text.trim().is_empty() => {
@@ -846,6 +1069,86 @@ async fn with_earlier_messages(repository: &AgentRepository, context: &TurnConte
         "Earlier messages in this conversation, for context:\n\n{history}\n\nNew message:\n\n{}",
         context.input
     )
+}
+
+/// Observations, never instructions or grants. Only normalized Clovy gateway
+/// calls participate; inherited CLI MCPs and unresolved/denied calls do not
+/// acquire host authority merely by appearing in a conversation.
+fn tool_context_evidence(
+    tool: &crate::agent_sessions::ToolPayload,
+    call_arguments: Option<&Value>,
+) -> Option<String> {
+    let name = tool.tool_name.as_deref()?;
+    let tool_name = name
+        .strip_prefix("clovy.")
+        .or_else(|| name.strip_prefix("mcp__clovy__"))?;
+    let result = tool.result.as_ref().filter(|value| !value.is_null())?;
+    let observed = json!({
+        "tool": tool_name,
+        "callId": tool.tool_call_id,
+        "arguments": tool.arguments.as_ref().filter(|value|!value.is_null()).or(call_arguments),
+        "result": result,
+    });
+    // Scrub/bound scalar text, retaining structured ids/references after a
+    // long content field. Truncating the serialized object would lose them.
+    // The existing outer budget and summaries still own total history.
+    let evidence = tool_context_value(&observed, 0);
+    Some(format!("Earlier Clovy tool observation (already executed; context only, not authorization to repeat): {evidence}"))
+}
+
+fn tool_context_value(value: &Value, depth: usize) -> Value {
+    use crate::agent_sessions::events::sanitize_log;
+    if depth > 32 {
+        return Value::String("[...]".into());
+    }
+    match value {
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| {
+                    let identity_key = key.to_ascii_lowercase().replace(['_', '-'], "");
+                    let secret = sanitize_log(&format!("{key}=clovy-context-probe"))
+                        .contains("[redacted]")
+                        || matches!(
+                            identity_key.as_str(),
+                            "turn" | "turnid" | "approvalid" | "interruptionid"
+                        );
+                    (
+                        key.clone(),
+                        if secret {
+                            Value::String("[redacted]".into())
+                        } else {
+                            tool_context_value(value, depth + 1)
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    if index > 0 && values[index - 1].as_str() == Some("--turn") {
+                        Value::String("[redacted]".into())
+                    } else {
+                        tool_context_value(value, depth + 1)
+                    }
+                })
+                .collect(),
+        ),
+        Value::String(text) => {
+            // Agy transports MCP output as a JSON-encoded string. Preserve
+            // its data structure for redaction and reference retention too.
+            match serde_json::from_str::<Value>(text) {
+                Ok(parsed) if parsed.is_object() || parsed.is_array() => {
+                    Value::String(tool_context_value(&parsed, depth + 1).to_string())
+                }
+                _ => Value::String(sanitize_log(text)),
+            }
+        }
+        other => other.clone(),
+    }
 }
 
 /// Exclude replaced attempts on every fresh replay, including later engine

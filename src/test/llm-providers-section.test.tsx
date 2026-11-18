@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LlmProvidersSection } from "../components/settings/LlmProvidersSection";
@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   llmDeleteEndpoint: vi.fn(),
   llmTestProvider: vi.fn(),
   llmSetUsage: vi.fn(),
+  openAntigravityLogin: vi.fn(),
   probeLocalGenerationEndpoint: vi.fn(),
 }));
 
@@ -24,6 +25,7 @@ vi.mock("../lib/llm-providers", async (importOriginal) => ({
   llmDeleteEndpoint: mocks.llmDeleteEndpoint,
   llmTestProvider: mocks.llmTestProvider,
   llmSetUsage: mocks.llmSetUsage,
+  openAntigravityLogin: mocks.openAntigravityLogin,
 }));
 
 vi.mock("../lib/tauri", async (importOriginal) => ({
@@ -99,6 +101,47 @@ const sampleProviders: LlmProvidersDto = {
 };
 
 describe("LlmProvidersSection", () => {
+  it.each([
+    ["en", "Authenticate in Clovy", "Opening terminal..."],
+    ["pt-BR", "Autenticar no Clovy", "Abrindo terminal..."],
+  ] as const)("managed profile login handles keyboard, pending, failure and retry in %s", async (locale, label, opening) => {
+    applyInterfaceLocale(locale);
+    mocks.llmDetectClis.mockResolvedValue(
+      sampleClis.map((cli) => (cli.id === "agy" ? { ...cli, installed: true } : cli)),
+    );
+    let reject: (error: Error) => void = () => undefined;
+    mocks.openAntigravityLogin.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, fail) => {
+          reject = fail;
+        }),
+    );
+    const user = userEvent.setup();
+    render(<LlmProvidersSection />);
+    const action = await screen.findByRole("button", { name: label });
+    action.focus();
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("button", { name: opening })).toBeDisabled();
+    await user.keyboard("{Enter}");
+    expect(mocks.openAntigravityLogin).toHaveBeenCalledTimes(1);
+    await act(async () => reject(new Error("Synthetic terminal unavailable")));
+    expect(await screen.findByText(/Synthetic terminal unavailable/)).toBeInTheDocument();
+    mocks.openAntigravityLogin.mockResolvedValueOnce(undefined);
+    await user.click(screen.getByRole("button", { name: label }));
+    await waitFor(() => expect(screen.getByRole("button", { name: label })).toBeEnabled());
+    expect(screen.queryByText(/Synthetic terminal unavailable/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/successfully authenticated|autenticado com sucesso/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not offer managed profile authentication without an installed Antigravity", async () => {
+    render(<LlmProvidersSection />);
+    await screen.findByRole("heading", { name: "Antigravity" });
+    expect(screen.queryByRole("button", { name: "Authenticate in Clovy" })).not.toBeInTheDocument();
+    expect(mocks.openAntigravityLogin).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.llmProviders.mockResolvedValue(sampleProviders);

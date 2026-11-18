@@ -222,6 +222,7 @@ async fn completed_assistant_text_moves_behind_the_tools_that_produced_it() {
             Some(&run.id),
             2,
             &AgentItemPayload::ToolCall(ToolPayload {
+                error: None,
                 tool_name: Some("read_file".into()),
                 tool_call_id: Some("call-1".into()),
                 arguments: Some(serde_json::json!({ "path": "notes.md" })),
@@ -240,6 +241,7 @@ async fn completed_assistant_text_moves_behind_the_tools_that_produced_it() {
             Some(&run.id),
             3,
             &AgentItemPayload::ToolResult(ToolPayload {
+                error: None,
                 tool_name: Some("read_file".into()),
                 tool_call_id: Some("call-1".into()),
                 arguments: None,

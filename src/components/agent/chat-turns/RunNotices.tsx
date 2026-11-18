@@ -9,14 +9,17 @@ export function ContextOverflowNoticePart() {
 export function UpstreamProviderFailureNoticePart({
   onRetry,
   kind = "upstream-provider",
+  diagnostic,
 }: {
   onRetry?: () => void;
   kind?: "upstream-provider" | "tool" | "runtime";
+  diagnostic?: string;
   [key: string]: unknown;
 }) {
   const t = useT();
-  const message =
-    kind === "tool"
+  const message = diagnostic
+    ? t("chat.notice.workspaceConnectionRecovery")
+    : kind === "tool"
       ? t("chat.notice.toolFailed")
       : kind === "runtime"
         ? t("chat.notice.runtimeStopped")
@@ -24,6 +27,7 @@ export function UpstreamProviderFailureNoticePart({
   return (
     <div className="agent-system-notice">
       {message}
+      {diagnostic ? <div>{diagnostic}</div> : null}
       {onRetry ? (
         <button type="button" onClick={onRetry}>
           {t("common.tryAgain")}

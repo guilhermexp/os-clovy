@@ -15,6 +15,9 @@
 //!
 //! See `docs/llm-providers.md` for the full contract.
 
+pub mod agy;
+pub mod agy_login;
+mod agy_private;
 pub mod cli;
 #[cfg(all(test, windows))]
 pub(crate) mod cmd_shim_tests;
@@ -271,37 +274,80 @@ where
 
 /// Runs one isolated CLI call: every tool off (CLIs that cannot guarantee it
 /// are refused before anything starts), resolved through the login-shell
-/// PATH, with the profile environment, in an empty scratch directory, under
+/// PATH, with the profile environment (Antigravity uses its app-owned profile),
+/// in an exclusive execution directory, under
 /// a timeout.
 pub async fn run_cli(
     kind: CliKind,
     request: &GenerateRequest,
     env: &shell_env::LoginEnv,
 ) -> Result<String, LlmError> {
+    let host = if kind == CliKind::Agy {
+        Some(
+            agy::HostContext::current().map_err(|error| LlmError::CliFailed {
+                cli: kind,
+                detail: error.to_string(),
+            })?,
+        )
+    } else {
+        None
+    };
+    run_cli_in_context(kind, request, env, host.as_ref()).await
+}
+
+async fn run_cli_in_context(
+    kind: CliKind,
+    request: &GenerateRequest,
+    env: &shell_env::LoginEnv,
+    host: Option<&agy::HostContext>,
+) -> Result<String, LlmError> {
     let mut invocation = cli::build_invocation(kind, request)?;
     let program = env
         .which(kind.id())
         .ok_or(LlmError::CliNotInstalled(kind))?;
-    if kind == CliKind::Agy {
-        let home = env.home().or_else(|| {
-            env.vars()
-                .get("USERPROFILE")
-                .filter(|home| !home.is_empty())
-                .map(std::path::PathBuf::from)
-        });
-        if let Some(detail) = home.as_deref().and_then(cli::agy_extensions_on) {
-            return Err(LlmError::CliFailed { cli: kind, detail });
-        }
-    }
-    let scratch = tempfile::Builder::new()
-        .prefix("clovy-llm-")
-        .tempdir()
-        .map_err(|error| LlmError::CliFailed {
+    let program = if kind == CliKind::Agy {
+        std::fs::canonicalize(program).map_err(|error| LlmError::CliFailed {
             cli: kind,
-            detail: format!("could not create a scratch directory: {error}"),
-        })?;
+            detail: error.to_string(),
+        })?
+    } else {
+        program
+    };
+    let managed = if kind == CliKind::Agy {
+        Some(
+            host.ok_or_else(|| LlmError::CliFailed {
+                cli: kind,
+                detail: "Clovy's Antigravity profile context is missing.".into(),
+            })?
+            .one_shot()
+            .map_err(|error| LlmError::CliFailed {
+                cli: kind,
+                detail: error.to_string(),
+            })?,
+        )
+    } else {
+        None
+    };
+    let scratch = if managed.is_none() {
+        Some(
+            tempfile::Builder::new()
+                .prefix("clovy-llm-")
+                .tempdir()
+                .map_err(|error| LlmError::CliFailed {
+                    cli: kind,
+                    detail: format!("could not create a scratch directory: {error}"),
+                })?,
+        )
+    } else {
+        None
+    };
+    let cwd = managed
+        .as_ref()
+        .map(|execution| execution.cwd())
+        .or_else(|| scratch.as_ref().map(|scratch| scratch.path()))
+        .expect("prepared CLI execution");
     for (name, text) in &invocation.files {
-        std::fs::write(scratch.path().join(name), text).map_err(|error| LlmError::CliFailed {
+        std::fs::write(cwd.join(name), text).map_err(|error| LlmError::CliFailed {
             cli: kind,
             detail: format!("could not write {name}: {error}"),
         })?;
@@ -311,8 +357,19 @@ pub async fn run_cli(
         child_env.remove(*name);
     }
     child_env.extend(invocation.set_env.iter().cloned());
+    if let Some(execution) = &managed {
+        execution.validate().map_err(|error| LlmError::CliFailed {
+            cli: kind,
+            detail: error.to_string(),
+        })?;
+        child_env = execution.environment(&child_env);
+        child_env.insert("CLOVY_ONESHOT".into(), "1".into());
+        invocation
+            .args
+            .extend(["--settings".into(), execution.settings()]);
+    }
     if kind == CliKind::Codex {
-        let off = codex_mcp_off_args(kind, &program, &child_env, scratch.path()).await?;
+        let off = codex_mcp_off_args(kind, &program, &child_env, cwd).await?;
         // Before the trailing `-` (prompt on stdin).
         let at = invocation.args.len().saturating_sub(1);
         invocation.args.splice(at..at, off);
@@ -322,7 +379,7 @@ pub async fn run_cli(
         program,
         args: invocation.args.clone(),
         env: child_env,
-        cwd: scratch.path().to_path_buf(),
+        cwd: cwd.to_path_buf(),
         stdin: invocation.stdin.clone(),
         timeout: request.timeout.unwrap_or(DEFAULT_CLI_TIMEOUT),
     })
@@ -334,7 +391,7 @@ pub async fn run_cli(
         }
     })?;
     if let Some(name) = invocation.output_file {
-        output.stdout = process::read_output_file(&scratch.path().join(name))
+        output.stdout = process::read_output_file(&cwd.join(name))
             .map_err(|detail| LlmError::CliFailed { cli: kind, detail })?;
     }
     cli::parse_output(kind, &output, request.schema.is_some())
@@ -1115,139 +1172,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    fn fake_agy(dir: &Path) -> std::path::PathBuf {
-        let ran = dir.join("agy.ran");
-        fake_cli(
-            dir,
-            "agy",
-            &format!(
-                "touch '{}'\necho '{{\"status\":\"SUCCESS\",\"response\":\"ok\"}}'",
-                ran.display()
-            ),
-        );
-        ran
-    }
-
-    #[cfg(unix)]
-    async fn run_agy(dir: &Path) -> Result<String, LlmError> {
-        run_cli(
-            CliKind::Agy,
-            &GenerateRequest {
-                prompt: "Resuma".to_string(),
-                ..GenerateRequest::default()
-            },
-            &env_with(dir),
-        )
-        .await
-    }
-
-    /// agy starts the user's MCP servers and plugins in print mode, outside
-    /// `--sandbox`, and has no per-call switch to turn them off: while any is
-    /// on, a one-shot call is refused before agy starts.
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn llm_agy_one_shot_is_refused_while_an_mcp_server_or_plugin_is_on() {
-        let dir = tempfile::tempdir().unwrap();
-        let ran = fake_agy(dir.path());
-        let config = dir.path().join(".gemini/config");
-        std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(
-            config.join("mcp_config.json"),
-            r#"{"mcpServers":{"evil":{"command":"evil","args":[]},"off":{"command":"x","disabled":true}}}"#,
-        )
-        .unwrap();
-        let error = run_agy(dir.path()).await.unwrap_err();
-        assert!(
-            matches!(&error, LlmError::CliFailed { cli: CliKind::Agy, detail } if detail.contains("evil")),
-            "{error:?}"
-        );
-        assert!(!ran.exists(), "agy ran with an MCP server on");
-
-        std::fs::write(
-            config.join("mcp_config.json"),
-            r#"{"mcpServers":{"off":{"command":"x","disabled":true}}}"#,
-        )
-        .unwrap();
-        assert_eq!(run_agy(dir.path()).await.unwrap(), "ok");
-
-        std::fs::create_dir_all(config.join("plugins/some-plugin")).unwrap();
-        let error = run_agy(dir.path()).await.unwrap_err();
-        assert!(
-            matches!(&error, LlmError::CliFailed { cli: CliKind::Agy, detail } if detail.contains("plugin")),
-            "{error:?}"
-        );
-    }
-
-    /// agy keeps whether a plugin is on in its own `config.json`
-    /// (`plugins.<dir>.enabled`), falling back to the plugin's `plugin.json`
-    /// (`"disabled": true` ships it off). Only plugins that are on count.
-    #[test]
-    fn llm_agy_counts_only_plugins_agy_itself_has_on() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join(".gemini/config");
-        let plugins = config.join("plugins");
-        for name in ["on", "turned-off", "ships-off", "turned-on", "nested-off"] {
-            std::fs::create_dir_all(plugins.join(name)).unwrap();
-        }
-        std::fs::write(
-            plugins.join("ships-off/plugin.json"),
-            r#"{"disabled": true}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            plugins.join("turned-on/plugin.json"),
-            r#"{"disabled": true}"#,
-        )
-        .unwrap();
-        std::fs::create_dir_all(plugins.join("nested-off/.antigravity-plugin")).unwrap();
-        std::fs::write(
-            plugins.join("nested-off/.antigravity-plugin/plugin.json"),
-            r#"{"name": "nested-off", "disabled": true}"#,
-        )
-        .unwrap();
-        // Saved by Notepad: a byte order mark first.
-        std::fs::write(
-            config.join("config.json"),
-            "\u{feff}{\"plugins\":{\"turned-off\":{\"enabled\":false},\"turned-on\":{\"enabled\":true}}}",
-        )
-        .unwrap();
-
-        let detail = cli::agy_extensions_on(dir.path()).expect("two plugins are on");
-        assert!(detail.contains("plugin on"), "{detail}");
-        assert!(detail.contains("plugin turned-on"), "{detail}");
-        for off in ["turned-off", "ships-off", "nested-off"] {
-            assert!(!detail.contains(off), "{off}: {detail}");
-        }
-
-        std::fs::write(
-            config.join("config.json"),
-            r#"{"plugins":{"on":{"enabled":false},"turned-on":{"enabled":false},"turned-off":{"enabled":false}}}"#,
-        )
-        .unwrap();
-        assert_eq!(cli::agy_extensions_on(dir.path()), None);
-    }
-
-    /// A missing `config.json` is no configuration; one agy cannot read or
-    /// parse may hold `enabled: false` entries Clovy cannot see, so it
-    /// blocks the call with a diagnostic instead of letting plugins start.
-    #[test]
-    fn llm_agy_refuses_a_config_it_cannot_read() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join(".gemini/config");
-        std::fs::create_dir_all(&config).unwrap();
-        assert_eq!(cli::agy_extensions_on(dir.path()), None, "no config at all");
-
-        std::fs::write(config.join("config.json"), "{\"plugins\": {").unwrap();
-        let detail = cli::agy_extensions_on(dir.path()).expect("malformed config blocks");
-        assert!(detail.contains("config.json"), "{detail}");
-
-        std::fs::remove_file(config.join("config.json")).unwrap();
-        std::fs::create_dir(config.join("config.json")).unwrap();
-        let detail = cli::agy_extensions_on(dir.path()).expect("unreadable config blocks");
-        assert!(detail.contains("config.json"), "{detail}");
-    }
-
     fn registry_with_activity(
         provider: ProviderRef,
         level: Option<StructuredOutputLevel>,
@@ -1397,3 +1321,6 @@ mod tests {
         assert!(parse_json_value("[1,2]").is_none());
     }
 }
+
+#[cfg(all(test, unix))]
+mod managed_profile_tests;

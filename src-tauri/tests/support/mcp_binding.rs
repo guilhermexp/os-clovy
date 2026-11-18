@@ -14,6 +14,7 @@ pub fn binding(cli: CliKind, attended: bool, session: &str, run: &str) -> TurnBi
         kind: cli,
         program: std::path::PathBuf::new(),
         env: Default::default(),
+        agy: None,
         workspace: std::path::PathBuf::new(),
         input: String::new(),
         mcp: None,

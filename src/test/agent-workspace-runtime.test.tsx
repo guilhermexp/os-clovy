@@ -123,6 +123,294 @@ function mockAgentLayoutBounds() {
 }
 
 describe("AgentWorkspace runtime wiring", () => {
+  it.each([
+    "diagnostic",
+    "clean",
+    "switch",
+  ] as const)("F10b initialSessionId hydration preserves only its own real diagnostic: %s", async (scenario) => {
+    const message = "Initial workspace cleanup needs recovery.";
+    const base = mocks.invoke.getMockImplementation();
+    let release: (value: typeof session) => void = () => undefined;
+    const initial = new Promise<typeof session>((resolve) => {
+      release = resolve;
+    });
+    const cancelled = {
+      id: "initial-cancelled-run",
+      sessionId: session.id,
+      status: "cancelled",
+      model: session.model,
+    };
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      const id = (args as { sessionId?: string } | undefined)?.sessionId;
+      if (command === "get_agent_session")
+        return id === session.id ? initial : Promise.resolve(newSession);
+      if (command === "list_agent_items") return Promise.resolve([]);
+      if (command === "get_latest_agent_run")
+        return Promise.resolve(id === session.id ? cancelled : null);
+      return base?.(command, args);
+    });
+    const { rerender } = render(<AgentWorkspace initialSessionId={session.id} />);
+    await waitFor(() => expect(mocks.runtimeListener).toBeDefined());
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("list_agent_items", { sessionId: session.id }),
+    );
+    // listItems is already empty; getSession is still the initial held read.
+    await act(async () => Promise.resolve());
+    if (scenario !== "clean") {
+      act(() =>
+        mocks.runtimeListener?.({
+          payload: {
+            protocolVersion: 1,
+            eventId: "initial-workspace-warning",
+            sessionId: session.id,
+            runId: cancelled.id,
+            sequence: 51,
+            method: "run.diagnostic",
+            data: {
+              itemId: "initial-warning",
+              itemSequence: 2,
+              createdAt: session.createdAt,
+              message,
+              category: "runtime",
+              code: "agent_workspace_mcp_cleanup",
+              retryable: false,
+            },
+          },
+        }),
+      );
+    }
+    if (scenario === "switch") {
+      rerender(<AgentWorkspace initialSessionId={newSession.id} />);
+      await waitFor(() =>
+        expect(mocks.invoke).toHaveBeenCalledWith("get_agent_session", {
+          sessionId: newSession.id,
+        }),
+      );
+    }
+    await act(async () => release(session));
+    if (scenario === "diagnostic") {
+      expect(await screen.findByText(message)).toBeInTheDocument();
+      expect(screen.getAllByText(message)).toHaveLength(1);
+    } else {
+      expect(screen.queryByText(message)).not.toBeInTheDocument();
+    }
+    expect(screen.queryByRole("button", { name: "Stop Clovy" })).not.toBeInTheDocument();
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "start_agent_run")).toBe(false);
+  });
+
+  it("F10 preserves a late cleanup diagnostic while a cancelled snapshot finishes hydrating", async () => {
+    const message = "Late workspace cleanup needs recovery.";
+    const cancelled = {
+      id: "cancelled-run",
+      sessionId: session.id,
+      status: "cancelled",
+      model: "__clovy_cli_engine__:agy",
+    };
+    const base = mocks.invoke.getMockImplementation();
+    let pending = false;
+    let release: (value: unknown[]) => void = () => undefined;
+    const artifacts = new Promise<unknown[]>((resolve) => {
+      release = resolve;
+    });
+    let storedItems: unknown[] = [];
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      const id = (args as { sessionId?: string } | undefined)?.sessionId;
+      if (command === "get_agent_session")
+        return Promise.resolve(id === newSession.id ? newSession : session);
+      if (command === "get_latest_agent_run")
+        return Promise.resolve(id === session.id ? cancelled : null);
+      if (command === "list_agent_items")
+        return Promise.resolve(id === session.id ? storedItems : []);
+      if (command === "list_agent_artifacts" && pending) return artifacts;
+      return base?.(command, args);
+    });
+    const { rerender } = render(<AgentWorkspace initialSession={session} />);
+    await screen.findByRole("textbox", { name: "Message Clovy" });
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("get_latest_agent_run", { sessionId: session.id }),
+    );
+    await act(async () => Promise.resolve());
+    pending = true;
+    act(() =>
+      mocks.runtimeListener?.({
+        payload: {
+          protocolVersion: 1,
+          eventId: "cancel-refresh",
+          sessionId: session.id,
+          runId: cancelled.id,
+          sequence: 50,
+          method: "run.cancelled",
+          data: { completedAt: session.createdAt },
+        },
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        mocks.invoke.mock.calls.filter(([command]) => command === "list_agent_items"),
+      ).toHaveLength(2),
+    );
+    act(() =>
+      mocks.runtimeListener?.({
+        payload: {
+          protocolVersion: 1,
+          eventId: "late-f10",
+          sessionId: session.id,
+          runId: cancelled.id,
+          sequence: 51,
+          method: "run.diagnostic",
+          data: {
+            itemId: "late-warning",
+            itemSequence: 2,
+            createdAt: session.createdAt,
+            message,
+            category: "runtime",
+            code: "agent_workspace_mcp_cleanup",
+            retryable: false,
+          },
+        },
+      }),
+    );
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    await act(async () => {
+      release([]);
+    });
+    expect(screen.getAllByText(message)).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Stop Clovy" })).not.toBeInTheDocument();
+    storedItems = [
+      {
+        id: "late-warning",
+        sessionId: session.id,
+        runId: cancelled.id,
+        sequence: 2,
+        createdAt: session.createdAt,
+        kind: "error",
+        message,
+        category: "runtime",
+        code: "agent_workspace_mcp_cleanup",
+        retryable: false,
+      },
+    ];
+    pending = false;
+    rerender(<AgentWorkspace initialSession={newSession} />);
+    await waitFor(() => expect(screen.queryByText(message)).not.toBeInTheDocument());
+    rerender(<AgentWorkspace initialSession={session} />);
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(screen.getAllByText(message)).toHaveLength(1);
+  });
+
+  it("F10 rejects a pending old-session diagnostic snapshot after switching to a session without errors", async () => {
+    const base = mocks.invoke.getMockImplementation();
+    let pending = false;
+    let release: (value: unknown[]) => void = () => undefined;
+    const artifacts = new Promise<unknown[]>((resolve) => {
+      release = resolve;
+    });
+    mocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      const id = (args as { sessionId?: string } | undefined)?.sessionId;
+      if (command === "get_agent_session")
+        return Promise.resolve(id === newSession.id ? newSession : session);
+      if (command === "get_latest_agent_run") return Promise.resolve(null);
+      if (command === "list_agent_items") return Promise.resolve([]);
+      if (command === "list_agent_artifacts" && pending && id === session.id) return artifacts;
+      return base?.(command, args);
+    });
+    const { rerender } = render(<AgentWorkspace initialSession={session} />);
+    await screen.findByRole("textbox", { name: "Message Clovy" });
+    await act(async () => Promise.resolve());
+    pending = true;
+    act(() =>
+      mocks.runtimeListener?.({
+        payload: {
+          protocolVersion: 1,
+          eventId: "switch-cancel",
+          sessionId: session.id,
+          runId: "old-run",
+          sequence: 50,
+          method: "run.cancelled",
+          data: { completedAt: session.createdAt },
+        },
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        mocks.invoke.mock.calls.filter(([command]) => command === "list_agent_items"),
+      ).toHaveLength(2),
+    );
+    act(() =>
+      mocks.runtimeListener?.({
+        payload: {
+          protocolVersion: 1,
+          eventId: "switch-diagnostic",
+          sessionId: session.id,
+          runId: "old-run",
+          sequence: 51,
+          method: "run.diagnostic",
+          data: {
+            itemId: "old-warning",
+            itemSequence: 2,
+            createdAt: session.createdAt,
+            message: "Old workspace cleanup",
+            category: "runtime",
+            code: "agent_workspace_mcp_cleanup",
+            retryable: false,
+          },
+        },
+      }),
+    );
+    expect(await screen.findByText("Old workspace cleanup")).toBeInTheDocument();
+    rerender(<AgentWorkspace initialSession={newSession} />);
+    await waitFor(() =>
+      expect(screen.queryByText("Old workspace cleanup")).not.toBeInTheDocument(),
+    );
+    await act(async () => release([]));
+    expect(screen.queryByText("Old workspace cleanup")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop Clovy" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["en", "Workspace connection needs recovery."],
+    ["pt-BR", "A conexão da pasta de trabalho precisa de recuperação."],
+  ] as const)("shows a late cleanup diagnostic in %s without announcing a cancelled conversation as running", async (locale, heading) => {
+    applyInterfaceLocale(locale);
+    const message = "Workspace MCP cleanup needs recovery: configuration changed.";
+    render(<AgentWorkspace initialSession={session} />);
+    await screen.findByText("Earlier answer");
+    await waitFor(() => expect(mocks.runtimeListener).toBeDefined());
+    const statuses: string[] = [];
+    const status = (event: Event) => statuses.push((event as CustomEvent).detail.status);
+    window.addEventListener(AGENT_SESSION_STATUS_EVENT, status);
+    try {
+      act(() =>
+        mocks.runtimeListener?.({
+          payload: {
+            protocolVersion: 1,
+            eventId: "late-cleanup",
+            sessionId: session.id,
+            runId: "cancelled-run",
+            sequence: 51,
+            method: "run.diagnostic",
+            data: {
+              itemId: "warning",
+              itemSequence: 2,
+              createdAt: session.createdAt,
+              message,
+              category: "runtime",
+              code: "agent_workspace_mcp_cleanup",
+              retryable: false,
+            },
+          },
+        }),
+      );
+      expect(await screen.findByText(message)).toBeInTheDocument();
+      expect(screen.getByText(heading)).toBeInTheDocument();
+      expect(statuses).not.toContain("running");
+      expect(screen.queryByRole("button", { name: "Stop Clovy" })).not.toBeInTheDocument();
+    } finally {
+      window.removeEventListener(AGENT_SESSION_STATUS_EVENT, status);
+      act(() => applyInterfaceLocale("en"));
+    }
+  });
+
   beforeEach(() => {
     resetAgentSessionDraftsForTests();
     resetCurrentDataPartitionForTests();

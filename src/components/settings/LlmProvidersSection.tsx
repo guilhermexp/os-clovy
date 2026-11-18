@@ -2,7 +2,7 @@ import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import { IconTrashCan } from "central-icons/IconTrashCan";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { type TFunction, useT } from "../../i18n";
 import { messageFromError } from "../../lib/errors";
 import {
@@ -18,6 +18,7 @@ import {
   llmSaveEndpoint,
   llmSetUsage,
   llmTestProvider,
+  openAntigravityLogin,
   parseProviderRefKey,
   providerRefKey,
 } from "../../lib/llm-providers";
@@ -91,6 +92,9 @@ export function LlmProvidersSection({
   const [cliTestResults, setCliTestResults] = useState<Record<string, string>>({});
   const [endpointTestResults, setEndpointTestResults] = useState<Record<string, string>>({});
   const [testingTarget, setTestingTarget] = useState<string>();
+  const [agyLoginOpening, setAgyLoginOpening] = useState(false);
+  const [agyLoginError, setAgyLoginError] = useState<string>();
+  const agyLoginPending = useRef(false);
 
   // Add / Edit Endpoint dialog state
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -192,6 +196,21 @@ export function LlmProvidersSection({
       }));
     } finally {
       setTestingTarget(undefined);
+    }
+  };
+
+  const handleAntigravityLogin = async () => {
+    if (agyLoginPending.current) return;
+    agyLoginPending.current = true;
+    setAgyLoginOpening(true);
+    setAgyLoginError(undefined);
+    try {
+      await openAntigravityLogin();
+    } catch (error) {
+      setAgyLoginError(messageFromError(error));
+    } finally {
+      agyLoginPending.current = false;
+      setAgyLoginOpening(false);
     }
   };
 
@@ -522,6 +541,20 @@ export function LlmProvidersSection({
                     {details}
                     {testResult ? ` · ${testResult}` : ""}
                   </p>
+                  {cli.id === "agy" && isInstalled ? (
+                    <>
+                      <p className="settings-row-description">
+                        {t("settingsPanels.llm.agyLoginDescription")}
+                      </p>
+                      {agyLoginError ? (
+                        <InlineNotice
+                          tone="destructive"
+                          role="alert"
+                          body={t("settingsPanels.llm.agyLoginError", { detail: agyLoginError })}
+                        />
+                      ) : null}
+                    </>
+                  ) : null}
                   {cli.oneShot ? null : (
                     <p className="settings-row-description">
                       {t("settingsPanels.llm.toolsOnReason")}
@@ -529,11 +562,25 @@ export function LlmProvidersSection({
                   )}
                 </div>
                 <div className="settings-row-control">
+                  {cli.id === "agy" && isInstalled ? (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={agyLoginOpening || isTesting}
+                      onClick={() => void handleAntigravityLogin()}
+                    >
+                      {t(
+                        agyLoginOpening
+                          ? "settingsPanels.llm.agyLoginOpening"
+                          : "settingsPanels.llm.agyLogin",
+                      )}
+                    </button>
+                  ) : null}
                   {isInstalled && cli.oneShot ? (
                     <button
                       type="button"
                       className="btn btn-secondary"
-                      disabled={isTesting}
+                      disabled={isTesting || (cli.id === "agy" && agyLoginOpening)}
                       onClick={() => void handleTestCli(cli)}
                     >
                       <IconArrowRotateClockwise size={14} />

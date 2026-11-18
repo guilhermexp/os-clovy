@@ -1565,20 +1565,18 @@ fn normalize_agent_model(model: &str) -> String {
     if let Some(kind) = crate::chat_engine::cli_for_model(model) {
         crate::chat_engine::engine_model_id(kind)
     } else {
-        crate::chat_engine::engine_model_id(
-            crate::providers::default_unattended_cli().unwrap_or(crate::llm::cli::CliKind::Claude),
-        )
+        crate::providers::selected_chat_engine_model()
     }
 }
 
 fn session_json(session: super::AgentSessionDto) -> Value {
     json!({ "id": session.id, "title": session.title, "status": session.status, "model": session.model, "safetyMode": session.safety_mode, "approvalMode": session.approval_mode, "workspacePath": session.workspace_path.unwrap_or_default(), "source": match session.source.as_str() { "legacy_routine" => "legacy_routine", "routine" => "routine", "user" => "user", _ => "legacy_task" }, "createdAt": session.created_at, "updatedAt": session.updated_at, "error": session.last_error })
 }
-fn run_json(run: super::AgentRunDto) -> Value {
+pub(crate) fn run_json(run: super::AgentRunDto) -> Value {
     json!({ "id": run.id, "sessionId": run.session_id, "status": run.status, "model": run.model, "approvalMode": run.approval_mode, "reasoningEffort": run.reasoning_effort, "startedAt": run.started_at, "completedAt": run.completed_at, "usage": run.usage, "error": run.error_message })
 }
 
-fn item_json_with_active_run(
+pub(crate) fn item_json_with_active_run(
     item: AgentItemDto,
     active_run_id: Option<&str>,
 ) -> Result<Value, AppError> {
@@ -1641,7 +1639,13 @@ fn item_json_with_active_run(
             json!({ "kind": "tool_call", "callId": v.tool_call_id.unwrap_or_default(), "name": v.tool_name.unwrap_or_default(), "arguments": v.arguments, "status": v.status.unwrap_or_else(|| "complete".into()) })
         }
         AgentItemPayload::ToolResult(v) => {
-            json!({ "kind": "tool_result", "callId": v.tool_call_id.unwrap_or_default(), "name": v.tool_name.unwrap_or_default(), "output": v.result, "isError": v.status.as_deref() == Some("failed") })
+            let is_error = v.status.as_deref() == Some("failed");
+            let output = if is_error {
+                v.error.map(Value::String).or(v.result)
+            } else {
+                v.result
+            };
+            json!({ "kind": "tool_result", "callId": v.tool_call_id.unwrap_or_default(), "name": v.tool_name.unwrap_or_default(), "output": output, "isError": is_error })
         }
         AgentItemPayload::Interruption(v) => json!({ "kind": "interruption", "interruption": v }),
         AgentItemPayload::Error(v) => {
@@ -2719,5 +2723,63 @@ mod tests {
             [PathBuf::from("/workspace/attachments/chart.png")]
         );
         assert_eq!(cli_message_with_attachments("Hi", &[]), "Hi");
+    }
+}
+
+#[cfg(test)]
+mod selection41_tests {
+    use super::*;
+    #[tokio::test]
+    async fn selection41_legacy_retry_uses_chat_and_persists_explicit_engine() {
+        use crate::llm::{cli::CliKind, registry::ProviderRef};
+        let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let mut settings = crate::providers::default_settings_for_tests();
+        settings.llm_usage.chat = ProviderRef::Cli { id: CliKind::Agy };
+        settings.llm_cli_default_applied = true;
+        crate::providers::replace_current_settings_for_tests(settings);
+        let pool = sqlx_sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query::query(
+            "CREATE TABLE agent_sessions(id TEXT PRIMARY KEY,model TEXT,workspace_path TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let repository = AgentRepository::new(pool.clone());
+        for (id, model, expected) in [
+            ("legacy", "old-native-model", "__clovy_cli_engine__:agy"),
+            (
+                "explicit",
+                "__clovy_cli_engine__:codex",
+                "__clovy_cli_engine__:codex",
+            ),
+        ] {
+            sqlx::query::query("INSERT INTO agent_sessions VALUES (?,?,NULL)")
+                .bind(id)
+                .bind(model)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let session:super::super::AgentSessionDto=serde_json::from_value(json!({"id":id,"title":"Synthetic","status":"idle","model":model,
+                "safetyMode":"sandboxed","approvalMode":"approvals","workspacePath":null,"source":"user","createdAt":"now","updatedAt":"now","completedAt":null,"lastError":null})).unwrap();
+            assert_eq!(
+                persist_retry_session(&repository, &session, "/synthetic/workspace")
+                    .await
+                    .unwrap(),
+                expected
+            );
+            let saved: String =
+                sqlx::query_scalar::query_scalar("SELECT model FROM agent_sessions WHERE id=?")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(saved, expected);
+        }
+        crate::providers::replace_current_settings_for_tests(
+            crate::providers::default_settings_for_tests(),
+        );
     }
 }

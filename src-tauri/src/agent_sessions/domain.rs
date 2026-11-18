@@ -168,6 +168,9 @@ pub struct ToolPayload {
     pub tool_call_id: Option<String>,
     pub arguments: Option<Value>,
     pub result: Option<Value>,
+    /// Host-normalized failure, separate from the raw observed result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub status: Option<String>,
 }
 

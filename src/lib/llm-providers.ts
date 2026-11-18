@@ -66,6 +66,11 @@ export function llmDetectClis(): Promise<LlmCliStatusDto[]> {
   return invoke<LlmCliStatusDto[]>("llm_detect_clis");
 }
 
+/** Opens native authentication in Clovy's profile. It returns no token or login status. */
+export function openAntigravityLogin(): Promise<void> {
+  return invoke<void>("llm_open_agy_login");
+}
+
 export function llmSaveEndpoint(request: LlmSaveEndpointRequest): Promise<LlmProvidersDto> {
   return invoke<LlmProvidersDto>("llm_save_endpoint", { request });
 }

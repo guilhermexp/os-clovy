@@ -17,6 +17,8 @@
 #[path = "binding_tests.rs"]
 mod binding_tests;
 pub mod cli;
+#[cfg(all(test, unix))]
+mod gateway_tests;
 pub mod policy;
 #[cfg(test)]
 #[path = "red_tests.rs"]
@@ -379,6 +381,14 @@ pub async fn start_cli_turn(
         kind: request.kind,
         program,
         env: env.vars().clone(),
+        agy: if request.kind == CliKind::Agy {
+            Some(
+                crate::llm::agy::HostContext::current()
+                    .map_err(|error| AppError::new("agy_profile_unavailable", error.to_string()))?,
+            )
+        } else {
+            None
+        },
         workspace: request.workspace,
         input: request.input,
         mcp,

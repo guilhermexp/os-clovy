@@ -98,3 +98,90 @@ snapshots it for each run; a bypass authorization is recorded as policy-origin
 before a tool may continue, and clarifications still require a person.
 Unattended runs do not inherit bypass. This policy remains independent of
 CLI execution restrictions and connector, operating-system and login grants.
+
+
+## 2026-11-03 addendum: Antigravity workspace transport
+
+The earlier consequence listing agy among CLIs without MCP reflects the
+capability known at the original decision. The installed CLI now discovers
+`<workspace>/.agents/mcp_config.json`; native synthetic canaries also resumed
+one conversation with a new server name and observed the second server's real
+response. The transport uses this local configuration with the existing
+`McpLaunch`, `TurnRegistry`, turn token and approval broker. Each turn receives
+a distinct server name and a 900-second tool timeout; names are not grants.
+
+Because callers can supply a shared workspace, a per-workspace OS lease owns
+the entry until teardown. A private durable receipt preserves the original
+unit before atomic installation. Teardown restores an unchanged unit exactly,
+or removes only its still-identical entry while retaining concurrent edits.
+Unsafe/malformed current content retains the receipt and fails explicitly.
+Host revocation does not depend on cleanup; the next lease recovers crash
+receipts before installing another entry. No global configuration is edited.
+Only events naming the exact leased server receive Clovy's normalized tool
+identity. Other MCP servers cannot claim host-owned diagnostics by using a
+similar name or copying metadata.
+
+This transport decision does not qualify Antigravity's unattended policy,
+one-shot isolation, default selection, or full platform parity. Those are
+separate acceptance tasks in `antigravity-paridade-completa`; native Windows
+execution remains required. The original broker/authority decision is unchanged.
+
+
+### 2026-11-03 review addendum: retained configuration units
+
+Optimistic comparison followed by rename/unlink is not CAS against editors
+outside Clovy's lease. Unix mutations now persist a small intent before a
+native exchange/capture and retain the actual displaced unit in a private
+workspace recovery directory. A race returns a conflict and keeps its bytes
+and metadata; cleanup never rolls a later publication back. Unambiguous crash
+states can complete their receipt; ambiguous states remain for inspection.
+These recovery units are intentionally not swept or automatically pruned.
+
+Receipt v2 must prove the complete before/installed relation and original
+metadata against the retained unit. Full restore additionally requires the
+identity and metadata of the actually installed unit to match; equal bytes
+alone do not justify restoring earlier permissions. Revocation and explicit
+cleanup precede terminal publication even on preparation returns.
+
+Windows has no qualified implementation of this mutation contract yet.
+MoveFileExW discards the raced target, while ReplaceFileW can merge its DACL
+into the token file. Preparation therefore fails before workspace mutation;
+Windows acceptance remains blocked until a safe native operation is qualified.
+This safety condition does not narrow the intended three-engine parity goal.
+
+
+## 2026-11-03 approved A1–A5 addendum: app-owned Antigravity profile
+
+The owner approved a common native SDK profile for Antigravity chat, one-shot
+calls and interactive authentication. This supersedes the shared-workspace
+transport and retained-unit mutation algorithm described in the two earlier
+2026-11-03 addenda. Their history is retained; the shared mutation code is
+removed, including its unresolved Windows replacement limitation.
+
+The app resolves its real data root before replacing only the final child
+HOME/XDG environment. The SDK uses `runtime-profiles/agy/home` under that root;
+chat uses a stable private execution directory per stored session and one-shot
+calls use exclusive disposable directories. Personal workspaces remain in the
+host gateway's authorization context, never SDK discovery. This avoids editing
+user configuration, coordinating with unrelated editors or hiding native
+login on every call. The trade-off is an explicit first authentication in
+Clovy's profile, opened in an owned OS terminal with native OAuth and consent.
+No credentials or SDK brain/history are copied.
+
+The existing gateway and broker remain the only host tool boundary. A turn
+receives one unique server in its own private `.agents/mcp_config.json`, with
+absolute transport arguments and a private recovery receipt. Revocation always
+precedes transport cleanup; altered state is preserved and diagnosed. Cleanup
+never traverses native authentication. The server's supported `env.HOME`
+restores the relay's host identity while the SDK keeps its private HOME, so the
+existing debug production-data refusal remains effective without a bypass.
+
+Existing run JSON records the private profile origin alongside the native
+conversation ID. Legacy or foreign-profile IDs trigger canonical replay into a
+new conversation; matching origins resume. No schema or second memory is added.
+Native command/file/URL actions are denied by transient `request-review`
+settings, with only the current MCP server allowed; one-shot calls deny MCP as
+well. Native OAuth remains separate from API-key billing. These settings and a
+private HOME do not establish an OS sandbox or unattended admission. Native
+app/terminal/Stop/browser and Windows acceptance remain separate evidence
+requirements. The broker, canonical history and routine policy stay unchanged.

@@ -173,14 +173,10 @@ fn validate_state(state: &str) -> Result<(), AppError> {
 
 fn resolve_routine_model(
     stored_model: &str,
-    _selected_model: &str,
-    default_cli: Option<crate::llm::cli::CliKind>,
-) -> String {
-    let kind = crate::chat_engine::cli_for_model(stored_model)
-        .filter(|kind| crate::llm::registry::DEFAULT_CHAT_CLIS.contains(kind))
-        .or(default_cli)
-        .unwrap_or(crate::llm::cli::CliKind::Claude);
-    crate::chat_engine::engine_model_id(kind)
+    installed: &[crate::llm::cli::CliKind],
+) -> Result<String, AppError> {
+    crate::llm::registry::resolve_unattended_cli(stored_model, |kind| installed.contains(&kind))
+        .map(crate::chat_engine::engine_model_id)
 }
 
 async fn guard_routine_turn(
@@ -521,6 +517,7 @@ async fn claim_with_connector_guard(
     require_due: bool,
     connector: Option<ConnectorClaimGuard<'_>>,
 ) -> Result<Option<Claim>, AppError> {
+    let env = crate::llm::shell_env::login_env().await;
     claim_with_connector_guard_for_turn(
         pool,
         routine_id,
@@ -528,6 +525,7 @@ async fn claim_with_connector_guard(
         require_due,
         connector,
         None,
+        &env,
     )
     .await
 }
@@ -539,7 +537,14 @@ async fn claim_with_connector_guard_for_turn(
     require_due: bool,
     connector: Option<ConnectorClaimGuard<'_>>,
     turn: BoundRoutineTurn<'_>,
+    env: &crate::llm::shell_env::LoginEnv,
 ) -> Result<Option<Claim>, AppError> {
+    // Resolve executable presence before acquiring the SQLite writer. No CLI
+    // process or synchronous login-shell resolution occurs inside the claim.
+    let installed: Vec<_> = crate::llm::registry::UNATTENDED_CLIS
+        .into_iter()
+        .filter(|kind| env.which(kind.id()).is_some())
+        .collect();
     // Serialize the eligibility read with the claim write. A deferred
     // transaction can fail with SQLITE_BUSY_SNAPSHOT when a scheduler,
     // connector, and manual trigger race after reading the same free row.
@@ -571,11 +576,7 @@ async fn claim_with_connector_guard_for_turn(
     let run_id = Uuid::new_v4().to_string();
     let timestamp = crate::db::repositories::timestamp();
     let stored_model: String = routine.get("model");
-    let model = resolve_routine_model(
-        &stored_model,
-        &crate::providers::remote_generation_model(),
-        crate::providers::default_unattended_cli(),
-    );
+    let model = resolve_routine_model(&stored_model, &installed)?;
     let safety_mode = AgentSafetyMode::from(routine.get::<String, _>("safety_mode").as_str());
     let metadata = serde_json::from_str::<Value>(&routine.get::<String, _>("metadata_json"))
         .unwrap_or_else(|_| json!({}));
@@ -627,6 +628,7 @@ mod bound_claim_tests {
             .execute(broker.pool())
             .await
             .unwrap();
+        let env = crate::llm::shell_env::LoginEnv::from_vars(Default::default());
         let result = claim_with_connector_guard_for_turn(
             broker.pool(),
             &routine.id,
@@ -639,6 +641,7 @@ mod bound_claim_tests {
                 &binding.run_id,
                 &binding.authority,
             )),
+            &env,
         )
         .await;
         assert_eq!(result.unwrap_err().code, "turn_expired");
@@ -647,10 +650,19 @@ mod bound_claim_tests {
             .unwrap()
             .is_empty());
         // The refused admission leaves the claim available to the scheduler.
-        assert!(claim(broker.pool(), &routine.id, "schedule", false)
-            .await
-            .unwrap()
-            .is_some());
+        let (_directory, env) = super::selection_tests::environment(&[CliKind::Claude]);
+        assert!(claim_with_connector_guard_for_turn(
+            broker.pool(),
+            &routine.id,
+            "schedule",
+            false,
+            None,
+            None,
+            &env
+        )
+        .await
+        .unwrap()
+        .is_some());
     }
 }
 
@@ -658,12 +670,37 @@ mod bound_claim_tests {
 /// result; keeping the operations separate makes scheduler tests deterministic
 /// and allows bounded concurrent dispatch at the app integration layer.
 pub async fn claim_due(pool: &SqlitePool) -> Result<Vec<Claim>, AppError> {
+    let env = crate::llm::shell_env::login_env().await;
+    claim_due_with_env(pool, &env).await
+}
+
+async fn claim_due_with_env(
+    pool: &SqlitePool,
+    env: &crate::llm::shell_env::LoginEnv,
+) -> Result<Vec<Claim>, AppError> {
     let ids: Vec<String> = query("SELECT id FROM routines WHERE state = 'scheduled' AND enabled = 1 AND claim_token IS NULL AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at ASC, id ASC")
         .bind(crate::db::repositories::timestamp()).fetch_all(pool).await.map_err(app_error)?.into_iter().map(|row| row.get("id")).collect();
     let mut claims = Vec::new();
     for id in ids {
-        if let Some(claim) = claim(pool, &id, "schedule", true).await? {
-            claims.push(claim);
+        match claim_with_connector_guard_for_turn(pool, &id, "schedule", true, None, None, env)
+            .await
+        {
+            Ok(Some(claim)) => claims.push(claim),
+            Ok(None) => {}
+            Err(error)
+                if matches!(
+                    error.code.as_str(),
+                    "routine_engine_unavailable"
+                        | "routine_engine_not_allowed"
+                        | "llm_cli_not_installed"
+                ) =>
+            {
+                // A refusal belongs to this routine. Keep earlier committed
+                // claims dispatchable and continue the remaining due work.
+                tracing::warn!(routine_id = %id, error_code = %error.code, error = %error.message,
+                    "routine engine selection refused");
+            }
+            Err(error) => return Err(error),
         }
     }
     Ok(claims)
@@ -1028,7 +1065,9 @@ pub(crate) async fn trigger_and_start_for_turn(
     turn: BoundRoutineTurn<'_>,
 ) -> Result<Option<AgentRoutineRunDto>, AppError> {
     reconcile(pool).await?;
-    match claim_with_connector_guard_for_turn(pool, routine_id, "manual", false, None, turn).await?
+    let env = crate::llm::shell_env::login_env().await;
+    match claim_with_connector_guard_for_turn(pool, routine_id, "manual", false, None, turn, &env)
+        .await?
     {
         Some(claim) => start_claim(app, pool, claim).await.map(Some),
         None => Ok(None),
@@ -1728,6 +1767,23 @@ mod tests {
     use sqlx_sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
     use std::time::Duration as StdDuration;
 
+    async fn claim(
+        pool: &SqlitePool,
+        id: &str,
+        trigger: &str,
+        due: bool,
+    ) -> Result<Option<Claim>, AppError> {
+        let (_directory, env) =
+            super::selection_tests::environment(&[crate::llm::cli::CliKind::Claude]);
+        super::claim_with_connector_guard_for_turn(pool, id, trigger, due, None, None, &env).await
+    }
+
+    async fn claim_due(pool: &SqlitePool) -> Result<Vec<Claim>, AppError> {
+        let (_directory, env) =
+            super::selection_tests::environment(&[crate::llm::cli::CliKind::Claude]);
+        super::claim_due_with_env(pool, &env).await
+    }
+
     async fn initialize_pool(pool: &SqlitePool) {
         // The routine migration only needs these parent keys for FK coverage.
         // Running the full runtime migration in memory would also require the
@@ -1862,39 +1918,31 @@ mod tests {
     }
 
     #[test]
-    fn native_routine_models_use_claude_when_no_cli_is_selected() {
-        for model in ["", "auto", "open-software/auto", "explicit-model"] {
+    fn routines_without_installed_eligible_engines_fail_before_claiming() {
+        for model in ["", "auto", "open-software/auto"] {
             assert_eq!(
-                resolve_routine_model(model, "remote-model", None),
-                crate::chat_engine::engine_model_id(crate::llm::cli::CliKind::Claude)
+                resolve_routine_model(model, &[]).unwrap_err().code,
+                "routine_engine_unavailable"
             );
         }
-    }
-
-    #[test]
-    fn retired_routine_models_keep_the_local_codex_fallback() {
-        let model = resolve_routine_model(
-            "auto",
-            "remote-model",
-            Some(crate::llm::cli::CliKind::Codex),
+        assert_eq!(
+            resolve_routine_model("explicit-model", &[])
+                .unwrap_err()
+                .code,
+            "routine_engine_not_allowed"
         );
         assert_eq!(
-            crate::chat_engine::cli_for_model(&model),
-            Some(crate::llm::cli::CliKind::Codex)
+            resolve_routine_model(
+                "__clovy_cli_engine__:claude",
+                &[crate::llm::cli::CliKind::Codex]
+            )
+            .unwrap_err()
+            .code,
+            "llm_cli_not_installed"
         );
-    }
-
-    #[test]
-    fn a_routine_without_a_cli_reports_the_missing_local_engine() {
-        let model = resolve_routine_model("auto", "remote-model", None);
-        let kind = crate::chat_engine::cli_for_model(&model).unwrap();
-        // start_cli_turn resolves the executable before spawning and returns
-        // this error when the selected CLI is absent from the login PATH.
-        let error = AppError::from(crate::llm::LlmError::CliNotInstalled(kind));
-        assert_eq!(error.code, "llm_cli_not_installed");
         assert_eq!(
-            error.message,
-            "Claude Code is not installed on this computer."
+            resolve_routine_model("auto", &[crate::llm::cli::CliKind::Codex]).unwrap(),
+            "__clovy_cli_engine__:codex"
         );
     }
 
@@ -2345,7 +2393,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claimed_run_snapshots_the_resolved_remote_model_and_safety_mode() {
+    async fn claimed_run_snapshots_the_resolved_cli_model_and_safety_mode() {
         let _guard = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
         let pool = pool().await;
         let mut request = create_request("every 1h");
@@ -2358,10 +2406,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             claim.model,
-            crate::chat_engine::engine_model_id(
-                crate::providers::default_unattended_cli()
-                    .unwrap_or(crate::llm::cli::CliKind::Claude)
-            )
+            crate::chat_engine::engine_model_id(crate::llm::cli::CliKind::Claude)
         );
         assert_eq!(claim.safety_mode, AgentSafetyMode::Unrestricted);
         let run = list_runs(&pool, Some("routine-1"))
@@ -2371,10 +2416,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             run.model,
-            crate::chat_engine::engine_model_id(
-                crate::providers::default_unattended_cli()
-                    .unwrap_or(crate::llm::cli::CliKind::Claude)
-            )
+            crate::chat_engine::engine_model_id(crate::llm::cli::CliKind::Claude)
         );
         assert_eq!(run.safety_mode, AgentSafetyMode::Unrestricted);
     }
@@ -2945,54 +2987,25 @@ mod tests {
     }
 
     #[test]
-    fn automatic_routine_model_runs_on_the_default_cli_engine() {
+    fn automatic_routines_resolve_only_installed_eligible_engines() {
+        use crate::llm::cli::CliKind;
         for stored_model in ["", "auto", crate::providers::LEGACY_AUTO_GENERATION_MODEL] {
             assert_eq!(
-                resolve_routine_model(
-                    stored_model,
-                    "kimi-k2-6",
-                    Some(crate::llm::cli::CliKind::Claude)
-                ),
+                resolve_routine_model(stored_model, &[CliKind::Claude]).unwrap(),
                 "__clovy_cli_engine__:claude"
             );
         }
-        // A retired remote model also moves onto the selected local engine.
         assert_eq!(
-            resolve_routine_model(
-                "explicit-model",
-                "kimi-k2-6",
-                Some(crate::llm::cli::CliKind::Codex)
-            ),
-            "__clovy_cli_engine__:codex"
+            resolve_routine_model("explicit-model", &[CliKind::Codex])
+                .unwrap_err()
+                .code,
+            "routine_engine_not_allowed"
         );
-    }
-
-    #[tokio::test]
-    async fn routines_follow_the_chat_engine_only_onto_claude_code_or_codex() {
-        use crate::llm::{cli::CliKind, registry::ProviderRef};
-        let _guard = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
-        let mut settings = crate::providers::default_settings_for_tests();
-        for (chat, expected) in [
-            (
-                ProviderRef::Cli {
-                    id: CliKind::Claude,
-                },
-                Some(CliKind::Claude),
-            ),
-            (
-                ProviderRef::Cli { id: CliKind::Codex },
-                Some(CliKind::Codex),
-            ),
-            // Clovy cannot confine pi's tools for unattended work.
-            (ProviderRef::Cli { id: CliKind::Pi }, None),
-            (ProviderRef::OpenRouter, None),
-        ] {
-            settings.llm_usage.chat = chat;
-            crate::providers::replace_current_settings_for_tests(settings.clone());
-            assert_eq!(crate::providers::default_unattended_cli(), expected);
-        }
-        crate::providers::replace_current_settings_for_tests(
-            crate::providers::default_settings_for_tests(),
+        assert_eq!(
+            resolve_routine_model("auto", &[CliKind::Agy])
+                .unwrap_err()
+                .code,
+            "routine_engine_unavailable"
         );
     }
 
@@ -3079,6 +3092,7 @@ mod tests {
                     "PATH".to_string(),
                     "/usr/bin:/bin".to_string(),
                 )]),
+                agy: None,
                 workspace: workspace.path().to_path_buf(),
                 input: routine_cli_prompt(&claimed),
                 mcp: None,
@@ -3157,3 +3171,365 @@ mod tests {
 #[cfg(test)]
 #[path = "routine_dispatch_failure_tests.rs"]
 mod dispatch_failure_tests;
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::llm::{cli::CliKind, registry::ProviderRef, shell_env::LoginEnv};
+    use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    pub(super) fn environment(installed: &[CliKind]) -> (tempfile::TempDir, LoginEnv) {
+        let directory = tempfile::tempdir().unwrap();
+        for kind in installed {
+            let path = directory.path().join(if cfg!(windows) {
+                format!("{}.exe", kind.id())
+            } else {
+                kind.id().to_string()
+            });
+            std::fs::write(&path, "#!/bin/sh\nexit 91\n").unwrap();
+            #[cfg(unix)]
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let env = LoginEnv::from_vars(BTreeMap::from([
+            ("PATH".into(), directory.path().display().to_string()),
+            ("PATHEXT".into(), ".EXE".into()),
+        ]));
+        (directory, env)
+    }
+    async fn fixture(model: &str) -> SqlitePool {
+        let pool = sqlx_sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for sql in [
+            "CREATE TABLE agent_sessions(id TEXT PRIMARY KEY)",
+            "CREATE TABLE agent_runs(id TEXT PRIMARY KEY)",
+            "CREATE TABLE connector_triggers(id TEXT,job_id TEXT,kind TEXT,account_id TEXT)",
+        ] {
+            query(sql).execute(&pool).await.unwrap();
+        }
+        for sql in include_str!("../migrations/026_routines.sql")
+            .split(';')
+            .filter(|sql| !sql.trim().is_empty())
+        {
+            query(sql).execute(&pool).await.unwrap();
+        }
+        query("INSERT INTO routines(id,name,prompt,schedule,model,created_at,updated_at,metadata_json,tool_catalog_version) VALUES ('selection','Synthetic','Keep notes','every 1h',?,'now','now','{}',1)")
+            .bind(model).execute(&pool).await.unwrap();
+        pool
+    }
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            crate::providers::replace_current_settings_for_tests(
+                crate::providers::default_settings_for_tests(),
+            );
+        }
+    }
+    #[tokio::test]
+    async fn selection41_routine_claim_uses_only_installed_eligible_cli_independently_of_chat_and_notes(
+    ) {
+        let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let _restore = Restore;
+        let mut settings = crate::providers::default_settings_for_tests();
+        settings.llm_usage.chat = ProviderRef::Cli { id: CliKind::Agy };
+        settings.llm_usage.notes = ProviderRef::Cli { id: CliKind::Codex };
+        settings.llm_cli_default_applied = true;
+        crate::providers::replace_current_settings_for_tests(settings);
+        for only in [CliKind::Claude, CliKind::Codex] {
+            let (_directory, env) = environment(&[only]);
+            let pool = fixture("auto").await;
+            let claimed = claim_with_connector_guard_for_turn(
+                &pool,
+                "selection",
+                "manual",
+                false,
+                None,
+                None,
+                &env,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(claimed.model, crate::chat_engine::engine_model_id(only));
+            assert_eq!(
+                query("SELECT model FROM routine_runs")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                    .get::<String, _>("model"),
+                claimed.model
+            );
+            assert_eq!(
+                crate::llm::provider_for(crate::llm::registry::LlmUsage::Chat),
+                ProviderRef::Cli { id: CliKind::Agy }
+            );
+            assert_eq!(
+                crate::llm::provider_for(crate::llm::registry::LlmUsage::Notes),
+                ProviderRef::Cli { id: CliKind::Codex }
+            );
+        }
+    }
+    #[tokio::test]
+    async fn selection41_refused_engine_leaves_no_claim_run_or_effect() {
+        let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let _restore = Restore;
+        for (model, installed, code) in [
+            ("auto", vec![], "routine_engine_unavailable"),
+            ("auto", vec![CliKind::Agy], "routine_engine_unavailable"),
+            (
+                "__clovy_cli_engine__:agy",
+                vec![CliKind::Agy, CliKind::Codex],
+                "routine_engine_not_allowed",
+            ),
+            (
+                "__clovy_cli_engine__:claude",
+                vec![CliKind::Codex],
+                "llm_cli_not_installed",
+            ),
+            (
+                "__clovy_cli_engine__:codex",
+                vec![CliKind::Claude],
+                "llm_cli_not_installed",
+            ),
+            (
+                "__clovy_cli_engine__:pi",
+                vec![CliKind::Pi, CliKind::Claude],
+                "routine_engine_not_allowed",
+            ),
+            (
+                "explicit-remote-model",
+                vec![CliKind::Codex],
+                "routine_engine_not_allowed",
+            ),
+        ] {
+            let (_directory, env) = environment(&installed);
+            let pool = fixture(model).await;
+            let error = claim_with_connector_guard_for_turn(
+                &pool,
+                "selection",
+                "manual",
+                false,
+                None,
+                None,
+                &env,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, code);
+            let row = query("SELECT claim_token,model FROM routines")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(row.get::<Option<String>, _>("claim_token"), None);
+            assert_eq!(row.get::<String, _>("model"), model);
+            for table in ["routine_runs", "agent_sessions", "agent_runs"] {
+                assert_eq!(
+                    query(&format!("SELECT COUNT(*) AS n FROM {table}"))
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap()
+                        .get::<i64, _>("n"),
+                    0
+                );
+            }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct SelectionDiagnostics(std::sync::Arc<std::sync::Mutex<Vec<BTreeMap<String, String>>>>);
+    impl tracing::Subscriber for SelectionDiagnostics {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() == tracing::Level::WARN
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields(BTreeMap<String, String>);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0
+                        .insert(field.name().to_string(), format!("{value:?}"));
+                }
+            }
+            let mut fields = Fields(BTreeMap::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+
+    async fn assert_batch_continues_after_refusal(model: &str, code: &str) {
+        use tracing::instrument::WithSubscriber;
+        let (_directory, env) = environment(&[CliKind::Codex]);
+        let pool = fixture("auto").await;
+        query("DELETE FROM routines").execute(&pool).await.unwrap();
+        for (id, model) in [
+            ("A", "auto"),
+            ("B", model),
+            ("C", "__clovy_cli_engine__:codex"),
+        ] {
+            query("INSERT INTO routines(id,name,prompt,schedule,model,next_run_at,created_at,updated_at,metadata_json,tool_catalog_version) VALUES (?,?,'Keep notes','every 1h',?,'2000-01-01T00:00:00Z','now','now','{}',1)")
+                .bind(id).bind(id).bind(model).execute(&pool).await.unwrap();
+        }
+        let diagnostics = SelectionDiagnostics::default();
+        let result = claim_due_with_env(&pool, &env)
+            .with_subscriber(diagnostics.clone())
+            .await;
+        // A is already committed even on the old failing path; dropping its
+        // returned batch would strand this exact durable claim.
+        let first = query("SELECT claim_token FROM routines WHERE id='A'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(first.get::<Option<String>, _>("claim_token").is_some());
+        let claims = result.expect("B's selection refusal must not discard A or prevent C");
+        let delivered = claims
+            .into_iter()
+            .map(|claim| {
+                (
+                    claim.routine_id,
+                    claim.routine_run_id,
+                    claim.token,
+                    claim.model,
+                )
+            })
+            .collect::<Vec<_>>();
+        let rows = query(
+            "SELECT routine_id,id,claim_token,model,status FROM routine_runs ORDER BY routine_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let persisted = rows
+            .iter()
+            .map(|row| {
+                assert_eq!(row.get::<String, _>("status"), "queued");
+                (
+                    row.get::<String, _>("routine_id"),
+                    row.get::<String, _>("id"),
+                    row.get::<String, _>("claim_token"),
+                    row.get::<String, _>("model"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(delivered, persisted);
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|claim| claim.0.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "C"]
+        );
+        for (id, _, token, resolved) in &delivered {
+            assert_eq!(resolved, "__clovy_cli_engine__:codex");
+            assert!(!token.is_empty());
+            let saved: String = query("SELECT claim_token FROM routines WHERE id=?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get("claim_token");
+            assert_eq!(&saved, token);
+        }
+        let refused = query("SELECT model,claim_token FROM routines WHERE id='B'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(refused.get::<String, _>("model"), model);
+        assert_eq!(refused.get::<Option<String>, _>("claim_token"), None);
+        {
+            let events = diagnostics.0.lock().unwrap();
+            let event = events
+                .iter()
+                .find(|fields| fields.get("routine_id").is_some_and(|id| id == "B"))
+                .expect("refusal must emit an identified diagnostic");
+            assert_eq!(event.get("error_code").map(String::as_str), Some(code));
+            assert!(event.get("error").is_some_and(|cause| !cause.is_empty()));
+        }
+        assert!(claim_due_with_env(&pool, &env)
+            .with_subscriber(diagnostics)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            query("SELECT COUNT(*) AS n FROM routine_runs")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get::<i64, _>("n"),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn post_review_f12_missing_explicit_engine_does_not_strand_confirmed_or_later_claims() {
+        assert_batch_continues_after_refusal(
+            "__clovy_cli_engine__:claude",
+            "llm_cli_not_installed",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn post_review_f12_ineligible_engine_does_not_strand_confirmed_or_later_claims() {
+        assert_batch_continues_after_refusal(
+            "__clovy_cli_engine__:agy",
+            "routine_engine_not_allowed",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn post_review_f12_storage_failure_is_not_an_engine_refusal() {
+        use tracing::instrument::WithSubscriber;
+        let (_directory, env) = environment(&[CliKind::Codex]);
+        let pool = fixture("auto").await;
+        query("UPDATE routines SET next_run_at='2000-01-01T00:00:00Z'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        query("CREATE TRIGGER reject_claim BEFORE UPDATE OF claim_token ON routines BEGIN SELECT RAISE(ABORT, 'synthetic storage failure'); END")
+            .execute(&pool).await.unwrap();
+        let diagnostics = SelectionDiagnostics::default();
+        let error = claim_due_with_env(&pool, &env)
+            .with_subscriber(diagnostics.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "routine_storage_failed");
+        assert!(error.message.contains("synthetic storage failure"));
+        assert!(diagnostics
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| !event.contains_key("routine_id")));
+        assert_eq!(
+            query("SELECT COUNT(*) AS n FROM routine_runs")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get::<i64, _>("n"),
+            0
+        );
+        assert_eq!(
+            query("SELECT claim_token FROM routines")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get::<Option<String>, _>("claim_token"),
+            None
+        );
+    }
+}

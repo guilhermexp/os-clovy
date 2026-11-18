@@ -6,7 +6,8 @@
 //! uses it, merged over its own environment, both to resolve CLI executables
 //! and as the base environment of every CLI it runs. HOME and profile
 //! variables such as `PI_CODING_AGENT_DIR` therefore reach the CLI exactly as
-//! the user's shell sets them; Clovy never rewrites them.
+//! the user's shell sets them in this snapshot. Antigravity applies its
+//! app-owned profile only to the final child environment, after resolution.
 //!
 //! `-i` is deliberately not used: interactive startup files can prompt, print
 //! banners, or wait on a TTY.

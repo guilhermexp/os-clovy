@@ -61,7 +61,8 @@ export function startAgentRunSettlementRelay(options: AgentRunSettlementRelayOpt
   };
 
   void listen(AGENT_RUNTIME_EVENT, ({ payload }) => {
-    if (!payload?.runId || finishedRuns.has(payload.runId)) return;
+    if (!payload?.runId || payload.method === "run.diagnostic" || finishedRuns.has(payload.runId))
+      return;
     const terminal =
       payload.method === "run.completed" ||
       payload.method === "run.cancelled" ||

@@ -72,6 +72,7 @@ export default defineMessages({
 
     "chat.notice.toolFailed": "A tool Clovy used could not finish this request.",
     "chat.notice.runtimeStopped": "Clovy stopped unexpectedly.",
+    "chat.notice.workspaceConnectionRecovery": "Workspace connection needs recovery.",
     "chat.notice.upstreamFailed": "The model service could not finish this request.",
     "chat.thinking.running": "Thinking",
     "chat.thinking.done": "Thought",
@@ -256,6 +257,8 @@ export default defineMessages({
     "chat.notice.toolFailed":
       "Uma ferramenta usada pelo Clovy não conseguiu concluir esta solicitação.",
     "chat.notice.runtimeStopped": "O Clovy parou inesperadamente.",
+    "chat.notice.workspaceConnectionRecovery":
+      "A conexão da pasta de trabalho precisa de recuperação.",
     "chat.notice.upstreamFailed": "O serviço do modelo não conseguiu concluir esta solicitação.",
     "chat.thinking.running": "Pensando",
     "chat.thinking.done": "Pensou",

@@ -13,6 +13,7 @@ import {
   type ChatEngineCatalog,
   chatDefaultEngine,
   chatEngineCatalog,
+  chatModelId,
   classifyChatEngineModel,
   defaultChatCliId,
   defaultChatModelId,
@@ -86,6 +87,27 @@ describe("chat-engine helpers", () => {
     expect(await defaultChatModelId()).toBe("__clovy_cli_engine__:claude");
     mocks.invoke.mockRejectedValueOnce(new Error("unknown command"));
     expect(await defaultChatModelId()).toBe("__clovy_cli_engine__:claude");
+  });
+
+  it.each([
+    "claude",
+    "codex",
+    "agy",
+  ])("resolves historical session models onto the only installed CLI %s", (only) => {
+    const clis = ["claude", "codex", "agy"].map((id) => ({
+      id,
+      name: id,
+      installed: id === only,
+      reason: null,
+      modelId: `${CLI_ENGINE_MODEL_PREFIX}${id}`,
+    }));
+    expect(chatModelId("historical-model", { clis })).toBe(`${CLI_ENGINE_MODEL_PREFIX}${only}`);
+    // Explicit choices stay explicit, including a now unavailable engine.
+    for (const chosen of ["claude", "codex", "agy"]) {
+      expect(chatModelId(`${CLI_ENGINE_MODEL_PREFIX}${chosen}`, { clis })).toBe(
+        `${CLI_ENGINE_MODEL_PREFIX}${chosen}`,
+      );
+    }
   });
 
   it("marks Claude Code as the default CLI, else Codex", () => {

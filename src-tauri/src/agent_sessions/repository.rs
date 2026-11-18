@@ -391,9 +391,13 @@ impl AgentRepository {
         run_id: &str,
         cli: &str,
         conversation_id: &str,
+        profile_id: Option<&str>,
     ) -> Result<(), sqlx::Error> {
-        query("UPDATE agent_runs SET run_config_json = json_set(COALESCE(run_config_json, '{}'), '$.engine', 'cli', '$.cli', ?, '$.conversationId', ?), updated_at = ? WHERE id = ? AND json_extract(run_config_json, '$.conversationId') IS NULL")
-            .bind(cli).bind(conversation_id).bind(crate::db::repositories::timestamp()).bind(run_id)
+        let origin = profile_id
+            .map(|id| serde_json::json!({"cliProfileId":id}))
+            .unwrap_or_else(|| serde_json::json!({}));
+        query("UPDATE agent_runs SET run_config_json = json_patch(json_set(COALESCE(run_config_json, '{}'), '$.engine', 'cli', '$.cli', ?, '$.conversationId', ?), json(?)), updated_at = ? WHERE id = ? AND json_extract(run_config_json, '$.conversationId') IS NULL")
+            .bind(cli).bind(conversation_id).bind(origin.to_string()).bind(crate::db::repositories::timestamp()).bind(run_id)
             .execute(&self.pool).await?;
         Ok(())
     }

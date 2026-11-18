@@ -296,6 +296,8 @@ export function AgentWorkspace({
   const [projection, setProjection] = useState<AgentRuntimeProjection>(() =>
     createAgentRuntimeProjection({ session: initialAgentSession }),
   );
+  const projectionEventsRef = useRef(projection.processedEventIds);
+  projectionEventsRef.current = projection.processedEventIds;
   const [hydratedSelectionId, setHydratedSelectionId] = useState<string>();
   const [artifacts, setArtifacts] = useState<AgentArtifactDto[]>([]);
   const [artifactPanel, setArtifactPanel] = useState<AgentArtifactPanelState | null>(null);
@@ -721,6 +723,7 @@ export function AgentWorkspace({
   const hydrate = useCallback(
     async (sessionId: string) => {
       if (isAgentSessionDeleted(sessionId)) return;
+      const readStartedEventIds = projectionEventsRef.current;
       const requestId = crypto.randomUUID();
       hydrationRequestRef.current = requestId;
       if (selectedIdRef.current === sessionId) setHydratedSelectionId(undefined);
@@ -748,11 +751,15 @@ export function AgentWorkspace({
         return;
       }
       setProjection((current) =>
-        mergeAgentRuntimeSnapshot(current, {
-          session,
-          items,
-          run: latestRun ?? undefined,
-        }),
+        mergeAgentRuntimeSnapshot(
+          current,
+          {
+            session,
+            items,
+            run: latestRun ?? undefined,
+          },
+          readStartedEventIds,
+        ),
       );
       updateQueuedFollowUps((current) =>
         reconcileConsumedAgentFollowUp(
@@ -966,6 +973,12 @@ export function AgentWorkspace({
     };
     void listen<AgentRuntimeEvent>(AGENT_RUNTIME_EVENT, ({ payload }) => {
       if (isAgentSessionDeleted(payload.sessionId)) return;
+      if (payload.method === "run.diagnostic") {
+        if (payload.sessionId === selectedIdRef.current) {
+          setProjection((current) => applyAgentRuntimeEvent(current, payload));
+        }
+        return;
+      }
       if (payload.method === "steering.consumed") {
         attemptedQueuedMessageIdsRef.current.delete(payload.data.messageId);
         setFailedQueuedMessageIds((current) => {
