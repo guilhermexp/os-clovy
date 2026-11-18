@@ -5752,6 +5752,7 @@ mod tests {
         let before = repos.get_note(&note_id).await.unwrap();
         let binding = crate::mcp_server::turns::TurnBinding {
             authority: crate::domain::turn_authority::TurnAuthority::new(),
+            wire_names: None,
             session_id: "conversation".into(),
             run_id: "run".into(),
             data_partition: "default".into(),

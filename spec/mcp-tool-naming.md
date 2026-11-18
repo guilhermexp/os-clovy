@@ -79,3 +79,21 @@ user-connected and provider-hosted servers, are not ours to name; use them as
 they come (Notion's `notion-*`, and the gateway's `mcp_<server>_<tool>` and
 `mcp_linear_*`, which only prefix the server's own names). This rule binds
 June-owned in-loop host tools and the Clovy MCP server's own tools only.
+
+**Native transport identity.** Canonical names above remain the identities in
+the common catalog, dispatcher, snapshots, history and approval/policy keys.
+Bound Claude Code, Codex and Antigravity MCP transports use one passive codec
+per grant at `tools/list` and `tools/call`, shared with native event translation.
+Safe ASCII names up to 36 bytes pass unchanged except for the reserved `_c_`
+prefix. Longer, unsafe or reserved names are represented by `_c_` plus
+unpadded URL-safe base64 of SHA-256(canonical bytes)[0..24], a 35-byte wire
+name. Descriptions retain the full canonical identity and original meaning;
+schemas and annotations are unchanged. Publication registers the encoded
+pairs atomically and refuses digest collisions. Only an advertised wire name
+decodes, once, in that grant. Raw names requiring encoding, unknown encoded
+names and previous Antigravity servers have no fallback or authority.
+
+This codec neither truncates nor filters the canonical pool, changes the
+gateway's 128-byte canonical limit, nor renames an external tool. Public MCP,
+internal tool APIs and other CLI kinds retain canonical behavior. Native
+SDK/UI qualification remains pending separately from pure codec verification.

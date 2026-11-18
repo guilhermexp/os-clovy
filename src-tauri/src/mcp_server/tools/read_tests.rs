@@ -177,6 +177,7 @@ async fn routine_read_policy_preserves_unbound_and_attended_chat_reads() {
     let run = repo.create_run(&session.id, "test", None).await.unwrap();
     let chat = TurnBinding {
         authority: crate::domain::turn_authority::TurnAuthority::new(),
+        wire_names: None,
         data_partition: crate::agent_sessions::run_partition::resolve(
             &data.notes,
             &session.id,

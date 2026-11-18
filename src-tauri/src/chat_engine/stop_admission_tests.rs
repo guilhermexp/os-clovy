@@ -168,6 +168,7 @@ async fn fixture() -> (
     }
     let binding = |id: &str| TurnBinding {
         authority: TurnAuthority::new(),
+        wire_names: None,
         session_id: id.into(),
         run_id: format!("{id}-run"),
         data_partition: "default".into(),

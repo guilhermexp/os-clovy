@@ -57,6 +57,7 @@ impl ToolGroup for TurnProbe {
 fn binding(run_id: &str) -> TurnBinding {
     TurnBinding {
         authority: crate::domain::turn_authority::TurnAuthority::new(),
+        wire_names: None,
         session_id: "session-1".into(),
         run_id: run_id.into(),
         data_partition: "default".into(),
@@ -235,6 +236,7 @@ async fn a_bound_relay_runs_turn_tools_in_its_session_and_run() {
     let run = repo.create_run(&session.id, "test", None).await.unwrap();
     let binding = TurnBinding {
         authority: crate::domain::turn_authority::TurnAuthority::new(),
+        wire_names: None,
         session_id: session.id.clone(),
         run_id: run.id.clone(),
         data_partition: crate::agent_sessions::run_partition::resolve(

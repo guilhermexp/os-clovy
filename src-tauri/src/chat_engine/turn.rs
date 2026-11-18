@@ -81,6 +81,7 @@ impl TurnContext {
     pub fn binding(&self) -> TurnBinding {
         TurnBinding {
             authority: crate::domain::turn_authority::TurnAuthority::new(),
+            wire_names: None,
             session_id: self.session_id.clone(),
             run_id: self.run_id.clone(),
             data_partition: self.data_partition.clone(),
@@ -323,15 +324,23 @@ pub async fn execute_turn<S: FrameSink>(
     };
     // The token lives exactly as long as this turn: every return below
     // drops it, which revokes it.
+    let mut wire_names = None;
     let mcp = context
         .mcp
         .as_ref()
         .filter(|_| cli::accepts_mcp(context.kind))
         .map(|launch| match &context.turns {
             Some(turns) => {
-                let issued = resources
-                    .grant
-                    .insert(TurnGrant::issue(turns, context.binding()));
+                let mut binding = context.binding();
+                if matches!(
+                    context.kind,
+                    CliKind::Claude | CliKind::Codex | CliKind::Agy
+                ) {
+                    let names = crate::mcp_server::wire_names::WireNames::default();
+                    binding.wire_names = Some(names.clone());
+                    wire_names = Some(names);
+                }
+                let issued = resources.grant.insert(TurnGrant::issue(turns, binding));
                 launch.for_turn(issued.token())
             }
             None => launch.clone(),
@@ -470,12 +479,14 @@ pub async fn execute_turn<S: FrameSink>(
         return;
     }
 
-    let mut translator = StreamTranslator::new(context.kind).with_turn_mcp_server(
-        resources
-            .execution
-            .as_ref()
-            .and_then(|execution| execution.server()),
-    );
+    let mut translator = StreamTranslator::new(context.kind)
+        .with_turn_mcp_server(
+            resources
+                .execution
+                .as_ref()
+                .and_then(|execution| execution.server()),
+        )
+        .with_wire_names(wire_names);
     if let Some(execution) = &resources.execution {
         if let Err(error) = execution.validate() {
             frames

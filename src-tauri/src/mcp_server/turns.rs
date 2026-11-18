@@ -31,6 +31,9 @@ pub const TURN_REQUIRED: &str = "turn_required";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TurnBinding {
     pub authority: crate::domain::turn_authority::TurnAuthority,
+    /// Passive transport metadata shared with this turn's stream translator.
+    /// Canonical tool identity and authority remain with the host.
+    pub wire_names: Option<super::wire_names::WireNames>,
     pub session_id: String,
     pub run_id: String,
     /// Host-owned run snapshot, never the current view or a model argument.

@@ -42,6 +42,7 @@ pub(crate) struct HttpFixture {
     pub url: String,
     pub calls: Arc<Mutex<Vec<(String, Value)>>>,
     pub active: Arc<AtomicUsize>,
+    pub effects: Arc<Mutex<Vec<Value>>>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for HttpFixture {
@@ -54,6 +55,14 @@ impl HttpFixture {
         Self::with_elicitation(false).await
     }
     pub async fn with_elicitation(elicit: bool) -> Self {
+        Self::configured(elicit, None).await
+    }
+    /// A real loopback MCP server with mutable state, for protocol-boundary
+    /// tests that must observe an approved effect through a later read.
+    pub async fn with_stateful_methods(methods: Vec<String>) -> Self {
+        Self::configured(false, Some(methods)).await
+    }
+    async fn configured(elicit: bool, methods: Option<Vec<String>>) -> Self {
         use tokio::{
             io::{AsyncReadExt, AsyncWriteExt},
             net::TcpListener,
@@ -64,6 +73,8 @@ impl HttpFixture {
         let recorded = calls.clone();
         let active = Arc::new(AtomicUsize::new(0));
         let active_requests = active.clone();
+        let effects = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let written = effects.clone();
         let answers = Arc::new(Mutex::new(std::collections::HashMap::<
             String,
             Arc<tokio::sync::Notify>,
@@ -76,6 +87,8 @@ impl HttpFixture {
                 let active = active_requests.clone();
                 let answers = answers.clone();
                 let question_ids = question_ids.clone();
+                let methods = methods.clone();
+                let effects = written.clone();
                 tokio::spawn(async move {
                     let mut bytes = Vec::new();
                     let (start, size) = loop {
@@ -150,6 +163,27 @@ impl HttpFixture {
                         Some("initialize") => {
                             json!({"protocolVersion":"2025-06-18", "capabilities":{}, "serverInfo":{"name":"fixture", "version":"1"}})
                         }
+                        Some("tools/list") if methods.is_some() => {
+                            json!({"tools":methods.as_ref().unwrap().iter().map(|name| json!({
+                                "name":name,
+                                "description":format!("Stateful fixture operation {name}"),
+                                "inputSchema":{"type":"object","properties":{"stamp":{"type":"string"}}},
+                                "annotations":{"readOnlyHint":name == "read_state"}
+                            })).collect::<Vec<_>>()})
+                        }
+                        Some("tools/call") if methods.is_some() => {
+                            let name = body["params"]["name"].as_str().unwrap();
+                            assert!(methods
+                                .as_ref()
+                                .unwrap()
+                                .iter()
+                                .any(|method| method == name));
+                            let mut effects = effects.lock().unwrap();
+                            if name != "read_state" {
+                                effects.push(body["params"]["arguments"].clone());
+                            }
+                            json!({"content":[{"type":"text","text":serde_json::to_string(&*effects).unwrap()}]})
+                        }
                         Some("tools/list") => {
                             json!({"tools":[{"name":"send", "description":"Send fixture", "inputSchema":{"type":"object","properties":{"text":{"type":"string"}}}},{"name":"read", "inputSchema":{"type":"object"}}]})
                         }
@@ -168,6 +202,7 @@ impl HttpFixture {
             url,
             calls,
             active,
+            effects,
             task,
         }
     }

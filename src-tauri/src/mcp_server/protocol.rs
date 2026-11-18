@@ -89,7 +89,16 @@ pub async fn handle_in(ctx: &ToolCtx<'_>, message: &Value) -> Option<Value> {
             },
         )),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools::descriptors(ctx).await })),
+        "tools/list" => {
+            let mut descriptors = tools::descriptors(ctx).await;
+            match ctx.binding.and_then(|binding| binding.wire_names.as_ref()) {
+                Some(names) => names
+                    .publish(&mut descriptors)
+                    .map(|()| json!({ "tools": descriptors }))
+                    .map_err(|error| (SERVER_UNAVAILABLE, error.to_string())),
+                None => Ok(json!({ "tools": descriptors })),
+            }
+        }
         "tools/call" => call_tool(ctx, &params).await,
         "resources/list" => Ok(json!({ "resources": resources() })),
         "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
@@ -107,6 +116,15 @@ async fn call_tool(ctx: &ToolCtx<'_>, params: &Value) -> Result<Value, (i64, Str
         .get("name")
         .and_then(Value::as_str)
         .ok_or((INVALID_PARAMS, "`name` is required".to_string()))?;
+    let resolved = match ctx.binding.and_then(|binding| binding.wire_names.as_ref()) {
+        Some(names) => Some(
+            names
+                .resolve(name)
+                .ok_or_else(|| (INVALID_PARAMS, format!("Unknown tool: {name}")))?,
+        ),
+        None => None,
+    };
+    let name = resolved.as_ref().map_or(name, AsRef::as_ref);
     if !tools::is_known_tool(name) {
         return Err((INVALID_PARAMS, format!("Unknown tool: {name}")));
     }

@@ -31,6 +31,7 @@ fn hello(dir: &std::path::Path, offered: Value) -> (SyncStream, Value) {
 fn binding() -> crate::mcp_server::turns::TurnBinding {
     crate::mcp_server::turns::TurnBinding {
         authority: crate::domain::turn_authority::TurnAuthority::new(),
+        wire_names: None,
         session_id: "synthetic-session".into(),
         run_id: "synthetic-run".into(),
         data_partition: "frozen-host-partition".into(),

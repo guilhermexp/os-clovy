@@ -4739,6 +4739,7 @@ mod queued_audio_authority_tests {
             .unwrap();
         let binding = TurnBinding {
             authority: TurnAuthority::new(),
+            wire_names: None,
             session_id: "conversation".into(),
             run_id: "run".into(),
             data_partition: "owner".into(),
