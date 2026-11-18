@@ -362,6 +362,8 @@ pub fn read_skill_content(path: &Path) -> io::Result<String> {
 
 /// Atomic replacement uses a canonical destination parent, never a path whose
 /// skill directory may be a symlink outside the managed root.
+#[cfg(test)]
+thread_local! { static RED_AFTER_VALIDATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None); }
 pub fn update_managed_skill(root: &Path, skill_id: &str, content: &str) -> io::Result<()> {
     use io::Write;
     if !valid_skill_id(skill_id) || content.len() > MAX_SKILL_BYTES {
@@ -394,6 +396,8 @@ pub fn update_managed_skill(root: &Path, skill_id: &str, content: &str) -> io::R
             "Skill directory is outside managed storage.",
         ));
     }
+    #[cfg(test)]
+    RED_AFTER_VALIDATION.with(|hook| { if let Some(hook) = hook.borrow_mut().take() { hook(); } });
     let content = skill_content_for_id(content, id);
     if content.len() > MAX_SKILL_BYTES {
         return Err(io::Error::new(
@@ -436,6 +440,25 @@ pub fn update_managed_skill(root: &Path, skill_id: &str, content: &str) -> io::R
 #[cfg(test)]
 mod discovery_regressions {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn red_update_must_not_follow_replaced_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let skill = root.path().join("selected");
+        fs::create_dir(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), "before").unwrap();
+        fs::write(outside.path().join("SKILL.md"), "outside sentinel").unwrap();
+        let original = root.path().join("original");
+        let swap = skill.clone();
+        let external = outside.path().to_owned();
+        RED_AFTER_VALIDATION.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+            fs::rename(&swap, original).unwrap();
+            std::os::unix::fs::symlink(external, swap).unwrap();
+        })));
+        let _ = update_managed_skill(root.path(), "selected", "after");
+        assert_eq!(fs::read_to_string(outside.path().join("SKILL.md")).unwrap(), "outside sentinel");
+    }
     #[test]
     fn managed_precedence_canonical_aliases_and_containment_share_identity() {
         let managed = tempfile::tempdir().unwrap();
