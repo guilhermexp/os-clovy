@@ -1971,6 +1971,32 @@ fn attachment_mime_type(path: &std::path::Path) -> Option<&'static str> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn interrupted_tool_call_hydration_preserves_status_identity_arguments_and_order() {
+        let item = AgentItemDto {
+            id: "stored-item".into(),
+            session_id: "session".into(),
+            run_id: Some("historical-run".into()),
+            sequence: 42,
+            payload: AgentItemPayload::ToolCall(super::super::ToolPayload {
+                tool_name: Some("clovy.create_note".into()),
+                tool_call_id: Some("item_1".into()),
+                arguments: Some(json!({"title":"Synthetic"})),
+                result: None,
+                status: Some("interrupted".into()),
+            }),
+            external_id: Some("old-event".into()),
+            created_at: "earlier".into(),
+        };
+        let dto = item_json_with_active_run(item, Some("newer-run")).unwrap();
+        assert_eq!(
+            dto,
+            json!({"id":"stored-item","sessionId":"session","runId":"historical-run","sequence":42,"createdAt":"earlier","kind":"tool_call","callId":"item_1","name":"clovy.create_note","arguments":{"title":"Synthetic"},"status":"interrupted"})
+        );
+        assert!(dto.get("output").is_none());
+        assert!(dto.get("isError").is_none());
+    }
+
     #[tokio::test]
     async fn review_delta_branch_retry_keeps_independent_attachment_copy() {
         let broker = crate::approval_broker::testing::TestBroker::new([]).await;

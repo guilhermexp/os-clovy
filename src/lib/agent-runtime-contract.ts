@@ -99,7 +99,8 @@ export type AgentToolCallItemDto = AgentItemBase & {
   callId: string;
   name: string;
   arguments: unknown;
-  status: "running" | "complete" | "failed";
+  /** Interrupted means the run ended without an observed final result. */
+  status: "running" | "complete" | "failed" | "interrupted";
 };
 
 export type AgentToolResultItemDto = AgentItemBase & {
@@ -288,14 +289,18 @@ export type AgentRuntimeEvent = RuntimeFrameBase &
         data: RuntimeItemData & { interruption: AgentInterruptionDto };
       }
     | { eventId: string; method: "usage.updated"; data: AgentUsageDto }
-    | { eventId: string; method: "run.completed"; data: { completedAt: string } }
-    | { eventId: string; method: "run.cancelled"; data: { completedAt: string } }
+    | {
+        eventId: string;
+        method: "run.completed" | "run.cancelled";
+        data: { completedAt: string; interruptedCallIds?: string[] };
+      }
     | {
         eventId: string;
         method: "run.failed";
         data: {
           itemSequence: number;
           completedAt: string;
+          interruptedCallIds?: string[];
           message: string;
           category?: "tool" | "provider" | "runtime" | "context" | "credits";
           code?: string;

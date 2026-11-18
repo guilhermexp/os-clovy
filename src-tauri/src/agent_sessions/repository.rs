@@ -775,14 +775,18 @@ impl AgentRepository {
             .to_string();
         let mut transaction = self.pool.begin().await?;
         if let Some(run_id) = run_id {
+            let running_tool_call = matches!(payload, AgentItemPayload::ToolCall(tool) if tool.status.as_deref() == Some("running"));
             let updated = query(
                 "UPDATE agent_runs SET last_sequence = ?, updated_at = ?
-                 WHERE id = ? AND last_sequence < ?",
+                 WHERE id = ? AND session_id = ? AND last_sequence < ?
+                   AND (? = 0 OR status NOT IN ('completed','cancelled','failed','interrupted'))",
             )
             .bind(sequence)
             .bind(&now)
             .bind(run_id)
+            .bind(session_id)
             .bind(sequence)
+            .bind(running_tool_call)
             .execute(&mut *transaction)
             .await?
             .rows_affected();

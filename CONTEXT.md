@@ -428,6 +428,13 @@ conversation turns).
 The ProseMirror chat input with slash commands and attachment chips.
 _Avoid_: textbox.
 
+**Interrupted tool call**:
+A tool call whose agent run ended without an observed final result. Its
+`interrupted` status ends the running indicator while preserving the call's
+identity and arguments. It does not establish whether the effect happened,
+failed, or was rolled back. A genuine result remains the observed evidence.
+_Avoid_: failed tool, cancelled effect, rolled-back action (without evidence).
+
 **Issue report** (removed):
 The in-app bug / feedback report dialog and its remote submission were
 removed from the desktop; see
