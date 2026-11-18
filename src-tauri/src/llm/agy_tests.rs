@@ -44,6 +44,199 @@ fn launch(root: &Path, token: &str) -> McpLaunch {
 }
 
 #[test]
+fn f17_issued_receipts_use_compact_full_nonce_and_version_three() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let root = private_root();
+    let host = host(root.path());
+    let mut execution = host.chat("compact").unwrap();
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..8 {
+        execution
+            .install_mcp(&launch(root.path(), "synthetic-turn"))
+            .unwrap();
+        let server = execution.server().unwrap();
+        assert_eq!(server.len(), 23);
+        let nonce = URL_SAFE_NO_PAD
+            .decode(server.strip_prefix('c').unwrap())
+            .unwrap();
+        assert_eq!(nonce.len(), 16);
+        assert_eq!(Uuid::from_slice(&nonce).unwrap().get_version_num(), 4);
+        assert!(seen.insert(server.to_owned()));
+        let receipt: Receipt = serde_json::from_slice(
+            &std::fs::read(execution.cwd().join(".agents").join(RECEIPT)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt.version, 3);
+        execution.finish().unwrap();
+        assert!(execution.server().is_none());
+    }
+}
+
+// Build durable owned state through the same private filesystem primitives,
+// including a real file identity. No old format is issued by install_mcp.
+fn f17_receipt(
+    execution: &Execution,
+    version: u8,
+    server: &str,
+    published: bool,
+) -> (Directory, Receipt) {
+    let agents = execution
+        .directory
+        .as_ref()
+        .unwrap()
+        .child(".agents")
+        .unwrap();
+    let config = json!({"mcpServers":{(server):{"command":std::env::current_exe().unwrap(),
+        "args":["--dir",execution.cwd(),"--turn","synthetic-expired-turn"],"timeoutSeconds":900}}});
+    let (candidate, identity) = agents
+        .stage("config", &serde_json::to_vec_pretty(&config).unwrap())
+        .unwrap();
+    if published {
+        agents.publish(&candidate, CONFIG, &identity).unwrap();
+    }
+    let receipt = Receipt {
+        version,
+        profile: execution.profile_id().into(),
+        server: server.into(),
+        identity,
+        config,
+        candidate: (version != 1).then_some(candidate),
+    };
+    (agents, receipt)
+}
+
+fn f17_publish_receipt(agents: &Directory, receipt: &Receipt) {
+    agents
+        .publish_new(RECEIPT, &serde_json::to_vec(receipt).unwrap(), "receipt")
+        .unwrap();
+}
+
+#[test]
+fn f17_recovery_accepts_owned_new_and_legacy_receipts_without_live_authority() {
+    for (version, server) in [
+        (1, "clovy_turn_00112233445546778899aabbccddeeff"),
+        (2, "clovy_turn_00112233445546778899aabbccddeeff"),
+        (3, "cABEiM0RVRneImaq7zN3u_w"),
+    ] {
+        for published in [false, true] {
+            if version == 1 && !published {
+                continue;
+            }
+            let root = private_root();
+            let host = host(root.path());
+            let execution = host.chat("recover").unwrap();
+            let cwd = execution.cwd().to_path_buf();
+            let origin = execution.profile_id().to_owned();
+            let auth = execution.home().join("synthetic-native-state");
+            std::fs::write(&auth, b"keep native state").unwrap();
+            let (agents, receipt) = f17_receipt(&execution, version, server, published);
+            if version == 1 {
+                // Recovery still recognizes an interrupted v1 in-place write.
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(agents.path().join(CONFIG))
+                    .unwrap();
+                file.set_len(12).unwrap();
+            }
+            f17_publish_receipt(&agents, &receipt);
+            drop(execution); // cleanup-only: no server becomes current
+            let mut recovered = host.chat("recover").unwrap();
+            assert_eq!(recovered.cwd(), cwd);
+            assert_eq!(recovered.profile_id(), origin);
+            assert!(recovered.server().is_none());
+            assert!(!agents.path().join(CONFIG).exists());
+            assert!(!agents.path().join(RECEIPT).exists());
+            if let Some(candidate) = &receipt.candidate {
+                assert!(!agents.path().join(candidate).exists());
+            }
+            recovered
+                .install_mcp(&launch(root.path(), "synthetic-new-turn"))
+                .unwrap();
+            assert_ne!(recovered.server(), Some(server));
+            recovered.finish().unwrap();
+            assert_eq!(std::fs::read(auth).unwrap(), b"keep native state");
+        }
+    }
+}
+
+#[test]
+fn f17_receipt_version_name_and_ownership_mismatches_are_retained() {
+    for (version, server, mismatch) in [
+        (1, "cABEiM0RVRneImaq7zN3u_w", "name"),
+        (2, "cABEiM0RVRneImaq7zN3u_w", "name"),
+        (3, "clovy_turn_00112233445546778899aabbccddeeff", "name"),
+        (3, "cABEiM0RVRneImaq7zN3u_w=", "name"),
+        (3, "cABEiM0RVRneImaq7zN3u_x", "name"), // noncanonical trailing bits
+        (3, "cABEiM0RVRneImaq7zN3u_!", "name"),
+        (3, "cABEiM0RVRneImaq7zN3u_", "name"),
+        (3, "dABEiM0RVRneImaq7zN3u_w", "name"),
+        (1, "clovy_turn_not-a-uuid", "name"),
+        (2, "clovy_turn_not-a-uuid", "name"),
+        (4, "cABEiM0RVRneImaq7zN3u_w", "version"),
+        (3, "cABEiM0RVRneImaq7zN3u_w", "profile"),
+        (3, "cABEiM0RVRneImaq7zN3u_w", "config"),
+        (3, "cABEiM0RVRneImaq7zN3u_w", "candidate"),
+    ] {
+        let root = private_root();
+        let host = host(root.path());
+        let mut execution = host.chat("refuse").unwrap();
+        let (agents, mut receipt) = f17_receipt(&execution, version, server, true);
+        match mismatch {
+            "profile" => receipt.profile.push_str("-foreign"),
+            "config" => receipt.config = json!({"mcpServers":{"foreign":{}}}),
+            "candidate" => receipt.candidate = Some("../foreign".into()),
+            _ => (),
+        }
+        f17_publish_receipt(&agents, &receipt);
+        let before = std::fs::read(agents.path().join(CONFIG)).unwrap();
+        let proof = std::fs::read(agents.path().join(RECEIPT)).unwrap();
+        assert!(
+            execution.finish().is_err(),
+            "version {version}, {server}, {mismatch}"
+        );
+        drop(execution);
+        assert!(host.chat("refuse").is_err());
+        assert_eq!(std::fs::read(agents.path().join(CONFIG)).unwrap(), before);
+        assert_eq!(std::fs::read(agents.path().join(RECEIPT)).unwrap(), proof);
+    }
+}
+
+#[test]
+fn f17_v3_equal_bytes_foreign_replacements_are_never_removed() {
+    for published in [false, true] {
+        let root = private_root();
+        let host = host(root.path());
+        let mut execution = host.chat("replaced").unwrap();
+        let (agents, receipt) = f17_receipt(&execution, 3, "cABEiM0RVRneImaq7zN3u_w", published);
+        f17_publish_receipt(&agents, &receipt);
+        let name = if published {
+            CONFIG
+        } else {
+            receipt.candidate.as_deref().unwrap()
+        };
+        let before = std::fs::read(agents.path().join(name)).unwrap();
+        std::fs::rename(
+            agents.path().join(name),
+            agents.path().join("retained-original"),
+        )
+        .unwrap();
+        let (replacement, identity) = agents.stage("config", &before).unwrap();
+        assert_ne!(identity, receipt.identity);
+        agents.publish(&replacement, name, &identity).unwrap();
+        let proof = std::fs::read(agents.path().join(RECEIPT)).unwrap();
+        assert!(execution.finish().is_err());
+        drop(execution);
+        assert!(host.chat("replaced").is_err());
+        assert_eq!(std::fs::read(agents.path().join(name)).unwrap(), before);
+        assert_eq!(
+            std::fs::read(agents.path().join("retained-original")).unwrap(),
+            before
+        );
+        assert_eq!(std::fs::read(agents.path().join(RECEIPT)).unwrap(), proof);
+    }
+}
+
+#[test]
 fn managed_profile_transport_cleanup_preserves_native_state_and_session_identity() {
     let root = private_root();
     let host = host(root.path());

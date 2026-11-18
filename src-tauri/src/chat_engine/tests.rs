@@ -714,8 +714,7 @@ echo '{"event":"result","result":{"status":"SUCCESS","response":"Configured"}}'"
                 let config = config.expect("Agy received workspace MCP configuration");
                 let servers = config["mcpServers"].as_object().unwrap();
                 assert_eq!(servers.len(), 1);
-                let (name, server) = servers.iter().next().unwrap();
-                assert!(name.starts_with("clovy_turn_"));
+                let server = servers.values().next().unwrap();
                 assert_eq!(server["command"], json!(launch.command));
                 assert_eq!(server["args"], json!(launch.args));
                 assert_eq!(server["timeoutSeconds"], 900);

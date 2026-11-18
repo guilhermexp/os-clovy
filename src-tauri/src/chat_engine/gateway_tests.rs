@@ -123,6 +123,99 @@ echo '{"event":"init","conversation_id":"agy-synthetic-conversation"}'
 echo '{"event":"result","result":{"status":"SUCCESS","response":"Gateway checked"}}'
 "#;
 
+#[tokio::test]
+async fn f17_core_catalog_fits_native_name_bound_and_previous_server_stays_external() {
+    use super::cli::{EngineEvent, StreamTranslator};
+    use crate::mcp_server::tools::{groups, ActivityAccess, McpData, ToolCtx};
+    let h = Harness::new(CliKind::Agy).await;
+    let run = h.new_run(CliKind::Agy, "Synthetic catalog contract").await;
+    let program = std::env::current_exe().unwrap();
+    let context = h.context(
+        CliKind::Agy,
+        &program,
+        &run,
+        "Synthetic catalog contract",
+        None,
+    );
+    let binding = context.binding();
+    let data = McpData {
+        notes: h.repository.pool.clone(),
+        profile: binding.data_partition.clone(),
+        memory_enabled: true,
+        activity: ActivityAccess::On,
+        now: chrono::Utc::now(),
+    };
+    let ctx = ToolCtx {
+        data: &data,
+        app: None,
+        binding: Some(&binding),
+        broker: None,
+    };
+    // Static core descriptors come from the actual registered groups. External
+    // MCP/connector discovery needs its own transport-name solution (F18).
+    let catalog: Vec<_> = groups()
+        .iter()
+        .flat_map(|group| group.descriptors(&ctx))
+        .collect();
+    let names: Vec<_> = catalog
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"request_clarification"));
+    assert!(names.contains(&"search_conversation_messages"));
+    let mut execution = context.agy.as_ref().unwrap().chat(&h.session_id).unwrap();
+    let launch = crate::mcp_server::launch(&program, h.app_data.path());
+    execution.install_mcp(&launch).unwrap();
+    let previous = execution.server().unwrap().to_owned();
+    execution.finish().unwrap();
+    execution.install_mcp(&launch).unwrap();
+    let current = execution.server().unwrap();
+    assert_ne!(previous, current);
+    // Contract-shaped check of the measured SDK grammar, not SDK execution.
+    let rejected: Vec<_> = names
+        .iter()
+        .map(|name| format!("mcp_{current}_{name}"))
+        .filter(|name| {
+            name.len() > 64
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })
+        .collect();
+    println!(
+        "core descriptors={}, server bytes={}, longest qualified bytes={}",
+        names.len(),
+        current.len(),
+        names
+            .iter()
+            .map(|name| 5 + current.len() + name.len())
+            .max()
+            .unwrap()
+    );
+    assert!(
+        rejected.is_empty(),
+        "SDK name contract rejects core tools: {rejected:?}"
+    );
+    for server in [
+        current,
+        previous.as_str(),
+        "clovy_turn_00112233445546778899aabbccddeeff",
+    ] {
+        let mut translator =
+            StreamTranslator::new(CliKind::Agy).with_turn_mcp_server(Some(current));
+        let event = json!({"event":"step_update","step_update":{"step_index":1,"step_type":"tool","state":"RUNNING","tool_name":"call_mcp_tool","tool_info":{"parameters":{"ServerName":server,"ToolName":"request_clarification","Arguments":{"question":"Which?","choices":[]}}}}});
+        let expected = if server == current {
+            "clovy.request_clarification".into()
+        } else {
+            format!("external_mcp.{server}.request_clarification")
+        };
+        assert!(translator.translate_line(&event.to_string()).iter().any(
+            |event| matches!(event, EngineEvent::ToolStarted { name, .. } if name == &expected)
+        ));
+    }
+    execution.finish().unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agy_workspace_binding_uses_real_channel_broker_and_revokes() {
@@ -235,7 +328,6 @@ async fn agy_workspace_binding_uses_real_channel_broker_and_revokes() {
         let servers = config["mcpServers"].as_object().unwrap();
         assert_eq!(servers.len(), 1);
         let (server, entry) = servers.iter().next().unwrap();
-        assert!(server.starts_with("clovy_turn_"));
         assert_eq!(entry["timeoutSeconds"], 900);
         assert_eq!(
             entry["env"]["HOME"],

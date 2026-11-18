@@ -2,6 +2,7 @@
 //! Authentication belongs to the SDK. Only execution transport is disposable.
 use super::agy_private::{self as private, Directory};
 use crate::mcp_server::McpLaunch;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -555,12 +556,16 @@ impl Execution {
         if agents.read(CONFIG)?.is_some() || agents.read(RECEIPT)?.is_some() {
             return Err(private::denied());
         }
-        let server = format!("clovy_turn_{}", Uuid::new_v4().simple());
+        // The SDK qualifies tools as mcp_<server>_<tool>, capped at 64 bytes.
+        // Keep the full nonce in 23 bytes; this transport name is not authority.
+        let mut server = String::with_capacity(23);
+        server.push('c');
+        URL_SAFE_NO_PAD.encode_string(Uuid::new_v4().as_bytes(), &mut server);
         let config = json!({"mcpServers":{(server.clone()):{"command":launch.command,"args":launch.args,"timeoutSeconds":900,
             "env":self.profile.relay_env}}});
         let (candidate, identity) = agents.stage("config", &serde_json::to_vec_pretty(&config)?)?;
         let receipt = Receipt {
-            version: 2,
+            version: 3,
             profile: self.profile.id.clone(),
             server: server.clone(),
             identity,
@@ -607,17 +612,28 @@ impl Execution {
         let receipt: Receipt = serde_json::from_slice(&bytes).map_err(|_| private::denied())?;
         let candidate_valid = match (&receipt.candidate, receipt.version) {
             (None, 1) => true,
-            (Some(name), 2) => name
+            (Some(name), 2 | 3) => name
                 .strip_prefix(".clovy-mcp-config-")
                 .is_some_and(|id| Uuid::parse_str(id).is_ok()),
             _ => false,
         };
-        if !candidate_valid
-            || receipt.profile != self.profile.id
-            || !receipt
+        let server_valid = match receipt.version {
+            // Existing durable receipts remain cleanup-only recovery input.
+            1 | 2 => receipt
                 .server
                 .strip_prefix("clovy_turn_")
-                .is_some_and(|id| Uuid::parse_str(id).is_ok())
+                .is_some_and(|id| Uuid::parse_str(id).is_ok()),
+            3 => receipt.server.strip_prefix('c').is_some_and(|nonce| {
+                nonce.len() == 22
+                    && URL_SAFE_NO_PAD
+                        .decode_slice(nonce, &mut [0; 16])
+                        .is_ok_and(|len| len == 16)
+            }),
+            _ => false,
+        };
+        if !candidate_valid
+            || receipt.profile != self.profile.id
+            || !server_valid
             || receipt.config["mcpServers"]
                 .as_object()
                 .map_or(true, |servers| {
