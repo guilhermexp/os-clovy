@@ -408,7 +408,6 @@
   --t-fast: 100ms;
   --t-med: 160ms;
   --t-slow: 240ms;
-  --stream-word-fade-dur: 1500ms;
   --icon-swap-dur: 250ms;
   --icon-swap-blur: 2px;
   --icon-swap-start-scale: 0.25;

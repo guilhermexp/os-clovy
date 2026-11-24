@@ -776,3 +776,82 @@ pub(super) async fn wait_external_request(
     .await
     .expect("an external operation must request approval")
 }
+
+struct FailedConnectorResponse {
+    driver: HttpConnector,
+    code: &'static str,
+}
+impl ConnectorDriver for FailedConnectorResponse {
+    fn catalog<'a>(&'a self, ctx: &'a ToolCtx<'a>) -> BoxFuture<'a, Result<Vec<Value>, AppError>> {
+        self.driver.catalog(ctx)
+    }
+    fn invoke<'a>(
+        &'a self,
+        ctx: &'a ToolCtx<'a>,
+        call: PreparedCall,
+        approval_id: Option<String>,
+    ) -> BoxFuture<'a, Result<Value, AppError>> {
+        Box::pin(async move {
+            self.driver.invoke(ctx, call, approval_id).await?;
+            Err(AppError::new(self.code, "The response could not be read."))
+        })
+    }
+}
+
+#[tokio::test]
+async fn external_connector_failed_write_response_prevents_unsafe_retry() {
+    use crate::approval_broker::external::ExternalApprovalBroker;
+    use crate::mcp_server::channel::ExternalConnection;
+    use std::time::Duration;
+
+    for code in [
+        "network_error",
+        "connector_google_api_error",
+        "github_upstream_error",
+    ] {
+        for tool in ["send_email", "list_unread"] {
+            let http = HttpFixture::new().await;
+            let repository = TestBroker::new([]).await;
+            let data = data(&repository);
+            let ctx = ToolCtx::unbound(&data);
+            let group = ConnectorTools::new(FailedConnectorResponse {
+                driver: driver(&http),
+                code,
+            });
+            let broker = ExternalApprovalBroker::new(
+                || Some("default".into()),
+                || {},
+                Duration::from_secs(5),
+            );
+            let (connection, _close, _cancel) = ExternalConnection::test_connection();
+            let access = broker.scope(&connection, "default", None);
+            let args = json!({"accountId":"fixture-google"});
+            let call = group.call_external(&ctx, &access, tool, &args);
+            tokio::pin!(call);
+            let request = tokio::select! {
+                early = &mut call => panic!("answered before approval: {early:?}"),
+                pending = wait_external_request(&broker) => pending,
+            };
+            assert_eq!(http.tool_calls(), 0);
+            broker
+                .decide(request["id"].as_str().unwrap(), true)
+                .unwrap();
+            let error = call.await.unwrap_err();
+            assert_eq!(
+                http.tool_calls(),
+                1,
+                "the server already received the request"
+            );
+            if tool == "send_email" {
+                assert_eq!(error.code, "connector_delivery_uncertain");
+                let details = error.details.unwrap();
+                assert_eq!(details["cause"], code);
+                assert_eq!(details["delivery"], "unknown");
+                assert_eq!(details["effect"], "unknown");
+                assert_eq!(details["retrySafe"], false);
+            } else {
+                assert_eq!(error.code, code);
+            }
+        }
+    }
+}

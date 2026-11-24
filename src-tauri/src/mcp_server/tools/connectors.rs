@@ -329,10 +329,25 @@ impl<D: ConnectorDriver> ConnectorTools<D> {
             },
             approval.guard_owned(),
         );
-        tokio::select! {
+        let result = tokio::select! {
             biased;
-            _ = access.cancelled() => Err(AppError::new("connector_delivery_uncertain", "The request closed after dispatch. Check the connected account before retrying.")),
+            _ = access.cancelled() => Err(uncertain_connector_delivery("external_call_closed")),
             result = operation => result,
+        };
+        match result {
+            Err(error)
+                if WRITES.contains(&name)
+                    && matches!(
+                        error.code.as_str(),
+                        "network_error"
+                            | "connector_google_api_error"
+                            | "github_upstream_error"
+                            | "agent_connector_response_invalid"
+                    ) =>
+            {
+                Err(uncertain_connector_delivery(&error.code))
+            }
+            other => other,
         }
     }
 
@@ -348,6 +363,17 @@ impl<D: ConnectorDriver> ConnectorTools<D> {
                 )
             })
     }
+}
+
+fn uncertain_connector_delivery(cause: &str) -> AppError {
+    let mut error = AppError::new(
+        "connector_delivery_uncertain",
+        "The connected account may have received the approved action. Check it before retrying.",
+    );
+    error.details = Some(json!({
+        "cause": cause, "delivery": "unknown", "effect": "unknown", "retrySafe": false
+    }));
+    error
 }
 
 pub(super) fn is_account_tool(name: &str) -> bool {

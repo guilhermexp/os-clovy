@@ -1,7 +1,7 @@
 import { defineMessages } from "../define";
 
-// HUD windows: dictation + meeting-detection pill (hud.ts), agent sessions
-// overlay (agent-hud.ts), and the recording pill (meeting-hud.ts).
+// HUD windows: dictation + meeting-detection pill (hud.ts)
+// and the recording pill (meeting-hud.ts).
 export default defineMessages({
   en: {
     // Dictation HUD
@@ -91,22 +91,6 @@ export default defineMessages({
     "hud.meetingEnd.stopLabel": "Stop recording now",
     "hud.meetingEnd.keep": "Keep recording",
     "hud.meetingEnd.seconds": "{seconds}s",
-    // Agent sessions HUD
-    "hud.agents.windowTitle": "Clovy Agents",
-    "hud.agents.activity": "Agent activity",
-    "hud.agents.sessions": "Agent sessions",
-    "hud.agents.hide": "Hide sessions HUD",
-    "hud.agents.expand": "Expand agent activity",
-    "hud.agents.collapse": "Collapse agent activity",
-    "hud.agents.needInput": { one: "{count} needs input", other: "{count} need input" },
-    "hud.agents.running": { one: "{count} running", other: "{count}" },
-    "hud.agents.activeAgents": { one: "{count} active agent", other: "{count} active agents" },
-    "hud.agents.status.thinking": "Thinking",
-    "hud.agents.status.needsInput": "Needs input",
-    "hud.agents.status.done": "Done",
-    "hud.agents.status.failed": "Hit a problem",
-    "hud.agents.status.stopped": "Stopped",
-    "hud.agents.untitledSession": "Agent session",
   },
   "pt-BR": {
     "hud.dictation.windowTitle": "Ditado do Clovy",
@@ -198,23 +182,5 @@ export default defineMessages({
     "hud.meetingEnd.stopLabel": "Parar a gravação agora",
     "hud.meetingEnd.keep": "Continuar gravando",
     "hud.meetingEnd.seconds": "{seconds}s",
-    "hud.agents.windowTitle": "Agentes do Clovy",
-    "hud.agents.activity": "Atividade dos agentes",
-    "hud.agents.sessions": "Sessões de agentes",
-    "hud.agents.hide": "Ocultar HUD de sessões",
-    "hud.agents.expand": "Expandir atividade dos agentes",
-    "hud.agents.collapse": "Recolher atividade dos agentes",
-    "hud.agents.needInput": {
-      one: "{count} precisa de resposta",
-      other: "{count} precisam de resposta",
-    },
-    "hud.agents.running": { one: "{count} em execução", other: "{count}" },
-    "hud.agents.activeAgents": { one: "{count} agente ativo", other: "{count} agentes ativos" },
-    "hud.agents.status.thinking": "Pensando",
-    "hud.agents.status.needsInput": "Precisa de resposta",
-    "hud.agents.status.done": "Concluído",
-    "hud.agents.status.failed": "Encontrou um problema",
-    "hud.agents.status.stopped": "Parado",
-    "hud.agents.untitledSession": "Sessão do agente",
   },
 });

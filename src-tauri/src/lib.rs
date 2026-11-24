@@ -1,7 +1,6 @@
 #![recursion_limit = "256"]
 
 pub mod activity;
-pub mod agent_hud;
 pub mod agent_mcp;
 pub mod agent_recorder;
 pub mod agent_sessions;
@@ -343,11 +342,6 @@ pub fn run() {
             dictation::dictation_hud_shake,
             dictation::dictation_hotkey_status,
             dictation::latest_dictation_event,
-            agent_hud::agent_hud_show,
-            agent_hud::agent_hud_hide,
-            agent_hud::agent_hud_set_layout,
-            agent_hud::agent_hud_open_agent,
-            agent_hud::agent_hud_main_focused,
             notifications::send_app_notification,
             notifications::agent_open_ready,
             notifications::routine_open_ready,

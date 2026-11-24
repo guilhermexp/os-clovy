@@ -10,12 +10,12 @@ shell commands, and other important information, read
 
 ## Project
 
-Clovy is a local-first **Tauri desktop app** for meeting notes: it records a
-meeting or dictation, transcribes audio, turns transcripts into structured
-notes, and hosts CLI chat over the user's notes. The frontend is **React**
-(`src/`), and the native shell is **Rust** (`src-tauri/`). Chat uses installed
-CLI engines (Claude Code, Codex and Antigravity), with Claude Code as the initial
-default when available. The app owns canonical history and the common tool
+Clovy is a local-first **Tauri desktop app** for activity, meeting notes,
+dictation and routines. It opens in Today. External agents access its data
+and tools through the local MCP relay, with protected actions approved in
+Settings > MCP. The frontend is **React** (`src/`), and the native shell is
+**Rust** (`src-tauri/`). Installed CLI engines power routines, note generation
+and activity processing. The app owns persisted history and the common tool
 gateway; execution failure never silently switches engines. The desktop calls
 **Groq**, **OpenRouter**, and **fal** directly with
 the user's own keys; transcription may instead use the user-installed local
@@ -32,7 +32,7 @@ sharing service, or credit balance. Clovy tools remain available through MCP.
 os-clovy/
 ├── src/                     # React frontend
 │   ├── app/                 # app shell, routing, onboarding, bootstrap
-│   ├── components/          # agent (chat), settings, onboarding, note-editor, recorder, sidebar, ...
+│   ├── components/          # routine results, settings, onboarding, note-editor, recorder, sidebar, ...
 │   ├── lib/                 # agent runtime contracts, model privacy, Tauri bindings, ...
 │   ├── styles/              # app.css + tokens.css (design tokens)
 │   └── test/                # vitest suites (all frontend tests live here)
@@ -44,8 +44,8 @@ os-clovy/
 │   ├── src/activity/        # text-only capture: macOS AX/Vision, windows/ UIA/WGC/OCR; encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057); timeline/ = ETL, gaps, categories, FTS search, agent tools (docs/activity-timeline.md); tests: `cargo test activity`
 │   ├── src/coding_agents/   # read-only ingest of local coding-agent transcripts, blocks, tool-free summaries (docs/coding-agent-sessions.md; tests: `cargo test coding_agents`)
 │   ├── src/day_intelligence/ # distillation + local embeddings, hourly reports, workstreams, day summary/standup, schedule, notifications (docs/day-intelligence.md; tests: `cargo test day_intelligence`)
-│   ├── src/mcp_server/      # Clovy MCP server: `clovy-mcp` stdio relay, authenticated private IPC (macOS Unix socket; Windows named pipe), unbound read-only tools and host-bound tools (docs/mcp-server.md, ADR-0058/0059; tests: `cargo test mcp_server`)
-│   ├── src/chat_engine/     # agent CLIs as a chat session's engine (Home included, ADR-0064): resume, stream → agent items, cancel, Clovy tools via MCP (docs/llm-providers.md; tests: `cargo test chat_engine`)
+│   ├── src/mcp_server/      # Clovy MCP server: `clovy-mcp` stdio relay, authenticated private IPC (macOS Unix socket; Windows named pipe), authenticated external calls, per-action approvals and host-bound tools (docs/mcp-server.md, ADR-0058/0059; tests: `cargo test mcp_server`)
+│   ├── src/chat_engine/     # CLI execution for routines and preserved session history: resume, persisted results, cancel, Clovy tools via MCP (docs/llm-providers.md; tests: `cargo test chat_engine`)
 │   ├── src/commands.rs      # the Tauri command surface; every command invoked from `src/` must be in `lib.rs` `generate_handler!` (guard: `src/test/tauri-command-registry.test.ts`)
 │   └── native/              # macOS system-audio helper (Swift) + dictation helper + dev launcher (`dev-launcher/`, ADR-0060) + `mac-local-transcriber/` (SwiftPM + FluidAudio, pinned model manifest in `resources/local-transcriber-model.json`, built by `scripts/prepare-local-transcriber.mjs`; plain `cargo` builds bundle only a placeholder, so local transcription needs `pnpm local-transcriber:prepare`)
 ├── docs/                    # see docs/index.md — ADRs, subsystem docs, runbooks, PRDs, QA
@@ -203,7 +203,7 @@ build scripts in `pnpm-workspace.yaml` — live in
 - **Windows MCP:** also run `cargo test --manifest-path src-tauri/Cargo.toml --locked mcp_server`
   on Windows. Unix transport tests and GNU metadata checks do not qualify named-pipe
   runtime, other-SID denial, Authenticode or the installed NSIS artifact.
-- **Chat and tools gate:** `cargo test chat_engine`, `cargo test mcp_server`,
+- **Runtime and tools gate:** `cargo test chat_engine`, `cargo test mcp_server`,
   and `cargo test approval_broker` cover CLI turns and local tool authority.
 - **Agent item ordering:** `event.sequence` is a per-run replay cursor, not a
   timeline ordinal. Item-producing events carry `data.itemSequence` from the
@@ -245,7 +245,7 @@ build scripts in `pnpm-workspace.yaml` — live in
   request; never substitute a service key, another provider, a local bearer
   token, or a retired route.
   Keys remain in the credential store and go only to their own provider;
-  media downloads carry none. Chat stays on CLI engines. Notes may use a CLI,
+  media downloads carry none. Routines use installed CLI engines. Notes may use a CLI,
   an explicitly configured endpoint, or OpenRouter. Keep `llm::generate`
   and the CLI/endpoint note routes intact. See
   [ADR-0073](docs/adr/0073-desktop-calls-user-providers-without-a-clovy-server.md).
@@ -328,7 +328,7 @@ the only remote). Issues and branches use the harness tickets, not `JUN-*`.
   `<app_data>/runtime-profiles/agy/home` and private execution workspaces.
   HOME/XDG and Windows profile aliases change only in the CLI child; personal
   transcript ingestion and the relay's host identity stay unchanged.
-  Chat, Test, note/activity calls and `llm_open_agy_login` use that same context.
+  Routines, provider tests, note/activity calls and `llm_open_agy_login` use that same context.
   Native authentication is retained, not copied or removed with a turn.
   Workspace discovery is bounded by an app-owned empty Git root created through
   filesystem primitives, not a Git runtime dependency. Legacy/foreign native IDs
@@ -349,9 +349,9 @@ the only remote). Issues and branches use the harness tickets, not `JUN-*`.
 - **One runtime-mode control:** each run (including retries) derives Clovy tool
   approval from the saved safety mode: `sandboxed` requires approval;
   `unrestricted` bypasses it only when attended. The legacy session
-  `approval_mode` column has no authority and no setter command. Home stays
-  sandboxed; the selector stays on new focused conversations. Clarifications
-  still require a person, and unattended Clovy write requests remain refused.
+  `approval_mode` column has no authority and no setter command. External MCP
+  calls use per-operation approval in Settings > MCP. Clarifications require
+  a person, and unattended Clovy write requests remain refused.
   Only Codex + `unrestricted` uses `danger-full-access`, including routines
   explicitly configured with that mode. Other approval-skipping flags remain
   forbidden. Activity selection of an installed one-shot CLI without a measured
@@ -460,7 +460,7 @@ by editing OS databases.
 For the **provider cutover**, use a fresh isolated profile under a run-owned
 identifier and synthetic data. Exercise dictation with and without a Groq key,
 notes through Claude Code and OpenRouter, the text catalog, and model selection
-that leaves chat on Claude Code. A fake listener on `127.0.0.1:8080`, bound only
+and the configured routine engine. A fake listener on `127.0.0.1:8080`, bound only
 when free, must receive zero requests. Automated tests may inject an ephemeral
 retired origin. Check migration without changing endpoints/history; never copy
 or launch the owner's production profile. Only one native proof runs at once.
