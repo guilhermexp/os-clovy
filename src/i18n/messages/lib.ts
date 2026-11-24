@@ -151,13 +151,6 @@ export default defineMessages({
     "lib.errors.slashFileParse": "Could not parse /file paths. Close the quote and try again.",
 
     // Skill slash command errors.
-    "lib.skillSlash.ambiguous": "/{token} matches more than one skill. Use {matches}.",
-    "lib.skillSlash.disabledToken": "/{token} is disabled. Enable it in Agent settings to use it.",
-    "lib.skillSlash.disabledOne": "{matches} is disabled. Enable it in Agent settings to use it.",
-    "lib.skillSlash.disabledMany":
-      "{matches} are disabled. Enable one in Agent settings to use it.",
-    "lib.skillSlash.missingWithSuggestions": "Could not find skill /{token}. Try {suggestions}.",
-    "lib.skillSlash.missing": "Could not find skill /{token}.",
 
     // Built-in composer slash commands.
     "lib.slash.model.label": "Model",
@@ -170,25 +163,6 @@ export default defineMessages({
     "lib.slash.video.description": "Generate a video from a prompt.",
 
     // Agent tool activity labels.
-    "lib.toolActivity.computerUse": "Computer use",
-    "lib.toolActivity.usingTool": "Using a tool.",
-    "lib.toolActivity.sentence": "{label}.",
-    "lib.toolActivity.tool": "Tool",
-    "lib.toolActivity.browsing": "Browsing",
-    "lib.toolActivity.searchingWeb": "Searching web",
-    "lib.toolActivity.searchingImages": "Searching images",
-    "lib.toolActivity.searchingFiles": "Searching files",
-    "lib.toolActivity.searching": "Searching",
-    "lib.toolActivity.editingFiles": "Editing files",
-    "lib.toolActivity.readingFiles": "Reading files",
-    "lib.toolActivity.usingGitHub": "Using GitHub",
-    "lib.toolActivity.inspectingRepository": "Inspecting repository",
-    "lib.toolActivity.runningTests": "Running tests",
-    "lib.toolActivity.building": "Building",
-    "lib.toolActivity.checkingCode": "Checking code",
-    "lib.toolActivity.runningCommand": "Running command",
-    "lib.toolActivity.workingWithVideo": "Working with video",
-    "lib.toolActivity.workingWithImages": "Working with images",
 
     // Agent native notifications.
     "lib.agentNotify.ready": "Clovy is ready",
@@ -396,29 +370,6 @@ export default defineMessages({
     "lib.videoModels.wan30": "Text-to-video up to 1080p and 30 seconds, with audio.",
 
     // Home.
-    "lib.home.message": "Home message",
-    "lib.home.todayAt": "Today at {time}",
-    "lib.home.yesterdayAt": "Yesterday at {time}",
-    "lib.home.dayAt": "{day} at {time}",
-    "lib.home.greetingWithName": "{salutation}, {name}",
-    "lib.home.goodMorning": "Good morning",
-    "lib.home.goodAfternoon": "Good afternoon",
-    "lib.home.goodEvening": "Good evening",
-    "lib.home.pickUpToday": "What should we pick up today?",
-    "lib.home.helpToday": "What would you like help with today?",
-    "lib.home.pickUpAfternoon": "What should we pick up this afternoon?",
-    "lib.home.helpAfternoon": "What would you like help with this afternoon?",
-    "lib.home.pickUpEvening": "What should we pick up this evening?",
-    "lib.home.helpEvening": "What would you like help with this evening?",
-    "lib.home.nudge.planMyDay": "Plan my day",
-    "lib.home.nudge.thinkThroughDecision": "Think through a decision",
-    "lib.home.nudge.getSomethingDone": "Help me get something done",
-    "lib.home.nudge.planRestOfDay": "Plan the rest of my day",
-    "lib.home.nudge.workThroughBlocker": "Work through a blocker",
-    "lib.home.nudge.prioritize": "Help me prioritize",
-    "lib.home.nudge.reviewMyDay": "Review my day",
-    "lib.home.nudge.planTomorrow": "Plan tomorrow",
-    "lib.home.checkIn": "{salutation}. {question}",
 
     // Note PDF export.
     "lib.notePdf.defaultTitle": "Meeting notes",
@@ -570,17 +521,6 @@ export default defineMessages({
     "lib.errors.slashFileParse":
       "Não foi possível interpretar os caminhos do /file. Feche as aspas e tente de novo.",
 
-    "lib.skillSlash.ambiguous": "/{token} corresponde a mais de uma skill. Use {matches}.",
-    "lib.skillSlash.disabledToken":
-      "/{token} está desativada. Ative-a nas configurações do Agente para usá-la.",
-    "lib.skillSlash.disabledOne":
-      "{matches} está desativada. Ative-a nas configurações do Agente para usá-la.",
-    "lib.skillSlash.disabledMany":
-      "{matches} estão desativadas. Ative uma delas nas configurações do Agente para usá-la.",
-    "lib.skillSlash.missingWithSuggestions":
-      "Não foi possível encontrar a skill /{token}. Tente {suggestions}.",
-    "lib.skillSlash.missing": "Não foi possível encontrar a skill /{token}.",
-
     "lib.slash.model.label": "Modelo",
     "lib.slash.model.description": "Trocar o modelo de texto.",
     "lib.slash.file.label": "Arquivo",
@@ -589,26 +529,6 @@ export default defineMessages({
     "lib.slash.image.description": "Gerar uma imagem a partir de um prompt.",
     "lib.slash.video.label": "Vídeo",
     "lib.slash.video.description": "Gerar um vídeo a partir de um prompt.",
-
-    "lib.toolActivity.computerUse": "Uso do computador",
-    "lib.toolActivity.usingTool": "Usando uma ferramenta.",
-    "lib.toolActivity.sentence": "{label}.",
-    "lib.toolActivity.tool": "Ferramenta",
-    "lib.toolActivity.browsing": "Navegando",
-    "lib.toolActivity.searchingWeb": "Buscando na web",
-    "lib.toolActivity.searchingImages": "Buscando imagens",
-    "lib.toolActivity.searchingFiles": "Buscando arquivos",
-    "lib.toolActivity.searching": "Buscando",
-    "lib.toolActivity.editingFiles": "Editando arquivos",
-    "lib.toolActivity.readingFiles": "Lendo arquivos",
-    "lib.toolActivity.usingGitHub": "Usando o GitHub",
-    "lib.toolActivity.inspectingRepository": "Inspecionando o repositório",
-    "lib.toolActivity.runningTests": "Executando testes",
-    "lib.toolActivity.building": "Compilando",
-    "lib.toolActivity.checkingCode": "Verificando o código",
-    "lib.toolActivity.runningCommand": "Executando comando",
-    "lib.toolActivity.workingWithVideo": "Trabalhando com vídeo",
-    "lib.toolActivity.workingWithImages": "Trabalhando com imagens",
 
     "lib.agentNotify.ready": "O Clovy está pronto",
     "lib.agentNotify.needsInput": "O Clovy precisa da sua resposta",
@@ -803,30 +723,6 @@ export default defineMessages({
     "lib.videoModels.wan22":
       "Modelo padrão de texto para vídeo para clipes rápidos de 5 segundos em 720p.",
     "lib.videoModels.wan30": "Texto para vídeo de até 1080p e 30 segundos, com áudio.",
-
-    "lib.home.message": "Mensagem do Início",
-    "lib.home.todayAt": "Hoje às {time}",
-    "lib.home.yesterdayAt": "Ontem às {time}",
-    "lib.home.dayAt": "{day} às {time}",
-    "lib.home.greetingWithName": "{salutation}, {name}",
-    "lib.home.goodMorning": "Bom dia",
-    "lib.home.goodAfternoon": "Boa tarde",
-    "lib.home.goodEvening": "Boa noite",
-    "lib.home.pickUpToday": "O que vamos retomar hoje?",
-    "lib.home.helpToday": "Com o que você quer ajuda hoje?",
-    "lib.home.pickUpAfternoon": "O que vamos retomar hoje à tarde?",
-    "lib.home.helpAfternoon": "Com o que você quer ajuda hoje à tarde?",
-    "lib.home.pickUpEvening": "O que vamos retomar hoje à noite?",
-    "lib.home.helpEvening": "Com o que você quer ajuda hoje à noite?",
-    "lib.home.nudge.planMyDay": "Planejar meu dia",
-    "lib.home.nudge.thinkThroughDecision": "Pensar em uma decisão",
-    "lib.home.nudge.getSomethingDone": "Me ajude a concluir algo",
-    "lib.home.nudge.planRestOfDay": "Planejar o resto do meu dia",
-    "lib.home.nudge.workThroughBlocker": "Resolver um bloqueio",
-    "lib.home.nudge.prioritize": "Me ajude a priorizar",
-    "lib.home.nudge.reviewMyDay": "Revisar meu dia",
-    "lib.home.nudge.planTomorrow": "Planejar amanhã",
-    "lib.home.checkIn": "{salutation}. {question}",
 
     "lib.notePdf.defaultTitle": "Notas da reunião",
   },

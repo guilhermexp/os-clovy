@@ -8,7 +8,6 @@ import type { InterfaceLocale } from "./locale";
 import activity from "./messages/activity";
 import agent from "./messages/agent";
 import app from "./messages/app";
-import chat from "./messages/chat";
 import codingAgents from "./messages/codingAgents";
 import common from "./messages/common";
 import dayIntelligence from "./messages/dayIntelligence";
@@ -27,7 +26,6 @@ export const namespaces = {
   activity,
   agent,
   app,
-  chat,
   codingAgents,
   common,
   dayIntelligence,

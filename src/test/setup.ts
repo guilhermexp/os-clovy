@@ -196,7 +196,7 @@ beforeEach(() => {
 });
 
 // The app mounts the toast host once in the App shell, but component tests
-// render surfaces (e.g. AgentWorkspace) without it. Mount a single Toaster once,
+// render surfaces without it. Mount a single Toaster once,
 // into its own host outside React Testing Library's container so cleanup()
 // never unmounts it — any toast(...) a surface fires portals to document.body
 // where `screen` queries can still find it. Mounting once (not per test) keeps

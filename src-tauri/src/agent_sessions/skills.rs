@@ -2,6 +2,11 @@
 pub(crate) use super::skill_catalog::catalog_from_roots;
 use super::skill_catalog::skill_read_error;
 use super::skill_identity::reconcile_managed_obsidian_skill;
+use crate::db::repositories::McpMutation;
+use crate::domain::types::AppError;
+use serde_json::{json, Value};
+use sqlx::{executor::Executor, query::query, row::Row};
+use sqlx_sqlite::{Sqlite, SqlitePool};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 pub fn seed_bundled_skills(app: &AppHandle) {
@@ -119,8 +124,18 @@ pub(crate) async fn update_from_roots(
     id: &str,
     content: &str,
 ) -> Result<(), crate::domain::types::AppError> {
+    update_from_roots_checked(roots, id, content, || Ok(()))
+}
+
+fn update_from_roots_checked(
+    roots: &[(PathBuf, bool)],
+    id: &str,
+    content: &str,
+    authorize: impl FnOnce() -> Result<(), crate::domain::types::AppError>,
+) -> Result<(), crate::domain::types::AppError> {
     use super::skill_identity::{
-        canonical_skill_id, discover_skills, update_managed_skill, valid_skill_id, MAX_SKILL_BYTES,
+        canonical_skill_id, discover_skills, update_managed_skill_checked, valid_skill_id,
+        MAX_SKILL_BYTES,
     };
     use crate::domain::types::AppError;
     if !valid_skill_id(id) {
@@ -132,6 +147,13 @@ pub(crate) async fn update_from_roots(
             "Skill content exceeds 512 KiB.",
         ));
     }
+    static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serialized = WRITE_LOCK.lock().map_err(|_| {
+        AppError::new(
+            "agent_skill_write_failed",
+            "Managed skill storage is unavailable.",
+        )
+    })?;
     let skill = discover_skills(roots)
         .into_iter()
         .find(|skill| skill.id == canonical_skill_id(id))
@@ -165,8 +187,19 @@ pub(crate) async fn update_from_roots(
             "Managed skill storage overlaps read-only global skills.",
         ));
     }
-    update_managed_skill(&root.0, id, content)
-        .map_err(|error| AppError::new("agent_skill_write_failed", error.to_string()))
+    let mut rejected = None;
+    let result = update_managed_skill_checked(&root.0, id, content, || {
+        authorize().map_err(|error| {
+            rejected = Some(error);
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Skill edit refused")
+        })
+    });
+    match rejected {
+        Some(error) => Err(error),
+        None => {
+            result.map_err(|error| AppError::new("agent_skill_write_failed", error.to_string()))
+        }
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -226,56 +259,130 @@ mod tests {
     }
 }
 
-/// A bound skill update has one admission order with Stop. File replacement is
-/// synchronous and bounded while the database writer reserves the caller run.
-pub(crate) async fn update_for_turn(
-    pool: &sqlx_sqlite::SqlitePool,
+type SkillMutation<'a> = Option<(&'a str, McpMutation<'a>)>;
+
+async fn configured_enabled<'a>(
+    executor: impl Executor<'a, Database = Sqlite>,
+    id: &str,
+) -> Result<bool, AppError> {
+    let legacy = super::skill_identity::read_skill_ids(id).get(1).copied();
+    let found = query("SELECT enabled FROM agent_skill_settings WHERE skill_id = ? OR skill_id = ? ORDER BY skill_id != ? LIMIT 1")
+        .bind(id).bind(legacy).bind(id).fetch_optional(executor).await?;
+    Ok(found.map_or(true, |row| row.get::<i64, _>("enabled") != 0))
+}
+
+fn skill_target(roots: &[(PathBuf, bool)], id: &str, enabled: bool) -> Result<Value, AppError> {
+    use super::skill_identity::{discover_skills, read_skill_content};
+    let skill = discover_skills(roots)
+        .into_iter()
+        .find(|skill| skill.id == id)
+        .ok_or_else(|| AppError::new("agent_skill_not_found", "Skill was not found."))?;
+    let content = read_skill_content(&skill.path).map_err(skill_read_error)?;
+    let fingerprint = skill_fingerprint(&skill.path, &content);
+    Ok(json!({
+        "id":skill.id,
+        "configuredEnabled":enabled,
+        "source":if skill.managed {"managed"} else {"user_global"},
+        "description":super::skill_catalog::skill_description(&content),
+        "fingerprint":fingerprint,
+    }))
+}
+
+fn skill_fingerprint(path: &std::path::Path, content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut fingerprint = Sha256::new();
+    fingerprint.update(path.as_os_str().as_encoded_bytes());
+    fingerprint.update([0]);
+    fingerprint.update(content.as_bytes());
+    format!("{:x}", fingerprint.finalize())
+}
+
+pub(crate) fn read_matches_target(read: &Value, target: &Value) -> bool {
+    let fingerprint = match (read["path"].as_str(), read["content"].as_str()) {
+        (Some(path), Some(content)) => skill_fingerprint(std::path::Path::new(path), content),
+        _ => return false,
+    };
+    read["name"] == target["id"] && target["fingerprint"] == fingerprint
+}
+
+pub(crate) async fn external_target(
+    pool: &SqlitePool,
+    roots: &[(PathBuf, bool)],
+    id: &str,
+) -> Result<Value, AppError> {
+    skill_target(roots, id, configured_enabled(pool, id).await?)
+}
+
+fn check_skill_target(
+    roots: &[(PathBuf, bool)],
+    id: &str,
+    enabled: bool,
+    expected: &Value,
+) -> Result<(), AppError> {
+    if &skill_target(roots, id, enabled)? != expected {
+        return Err(AppError::new(
+            "agent_skill_conflict",
+            "The skill or its setting changed after approval was requested.",
+        ));
+    }
+    Ok(())
+}
+
+fn expected_skill(authority: McpMutation<'_>) -> Result<Option<&Value>, AppError> {
+    match authority {
+        McpMutation::External(_) => authority.external_target().map(Some).ok_or_else(|| {
+            AppError::new(
+                "agent_skill_conflict",
+                "An approved skill target is required.",
+            )
+        }),
+        McpMutation::Turn(..) => Ok(None),
+    }
+}
+
+/// Skill replacement is synchronous and anchored to the open managed
+/// directory. Holding the SQLite writer orders it against app setting
+/// changes and against another MCP approval of this operation.
+pub(crate) async fn update_authorized(
+    pool: &SqlitePool,
     roots: &[(PathBuf, bool)],
     id: &str,
     content: &str,
-    turn: (
-        &str,
-        &str,
-        &str,
-        &crate::domain::turn_authority::TurnAuthority,
-    ),
-) -> Result<(), crate::domain::types::AppError> {
-    let (profile, session, run, authority) = turn;
+    profile: &str,
+    authority: McpMutation<'_>,
+) -> Result<(), AppError> {
     let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
-    crate::db::repositories::guard_bound_turn(&mut transaction, profile, session, run, authority)
-        .await?;
-    update_from_roots(roots, id, content).await?;
+    authority.guard(&mut transaction, profile).await?;
+    let expected = expected_skill(authority)?;
+    let enabled = if expected.is_some() {
+        configured_enabled(&mut *transaction, id).await?
+    } else {
+        true
+    };
+    update_from_roots_checked(roots, id, content, || {
+        if let Some(expected) = expected {
+            check_skill_target(roots, id, enabled, expected)?;
+        }
+        authority.before_commit(profile)
+    })?;
     transaction.commit().await?;
     Ok(())
 }
 
 pub(crate) async fn set_enabled_from_roots(
-    pool: &sqlx_sqlite::SqlitePool,
+    pool: &SqlitePool,
     roots: &[(PathBuf, bool)],
     id: &str,
     enabled: bool,
-    turn: Option<(
-        &str,
-        &str,
-        &str,
-        &crate::domain::turn_authority::TurnAuthority,
-    )>,
-) -> Result<(), crate::domain::types::AppError> {
+    mutation: SkillMutation<'_>,
+) -> Result<(), AppError> {
     use super::skill_identity::{canonical_skill_id, discover_skills, valid_skill_id};
-    use crate::domain::types::AppError;
     if !valid_skill_id(id) {
         return Err(AppError::new("agent_skill_invalid", "Skill id is invalid."));
     }
     let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
-    if let Some((profile, session, run, authority)) = turn {
-        crate::db::repositories::guard_bound_turn(
-            &mut transaction,
-            profile,
-            session,
-            run,
-            authority,
-        )
-        .await?;
+    if let Some((profile, authority)) = mutation {
+        authority.guard(&mut transaction, profile).await?;
     }
     let id = canonical_skill_id(id);
     let skill = discover_skills(roots)
@@ -288,8 +395,23 @@ pub(crate) async fn set_enabled_from_roots(
             "User-global skills are read-only in Clovy.",
         ));
     }
-    sqlx::query::query("INSERT INTO agent_skill_settings(skill_id, enabled, managed, updated_at) VALUES (?, ?, 1, ?) ON CONFLICT(skill_id) DO UPDATE SET enabled = excluded.enabled, managed = excluded.managed, updated_at = excluded.updated_at")
+    let expected = mutation
+        .map(|(_, authority)| expected_skill(authority))
+        .transpose()?
+        .flatten();
+    let current = if expected.is_some() {
+        configured_enabled(&mut *transaction, id).await?
+    } else {
+        enabled
+    };
+    query("INSERT INTO agent_skill_settings(skill_id, enabled, managed, updated_at) VALUES (?, ?, 1, ?) ON CONFLICT(skill_id) DO UPDATE SET enabled = excluded.enabled, managed = excluded.managed, updated_at = excluded.updated_at")
         .bind(id).bind(enabled).bind(crate::db::repositories::timestamp()).execute(&mut *transaction).await?;
+    if let Some(expected) = expected {
+        check_skill_target(roots, id, current, expected)?;
+    }
+    if let Some((profile, authority)) = mutation {
+        authority.before_commit(profile)?;
+    }
     transaction.commit().await?;
     Ok(())
 }
@@ -312,24 +434,32 @@ mod bound_admin_tests {
             .execute(broker.pool())
             .await
             .unwrap();
-        let turn = (
-            "default",
-            binding.session_id.as_str(),
-            binding.run_id.as_str(),
-            &binding.authority,
-        );
+        let authority = McpMutation::Turn(&binding.session_id, &binding.run_id, &binding.authority);
         assert_eq!(
-            update_for_turn(broker.pool(), &roots, "example", "Denied", turn)
-                .await
-                .unwrap_err()
-                .code,
+            update_authorized(
+                broker.pool(),
+                &roots,
+                "example",
+                "Denied",
+                "default",
+                authority
+            )
+            .await
+            .unwrap_err()
+            .code,
             "turn_expired"
         );
         assert_eq!(
-            set_enabled_from_roots(broker.pool(), &roots, "example", false, Some(turn))
-                .await
-                .unwrap_err()
-                .code,
+            set_enabled_from_roots(
+                broker.pool(),
+                &roots,
+                "example",
+                false,
+                Some(("default", authority))
+            )
+            .await
+            .unwrap_err()
+            .code,
             "turn_expired"
         );
         assert_eq!(std::fs::read_to_string(file).unwrap(), "Original");

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use super::{ToolCtx, ToolGroup, TurnBinding};
+use crate::approval_broker::external::{ExternalCall, ExternalGuard};
 use crate::approval_broker::{ApprovalKind, ApprovalOutcome, ApprovalRequest, ApprovalTurn};
 use crate::connectors::notion::{self, BrokerAction};
 use crate::domain::types::AppError;
@@ -158,15 +159,43 @@ pub(crate) struct PreparedCall {
 }
 pub(crate) trait ConnectorDriver: Send + Sync {
     fn catalog<'a>(&'a self, ctx: &'a ToolCtx<'a>) -> BoxFuture<'a, Result<Vec<Value>, AppError>>;
+    fn external_catalog<'a>(
+        &'a self,
+        ctx: &'a ToolCtx<'a>,
+    ) -> BoxFuture<'a, Result<Vec<Value>, AppError>> {
+        self.catalog(ctx)
+    }
     fn invoke<'a>(
         &'a self,
         ctx: &'a ToolCtx<'a>,
         call: PreparedCall,
         approval_id: Option<String>,
     ) -> BoxFuture<'a, Result<Value, AppError>>;
+    fn invoke_external<'a>(
+        &'a self,
+        ctx: &'a ToolCtx<'a>,
+        call: PreparedCall,
+        _guard: ExternalGuard,
+    ) -> BoxFuture<'a, Result<Value, AppError>> {
+        self.invoke(ctx, call, None)
+    }
 }
 pub(crate) struct DirectConnectors;
 impl ConnectorDriver for DirectConnectors {
+    fn external_catalog<'a>(
+        &'a self,
+        ctx: &'a ToolCtx<'a>,
+    ) -> BoxFuture<'a, Result<Vec<Value>, AppError>> {
+        Box::pin(async move {
+            let app = ctx.app.ok_or_else(|| {
+                AppError::new(
+                    "connector_unavailable",
+                    "The connector host is unavailable.",
+                )
+            })?;
+            crate::connectors::agent_tools::external_account_descriptors(app).await
+        })
+    }
     fn catalog<'a>(&'a self, ctx: &'a ToolCtx<'a>) -> BoxFuture<'a, Result<Vec<Value>, AppError>> {
         Box::pin(async move {
             let app = ctx.app.ok_or_else(|| {
@@ -176,6 +205,30 @@ impl ConnectorDriver for DirectConnectors {
                 )
             })?;
             crate::connectors::agent_tools::descriptors(app).await
+        })
+    }
+    fn invoke_external<'a>(
+        &'a self,
+        ctx: &'a ToolCtx<'a>,
+        call: PreparedCall,
+        guard: ExternalGuard,
+    ) -> BoxFuture<'a, Result<Value, AppError>> {
+        Box::pin(async move {
+            let app = ctx.app.ok_or_else(|| {
+                AppError::new(
+                    "connector_unavailable",
+                    "The connector host is unavailable.",
+                )
+            })?;
+            crate::connectors::agent_tools::dispatch_external(
+                app,
+                &call.name,
+                call.arguments,
+                guard,
+                &ctx.data.profile,
+            )
+            .await?
+            .ok_or_else(|| AppError::new("mcp_tool_unknown", "Unknown connector tool."))
         })
     }
     fn invoke<'a>(
@@ -224,6 +277,110 @@ impl ConnectorDriver for DirectConnectors {
                 .ok_or_else(|| AppError::new("mcp_tool_unknown", "Unknown connector tool."))
         })
     }
+}
+
+impl<D: ConnectorDriver> ConnectorTools<D> {
+    pub(super) async fn external_catalog(&self, ctx: &ToolCtx<'_>) -> Vec<Value> {
+        self.driver
+            .external_catalog(ctx)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|tool| tool["name"].as_str().is_some_and(is_account_tool))
+            .map(descriptor)
+            .collect()
+    }
+
+    pub(super) async fn call_external(
+        &self,
+        ctx: &ToolCtx<'_>,
+        access: &ExternalCall<'_>,
+        name: &str,
+        arguments: &Value,
+    ) -> Result<Value, AppError> {
+        access.check_live()?;
+        let schema = self.external_descriptor(ctx, name).await?;
+        super::argument_validation::validate(&schema["inputSchema"], arguments)
+            .map_err(|error| AppError::new("agent_tool_arguments_invalid", error))?;
+        let target = json!({"accountId": arguments["accountId"]});
+        let approval = access
+            .approve(
+                name,
+                "Use a connected account",
+                "Clovy will send these arguments to the selected connected account.",
+                arguments,
+                Some(&target),
+            )
+            .await?;
+        let current = self.external_descriptor(ctx, name).await?;
+        super::argument_validation::validate(&current["inputSchema"], arguments).map_err(|_| {
+            AppError::new(
+                "connector_scope_missing",
+                "The connected account's authority changed.",
+            )
+        })?;
+        approval.check(&ctx.data.profile)?;
+        let operation = self.driver.invoke_external(
+            ctx,
+            PreparedCall {
+                name: name.into(),
+                arguments: arguments.clone(),
+                notion: None,
+            },
+            approval.guard_owned(),
+        );
+        let result = tokio::select! {
+            biased;
+            _ = access.cancelled() => Err(uncertain_connector_delivery("external_call_closed")),
+            result = operation => result,
+        };
+        match result {
+            Err(error) if WRITES.contains(&name) && delivery_may_be_unknown(&error) => {
+                Err(uncertain_connector_delivery(&error.code))
+            }
+            other => other,
+        }
+    }
+
+    async fn external_descriptor(&self, ctx: &ToolCtx<'_>, name: &str) -> Result<Value, AppError> {
+        self.external_catalog(ctx)
+            .await
+            .into_iter()
+            .find(|tool| tool["name"] == name)
+            .ok_or_else(|| {
+                AppError::new(
+                    "connector_unavailable",
+                    "This connected account tool is unavailable.",
+                )
+            })
+    }
+}
+
+fn delivery_may_be_unknown(error: &AppError) -> bool {
+    match error.code.as_str() {
+        "connector_google_api_error" => error
+            .details
+            .as_ref()
+            .and_then(|details| details["httpStatus"].as_u64())
+            .map_or(true, |status| !(400..500).contains(&status)),
+        "network_error" | "github_upstream_error" | "agent_connector_response_invalid" => true,
+        _ => false,
+    }
+}
+
+fn uncertain_connector_delivery(cause: &str) -> AppError {
+    let mut error = AppError::new(
+        "connector_delivery_uncertain",
+        "The connected account may have received the approved action. Check it before retrying.",
+    );
+    error.details = Some(json!({
+        "cause": cause, "delivery": "unknown", "effect": "unknown", "retrySafe": false
+    }));
+    error
+}
+
+pub(super) fn is_account_tool(name: &str) -> bool {
+    READS.contains(&name) || WRITES.contains(&name)
 }
 
 pub(crate) struct ConnectorTools<D> {

@@ -95,9 +95,6 @@
 }
 
 :root {
-  /* Owner-selected neutral ink for the Drift background in either theme. */
-  --agent-background-ink: #8f8d86;
-
   /* Type ------------------------------------------------------------- */
   --font-sans:
     "ABC Diatype", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -173,16 +170,12 @@
   --companion-pairing-qr-size: 256px;
   --companion-pairing-qr-canvas: oklch(100% 0 none);
   --onboarding-moods-max-w: 620px;
-  --onboarding-sticker-card-size: 78px;
-  --onboarding-personality-gesture-duration: 960ms;
-  --onboarding-personality-idle-duration: 4800ms;
   --onboarding-area-icon-tint: 14%;
   /* Breadcrumb (.detail-bar) height — its min-height, and what content fits
    * inside it resolves to. Shared with the rules that tuck scrollers behind
    * the bar and inset their scrollbar tracks below it. */
   --detail-bar-h: 46px;
-  /* Width of the custom webkit scrollbar on detail-view scrollers (agent
-   * chat, note detail). Shared with the edge fades and dissolves that stop
+  /* Width of the custom webkit scrollbar on the note detail scroller. Shared with the edge fades and dissolves that stop
    * short of the scrollbar's lane so they don't wash over the thumb. */
   --scrollbar-w: 8px;
   /* Visible grabber pill on drag-resize handles (sidebar, files panel). The
@@ -214,7 +207,7 @@
   /* The tab strip rides in the titlebar row itself (right of the traffic
    * lights + sidebar trigger), so it adds no height — the card keeps its
    * original top. --card-top is where the card and the fixed boxes that must
-   * align with it (the resize handles, the agent files panel) begin. */
+   * align with it begin. */
   --card-top: calc(var(--titlebar-h) + var(--sp-2));
 
   /* Centered content column. Shared by every primary view (notes, folders,
@@ -224,7 +217,7 @@
 
   /* Computer use surfaces. These bounds are shared layout contracts rather
    * than incidental component pixels: plugin cards stay usable as the grid
-   * wraps, and the attended approval surface remains compact over chat. */
+   * wraps and the approval surface remains compact. */
   --plugin-tile-min-w: 420px;
   --approvals-stack-w: 380px;
   --computer-use-approvals-max-h: 520px;
@@ -243,11 +236,6 @@
   --settings-skill-editor-min-h: 360px;
   --settings-skill-editor-ideal-h: 52dvh;
   --settings-skill-editor-max-h: 620px;
-
-  /* Agent chat column: the thread rail and the docked composer share this
-   * width so they stay concentric. Narrower than --content-max (chat reads
-   * as a conversation, not a document) but steps up with it below. */
-  --chat-max: 680px;
 
   /* Color — light theme.  Mirrors Fellow's globals.css so the two apps
    * read like siblings. ------------------------------------------------ */
@@ -420,10 +408,6 @@
   --t-fast: 100ms;
   --t-med: 160ms;
   --t-slow: 240ms;
-  --stream-word-fade-dur: 1500ms;
-  --home-typing-breath-dur: 1900ms;
-  --home-typing-blur: 2.5px;
-  --home-top-fade-size: 56px;
   --icon-swap-dur: 250ms;
   --icon-swap-blur: 2px;
   --icon-swap-start-scale: 0.25;
@@ -437,11 +421,6 @@
    * outline the element's rectangular box. */
   --drop-shadow-sm: drop-shadow(0 1px 2px oklch(24% 0.002 84.59 / 5%))
     drop-shadow(0 2px 4px oklch(24% 0.002 84.59 / 3%));
-  /* One step up for silhouetted surfaces that must read against the bare
-   * card canvas (e.g. Home's sent bubbles at the unwashed top of the
-   * thread). */
-  --drop-shadow-md: drop-shadow(0 1px 2px oklch(24% 0.002 84.59 / 5%))
-    drop-shadow(0 4px 12px oklch(24% 0.002 84.59 / 6%));
   /* Compact overlay depth: fits inside the dictation HUD's transparent
    * native gutter, unlike --shadow-md's long card shadow. */
   --shadow-hud: 0 1px 2px oklch(24% 0.002 84.59 / 5%), 0 4px 12px oklch(24% 0.002 84.59 / 8%);
@@ -503,14 +482,12 @@
 @media (min-width: 1440px) {
   :root {
     --content-max: 880px;
-    --chat-max: 768px;
   }
 }
 
 @media (min-width: 1920px) {
   :root {
     --content-max: 1000px;
-    --chat-max: 820px;
   }
 }
 
@@ -612,8 +589,6 @@
   --shadow-sm: 0 1px 2px oklch(0% 0 none / 24%), 0 2px 4px oklch(0% 0 none / 12%);
   --drop-shadow-sm: drop-shadow(0 1px 2px oklch(0% 0 none / 24%))
     drop-shadow(0 2px 4px oklch(0% 0 none / 12%));
-  --drop-shadow-md: drop-shadow(0 1px 2px oklch(0% 0 none / 24%))
-    drop-shadow(0 4px 12px oklch(0% 0 none / 18%));
   --shadow-hud: 0 1px 2px oklch(0% 0 none / 18%), 0 4px 12px oklch(0% 0 none / 28%);
   /* Same ambient bias as light md: soft contact, weight in the wide blurs. */
   --shadow-md:

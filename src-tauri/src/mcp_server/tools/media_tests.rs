@@ -1,8 +1,6 @@
-//! The media group (parity slice 2.3): the artifact lands in the bound
-//! session's workspace and in its artifact list, a video is followed within
-//! the CLI's tool timeout and continued by job id, and unbound clients never
-//! reach it. Media replies are faked in process for job logic, and a fake
-//! HTTP queue exercises the direct fal client in an isolated child process.
+//! Session and connection-owned artifacts have separate authority. Media
+//! replies are faked in process for job logic, and a local HTTP queue exercises
+//! the direct fal client in an isolated child process.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -17,6 +15,7 @@ use sqlx_sqlite::SqlitePool;
 use super::media::{self, MediaApi, MediaTools, VideoPolling, GENERATE_IMAGE};
 use super::{ActivityAccess, McpData, ToolCtx, ToolGroup, TurnBinding};
 use crate::agent_sessions::{AgentRepository, AgentSafetyMode};
+use crate::approval_broker::external::{one_pending, ExternalApprovalBroker};
 use crate::approval_broker::testing::TestBroker;
 use crate::domain::types::AppError;
 use crate::llm::cli::CliKind;
@@ -82,6 +81,198 @@ fn processing() -> Result<VideoStatusDto, AppError> {
     })
 }
 
+#[tokio::test]
+async fn external_media_approves_each_generation_and_binds_edit_sources_to_the_connection() {
+    use crate::mcp_server::channel::{self, ExternalConnection};
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(channel::channel_dir(root.path())).unwrap();
+    let broker =
+        ExternalApprovalBroker::new(|| Some("default".to_owned()), || {}, Duration::from_secs(5));
+    let (peer, _closed, _cancelled) = ExternalConnection::test_connection();
+    let scope = broker.scope(&peer, "default", Some(root.path()));
+    let api = FakeMediaApi::default();
+    let options = quick(Duration::from_millis(25));
+    let args = json!({"prompt":"a synthetic image"});
+    let catalog = media::external_tool_schemas();
+    assert!(catalog.iter().any(|entry| entry["name"] == GENERATE_IMAGE));
+    assert!(catalog.iter().any(|entry| entry["name"] == "edit_image"));
+    assert_eq!(
+        media::call_external_with(
+            &scope,
+            &api,
+            options,
+            GENERATE_IMAGE,
+            &json!({"prompt":"a synthetic image", "workspaceId":"fixture-foreign-workspace"}),
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "agent_tool_arguments_invalid",
+    );
+    assert!(api.calls().is_empty());
+    assert!(broker.pending().is_empty());
+    let generate = |decision| {
+        let broker = &broker;
+        let api = &api;
+        async move {
+            let pending = one_pending(broker).await;
+            assert!(api.calls().is_empty(), "no fal request before approval");
+            assert_eq!(pending["tool"], GENERATE_IMAGE);
+            assert!(pending["preview"]
+                .as_str()
+                .unwrap()
+                .contains("may be charged"));
+            broker
+                .decide(pending["id"].as_str().unwrap(), decision)
+                .unwrap();
+        }
+    };
+    let (denied, ()) = tokio::join!(
+        media::call_external_with(&scope, &api, options, GENERATE_IMAGE, &args),
+        generate(false)
+    );
+    assert_eq!(denied.unwrap_err().code, "user_denied");
+    assert!(api.calls().is_empty());
+    assert_eq!(
+        std::fs::read_dir(channel::channel_dir(root.path()))
+            .unwrap()
+            .count(),
+        0
+    );
+
+    let (image, ()) = tokio::join!(
+        media::call_external_with(&scope, &api, options, GENERATE_IMAGE, &args),
+        generate(true)
+    );
+    let result = image_text(&image.unwrap());
+    let path = Path::new(result["path"].as_str().unwrap());
+    assert_eq!(std::fs::read(path).unwrap(), PNG_BYTES);
+    assert!(path
+        .canonicalize()
+        .unwrap()
+        .starts_with(root.path().canonicalize().unwrap()));
+    let edit_args = json!({"sourcePath":result["artifactId"],"instruction":"make it blue"});
+    std::fs::write(path, b"replaced fixture").unwrap();
+    assert_eq!(
+        media::call_external_with(&scope, &api, options, "edit_image", &edit_args)
+            .await
+            .unwrap_err()
+            .code,
+        "image_source_invalid",
+    );
+    assert!(broker.pending().is_empty());
+    std::fs::write(path, PNG_BYTES).unwrap();
+    let (foreign_peer, _foreign_closed, _foreign_cancelled) = ExternalConnection::test_connection();
+    let foreign = broker.scope(&foreign_peer, "default", Some(root.path()));
+    assert!(
+        media::call_external_with(&foreign, &api, options, "edit_image", &edit_args)
+            .await
+            .is_err()
+    );
+    assert!(broker.pending().is_empty());
+    assert_eq!(api.calls(), ["image:a synthetic image"]);
+
+    let edit = async {
+        let pending = one_pending(&broker).await;
+        assert_eq!(pending["tool"], "edit_image");
+        assert_eq!(api.calls().len(), 1, "no upload before approval");
+        broker
+            .decide(pending["id"].as_str().unwrap(), true)
+            .unwrap();
+    };
+    let (edited, ()) = tokio::join!(
+        media::call_external_with(&scope, &api, options, "edit_image", &edit_args),
+        edit
+    );
+    assert_eq!(image_text(&edited.unwrap())["mediaType"], "image");
+    assert_eq!(api.calls().len(), 2);
+}
+
+#[tokio::test]
+async fn external_video_resumes_only_the_owned_job_and_never_resubmits() {
+    use crate::mcp_server::channel::{self, ExternalConnection};
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(channel::channel_dir(root.path())).unwrap();
+    let sample = root.path().join("sample.mp4");
+    std::fs::write(&sample, b"fixture-video").unwrap();
+    let broker =
+        ExternalApprovalBroker::new(|| Some("default".to_owned()), || {}, Duration::from_secs(5));
+    let (peer, _closed, _cancelled) = ExternalConnection::test_connection();
+    let scope = broker.scope(&peer, "default", Some(root.path()));
+    let api = FakeMediaApi::polling(&sample, vec![]);
+    assert!(media::external_tool_schemas()
+        .iter()
+        .any(|entry| entry["name"] == "generate_video"));
+    *api.stuck.lock().unwrap() = true;
+    let approve = |count| {
+        let broker = &broker;
+        let api = &api;
+        async move {
+            let pending = one_pending(broker).await;
+            assert_eq!(api.calls().len(), count);
+            broker
+                .decide(pending["id"].as_str().unwrap(), true)
+                .unwrap();
+        }
+    };
+    let start = json!({"prompt":"synthetic waves"});
+    let (pending, ()) = tokio::join!(
+        media::call_external_with(
+            &scope,
+            &api,
+            quick(Duration::from_millis(20)),
+            "generate_video",
+            &start
+        ),
+        approve(0)
+    );
+    let pending = pending.unwrap();
+    assert_eq!(pending["status"], "processing");
+    assert_ne!(pending["jobId"], "job-1");
+    let args = json!({"jobId":pending["jobId"]});
+    let (other, _other_closed, _other_cancelled) = ExternalConnection::test_connection();
+    let outside = broker.scope(&other, "default", Some(root.path()));
+    let polls = api.calls().len();
+    assert_eq!(
+        media::call_external_with(
+            &outside,
+            &api,
+            quick(Duration::from_millis(20)),
+            "generate_video",
+            &args
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "video_job_unavailable"
+    );
+    assert!(broker.pending().is_empty());
+    *api.stuck.lock().unwrap() = false;
+    let (result, ()) = tokio::join!(
+        media::call_external_with(
+            &scope,
+            &api,
+            quick(Duration::from_secs(1)),
+            "generate_video",
+            &args
+        ),
+        approve(polls)
+    );
+    let result = result.unwrap();
+    assert_eq!(result["status"], "completed");
+    assert_eq!(
+        std::fs::read(result["path"].as_str().unwrap()).unwrap(),
+        b"fixture-video"
+    );
+    assert_eq!(
+        api.calls()
+            .iter()
+            .filter(|call| call.starts_with("video:"))
+            .count(),
+        1
+    );
+}
+
 impl MediaApi for FakeMediaApi {
     fn generate_image(
         &self,
@@ -97,6 +288,7 @@ impl MediaApi for FakeMediaApi {
     fn edit_image(
         &self,
         request: EditImageRequest,
+        _safe_mode: Option<bool>,
     ) -> BoxFuture<'_, Result<GeneratedImageDto, AppError>> {
         self.calls.lock().unwrap().push(format!(
             "edit:{}:{}:{}",
@@ -131,6 +323,24 @@ impl MediaApi for FakeMediaApi {
                 None if *self.stuck.lock().unwrap() => processing(),
                 None => Ok(self.completed()),
             }
+        })
+    }
+
+    fn video_status_in<'a>(
+        &'a self,
+        directory: &'a Path,
+        job_id: String,
+    ) -> BoxFuture<'a, Result<VideoStatusDto, AppError>> {
+        Box::pin(async move {
+            let mut result = self.video_status(job_id).await?;
+            if let VideoStatusDto::Completed { path, .. } = &mut result {
+                let file = directory.join("fixture-video.mp4");
+                tokio::fs::copy(Path::new(path.as_str()), &file)
+                    .await
+                    .unwrap();
+                *path = file.to_string_lossy().into_owned();
+            }
+            Ok(result)
         })
     }
 }
@@ -634,6 +844,50 @@ async fn media_generate_image_reaches_fal_directly_over_http() {
         let decoded = image::load_from_memory(&bytes).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (2, 2));
         assert_eq!(turn.artifacts().await.len(), 1);
+        let root = tempfile::tempdir().unwrap();
+        use crate::mcp_server::channel::{self, ExternalConnection};
+        std::fs::create_dir(channel::channel_dir(root.path())).unwrap();
+        let approvals = ExternalApprovalBroker::new(
+            || Some("default".to_owned()),
+            || {},
+            Duration::from_secs(10),
+        );
+        let (peer, _close, _cancel) = ExternalConnection::test_connection();
+        let scope = approvals.scope(&peer, "default", Some(root.path()));
+        let api = media::FalMedia { app: None };
+        let args = json!({"prompt":"a lighthouse"});
+        let decision = async {
+            let pending = one_pending(&approvals).await;
+            assert!(std::fs::read_dir(channel::channel_dir(root.path()))
+                .unwrap()
+                .next()
+                .is_none());
+            approvals
+                .decide(pending["id"].as_str().unwrap(), true)
+                .unwrap();
+        };
+        let (result, ()) = tokio::join!(
+            media::call_external_with(
+                &scope,
+                &api,
+                quick(Duration::from_secs(2)),
+                GENERATE_IMAGE,
+                &args
+            ),
+            decision,
+        );
+        let result = image_text(&result.unwrap());
+        let path = Path::new(result["path"].as_str().unwrap());
+        assert!(path
+            .canonicalize()
+            .unwrap()
+            .starts_with(root.path().canonicalize().unwrap()));
+        assert_eq!(image::open(path).unwrap().width(), 2);
+        assert_eq!(
+            turn.artifacts().await.len(),
+            1,
+            "external request did not create a session artifact"
+        );
         return;
     }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -722,7 +976,7 @@ async fn media_generate_image_reaches_fal_directly_over_http() {
         String::from_utf8_lossy(&output.stderr)
     );
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 8);
     for (head, _) in requests.iter() {
         let lower = head.to_ascii_lowercase();
         if head.starts_with("GET /asset.png ") {

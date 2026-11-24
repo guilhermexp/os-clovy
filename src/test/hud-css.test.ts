@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import agentHudCss from "../styles/agent-hud.css?raw";
 import hudCss from "../styles/hud.css?raw";
 import meetingHudCss from "../styles/meeting-hud.css?raw";
 import tokensCss from "../styles/tokens.css?raw";
@@ -29,7 +28,7 @@ describe("dictation HUD styles", () => {
   });
 
   it("keeps Clovy identity lime even when the appearance accent changes", () => {
-    for (const css of [hudCss, meetingHudCss, agentHudCss]) {
+    for (const css of [hudCss, meetingHudCss]) {
       const root = cssRuleFor(css, ":root");
       expect(root).toContain("--attention: var(--clovy-lime);");
       expect(root).toContain("--attention-bright: var(--clovy-lime-top);");

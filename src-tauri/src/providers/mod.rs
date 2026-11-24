@@ -569,6 +569,11 @@ pub fn video_model() -> String {
     effective_current_settings().video_model
 }
 
+/// Discovery can check setup without reading or prompting for a credential.
+pub(crate) fn fal_configured() -> bool {
+    current_settings().provider_api_keys_configured.fal
+}
+
 /// The user's saved key for `provider`, or `None` when none is saved.
 /// The credential store is read only when settings record a saved key.
 /// A recorded key the store cannot return is an error; there is no fallback.
@@ -952,6 +957,13 @@ pub async fn generate_image(
 pub async fn edit_image(
     request: EditImageRequest,
 ) -> Result<crate::providers::fal::GeneratedImageDto, AppError> {
+    edit_image_with_safe_mode(request, None).await
+}
+
+pub(crate) async fn edit_image_with_safe_mode(
+    request: EditImageRequest,
+    safe_mode: Option<bool>,
+) -> Result<crate::providers::fal::GeneratedImageDto, AppError> {
     let image = request.image.trim().to_string();
     if image.is_empty() {
         return Err(AppError::new(
@@ -983,7 +995,7 @@ pub async fn edit_image(
         prompt,
         mime_type,
         model,
-        Some(image_safe_mode()),
+        Some(safe_mode.unwrap_or_else(image_safe_mode)),
         request_id,
     )
     .await

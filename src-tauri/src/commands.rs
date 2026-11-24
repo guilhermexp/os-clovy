@@ -1,4 +1,5 @@
 use crate::{
+    agent_recorder::RecorderAuthority,
     app_paths::AppPaths,
     audio::{
         capture::{
@@ -795,6 +796,27 @@ pub(crate) async fn create_memory_with_settings_for_turn(
     source: &str,
     turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
 ) -> Result<MemoryDto, AppError> {
+    create_memory_with_settings_authorized(
+        repos,
+        settings_path,
+        profile,
+        folder_id,
+        content,
+        source,
+        turn.map(crate::db::repositories::McpMutation::from_turn),
+    )
+    .await
+}
+
+pub(crate) async fn create_memory_with_settings_authorized(
+    repos: &Repositories,
+    settings_path: &Path,
+    profile: &str,
+    folder_id: Option<&str>,
+    content: &str,
+    source: &str,
+    authority: Option<crate::db::repositories::McpMutation<'_>>,
+) -> Result<MemoryDto, AppError> {
     // Every write path (Tauri command AND the loopback proxy) takes the
     // settings lock across the enabled check and the insert, so a save that
     // read "enabled" can never commit after a concurrent toggle-off persists.
@@ -809,7 +831,7 @@ pub(crate) async fn create_memory_with_settings_for_turn(
         ));
     }
     repos
-        .create_memory_for_turn(profile, folder_id, content, source, turn)
+        .create_memory_authorized(profile, folder_id, content, source, authority)
         .await
 }
 
@@ -826,6 +848,7 @@ pub(crate) async fn forget_memory_with_settings(
     repos.forget_memory(profile, id).await
 }
 
+#[cfg(test)]
 pub(crate) async fn forget_memory_with_settings_for_turn(
     repos: &Repositories,
     settings_path: &Path,
@@ -833,12 +856,29 @@ pub(crate) async fn forget_memory_with_settings_for_turn(
     id: &str,
     turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
 ) -> Result<(), AppError> {
-    if turn.is_none() {
+    forget_memory_with_settings_authorized(
+        repos,
+        settings_path,
+        profile,
+        id,
+        turn.map(crate::db::repositories::McpMutation::from_turn),
+    )
+    .await
+}
+
+pub(crate) async fn forget_memory_with_settings_authorized(
+    repos: &Repositories,
+    settings_path: &Path,
+    profile: &str,
+    id: &str,
+    authority: Option<crate::db::repositories::McpMutation<'_>>,
+) -> Result<(), AppError> {
+    if authority.is_none() {
         return forget_memory_with_settings(repos, settings_path, profile, id).await;
     }
     let _guard = MEMORY_SETTINGS_LOCK.lock().await;
     ensure_memory_enabled(settings_path)?;
-    repos.forget_memory_for_turn(profile, id, turn).await
+    repos.forget_memory_authorized(profile, id, authority).await
 }
 
 pub(crate) async fn update_memory_with_settings(
@@ -859,12 +899,31 @@ pub(crate) async fn update_memory_with_settings_for_turn(
     content: &str,
     turn: Option<(&str, &str, &crate::domain::turn_authority::TurnAuthority)>,
 ) -> Result<MemoryDto, AppError> {
+    update_memory_with_settings_authorized(
+        repos,
+        settings_path,
+        profile,
+        id,
+        content,
+        turn.map(crate::db::repositories::McpMutation::from_turn),
+    )
+    .await
+}
+
+pub(crate) async fn update_memory_with_settings_authorized(
+    repos: &Repositories,
+    settings_path: &Path,
+    profile: &str,
+    id: &str,
+    content: &str,
+    authority: Option<crate::db::repositories::McpMutation<'_>>,
+) -> Result<MemoryDto, AppError> {
     // Same lock discipline as create: check + write under the settings lock.
     let _guard = MEMORY_SETTINGS_LOCK.lock().await;
     ensure_memory_enabled(settings_path)?;
     let content = validated_memory_content(content)?;
     repos
-        .update_memory_for_turn(profile, id, content, turn)
+        .update_memory_authorized(profile, id, content, authority)
         .await
 }
 
@@ -973,7 +1032,7 @@ fn persist_memory_settings(path: &Path, settings: &MemorySettingsDto) -> Result<
     })
 }
 
-fn validated_memory_content(content: &str) -> Result<&str, AppError> {
+pub(crate) fn validated_memory_content(content: &str) -> Result<&str, AppError> {
     let content = content.trim();
     if content.is_empty() {
         return Err(AppError::new(
@@ -1425,6 +1484,7 @@ async fn start_recording_inner(
     let note = repos
         .get_note_with_profile(&request.note_id, request.expected_profile.as_deref())
         .await?;
+    let source_mode = request.source_mode.unwrap_or_default();
     let authorized_start = if let Some(request_id) = request.agent_request_id.as_deref() {
         let profile = request.expected_profile.as_deref().ok_or_else(|| {
             AppError::new(
@@ -1432,16 +1492,20 @@ async fn start_recording_inner(
                 "The agent recording needs a bound data partition.",
             )
         })?;
-        let binding = app
+        let authority = app
             .state::<crate::agent_recorder::AgentRecorderBroker>()
-            .authorization_for_start(request_id, profile, &request.note_id)?;
-        crate::mcp_server::tools::revalidate_binding(Some(&app), &repos.pool, &binding, profile)
-            .await?;
-        Some(binding)
+            .authorization_for_start(
+                request_id,
+                profile,
+                &request.note_id,
+                source_mode,
+                request.video.is_some(),
+            )?;
+        authority.revalidate(&app, &repos.pool, profile).await?;
+        Some(authority)
     } else {
         None
     };
-    let source_mode = request.source_mode.unwrap_or_default();
     // Readiness probing and capture startup both wait on the system-audio
     // helper (up to tens of seconds); run them off the async runtime.
     let readiness = tokio::task::spawn_blocking(move || recording_source_readiness(source_mode))
@@ -1479,14 +1543,14 @@ async fn start_recording_inner(
         }
     }
     if let Some(request_id) = request.agent_request_id.as_deref() {
-        if let Some(binding) = authorized_start.as_ref() {
-            crate::mcp_server::tools::revalidate_binding(
-                Some(&app),
-                &repos.pool,
-                binding,
-                request.expected_profile.as_deref().unwrap_or_default(),
-            )
-            .await?;
+        if let Some(authority) = authorized_start.as_ref() {
+            authority
+                .revalidate(
+                    &app,
+                    &repos.pool,
+                    request.expected_profile.as_deref().unwrap_or_default(),
+                )
+                .await?;
         }
         app.state::<crate::agent_recorder::AgentRecorderBroker>()
             .validate_target(
@@ -1520,14 +1584,14 @@ async fn start_recording_inner(
         .get_note_with_profile(&request.note_id, request.expected_profile.as_deref())
         .await?;
     if let Some(request_id) = request.agent_request_id.as_deref() {
-        if let Some(binding) = authorized_start.as_ref() {
-            crate::mcp_server::tools::revalidate_binding(
-                Some(&app),
-                &repos.pool,
-                binding,
-                request.expected_profile.as_deref().unwrap_or_default(),
-            )
-            .await?;
+        if let Some(authority) = authorized_start.as_ref() {
+            authority
+                .revalidate(
+                    &app,
+                    &repos.pool,
+                    request.expected_profile.as_deref().unwrap_or_default(),
+                )
+                .await?;
         }
         app.state::<crate::agent_recorder::AgentRecorderBroker>()
             .validate_target(
@@ -1545,15 +1609,14 @@ async fn start_recording_inner(
     let capture_request_id = request.agent_request_id.clone();
     let capture_profile = request.expected_profile.clone();
     let calendar_app = app.clone();
-    let authorization: Option<crate::audio::capture::CaptureStartAuthorization> =
-        authorized_start.as_ref().map(|binding| {
-            let authority = binding.authority.clone();
+    let authorization: Option<crate::audio::capture::CaptureStartAuthorization> = authorized_start
+        .map(|authority| {
             let app = app.clone();
             let request_id = capture_request_id.clone();
             let profile = capture_profile.clone();
             let note_id = capture_note_id.clone();
             Arc::new(move || {
-                authority.check_live()?;
+                authority.check_live(profile.as_deref().unwrap_or_default())?;
                 app.state::<crate::agent_recorder::AgentRecorderBroker>()
                     .validate_target(
                         request_id.as_deref().unwrap_or_default(),
@@ -1839,8 +1902,7 @@ async fn revalidate_active_recorder_request(
         return Ok(None);
     }
     let request_id = request.agent_request_id.clone().expect("checked above");
-    let (original_binding, _) = app
-        .state::<crate::agent_recorder::AgentRecorderBroker>()
+    app.state::<crate::agent_recorder::AgentRecorderBroker>()
         .request_authorization(&request_id)?;
     let status = capture_status(&request.session_id)?;
     let note_id = status.note_id.ok_or_else(|| {
@@ -1868,29 +1930,11 @@ async fn revalidate_active_recorder_request(
         )
     })?;
     let session_id = request.session_id.clone();
-    let binding = app
-        .state::<crate::agent_recorder::AgentRecorderBroker>()
-        .saved_authorization(&request_id, &profile, &note_id, &session_id, action, None)?;
-    if binding.authority != original_binding.authority {
-        return Err(AppError::new(
-            "turn_expired",
-            "The recorder authority changed.",
-        ));
-    }
-    let authority = original_binding.authority;
     let app = app.clone();
     Ok(Some(Arc::new(move || {
-        authority.check_live()?;
-        let current = app
-            .state::<crate::agent_recorder::AgentRecorderBroker>()
+        app.state::<crate::agent_recorder::AgentRecorderBroker>()
             .saved_authorization(&request_id, &profile, &note_id, &session_id, action, None)?;
-        if current.authority != authority {
-            return Err(AppError::new(
-                "turn_expired",
-                "The recorder authority changed.",
-            ));
-        }
-        authority.check_live()
+        Ok(())
     })))
 }
 
@@ -2826,7 +2870,7 @@ async fn retry_processing_from(
     )
     .await?;
     if request.agent_request_id.is_some() {
-        revalidate_saved_recorder_request(
+        let authority = revalidate_saved_recorder_request(
             &app,
             &repos,
             request.agent_request_id.as_deref(),
@@ -2840,6 +2884,13 @@ async fn retry_processing_from(
             })?,
             crate::agent_recorder::AgentRecorderAction::Retry,
             None,
+        )
+        .await?;
+        check_approved_recorder_note(
+            &repos,
+            authority.as_ref(),
+            request.expected_profile.as_deref(),
+            &request.note_id,
         )
         .await?;
         let note = repos
@@ -2905,7 +2956,7 @@ async fn retry_processing_from(
         .await?
         .unwrap_or(RecordingSourceMode::MicrophoneOnly);
     if let Some(binding) = accepted_binding.as_ref() {
-        authorize_queued_audio(
+        authorize_queued_recorder(
             &repos.pool,
             binding,
             request.expected_profile.as_deref().unwrap_or_default(),
@@ -2922,7 +2973,7 @@ async fn retry_processing_from(
         let queue_lock = ticket.lock();
         let _guard = queue_lock.lock().await;
         if let Some(binding) = accepted_binding.as_ref() {
-            if authorize_queued_audio(
+            if authorize_queued_recorder(
                 &task_repos.pool,
                 binding,
                 task_profile.as_deref().unwrap_or_default(),
@@ -2992,7 +3043,19 @@ async fn retry_processing_from(
         let title = note.title.clone();
         let existing_generated_note = note.generated_content.clone();
         let manual_notes = manual_notes_for_generation(&note);
-        let effect = process_saved_source_audio_with_progress(
+        if check_approved_recorder_note(
+            &task_repos,
+            accepted_binding.as_ref(),
+            task_profile.as_deref(),
+            &task_note_id,
+        )
+        .await
+        .is_err()
+        {
+            ticket.finish();
+            return;
+        }
+        let effect = process_saved_source_audio_with_cancellation(
             &task_repos,
             &paths,
             &task_note_id,
@@ -3009,9 +3072,13 @@ async fn retry_processing_from(
             manual_notes,
             timing,
             progress.clone(),
+            external_recorder_processing_cancelled(
+                accepted_binding.as_ref(),
+                task_profile.as_deref().unwrap_or_default(),
+            ),
         );
         let result = if let Some(binding) = accepted_binding.as_ref() {
-            run_authorized_queued_audio(
+            run_authorized_recorder_audio(
                 &task_repos.pool,
                 binding,
                 task_profile.as_deref().unwrap_or_default(),
@@ -3024,11 +3091,66 @@ async fn retry_processing_from(
             effect.await
         };
         ticket.finish();
-        if let Err(error) = &result {
-            schedule_rate_limited_resume(&task_note_id, &task_recording_session_id, error);
+        match (accepted_binding.as_ref(), &result) {
+            (Some(RecorderAuthority::External { .. }), _) | (_, Ok(_)) => {}
+            (_, Err(error)) => {
+                schedule_rate_limited_resume(&task_note_id, &task_recording_session_id, error);
+            }
         }
     });
     Ok(note)
+}
+
+async fn external_recorder_processing_cancelled(
+    authority: Option<&RecorderAuthority>,
+    profile: &str,
+) -> AppError {
+    if let Some(RecorderAuthority::External { guard, .. }) = authority {
+        guard.cancelled().await;
+        return guard.check(profile).err().unwrap_or_else(|| {
+            AppError::new(
+                "mcp_external_cancelled",
+                "The external recording request is no longer authorized.",
+            )
+        });
+    }
+    std::future::pending().await
+}
+
+async fn authorize_queued_recorder(
+    pool: &sqlx_sqlite::SqlitePool,
+    authority: &RecorderAuthority,
+    profile: &str,
+    note_id: &str,
+    session_id: &str,
+) -> Result<(), AppError> {
+    if let RecorderAuthority::Turn(binding) = authority {
+        return authorize_queued_audio(pool, binding, profile, note_id, session_id).await;
+    }
+    authority.check_live(profile)?;
+    if !queued_retry_target_exists(pool, profile, note_id, session_id).await? {
+        return Err(AppError::new(
+            "recording_not_found",
+            "The saved recording no longer belongs to the approved data partition.",
+        ));
+    }
+    authority.check_live(profile)
+}
+
+async fn run_authorized_recorder_audio<T>(
+    pool: &sqlx_sqlite::SqlitePool,
+    authority: &RecorderAuthority,
+    profile: &str,
+    note_id: &str,
+    session_id: &str,
+    effect: impl std::future::Future<Output = Result<T, AppError>>,
+) -> Result<T, AppError> {
+    if let RecorderAuthority::Turn(binding) = authority {
+        return run_authorized_queued_audio(pool, binding, profile, note_id, session_id, effect)
+            .await;
+    }
+    authorize_queued_recorder(pool, authority, profile, note_id, session_id).await?;
+    effect.await
 }
 
 /// Admission after a processing-queue wait. The cloned host authority stays
@@ -3141,9 +3263,9 @@ async fn revalidate_saved_recorder_request(
     session_id: &str,
     action: crate::agent_recorder::AgentRecorderAction,
     recovery_action: Option<crate::agent_recorder::RecordingRecoveryAction>,
-) -> Result<(), AppError> {
+) -> Result<Option<RecorderAuthority>, AppError> {
     let Some(request_id) = request_id else {
-        return Ok(());
+        return Ok(None);
     };
     let profile = profile.ok_or_else(|| {
         AppError::new(
@@ -3161,7 +3283,7 @@ async fn revalidate_saved_recorder_request(
             action,
             recovery_action,
         )?;
-    crate::mcp_server::tools::revalidate_binding(Some(app), &repos.pool, &binding, profile).await?;
+    binding.revalidate(app, &repos.pool, profile).await?;
     let exists:i64=sqlx::query_scalar::query_scalar("SELECT COUNT(*) FROM recording_sessions r JOIN notes n ON n.id=r.note_id WHERE r.id=? AND n.id=? AND n.profile=?").bind(session_id).bind(note_id).bind(profile).fetch_one(&repos.pool).await?;
     if exists != 1 {
         return Err(AppError::new(
@@ -3169,9 +3291,25 @@ async fn revalidate_saved_recorder_request(
             "The authorized note and recording session no longer exist in this data partition.",
         ));
     }
-    crate::mcp_server::tools::revalidate_binding(Some(app), &repos.pool, &binding, profile).await?;
+    binding.revalidate(app, &repos.pool, profile).await?;
     app.state::<crate::agent_recorder::AgentRecorderBroker>()
         .validate_request(request_id)?;
+    Ok(Some(binding))
+}
+
+async fn check_approved_recorder_note(
+    repos: &Repositories,
+    authority: Option<&RecorderAuthority>,
+    profile: Option<&str>,
+    note_id: &str,
+) -> Result<(), AppError> {
+    if let Some(authority @ RecorderAuthority::External { .. }) = authority {
+        let mut tx = repos.pool.begin().await?;
+        authority
+            .check_saved_note(&mut tx, profile.unwrap_or_default(), note_id)
+            .await?;
+        tx.commit().await?;
+    }
     Ok(())
 }
 
@@ -3179,7 +3317,8 @@ pub(crate) async fn discard_recoverable_recording(
     repos: &Repositories,
     paths: &crate::app_paths::AppPaths,
     info: &crate::db::repositories::RecordingRecoveryInfo,
-    authorization: impl std::future::Future<Output = Result<(), AppError>>,
+    profile: Option<&str>,
+    authorization: impl std::future::Future<Output = Result<Option<RecorderAuthority>, AppError>>,
 ) -> Result<NoteDto, AppError> {
     let video_paths = repos
         .video_artifact_paths_for_session(&info.session_id)
@@ -3187,12 +3326,23 @@ pub(crate) async fn discard_recoverable_recording(
     let source_paths = repos
         .source_artifact_paths_for_session(&info.session_id)
         .await?;
-    authorization.await?;
+    let authority = authorization.await?;
     // Revoke database ownership before unlinking. A worker that renames after
     // cleanup then sees the missing row and removes its own late output.
-    repos
-        .commit_recording_discard(&info.session_id, &info.note_id)
-        .await?;
+    if let Some(authority @ RecorderAuthority::External { .. }) = authority {
+        let profile = profile.unwrap_or_default();
+        let mut tx = repos.pool.begin_with("BEGIN IMMEDIATE").await?;
+        authority
+            .check_saved_note(&mut tx, profile, &info.note_id)
+            .await?;
+        Repositories::discard_recording_rows(&mut tx, &info.session_id, &info.note_id).await?;
+        authority.check_live(profile)?;
+        tx.commit().await?;
+    } else {
+        repos
+            .commit_recording_discard(&info.session_id, &info.note_id)
+            .await?;
+    }
     // Hydration is intentionally after cleanup: commit success is independent of
     // whether a concurrently deleted note can still be returned to the caller.
     let files: Vec<String> = source_paths
@@ -3237,7 +3387,7 @@ pub async fn recover_recording(
     repos
         .get_note_with_profile(&info.note_id, request.expected_profile.as_deref())
         .await?;
-    revalidate_saved_recorder_request(
+    let authority = revalidate_saved_recorder_request(
         &app,
         &repos,
         request.agent_request_id.as_deref(),
@@ -3246,6 +3396,13 @@ pub async fn recover_recording(
         &info.session_id,
         crate::agent_recorder::AgentRecorderAction::Recover,
         Some(recovery_action),
+    )
+    .await?;
+    check_approved_recorder_note(
+        &repos,
+        authority.as_ref(),
+        request.expected_profile.as_deref(),
+        &info.note_id,
     )
     .await?;
     let status: Option<String> =
@@ -3274,7 +3431,14 @@ pub async fn recover_recording(
             crate::agent_recorder::AgentRecorderAction::Recover,
             Some(recovery_action),
         );
-        return discard_recoverable_recording(&repos, &paths, &info, authorization).await;
+        return discard_recoverable_recording(
+            &repos,
+            &paths,
+            &info,
+            request.expected_profile.as_deref(),
+            authorization,
+        )
+        .await;
     }
     let _ =
         crate::domain::processing::optional_note_video_input(&repos, &paths, &request.session_id)
@@ -3520,7 +3684,7 @@ async fn process_recovered_source_audio(
                 crate::agent_recorder::AgentRecorderAction::Recover,
                 Some(crate::agent_recorder::RecordingRecoveryAction::Validate),
             )?;
-        authorize_queued_audio(&repos.pool, &binding, profile, note_id, session_id).await?;
+        authorize_queued_recorder(&repos.pool, &binding, profile, note_id, session_id).await?;
         app.state::<crate::agent_recorder::AgentRecorderBroker>()
             .validate_request(request_id)?;
         Some(binding)
@@ -3577,14 +3741,15 @@ async fn process_recovered_source_audio(
     {
         app.state::<crate::agent_recorder::AgentRecorderBroker>()
             .validate_request(request_id)?;
-        run_authorized_queued_audio(&repos.pool, binding, profile, note_id, session_id, effect)
+        run_authorized_recorder_audio(&repos.pool, binding, profile, note_id, session_id, effect)
             .await
     } else {
         effect.await
     };
     ticket.finish();
-    if let Err(error) = &result {
-        schedule_rate_limited_resume(note_id, session_id, error);
+    match (dequeue_binding.as_ref(), &result) {
+        (Some(RecorderAuthority::External { .. }), _) | (_, Ok(_)) => {}
+        (_, Err(error)) => schedule_rate_limited_resume(note_id, session_id, error),
     }
     result
 }

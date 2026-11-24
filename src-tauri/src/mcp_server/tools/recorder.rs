@@ -1,10 +1,11 @@
 //! Recorder operations use the visible main-window bridge and fixed note/session targets.
 use super::{ToolCtx, ToolGroup};
 use crate::agent_recorder::{
-    AgentRecorderAction, AgentRecorderBroker, AgentRecorderTarget, RecordingRecoveryAction,
+    AgentRecorderAction, AgentRecorderBroker, AgentRecorderTarget, RecorderAuthority,
+    RecordingRecoveryAction,
 };
-use crate::approval_broker::{ApprovalKind, ApprovalRequest, ApprovalTurn};
-use crate::db::repositories::Repositories;
+use crate::approval_broker::{external::ExternalCall, ApprovalKind, ApprovalRequest};
+use crate::db::repositories::{mcp_note_delete_target, McpMutation, Repositories};
 use crate::domain::types::{AppError, RecordingSourceMode};
 use crate::mcp_server::turns::TURN_REQUIRED;
 use futures_util::future::BoxFuture;
@@ -61,6 +62,66 @@ impl ToolGroup for RecorderTools {
         })
     }
 }
+
+pub(super) fn external_descriptors(ctx: &ToolCtx<'_>) -> Vec<Value> {
+    external_tool_schemas(ctx, visible_recorder(ctx.app).is_some())
+}
+
+pub(super) fn external_tool_schemas(ctx: &ToolCtx<'_>, visible_bridge: bool) -> Vec<Value> {
+    let mut tools = RecorderTools.descriptors(ctx);
+    tools.retain(|tool| visible_bridge || tool["annotations"]["readOnlyHint"] == true);
+    if let Some(start) = tools
+        .iter_mut()
+        .find(|tool| tool["name"] == START_RECORDING)
+    {
+        start["description"] = json!(
+            "Request a visible Clovy recording in the active data partition. Approval creates a note and starts the selected meeting audio sources if available."
+        );
+    }
+    tools
+}
+
+pub(super) async fn call_external(
+    ctx: &ToolCtx<'_>,
+    access: &ExternalCall<'_>,
+    name: &str,
+    args: &Value,
+) -> Result<Value, AppError> {
+    let recorder = visible_recorder(ctx.app);
+    call_external_with(
+        ctx,
+        access,
+        recorder.as_ref().map(|r| r as &dyn RecorderPort),
+        name,
+        args,
+    )
+    .await
+}
+
+pub(super) async fn call_external_with(
+    ctx: &ToolCtx<'_>,
+    access: &ExternalCall<'_>,
+    recorder: Option<&dyn RecorderPort>,
+    name: &str,
+    args: &Value,
+) -> Result<Value, AppError> {
+    let descriptor = external_tool_schemas(ctx, recorder.is_some())
+        .into_iter()
+        .find(|tool| tool["name"] == name)
+        .ok_or_else(|| {
+            AppError::new(
+                "agent_recorder_unavailable",
+                "The Clovy recorder bridge is unavailable.",
+            )
+        })?;
+    super::argument_validation::validate(&descriptor["inputSchema"], args).map_err(invalid)?;
+    let result = call_with_authority(ctx, recorder, Some(access), name, args).await?;
+    if descriptor["annotations"]["readOnlyHint"] == true {
+        access.check_live()?;
+    }
+    Ok(result)
+}
+
 pub(crate) trait RecorderPort: Send + Sync {
     fn request(
         &self,
@@ -72,6 +133,14 @@ pub(crate) trait RecorderPort: Send + Sync {
 struct AppRecorder<'a> {
     app: &'a AppHandle,
 }
+
+fn visible_recorder(app: Option<&AppHandle>) -> Option<AppRecorder<'_>> {
+    app.filter(|app| {
+        app.try_state::<AgentRecorderBroker>().is_some() && app.get_webview_window("main").is_some()
+    })
+    .map(|app| AppRecorder { app })
+}
+
 impl RecorderPort for AppRecorder<'_> {
     fn request(
         &self,
@@ -105,7 +174,7 @@ async fn session_target(ctx: &ToolCtx<'_>, id: &str) -> Result<AgentRecorderTarg
         note_id: Some(row.get("note_id")),
         session_id: Some(id.into()),
         recovery_action: None,
-        binding: None,
+        authority: None,
     })
 }
 pub(crate) async fn call(
@@ -114,10 +183,17 @@ pub(crate) async fn call(
     name: &str,
     args: &Value,
 ) -> Result<Value, AppError> {
-    let binding = ctx
-        .binding
-        .ok_or_else(|| AppError::new(TURN_REQUIRED, "Recorder tools require a Clovy turn."))?;
-    ctx.revalidate().await?;
+    call_with_authority(ctx, recorder, None, name, args).await
+}
+
+async fn call_with_authority(
+    ctx: &ToolCtx<'_>,
+    recorder: Option<&dyn RecorderPort>,
+    access: Option<&ExternalCall<'_>>,
+    name: &str,
+    args: &Value,
+) -> Result<Value, AppError> {
+    ctx.revalidate_local(access).await?;
     if name == RECORDING_STATUS {
         return recording_status_snapshot(ctx, crate::audio::capture::current_status()).await;
     }
@@ -149,11 +225,16 @@ pub(crate) async fn call(
                 "pause_recording" => AgentRecorderAction::Pause,
                 _ => AgentRecorderAction::Resume,
             };
+            let (title, description) = match action {
+                AgentRecorderAction::Stop => ("Stop this recording", "Stop this recording and process its note. The configured provider may charge for processing."),
+                AgentRecorderAction::Pause => ("Pause this recording", "Pause the specified recording."),
+                _ => ("Resume this recording", "Resume the specified paused recording."),
+            };
             (
                 action,
                 None,
-                "Control recording",
-                "Change the specified visible recording.",
+                title,
+                description,
                 session_target(ctx, id).await?,
             )
         }
@@ -181,7 +262,24 @@ pub(crate) async fn call(
                 ));
             }
             validate_saved_operation(ctx, name, &target).await?;
-            (if name=="recover_recording"{AgentRecorderAction::Recover}else{AgentRecorderAction::Retry},None,"Process saved recording","Validate or discard the specified recoverable take, or retry its saved audio. Processing can incur provider charges.",target)
+            let (action, title, description) = match target.recovery_action {
+                Some(RecordingRecoveryAction::Validate) => (
+                    AgentRecorderAction::Recover,
+                    "Validate saved audio",
+                    "Process the specified saved recording. The configured provider may charge for processing.",
+                ),
+                Some(RecordingRecoveryAction::Discard) => (
+                    AgentRecorderAction::Recover,
+                    "Discard saved audio",
+                    "Permanently discard the specified saved recording.",
+                ),
+                None => (
+                    AgentRecorderAction::Retry,
+                    "Retry note processing",
+                    "Retry processing the saved recording. The configured provider may charge for processing.",
+                ),
+            };
+            (action, None, title, description, target)
         }
         _ => return Err(AppError::new("mcp_tool_unknown", "Unknown recorder tool.")),
     };
@@ -191,9 +289,13 @@ pub(crate) async fn call(
             "The recorder request broker is unavailable.",
         )
     })?;
-    ctx.broker()?
-        .request(
-            &ApprovalTurn::from(binding),
+    let preview = match access {
+        Some(_) => Some(external_target(ctx, &target, source_mode, action).await?),
+        None => None,
+    };
+    let authority = ctx
+        .approve_local(
+            access,
             ApprovalRequest {
                 tool: name.into(),
                 call_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -204,10 +306,10 @@ pub(crate) async fn call(
                     preview: Some(serde_json::to_string(&target).unwrap_or_default()),
                 },
             },
+            preview.as_ref(),
         )
-        .await
-        .map_err(|e| AppError::new(e.code(), e.message()))?;
-    ctx.revalidate().await?;
+        .await?;
+    ctx.revalidate_local(access).await?;
     if let Some(id) = target.session_id.as_deref() {
         let checked = session_target(ctx, id).await?;
         if checked.note_id != target.note_id {
@@ -220,13 +322,17 @@ pub(crate) async fn call(
     if matches!(name, "recover_recording" | "retry_note_processing") {
         validate_saved_operation(ctx, name, &target).await?;
     }
+    if let Some(preview) = preview.as_ref() {
+        if &external_target(ctx, &target, source_mode, action).await? != preview {
+            return Err(AppError::new(
+                "recording_target_mismatch",
+                "The recording changed while this request was awaiting approval.",
+            ));
+        }
+    }
     if name == START_RECORDING {
         let note = Repositories::new(ctx.data.notes.clone())
-            .create_note_checked(
-                &ctx.data.profile,
-                None,
-                Some((&binding.session_id, &binding.run_id, &binding.authority)),
-            )
+            .create_note_checked(&ctx.data.profile, None, Some(authority))
             .await?;
         if let Some(app) = ctx.app {
             let _ = app.emit(
@@ -237,10 +343,26 @@ pub(crate) async fn call(
         target.note_id = Some(note.id);
     }
     let effect_target = serde_json::to_value(&target).unwrap_or_default();
-    target.binding = Some(binding.clone());
+    target.authority = Some(match authority {
+        McpMutation::External(approval) => RecorderAuthority::External {
+            guard: approval.guard_owned(),
+            approved_note: preview
+                .as_ref()
+                .and_then(|preview| preview.get("note"))
+                .map(|note| Box::new(note.clone())),
+        },
+        McpMutation::Turn(..) => RecorderAuthority::Turn(Box::new(
+            ctx.binding
+                .ok_or_else(|| {
+                    AppError::new(TURN_REQUIRED, "The recorder request requires a host turn.")
+                })?
+                .clone(),
+        )),
+    });
+    ctx.revalidate_local(access).await?;
     let request = recorder.request(action, source_mode, target);
     tokio::pin!(request);
-    let result = loop {
+    let mut result = loop {
         tokio::select! {
             result = &mut request => {
                 match result {
@@ -252,17 +374,89 @@ pub(crate) async fn call(
                 }
             },
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                if let Err(mut error)=ctx.revalidate().await {error.details=Some(json!({"target":effect_target,"delivery":"unknown","effect":"unknown","retrySafe":false}));return Err(error);}
+                if let Err(mut error)=ctx.revalidate_local(access).await {error.details=Some(json!({"target":effect_target,"delivery":"unknown","effect":"unknown","retrySafe":false}));return Err(error);}
             },
         }
     };
-    if let Err(mut error) = ctx.revalidate().await {
-        error.details = Some(
-            json!({"recordingResult":result,"effect":"completed_before_turn_revalidation","retrySafe":false}),
-        );
+    if let Err(mut error) = ctx.revalidate_local(access).await {
+        let effect = if access.is_some() {
+            "completed_before_authority_revalidation"
+        } else {
+            "completed_before_turn_revalidation"
+        };
+        error.details = Some(json!({"recordingResult":result,"effect":effect,"retrySafe":false}));
         return Err(error);
     }
+    if access.is_some() && action == AgentRecorderAction::Retry {
+        result["processing"] = json!("queued");
+    }
     Ok(result)
+}
+
+async fn external_target(
+    ctx: &ToolCtx<'_>,
+    target: &AgentRecorderTarget,
+    source: Option<RecordingSourceMode>,
+    action: AgentRecorderAction,
+) -> Result<Value, AppError> {
+    match action {
+        AgentRecorderAction::Start => {
+            if crate::audio::capture::current_status().is_some() {
+                return Err(AppError::new(
+                    "recording_already_active",
+                    "A recording is already active.",
+                ));
+            }
+            Ok(json!({"sourceMode":source, "createsNote":true}))
+        }
+        AgentRecorderAction::Pause | AgentRecorderAction::Resume | AgentRecorderAction::Stop => {
+            use crate::domain::types::RecordingState;
+            let status = crate::audio::capture::current_status()
+                .filter(|status| {
+                    Some(status.session_id.as_str()) == target.session_id.as_deref()
+                        && status.note_id == target.note_id
+                })
+                .ok_or_else(|| {
+                    AppError::new(
+                        "recording_target_mismatch",
+                        "The approved recording is not active.",
+                    )
+                })?;
+            let allowed = match action {
+                AgentRecorderAction::Pause => status.state == RecordingState::Recording,
+                AgentRecorderAction::Resume => status.state == RecordingState::Paused,
+                _ => matches!(
+                    status.state,
+                    RecordingState::Recording | RecordingState::Paused
+                ),
+            };
+            if !allowed {
+                return Err(AppError::new(
+                    "recording_target_mismatch",
+                    "The recording is not in the state required for this action.",
+                ));
+            }
+            Ok(
+                json!({"sessionId":status.session_id,"noteId":status.note_id,"sourceMode":status.source_mode,"state":status.state}),
+            )
+        }
+        AgentRecorderAction::Recover | AgentRecorderAction::Retry => {
+            let mut tx = ctx.data.notes.begin().await?;
+            let note = mcp_note_delete_target(
+                &mut tx,
+                &ctx.data.profile,
+                target
+                    .note_id
+                    .as_deref()
+                    .ok_or_else(|| invalid("No recording note."))?,
+            )
+            .await?;
+            tx.commit().await?;
+            Ok(
+                json!({"sessionId":target.session_id, "recoveryAction":target.recovery_action, "note":note}),
+            )
+        }
+    }
 }
 async fn validate_saved_operation(
     ctx: &ToolCtx<'_>,
@@ -284,7 +478,7 @@ async fn validate_saved_operation(
     }
     Ok(())
 }
-fn invalid(message: &str) -> AppError {
+fn invalid(message: impl Into<String>) -> AppError {
     AppError::new("agent_tool_arguments_invalid", message)
 }
 fn required<'a>(args: &'a Value, key: &str) -> Result<&'a str, AppError> {

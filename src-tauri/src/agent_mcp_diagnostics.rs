@@ -92,14 +92,16 @@ impl AgentMcpError {
             }
             Self::TimedOut | Self::Transport => ("unavailable", "check_connection"),
             Self::Remote(_) => ("unavailable", "inspect_server"),
-            Self::ElicitationRequired(_) => ("unavailable", "answer_in_chat"),
+            Self::ElicitationRequired(_) => ("unavailable", "use_interactive_client"),
             _ => ("unavailable", "configure"),
         };
         let message = match self {
             // These variants can contain a provider's free-form text. Keep
             // the cause typed without copying that payload into UI or logs.
             Self::InvalidDefinition(_) => "The MCP server configuration is invalid.".into(),
-            Self::ElicitationRequired(_) => "The MCP server requires an answer in chat.".into(),
+            Self::ElicitationRequired(_) => {
+                "The MCP server requires an MCP client that supports interactive requests.".into()
+            }
             _ => self.to_string(),
         };
         AgentMcpDiagnostic {

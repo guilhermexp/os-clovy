@@ -108,6 +108,8 @@ pub struct ComputerUseState {
     /// CLI turns by run id ([`begin_turn_lease`]): a granted run whose lease
     /// is gone was stopped and stays stopped; an ended run never gets one.
     turn_leases: Mutex<HashMap<String, TurnLease>>,
+    external_leases: Mutex<HashSet<String>>,
+    external_windows: Mutex<Option<ExternalWindowList>>,
     attended_generation: AtomicU64,
     cleanup_in_progress: AtomicU32,
     epoch: AtomicU64,
@@ -2699,7 +2701,12 @@ pub(crate) fn clear_leases_for_test(state: &ComputerUseState) {
 
 fn validate_run_session_id(session_id: &str) -> Result<String, AppError> {
     let session_id = session_id.trim();
-    if session_id.is_empty() || session_id.len() > 512 || session_id.chars().any(char::is_control) {
+    if session_id.is_empty()
+        || session_id.len() > 512
+        || session_id.chars().any(char::is_control)
+        || session_id.starts_with("cli-turn:")
+        || session_id.starts_with("external-mcp:")
+    {
         return Err(AppError::new(
             "computer_use_run_invalid",
             "Computer use requires a valid active session.",
@@ -2883,6 +2890,9 @@ fn cancel_driver_processes(state: &ComputerUseState) {
 
 fn invalidate_epoch(state: &ComputerUseState) {
     state.epoch.fetch_add(1, Ordering::SeqCst);
+    if let Ok(mut windows) = state.external_windows.lock() {
+        windows.take();
+    }
     state.epoch_changed.notify_waiters();
 }
 
@@ -2991,6 +3001,282 @@ pub(crate) fn normalized_action(arguments: &Value) -> Result<String, AppError> {
     }
 }
 
+const EXTERNAL_LEASE_PREFIX: &str = "external-mcp:";
+
+fn controller_lease_key(owner: &str) -> String {
+    if owner.starts_with(EXTERNAL_LEASE_PREFIX) {
+        owner.to_owned()
+    } else {
+        turn_lease_key(owner)
+    }
+}
+
+fn external_leases(
+    state: &ComputerUseState,
+) -> Result<std::sync::MutexGuard<'_, HashSet<String>>, AppError> {
+    state
+        .external_leases
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "MCP lease lock failed."))
+}
+
+fn begin_external_lease(state: &ComputerUseState, owner: &str) -> Result<bool, AppError> {
+    let mut leases = external_leases(state)?;
+    let active = state
+        .active_turn
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "Controller owner lock failed."))?;
+    let runs = state
+        .attended_runs
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "Run lease lock failed."))?;
+    if active
+        .as_deref()
+        .is_some_and(|current| current != owner && runs.contains(&controller_lease_key(current)))
+    {
+        return Err(AppError::new(
+            "computer_use_controller_busy",
+            "Another active task owns the Computer use controller.",
+        ));
+    }
+    if leases.contains(owner) {
+        if !runs.contains(owner) {
+            return Err(AppError::new(
+                "computer_use_run_stopped",
+                "Computer use was stopped for this MCP connection.",
+            ));
+        }
+        return Ok(false);
+    }
+    drop(runs);
+    begin_run_lease(state, owner.to_owned())?;
+    leases.insert(owner.to_owned());
+    Ok(true)
+}
+
+fn stop_external_lease(
+    state: &ComputerUseState,
+    owner: &str,
+    forget: bool,
+) -> Result<Option<u64>, AppError> {
+    let mut leases = external_leases(state)?;
+    if forget {
+        leases.remove(owner);
+    }
+    let mut active = state
+        .active_turn
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "Controller owner lock failed."))?;
+    let idle = end_run_lease(state, owner)?;
+    if active.as_deref() == Some(owner) {
+        invalidate_epoch(state);
+        cancel_driver_processes(state);
+        *active = None;
+    }
+    Ok(idle)
+}
+
+pub(crate) async fn external_action_available(app: &AppHandle) -> bool {
+    ensure_action_eligible(app).await.is_ok()
+}
+
+#[derive(Clone)]
+pub(crate) struct ExternalDesktopTarget(ExternalTarget);
+
+#[derive(Clone)]
+enum ExternalTarget {
+    Window { target: WindowTarget, epoch: u64 },
+    Capture(TargetContext),
+}
+
+struct ExternalWindowList {
+    owner: String,
+    epoch: u64,
+    windows: Vec<WindowTarget>,
+}
+
+impl ExternalDesktopTarget {
+    pub(crate) fn preview(&self) -> Value {
+        match &self.0 {
+            ExternalTarget::Window { target, .. } => json!({
+                "app": target.app_name, "windowId": target.window_id,
+                "title": sanitize_line(&target.title), "pid": target.pid,
+            }),
+            ExternalTarget::Capture(target) => json!({
+                "app": target.app_name, "windowId": target.window_id, "pid": target.pid,
+            }),
+        }
+    }
+}
+
+fn external_owner(access: &crate::approval_broker::external::ExternalCall<'_>) -> String {
+    let (connection, generation, _) = access.ownership();
+    format!("{EXTERNAL_LEASE_PREFIX}{connection}:{generation}")
+}
+
+pub(crate) fn external_action_target(
+    app: &AppHandle,
+    access: &crate::approval_broker::external::ExternalCall<'_>,
+    arguments: &Value,
+) -> Result<Option<ExternalDesktopTarget>, AppError> {
+    let action = normalized_action(arguments)?;
+    if matches!(action.as_str(), "list_apps" | "wait" | "open_app") {
+        if action == "open_app" {
+            open_app_name(arguments)?;
+        }
+        return Ok(None);
+    }
+    let state = app.state::<ComputerUseState>();
+    let owner = external_owner(access);
+    let active = state
+        .active_turn
+        .lock()
+        .map_err(|_| AppError::new("computer_use_unavailable", "Controller owner lock failed."))?;
+    if active.as_deref() != Some(owner.as_str()) {
+        return Err(stale_target_error());
+    }
+    match action.as_str() {
+        "capture" | "focus_app" => {
+            let missing = || {
+                AppError::new(
+                    "computer_use_target_required",
+                    "Choose the exact app and window_id from this connection's list_apps result.",
+                )
+            };
+            let name = arguments["app"]
+                .as_str()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .ok_or_else(missing)?;
+            let window_id = optional_window_id(arguments)?.ok_or_else(missing)?;
+            let list = state.external_windows.lock().map_err(|_| missing())?;
+            let list = list
+                .as_ref()
+                .filter(|list| list.owner == owner && list.epoch == state.current_epoch())
+                .ok_or_else(missing)?;
+            let target = select_window(&state, &list.windows, Some(name), Some(window_id))?;
+            Ok(Some(ExternalDesktopTarget(ExternalTarget::Window {
+                target,
+                epoch: list.epoch,
+            })))
+        }
+        _ => {
+            let target = state
+                .target
+                .lock()
+                .map_err(|_| AppError::new("computer_use_unavailable", "Target lock failed."))?
+                .clone();
+            target
+                .map(|target| Some(ExternalDesktopTarget(ExternalTarget::Capture(target))))
+                .ok_or_else(stale_target_error)
+        }
+    }
+}
+
+struct ExternalDesktopApproval {
+    guard: crate::approval_broker::external::ExternalGuard,
+    profile: String,
+    target: Option<ExternalDesktopTarget>,
+    started: Arc<AtomicBool>,
+}
+
+tokio::task_local! { static EXTERNAL_DESKTOP_APPROVAL: ExternalDesktopApproval; }
+
+fn check_external_desktop_scope() -> Result<(), AppError> {
+    EXTERNAL_DESKTOP_APPROVAL
+        .try_with(|authority| authority.guard.check(&authority.profile))
+        .unwrap_or(Ok(()))
+}
+
+fn admit_external_desktop_action(state: &ComputerUseState, owner: &str) -> Result<(), AppError> {
+    EXTERNAL_DESKTOP_APPROVAL
+        .try_with(|authority| {
+            authority.guard.check(&authority.profile)?;
+            if let Some(ExternalDesktopTarget(ExternalTarget::Window { epoch, .. })) =
+                &authority.target
+            {
+                ensure_epoch_current(state, Some(*epoch))?;
+            }
+            if let Some(ExternalDesktopTarget(ExternalTarget::Capture(target))) = &authority.target
+            {
+                let active = state.active_turn.lock().map_err(|_| {
+                    AppError::new("computer_use_unavailable", "Controller owner lock failed.")
+                })?;
+                let current = state.target.lock().map_err(|_| {
+                    AppError::new("computer_use_unavailable", "Target lock failed.")
+                })?;
+                if active.as_deref() != Some(owner)
+                    || !current
+                        .as_ref()
+                        .is_some_and(|current| same_target_capture(current, target))
+                {
+                    return Err(stale_target_error());
+                }
+            }
+            authority.started.store(true, Ordering::Release);
+            Ok(())
+        })
+        .unwrap_or(Ok(()))
+}
+
+pub(crate) async fn handle_external_action(
+    app: &AppHandle,
+    access: &crate::approval_broker::external::ExternalCall<'_>,
+    approval: crate::approval_broker::external::ExternalGuard,
+    target: Option<ExternalDesktopTarget>,
+    arguments: Value,
+) -> Result<Value, AppError> {
+    let (_, _, profile) = access.ownership();
+    approval.check(profile)?;
+    let owner = external_owner(access);
+    let state = app.state::<ComputerUseState>();
+    let started = Arc::new(AtomicBool::new(false));
+    let action = EXTERNAL_DESKTOP_APPROVAL.scope(
+        ExternalDesktopApproval {
+            guard: approval,
+            profile: profile.to_owned(),
+            target,
+            started: started.clone(),
+        },
+        async {
+            let _operation = state.operation.lock().await;
+            check_external_desktop_scope()?;
+            if begin_external_lease(&state, &owner)? {
+                let end = access.connection_end();
+                let app = app.clone();
+                let owner = owner.clone();
+                tokio::spawn(async move {
+                    end.await;
+                    let state = app.state::<ComputerUseState>();
+                    if let Ok(Some(generation)) = stop_external_lease(&state, &owner, true) {
+                        stop_if_idle(&app, &state, generation).await;
+                    }
+                });
+            }
+            handle_action_serialized(app, &state, &owner, arguments).await
+        },
+    );
+    tokio::select! {
+        biased;
+        _ = access.cancelled() => {
+            if !started.load(Ordering::Acquire) {
+                return Err(AppError::new("mcp_external_cancelled", "The MCP operation closed before dispatch."));
+            }
+            if let Ok(Some(generation)) = stop_external_lease(&state, &owner, false) {
+                // The selected action future holds the operation lock until
+                // it leaves this select, so only schedule idle cleanup.
+                let app = app.clone();
+                tokio::spawn(async move {
+                    let state = app.state::<ComputerUseState>();
+                    stop_if_idle(&app, &state, generation).await;
+                });
+            }
+            Err(AppError::new("computer_use_outcome_unknown", "MCP authority ended during Computer use. Check the target before retrying."))
+        }
+        result = action => result,
+    }
+}
+
 async fn handle_action(
     app: &AppHandle,
     state: &ComputerUseState,
@@ -2998,17 +3284,28 @@ async fn handle_action(
     arguments: Value,
 ) -> Result<Value, AppError> {
     let _operation = state.operation.lock().await;
+    handle_action_serialized(app, state, run_id, arguments).await
+}
+
+async fn handle_action_serialized(
+    app: &AppHandle,
+    state: &ComputerUseState,
+    run_id: &str,
+    arguments: Value,
+) -> Result<Value, AppError> {
+    admit_external_desktop_action(state, run_id)?;
     select_turn_owner(state, run_id)?;
     let epoch = state.epoch.load(Ordering::SeqCst);
     ensure_epoch_current(state, Some(epoch))?;
     ensure_attended_run(state)?;
     let task_generation = state.attended_generation.load(Ordering::SeqCst);
     ensure_action_eligible(app).await?;
+    check_external_desktop_scope()?;
     let action = normalized_action(&arguments)?;
     crate::computer_use_cursor::show(app, epoch);
     match action.as_str() {
         "capture" => capture(app, state, &arguments, Some(epoch), task_generation).await,
-        "list_apps" => list_apps(app, state, Some(epoch)).await,
+        "list_apps" => list_apps(app, state, Some(epoch), run_id).await,
         "wait" => {
             let seconds = arguments
                 .get("seconds")
@@ -3048,7 +3345,7 @@ fn ensure_attended_run(state: &ComputerUseState) -> Result<(), AppError> {
         .map_err(|_| AppError::new("computer_use_unavailable", "Run lease lock failed."))?;
     let attended = owner
         .as_ref()
-        .is_some_and(|owner| runs.contains(&turn_lease_key(owner)));
+        .is_some_and(|owner| runs.contains(&controller_lease_key(owner)));
     if attended {
         Ok(())
     } else {
@@ -3070,7 +3367,7 @@ fn select_turn_owner(state: &ComputerUseState, run_id: &str) -> Result<(), AppEr
         .attended_runs
         .lock()
         .map_err(|_| AppError::new("computer_use_unavailable", "Run lease lock failed."))?;
-    if !runs.contains(&turn_lease_key(run_id)) {
+    if !runs.contains(&controller_lease_key(run_id)) {
         return Err(attended_run_required());
     }
     if owner.as_deref() != Some(run_id) {
@@ -3279,6 +3576,7 @@ fn ensure_epoch_current(
     state: &ComputerUseState,
     expected_epoch: Option<u64>,
 ) -> Result<(), AppError> {
+    check_external_desktop_scope()?;
     if expected_epoch.is_some_and(|expected| state.epoch.load(Ordering::SeqCst) != expected) {
         return Err(AppError::new(
             "computer_use_stopped",
@@ -3303,6 +3601,28 @@ struct WindowTarget {
     height: f64,
     is_on_screen: bool,
     on_current_space: Option<bool>,
+}
+
+fn same_native_window(first: &WindowTarget, second: &WindowTarget) -> bool {
+    first.pid == second.pid
+        && first.window_id == second.window_id
+        && first.identity == second.identity
+        && first.native_owner == second.native_owner
+}
+
+fn verify_external_window(current: &WindowTarget) -> Result<(), AppError> {
+    EXTERNAL_DESKTOP_APPROVAL
+        .try_with(|authority| {
+            if let Some(ExternalDesktopTarget(ExternalTarget::Window { target, .. })) =
+                &authority.target
+            {
+                if !same_native_window(target, current) || target.title != current.title {
+                    return Err(stale_target_error());
+                }
+            }
+            Ok(())
+        })
+        .unwrap_or(Ok(()))
 }
 
 async fn windows(
@@ -3472,10 +3792,7 @@ async fn refresh_window_target(
         .await?
         .into_iter()
         .find(|window| {
-            window.pid == target.pid
-                && window.window_id == target.window_id
-                && window.identity == target.identity
-                && window.native_owner == target.native_owner
+            same_native_window(window, target)
                 && !blocked_target(state, &window.app_name, &window.identity)
         })
         .ok_or_else(stale_target_error)
@@ -3797,6 +4114,7 @@ async fn capture(
         arguments.get("app").and_then(Value::as_str),
         optional_window_id(arguments)?,
     )?;
+    verify_external_window(&target)?;
     ensure_app_authorized(
         app,
         state,
@@ -3807,6 +4125,7 @@ async fn capture(
     )
     .await?;
     target = refresh_window_target(app, state, &target, epoch).await?;
+    verify_external_window(&target)?;
     if window_needs_restore(&target) {
         target = join_target_to_clovy_stage(app, state, &target, epoch, task_generation).await?;
     }
@@ -3915,15 +4234,14 @@ async fn list_apps(
     app: &AppHandle,
     state: &ComputerUseState,
     expected_epoch: Option<u64>,
+    owner: &str,
 ) -> Result<Value, AppError> {
-    let windows = windows(app, state, expected_epoch).await?;
+    let mut windows = windows(app, state, expected_epoch).await?;
+    windows.retain(|window| !blocked_target(state, &window.app_name, &window.identity));
     let mut seen = HashSet::new();
     let mut apps = Vec::new();
     let mut available_windows = Vec::new();
-    for window in windows
-        .into_iter()
-        .filter(|window| !blocked_target(state, &window.app_name, &window.identity))
-    {
+    for window in &windows {
         if seen.insert(window.app_name.to_ascii_lowercase()) {
             apps.push(json!({ "name": window.app_name.clone(), "pid": window.pid }));
         }
@@ -3942,6 +4260,20 @@ async fn list_apps(
             "on_current_space": window.on_current_space,
             "needs_restore": window_needs_restore(&window),
         }));
+    }
+    if let Some(epoch) =
+        expected_epoch.filter(|_| EXTERNAL_DESKTOP_APPROVAL.try_with(|_| ()).is_ok())
+    {
+        let mut snapshot = state
+            .external_windows
+            .lock()
+            .map_err(|_| stale_target_error())?;
+        ensure_epoch_current(state, Some(epoch))?;
+        *snapshot = Some(ExternalWindowList {
+            owner: owner.to_owned(),
+            epoch,
+            windows,
+        });
     }
     let app_count = apps.len();
     let window_count = available_windows.len();
@@ -4337,6 +4669,7 @@ async fn focus_app(
     }
     let available_windows = windows(app, state, Some(epoch)).await?;
     let mut target = select_window(state, &available_windows, app_name, window_id)?;
+    verify_external_window(&target)?;
     ensure_app_authorized(
         app,
         state,
@@ -4347,6 +4680,7 @@ async fn focus_app(
     )
     .await?;
     target = refresh_window_target(app, state, &target, epoch).await?;
+    verify_external_window(&target)?;
     let joined_current_stage = raise_window || window_needs_restore(&target);
     let action_id = random_id();
     if joined_current_stage {
@@ -4679,6 +5013,21 @@ fn stale_element_error() -> AppError {
     )
 }
 
+struct PendingAppAuthorization<'a> {
+    app: &'a AppHandle,
+    state: &'a ComputerUseState,
+    id: &'a str,
+}
+
+impl Drop for PendingAppAuthorization<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut approvals) = self.state.approvals.lock() {
+            approvals.remove(self.id);
+        }
+        emit_approvals_changed(self.app, self.state);
+    }
+}
+
 async fn park_app_authorization(
     app: &AppHandle,
     state: &ComputerUseState,
@@ -4710,15 +5059,16 @@ async fn park_app_authorization(
             },
         );
     emit_approvals_changed(app, state);
+    let _pending = PendingAppAuthorization {
+        app,
+        state,
+        id: &approval_id,
+    };
     let approved = match tokio::time::timeout(APPROVAL_TIMEOUT, receiver).await {
         Ok(Ok(approved)) => approved,
         Ok(Err(_)) => false,
         Err(_) => false,
     };
-    if let Ok(mut approvals) = state.approvals.lock() {
-        approvals.remove(&approval_id);
-    }
-    emit_approvals_changed(app, state);
     if approved {
         Ok(())
     } else {
@@ -6185,6 +6535,29 @@ mod tests {
             None
         );
         assert!(idle_generation_is_current(&state, generation));
+    }
+
+    #[test]
+    fn external_desktop_lease_cannot_replace_another_active_owner() {
+        let state = ComputerUseState::default();
+        let first = "external-mcp:first:0";
+        let second = "external-mcp:second:0";
+        assert!(begin_external_lease(&state, first).unwrap());
+        select_turn_owner(&state, first).unwrap();
+        let generation = state.attended_generation.load(Ordering::SeqCst);
+        assert_eq!(
+            begin_external_lease(&state, second).unwrap_err().code,
+            "computer_use_controller_busy"
+        );
+        assert!(ensure_task_generation_current(&state, generation).is_ok());
+        assert_eq!(state.active_turn.lock().unwrap().as_deref(), Some(first));
+
+        stop_external_lease(&state, first, false).unwrap();
+        assert!(begin_external_lease(&state, first).is_err());
+        assert!(begin_external_lease(&state, second).unwrap());
+        select_turn_owner(&state, second).unwrap();
+        stop_external_lease(&state, first, true).unwrap();
+        assert_eq!(state.active_turn.lock().unwrap().as_deref(), Some(second));
     }
 
     #[test]

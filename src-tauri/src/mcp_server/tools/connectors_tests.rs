@@ -715,3 +715,157 @@ async fn gh_account_write_needs_the_bundle_and_an_approval_before_it_reaches_git
         1
     );
 }
+
+#[tokio::test]
+async fn external_connector_uses_live_catalog_and_holds_effect_for_approval() {
+    use crate::approval_broker::external::ExternalApprovalBroker;
+    use crate::mcp_server::channel::ExternalConnection;
+    use std::time::Duration;
+
+    let http = HttpFixture::new().await;
+    let repository = TestBroker::new([]).await;
+    let data = data(&repository);
+    let ctx = ToolCtx::unbound(&data);
+    let group = ConnectorTools::new(driver(&http));
+    let broker =
+        ExternalApprovalBroker::new(|| Some("default".into()), || {}, Duration::from_secs(5));
+    let (connection, _close, _cancel) = ExternalConnection::test_connection();
+    let access = broker.scope(&connection, "default", None);
+    assert!(group
+        .external_catalog(&ctx)
+        .await
+        .iter()
+        .any(|tool| tool["name"] == "send_email"));
+    let args = json!({"accountId":"fixture-google","to":["fixture@example.invalid"],"subject":"Fixture","bodyText":"Synthetic"});
+    for approve in [false, true] {
+        let call = group.call_external(&ctx, &access, "send_email", &args);
+        tokio::pin!(call);
+        let request = tokio::select! {
+            early = &mut call => panic!("answered before approval: {early:?}"),
+            pending = wait_external_request(&broker) => pending,
+        };
+        assert_eq!(http.tool_calls(), 0);
+        assert!(request["preview"]
+            .as_str()
+            .unwrap()
+            .contains("fixture@example.invalid"));
+        broker
+            .decide(request["id"].as_str().unwrap(), approve)
+            .unwrap();
+        let result = call.await;
+        if approve {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert_eq!(result.unwrap_err().code, "user_denied");
+        }
+    }
+    assert_eq!(http.tool_calls(), 1);
+}
+
+pub(super) async fn wait_external_request(
+    broker: &crate::approval_broker::external::ExternalApprovalBroker,
+) -> Value {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let Some(request) = broker.pending().first() {
+                return serde_json::to_value(request).unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("an external operation must request approval")
+}
+
+struct FailedConnectorResponse {
+    driver: HttpConnector,
+    code: &'static str,
+    http_status: Option<u16>,
+}
+impl ConnectorDriver for FailedConnectorResponse {
+    fn catalog<'a>(&'a self, ctx: &'a ToolCtx<'a>) -> BoxFuture<'a, Result<Vec<Value>, AppError>> {
+        self.driver.catalog(ctx)
+    }
+    fn invoke<'a>(
+        &'a self,
+        ctx: &'a ToolCtx<'a>,
+        call: PreparedCall,
+        approval_id: Option<String>,
+    ) -> BoxFuture<'a, Result<Value, AppError>> {
+        Box::pin(async move {
+            self.driver.invoke(ctx, call, approval_id).await?;
+            let error = match self.http_status {
+                Some(status) => crate::connectors::google::GoogleApiError::Api {
+                    status,
+                    message: "The response could not be read.".into(),
+                }
+                .into(),
+                None => AppError::new(self.code, "The response could not be read."),
+            };
+            Err(error)
+        })
+    }
+}
+
+#[tokio::test]
+async fn external_connector_failed_write_response_prevents_unsafe_retry() {
+    use crate::approval_broker::external::ExternalApprovalBroker;
+    use crate::mcp_server::channel::ExternalConnection;
+    use std::time::Duration;
+
+    for (code, http_status, delivery_unknown) in [
+        ("network_error", None, true),
+        ("connector_google_api_error", Some(200), true),
+        ("connector_google_api_error", Some(503), true),
+        ("connector_google_api_error", Some(403), false),
+        ("connector_google_api_error", Some(429), false),
+        ("github_upstream_error", None, true),
+        ("github_api_error", None, false),
+    ] {
+        for tool in ["send_email", "list_unread"] {
+            let http = HttpFixture::new().await;
+            let repository = TestBroker::new([]).await;
+            let data = data(&repository);
+            let ctx = ToolCtx::unbound(&data);
+            let group = ConnectorTools::new(FailedConnectorResponse {
+                driver: driver(&http),
+                code,
+                http_status,
+            });
+            let broker = ExternalApprovalBroker::new(
+                || Some("default".into()),
+                || {},
+                Duration::from_secs(5),
+            );
+            let (connection, _close, _cancel) = ExternalConnection::test_connection();
+            let access = broker.scope(&connection, "default", None);
+            let args = json!({"accountId":"fixture-google"});
+            let call = group.call_external(&ctx, &access, tool, &args);
+            tokio::pin!(call);
+            let request = tokio::select! {
+                early = &mut call => panic!("answered before approval: {early:?}"),
+                pending = wait_external_request(&broker) => pending,
+            };
+            assert_eq!(http.tool_calls(), 0);
+            broker
+                .decide(request["id"].as_str().unwrap(), true)
+                .unwrap();
+            let error = call.await.unwrap_err();
+            assert_eq!(
+                http.tool_calls(),
+                1,
+                "the server already received the request"
+            );
+            if tool == "send_email" && delivery_unknown {
+                assert_eq!(error.code, "connector_delivery_uncertain");
+                let details = error.details.unwrap();
+                assert_eq!(details["cause"], code);
+                assert_eq!(details["delivery"], "unknown");
+                assert_eq!(details["effect"], "unknown");
+                assert_eq!(details["retrySafe"], false);
+            } else {
+                assert_eq!(error.code, code);
+            }
+        }
+    }
+}

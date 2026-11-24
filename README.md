@@ -8,8 +8,8 @@
 <h3 align="center">Private AI on your Mac</h3>
 
 <p align="center">
-  Clovy brings chat, voice dictation, meeting notes, and a local agent into a single
-  private workspace. Local by default, with direct calls to the providers you
+  Clovy brings activity tracking, voice dictation, meeting notes, and routines into
+  a private workspace with tools for external agents. Local by default, with direct calls to the providers you
   configure, and open source so the privacy boundaries can be inspected.
 </p>
 
@@ -25,12 +25,12 @@ Most AI apps ask you to hand over your most sensitive data and trust them with
 it. Every prompt, file, and meeting reveals something about you, and a cloud
 agent with that reach is a remote company's window into your work.
 
-Clovy is built the other way around. The app and the agent run on your Mac.
+Clovy runs on your Mac and exposes its tools to your chosen agents through MCP.
 Notes, recordings, transcripts, files, sessions, and agent memory stay on your
 machine by default. Audio uses Groq or the optional local transcription engine; remote note text goes to
-OpenRouter, and images/video to fal, each with your own key. Chat runs through
-your installed CLI and its account. A configured endpoint can also generate
-notes. What a provider retains depends on that provider and route.
+OpenRouter, and images/video to fal, each with your own key. Routines and CLI
+note generation use your installed CLI and its account. A configured endpoint
+can also generate notes. What a provider retains depends on that provider and route.
 You do not have to take any of this on faith: Clovy is MIT licensed; bundled dependencies and optional models retain their own licenses.
 
 ## Local transcription
@@ -51,7 +51,6 @@ licenses, resource use, and the development self-test.
 
 ## What Clovy does
 
-- **Chat.** Ask questions, do research, brainstorm, and build plans.
 - **Dictation.** Hold a key, talk, release. Clovy turns your voice into clean,
   polished writing and pastes it into whatever app you were using, with
   push-to-talk and hands-free modes and selectable writing styles.
@@ -60,33 +59,18 @@ licenses, resource use, and the development self-test.
   system audio, orders the transcript into conversation turns, and generates
   editable notes. Saved audio is kept so failed steps can be retried without
   recording again.
-- **Agent.** Claude Code runs chat through your installed CLI and its login,
-  with Codex as the existing local fallback. Clovy supplies notes, skills,
-  and other local tools through MCP. Sessions are sandboxed by default, and
-  Clovy tool mutations wait for the local approval broker.
+- **MCP tools.** Connect external agents to your notes, activity, skills and
+  routines. Protected actions request approval in Settings > MCP.
 - **Image generation.** Generate and edit images, and create videos, directly
   through fal with your own key. Clovy's MCP media tools retain their local
   approval and artifact handling.
 - **Your choice of models.** The text picker lists OpenRouter's text-output
   catalog, including models without tools. It reloads when the key changes,
-  identifies the current Notes engine, and never changes the chat engine.
+  identifies the current Notes engine.
   Audio and media use curated model lists. Add provider keys in
   Settings > Models > More options > Provider API keys.
 
-<table>
-  <tr>
-    <td width="50%">
-      <img src=".github/assets/clovy-meeting-notes.jpg" alt="A meeting note in Clovy with a live transcription preview while recording">
-    </td>
-    <td width="50%">
-      <img src=".github/assets/clovy-agent-analysis.jpg" alt="A Clovy agent session in private mode, reporting its analysis of a spreadsheet">
-    </td>
-  </tr>
-  <tr>
-    <td align="center">Meeting notes with live transcription, no bot in the call</td>
-    <td align="center">The agent working through a spreadsheet in private mode</td>
-  </tr>
-</table>
+![A meeting note with a live transcription preview](.github/assets/clovy-meeting-notes.jpg)
 
 ## How Clovy keeps it private
 
@@ -109,7 +93,7 @@ Clovy runs on macOS 14 or later, Apple Silicon and Intel. There are no
 published releases: build it from source (see below).
 
 Windows builds cover the app shell, microphone recording, notes, and
-installed CLI chat engines. On Windows 10 1903+ and Windows 11 x64 they also
+installed CLI engines. On Windows 10 1903+ and Windows 11 x64 they also
 include encrypted text-only [activity capture](docs/activity-capture.md), the
 [activity timeline](docs/activity-timeline.md), local coding-agent session
 ingestion, and CPU embeddings for day intelligence. Global dictation paste,
@@ -151,8 +135,8 @@ sfw pnpm install
 pnpm tauri:dev
 ```
 
-Install and sign in to Claude Code for chat; Codex remains the existing local
-fallback. Save your Groq key for transcription and dictation, an OpenRouter
+Install and sign in to a supported CLI for routines and CLI note generation.
+Save your Groq key for transcription and dictation, an OpenRouter
 key for remote note generation and optional dictation cleanup, and a fal key
 for media. No local inference server needs to be started. Sharing links and
 the About verification action have been removed.

@@ -306,8 +306,7 @@ body:has(.mhud[data-mode="meeting-end"]):active {
 
 /* Clovy mark ---------------------------------------------------------- */
 
-/* The Clovy logo mark stands in for the old record LED, ported from the agent
- * HUD (.agent-hud-mark in agent-hud.css). The glyph is an inline SVG used as a
+/* The Clovy logo mark serves as the recording indicator. The SVG glyph is a
  * CSS mask over a solid base color, so the shimmer gradient can paint through
  * its shape. Recording is lime with a continuous bright shimmer pass —
  * that travelling highlight is the "live" signal (replacing the dot's breath);
@@ -342,8 +341,7 @@ body:has(.mhud[data-mode="meeting-end"]):active {
  * shimmer.css (soft 50%-mix shoulders, symmetric edges, no plateau, 20deg
  * tilt carried by the gradient angle); base = transparent so the mark's own
  * color shows through, highlight = --mark-shine. Keep in sync with
- * .agent-hud-mark::before in agent-hud.css and .hud-meeting-mark::before in
- * hud.css. */
+ * .hud-meeting-mark::before in hud.css. */
 .mhud-mark::before {
   position: absolute;
   inset: -2px auto -2px -110%;
@@ -372,9 +370,7 @@ body:has(.mhud[data-mode="meeting-end"]):active {
   display: none;
 }
 
-/* A transform-only highlight pass across the masked mark (ported from
- * agent-hud-shimmer in agent-hud.css). The band's tilt lives in the gradient
- * angle, not a skew, so the keyframe is a pure translate. */
+/* Translate the highlight across the masked mark. The gradient angle tilts the band. */
 @keyframes mhud-shimmer {
   to {
     transform: translate3d(230%, 0, 0);

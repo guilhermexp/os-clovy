@@ -9,9 +9,7 @@
 const ONBOARDING_VERSION = 8;
 const COMPLETED_KEY = "clovy.onboarding.completedVersion";
 const RESUME_KEY = "clovy.onboarding.resumeStep";
-const AGENT_ACK_KEY = "clovy.agent.riskAcknowledged";
 const AREA_KEY = "clovy.onboarding.area";
-const MOOD_KEY = "clovy.onboarding.mood";
 const USE_CASES_KEY = "clovy.onboarding.useCases";
 const CUSTOM_USE_CASE_KEY = "clovy.onboarding.customUseCase";
 const ONBOARDING_BROADCAST_CHANNEL = "clovy.onboarding";
@@ -32,67 +30,10 @@ export type OnboardingUseCase = (typeof ONBOARDING_USE_CASES)[number];
 
 const ONBOARDING_USE_CASE_SET = new Set<string>(ONBOARDING_USE_CASES);
 
-export const ONBOARDING_MOODS = ["calm", "clearheaded", "quick-witted", "strategic"] as const;
-export type OnboardingMood = (typeof ONBOARDING_MOODS)[number];
-
 export const ONBOARDING_AREAS = ["work", "personal", "thinking", "play"] as const;
 export type OnboardingArea = (typeof ONBOARDING_AREAS)[number];
 
-export type OnboardingPersonality = {
-  voice: number;
-  detail: number;
-  initiative: number;
-  humor: number;
-};
-
-const ONBOARDING_MOOD_SET = new Set<string>(ONBOARDING_MOODS);
 const ONBOARDING_AREA_SET = new Set<string>(ONBOARDING_AREAS);
-export const DEFAULT_ONBOARDING_MOOD: OnboardingMood = "clearheaded";
-
-export const ONBOARDING_AREA_MOOD_PRESETS = {
-  work: "clearheaded",
-  personal: "calm",
-  thinking: "strategic",
-  play: "quick-witted",
-} as const satisfies Record<OnboardingArea, OnboardingMood>;
-
-/**
- * The four visual moods are the approachable face of Gaut's original
- * personality vectors. These values are intentionally stable because the
- * native runtime turns them into durable behavioral instructions.
- */
-export const ONBOARDING_MOOD_PERSONALITY_PRESETS = {
-  calm: { voice: 80, detail: 55, initiative: 70, humor: 45 },
-  clearheaded: { voice: 10, detail: 40, initiative: 85, humor: 20 },
-  "quick-witted": { voice: 85, detail: 70, initiative: 80, humor: 95 },
-  strategic: { voice: 45, detail: 90, initiative: 75, humor: 20 },
-} as const satisfies Record<OnboardingMood, OnboardingPersonality>;
-
-/**
- * Native persona settings may contain a custom numeric vector written by an
- * older build. The settings UI still needs a stable visual selection, so map
- * that vector to the nearest of the four current personality presets without
- * overwriting it until the user explicitly saves.
- */
-export function closestOnboardingMood(personality: OnboardingPersonality): OnboardingMood {
-  let closest: OnboardingMood = ONBOARDING_MOODS[0];
-  let closestDistance = Number.POSITIVE_INFINITY;
-
-  for (const mood of ONBOARDING_MOODS) {
-    const preset = ONBOARDING_MOOD_PERSONALITY_PRESETS[mood];
-    const distance =
-      (personality.voice - preset.voice) ** 2 +
-      (personality.detail - preset.detail) ** 2 +
-      (personality.initiative - preset.initiative) ** 2 +
-      (personality.humor - preset.humor) ** 2;
-    if (distance < closestDistance) {
-      closest = mood;
-      closestDistance = distance;
-    }
-  }
-
-  return closest;
-}
 
 type OnboardingReplayEnv = {
   readonly DEV?: boolean;
@@ -242,25 +183,6 @@ export function saveOnboardingArea(area: OnboardingArea) {
   }
 }
 
-export function onboardingMood(fallback: OnboardingMood = DEFAULT_ONBOARDING_MOOD): OnboardingMood {
-  try {
-    const value = window.localStorage.getItem(MOOD_KEY);
-    return value && ONBOARDING_MOOD_SET.has(value) ? (value as OnboardingMood) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-export function saveOnboardingMood(mood: OnboardingMood) {
-  try {
-    if (ONBOARDING_MOOD_SET.has(mood)) {
-      window.localStorage.setItem(MOOD_KEY, mood);
-    }
-  } catch {
-    // Ignore; the balanced default remains available if storage is unavailable.
-  }
-}
-
 export function onboardingUseCases(): OnboardingUseCase[] {
   try {
     const raw = window.localStorage.getItem(USE_CASES_KEY);
@@ -315,27 +237,6 @@ export function saveOnboardingCustomUseCase(customUseCase: string) {
 
 function sanitizeCustomUseCase(customUseCase: string): string {
   return customUseCase.trim().replace(/\s+/g, " ").slice(0, 120);
-}
-
-/**
- * The onboarding honesty screen's acknowledgment that the agent can make
- * mistakes and the user stays the approval step. Surfaces for future use
- * by the agent workspace (e.g. re-prompt if never acknowledged).
- */
-export function isAgentRiskAcknowledged(): boolean {
-  try {
-    return window.localStorage.getItem(AGENT_ACK_KEY) === "true";
-  } catch {
-    return false;
-  }
-}
-
-export function setAgentRiskAcknowledged(acknowledged: boolean) {
-  try {
-    window.localStorage.setItem(AGENT_ACK_KEY, String(acknowledged));
-  } catch {
-    // Ignore.
-  }
 }
 
 /**

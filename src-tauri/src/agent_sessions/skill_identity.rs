@@ -362,6 +362,15 @@ pub fn read_skill_content(path: &Path) -> io::Result<String> {
 
 /// Atomic replacement remains anchored to the approved directory object.
 pub fn update_managed_skill(root: &Path, skill_id: &str, content: &str) -> io::Result<()> {
+    update_managed_skill_checked(root, skill_id, content, || Ok(()))
+}
+
+pub(super) fn update_managed_skill_checked(
+    root: &Path,
+    skill_id: &str,
+    content: &str,
+    authorize: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
     if !valid_skill_id(skill_id) || content.len() > MAX_SKILL_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -389,7 +398,7 @@ pub fn update_managed_skill(root: &Path, skill_id: &str, content: &str) -> io::R
             "Skill content exceeds 512 KiB.",
         ));
     }
-    directory.replace(&content)
+    directory.replace_checked(&content, authorize)
 }
 
 #[cfg(test)]

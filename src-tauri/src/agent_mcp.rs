@@ -223,7 +223,13 @@ enum McpRequestAuthority<'a> {
 // and elicitation. It carries host-owned authority to every wire write, with
 // no model-controlled arguments or platform credential substitutes.
 tokio::task_local! { static CUSTOM_MCP_DISPATCH: CustomMcpDispatch; }
+tokio::task_local! {
+    static EXTERNAL_MCP_APPROVAL: (crate::approval_broker::external::ExternalGuard, String);
+}
 fn authorize_mcp_wire_write(effect: bool) -> Result<(), AgentMcpError> {
+    if let Ok(result) = EXTERNAL_MCP_APPROVAL.try_with(|(guard, profile)| guard.check(profile)) {
+        result.map_err(|_| AgentMcpError::ConnectionChanged)?;
+    }
     CUSTOM_MCP_DISPATCH
         .try_with(|authority| {
             // Linearize write admission with invalidation. No await occurs under
@@ -245,42 +251,66 @@ fn authorize_mcp_wire_write(effect: bool) -> Result<(), AgentMcpError> {
 // A CLI invocation owns its transport through every clarification. Separate
 // invocations, including two calls in one turn, never see a native or another
 // CLI call's parked request. Nested discovery uses the same ownership scope.
-tokio::task_local! { static CLI_MCP_SCOPE: (String, String); }
+tokio::task_local! { static MCP_CALL_SCOPE: (Option<String>, String); }
 
 /// Run a CLI tool operation (including discovery and elicitation) without a
 /// native ToolContext. Credentials still resolve exclusively in this module.
 pub async fn in_cli_turn<F: Future>(run_id: &str, operation: F) -> F::Output {
-    if CLI_MCP_SCOPE
-        .try_with(|(run, _)| run == run_id)
+    if MCP_CALL_SCOPE
+        .try_with(|(run, _)| run.as_deref() == Some(run_id))
         .unwrap_or(false)
     {
         return operation.await;
     }
+    with_call_scope(Some(run_id.to_owned()), operation).await
+}
+
+pub(crate) async fn in_external_call<F: Future>(operation: F) -> F::Output {
+    with_call_scope(None, operation).await
+}
+
+pub(crate) async fn with_external_approval<F: Future>(
+    approval: crate::approval_broker::external::ExternalGuard,
+    profile: &str,
+    operation: F,
+) -> F::Output {
+    EXTERNAL_MCP_APPROVAL
+        .scope((approval, profile.to_owned()), operation)
+        .await
+}
+
+fn external_mcp_scope() -> bool {
+    MCP_CALL_SCOPE
+        .try_with(|(run, _)| run.is_none())
+        .unwrap_or(false)
+}
+
+async fn with_call_scope<F: Future>(run_id: Option<String>, operation: F) -> F::Output {
     let scope_id = Uuid::new_v4().to_string();
-    CLI_MCP_SCOPE
-        .scope((run_id.to_string(), scope_id.clone()), async move {
-            let mut cleanup = CliScopeCleanup(scope_id.clone());
+    MCP_CALL_SCOPE
+        .scope((run_id, scope_id.clone()), async move {
+            let mut cleanup = McpScopeCleanup(scope_id.clone());
             let output = operation.await;
-            retire_cli_scope(&scope_id).await;
+            retire_call_scope(&scope_id).await;
             cleanup.0.clear();
             output
         })
         .await
 }
-struct CliScopeCleanup(String);
-impl Drop for CliScopeCleanup {
+struct McpScopeCleanup(String);
+impl Drop for McpScopeCleanup {
     fn drop(&mut self) {
         if !self.0.is_empty() {
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 let scope_id = std::mem::take(&mut self.0);
                 runtime.spawn(async move {
-                    retire_cli_scope(&scope_id).await;
+                    retire_call_scope(&scope_id).await;
                 });
             }
         }
     }
 }
-async fn retire_cli_scope(scope_id: &str) {
+async fn retire_call_scope(scope_id: &str) {
     let Some(sessions) = MCP_SESSIONS.get() else {
         return;
     };
@@ -325,6 +355,7 @@ struct HttpMcpSession {
     client: reqwest::Client,
     session_id: Option<String>,
     pending: Option<PendingHttpRequest>,
+    external_termination: Option<reqwest::RequestBuilder>,
 }
 
 struct PendingStdioRequest {
@@ -1435,7 +1466,7 @@ async fn load_oauth_secrets<S: McpSecretStore>(
     if !oauth_refresh_due(&bundle.oauth, force) {
         return Ok((bundle, false));
     }
-    if !bundle.oauth.contains_key("refresh_token") {
+    if external_mcp_scope() || !bundle.oauth.contains_key("refresh_token") {
         return Err(AgentMcpError::OauthReconnectRequired);
     }
     let journal = begin_oauth_refresh_journal(repository, &lifecycle, &current).await?;
@@ -1581,6 +1612,76 @@ impl<S: McpSecretStore> AgentMcpSubsystem<S> {
             .await
     }
 
+    pub(crate) async fn discover_external_linear(
+        &self,
+        app: &AppHandle,
+    ) -> Result<Option<(ExternalLinearAccount, Vec<RuntimeToolDescriptorJson>)>, AgentMcpError>
+    {
+        let Some(account) = connected_linear_account(app, None).await? else {
+            return Ok(None);
+        };
+        let lifecycle = crate::connectors::acquire_linear_lifecycle(&account.account_id).await;
+        let Some(account) = connected_linear_account(app, Some(&account.account_id)).await? else {
+            return Ok(None);
+        };
+        let snapshot = lifecycle.snapshot();
+        drop(lifecycle);
+        let secrets = cached_linear_secrets(&account.account_id).await?;
+        let server = managed_linear_definition();
+        let tools = discover_managed_server(&server, &secrets, None, &snapshot).await?;
+        if !snapshot.is_current() {
+            return Err(AgentMcpError::ConnectionChanged);
+        }
+        let mut staged = McpToolRegistry::default();
+        staged.register_managed_linear(&server, tools)?;
+        let descriptors = staged.descriptors();
+        self.registry
+            .lock()
+            .map_err(|_| AgentMcpError::Storage)?
+            .tools
+            .extend(staged.tools);
+        Ok(Some((
+            ExternalLinearAccount { account, snapshot },
+            descriptors,
+        )))
+    }
+
+    pub(crate) async fn invoke_external_linear(
+        &self,
+        app: &AppHandle,
+        authority: &ExternalLinearAccount,
+        runtime_name: &str,
+        arguments: Value,
+    ) -> Result<Value, AgentMcpError> {
+        let registered = self
+            .registry
+            .lock()
+            .map_err(|_| AgentMcpError::Storage)?
+            .resolve(runtime_name)
+            .filter(|tool| tool.server_id == MANAGED_LINEAR_SERVER_ID)
+            .cloned()
+            .ok_or(AgentMcpError::ToolUnavailable)?;
+        let account_id = &authority.account.account_id;
+        if !authority.snapshot.is_current()
+            || connected_linear_account(app, Some(account_id))
+                .await?
+                .is_none()
+        {
+            return Err(AgentMcpError::ConnectionChanged);
+        }
+        let secrets = cached_linear_secrets(account_id).await?;
+        call_server(
+            &managed_linear_definition(),
+            &secrets,
+            &registered.remote_name,
+            arguments,
+            None,
+            None,
+            Some(McpRequestAuthority::Linear(&authority.snapshot)),
+        )
+        .await
+    }
+
     pub async fn refresh_registry_for_workspace_with_managed_linear(
         &self,
         app: &AppHandle,
@@ -1634,7 +1735,10 @@ impl<S: McpSecretStore> AgentMcpSubsystem<S> {
                     epoch,
                 )
                 .await;
-            if matches!(discovered, Err(AgentMcpError::Unauthorized)) && !secret.oauth.is_empty() {
+            if !external_mcp_scope()
+                && matches!(discovered, Err(AgentMcpError::Unauthorized))
+                && !secret.oauth.is_empty()
+            {
                 discovered = match self.load_server_secrets(&server, true).await {
                     Ok(refreshed) => {
                         self.discover_with_epoch(
@@ -1987,6 +2091,40 @@ fn managed_linear_definition() -> McpServerDefinition {
     }
 }
 
+pub(crate) struct ExternalLinearAccount {
+    pub(crate) account: crate::connectors::ConnectorAccount,
+    snapshot: crate::connectors::LinearLifecycleSnapshot,
+}
+
+async fn connected_linear_account(
+    app: &AppHandle,
+    account_id: Option<&str>,
+) -> Result<Option<crate::connectors::ConnectorAccount>, AgentMcpError> {
+    Ok(crate::connectors::list_runtime_accounts(app)
+        .await
+        .map_err(|_| AgentMcpError::Storage)?
+        .into_iter()
+        .find(|account| {
+            account.provider == crate::connectors::ConnectorProvider::Linear
+                && account.status == crate::connectors::ConnectorAccountStatus::Connected
+                && account_id.is_none_or(|id| account.account_id == id)
+        }))
+}
+
+async fn cached_linear_secrets(account_id: &str) -> Result<McpSecretBundle, AgentMcpError> {
+    let token = crate::connectors::cached_access_token(
+        crate::connectors::ConnectorProvider::Linear,
+        account_id,
+    )
+    .await
+    .map_err(|_| AgentMcpError::OauthReconnectRequired)?;
+    let mut secrets = McpSecretBundle::default();
+    secrets
+        .headers
+        .insert("Authorization".to_string(), format!("Bearer {token}"));
+    Ok(secrets)
+}
+
 async fn managed_linear_connection(
     app: &AppHandle,
     force_refresh: bool,
@@ -1998,28 +2136,15 @@ async fn managed_linear_connection(
     )>,
     AgentMcpError,
 > {
-    let account = crate::connectors::list_runtime_accounts(app)
-        .await
-        .map_err(|_| AgentMcpError::Storage)?
-        .into_iter()
-        .find(|account| {
-            account.provider == crate::connectors::ConnectorProvider::Linear
-                && account.status == crate::connectors::ConnectorAccountStatus::Connected
-        });
+    let account = connected_linear_account(app, None).await?;
     let Some(account) = account else {
         return Ok(None);
     };
     let lifecycle = crate::connectors::acquire_linear_lifecycle(&account.account_id).await;
-    let still_connected = crate::connectors::list_runtime_accounts(app)
-        .await
-        .map_err(|_| AgentMcpError::Storage)?
-        .into_iter()
-        .any(|candidate| {
-            candidate.provider == crate::connectors::ConnectorProvider::Linear
-                && candidate.account_id == account.account_id
-                && candidate.status == crate::connectors::ConnectorAccountStatus::Connected
-        });
-    if !still_connected {
+    if connected_linear_account(app, Some(&account.account_id))
+        .await?
+        .is_none()
+    {
         return Ok(None);
     }
     // Capture eligibility while the account row is stable, then release the
@@ -2199,6 +2324,11 @@ fn server_available(
     sandboxed: bool,
     workspace: Option<&std::path::Path>,
 ) -> bool {
+    if external_mcp_scope() && server.transport != McpTransport::StreamableHttp {
+        // Discovery itself launches stdio commands. External clients have no
+        // authority to launch a local process through the gateway.
+        return false;
+    }
     if !server.enabled || (sandboxed && !server.safety.allow_sandboxed) {
         return false;
     }
@@ -2552,7 +2682,7 @@ async fn session_request_guarded(
             .transport
             .as_ref()
             .is_some_and(PersistentMcpTransport::has_pending_elicitation);
-        if CLI_MCP_SCOPE.try_with(|_| ()).is_ok() && method == "tools/call" {
+        if MCP_CALL_SCOPE.try_with(|_| ()).is_ok() && method == "tools/call" {
             if elicitation_answer.is_some() {
                 if !has_pending_elicitation || slot.parked_call.as_ref() != Some(&params) {
                     return Err(AgentMcpError::ToolUnavailable);
@@ -2701,7 +2831,7 @@ fn session_key(
         .and_then(|path| path.canonicalize().ok())
         .unwrap_or_default();
     let base = format!("{}:{}", server.id, workspace.display());
-    CLI_MCP_SCOPE
+    MCP_CALL_SCOPE
         .try_with(|(_, scope)| format!("cli:{scope}:{base}"))
         .unwrap_or(base)
 }
@@ -3018,10 +3148,11 @@ async fn start_http_session(
     server: &McpServerDefinition,
     secrets: &McpSecretBundle,
 ) -> Result<HttpMcpSession, AgentMcpError> {
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| AgentMcpError::Transport)?;
+    let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    if external_mcp_scope() {
+        builder = builder.retry(reqwest::retry::never());
+    }
+    let client = builder.build().map_err(|_| AgentMcpError::Transport)?;
     let (_, session_id) = http_post(
         &client,
         server,
@@ -3033,23 +3164,51 @@ async fn start_http_session(
         None,
     )
     .await?;
+    let mut session = HttpMcpSession {
+        client,
+        session_id: None,
+        pending: None,
+        external_termination: None,
+    };
+    if let Some(session_id) = session_id {
+        session.set_session_id(server, secrets, session_id);
+    }
     http_notify(
-        &client,
+        &session.client,
         server,
         secrets,
-        session_id.as_deref(),
+        session.session_id.as_deref(),
         "notifications/initialized",
         json!({}),
     )
     .await?;
-    Ok(HttpMcpSession {
-        client,
-        session_id,
-        pending: None,
-    })
+    Ok(session)
 }
 
 impl HttpMcpSession {
+    fn set_session_id(
+        &mut self,
+        server: &McpServerDefinition,
+        secrets: &McpSecretBundle,
+        session_id: String,
+    ) {
+        if let Some(url) = server.url.as_ref().filter(|_| external_mcp_scope()) {
+            self.external_termination = Some(
+                http_credentials::apply(
+                    self.client
+                        .delete(url.as_str())
+                        .header("mcp-protocol-version", MCP_PROTOCOL_VERSION)
+                        .timeout(Duration::from_secs(2)),
+                    &secrets.headers,
+                    &secrets.oauth,
+                    oauth_mode(&server.metadata),
+                )
+                .header("mcp-session-id", session_id.as_str()),
+            );
+        }
+        self.session_id = Some(session_id);
+    }
+
     async fn request(
         &mut self,
         server: &McpServerDefinition,
@@ -3107,7 +3266,7 @@ impl HttpMcpSession {
         )
         .await?;
         if let Some(session_id) = session_id.as_ref() {
-            self.session_id = Some(session_id.clone());
+            self.set_session_id(server, secrets, session_id.clone());
         }
         match consume_http_response(
             &self.client,
@@ -3128,6 +3287,21 @@ impl HttpMcpSession {
                 self.pending = Some(pending);
                 Err(AgentMcpError::ElicitationRequired(message))
             }
+        }
+    }
+}
+
+impl Drop for HttpMcpSession {
+    fn drop(&mut self) {
+        if let (Some(request), Ok(runtime)) = (
+            self.external_termination.take(),
+            tokio::runtime::Handle::try_current(),
+        ) {
+            // Best-effort disposal of the exact external transport, including
+            // parked requests. Never replay tools/call or block its receipt.
+            runtime.spawn(async move {
+                let _ = request.send().await;
+            });
         }
     }
 }
@@ -3211,7 +3385,7 @@ pub(crate) async fn retire_server_sessions(server_id: &str) {
             .keys()
             .filter(|key| {
                 let server_prefix = format!("{server_id}:");
-                match CLI_MCP_SCOPE.try_with(|(_, scope)| format!("cli:{scope}:{server_prefix}")) {
+                match MCP_CALL_SCOPE.try_with(|(_, scope)| format!("cli:{scope}:{server_prefix}")) {
                     Ok(prefix) => key.starts_with(&prefix),
                     // Disconnect/shutdown outside an invocation retires every
                     // scope for this server; a CLI failure retires only its own.

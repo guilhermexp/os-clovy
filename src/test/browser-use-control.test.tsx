@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BrowserUseControl } from "../components/plugins/BrowserUseControl";
 import { BrowserSessionsTray } from "../components/agent/BrowserSessionsTray";
-import { AgentChatTurnRow } from "../components/agent/chat-turns/AgentChatTurnRow";
 import type { BrowserSession } from "../lib/tauri";
 import { dismissBrowserSessionError } from "../lib/use-browser-sessions";
 
@@ -146,48 +145,22 @@ describe("Clovy browser control", () => {
     ).toHaveLength(1);
   });
 
-  it("changes the stored consent from Plugins and keeps the chat card in sync", async () => {
+  it("changes the stored consent from Plugins", async () => {
     const user = userEvent.setup();
     render(
-      <>
-        <ul>
-          <BrowserUseControl />
-        </ul>
-        <AgentChatTurnRow
-          turn={{
-            id: "request",
-            role: "assistant",
-            status: "complete",
-            createdAt: "2026-11-01T00:00:00Z",
-            parts: [{ type: "text", text: "[REQUEST:BROWSER_ACCESS]" }],
-          }}
-          approvalSubmitting={{}}
-          clarifySubmitting={{}}
-          sudoSubmitting={{}}
-          secretSubmitting={{}}
-          thinkingOpen={() => false}
-          onThinkingOpenChange={vi.fn()}
-          onApproval={vi.fn()}
-          onClarify={vi.fn()}
-          onSudo={vi.fn()}
-          onSecret={vi.fn()}
-        />
-      </>,
+      <ul>
+        <BrowserUseControl />
+      </ul>,
     );
     const toggle = await screen.findByRole("switch", { name: "Enable browser use" });
     await waitFor(() => expect(toggle).toBeEnabled());
     await user.click(toggle);
-    await waitFor(() => expect(screen.getByText("Browser use enabled")).toBeInTheDocument());
-    expect(mocks.invoke).toHaveBeenCalledWith("browser_access_set", { enabled: true });
-    await user.click(toggle);
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Enable Browser use" })).toBeEnabled(),
-    );
-    await user.click(screen.getByRole("button", { name: "Enable Browser use" }));
     await waitFor(() => expect(toggle).toBeChecked());
-    expect(mocks.invoke.mock.calls.filter(([name]) => name === "browser_access_set")).toHaveLength(
-      3,
-    );
+    expect(mocks.invoke).toHaveBeenCalledWith("browser_access_set", { enabled: true });
+
+    await user.click(toggle);
+    await waitFor(() => expect(toggle).not.toBeChecked());
+    expect(mocks.invoke).toHaveBeenCalledWith("browser_access_set", { enabled: false });
   });
 
   it("exposes takeover and explicit resume from the shell, using host state", async () => {

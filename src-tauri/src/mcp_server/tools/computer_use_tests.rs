@@ -43,6 +43,23 @@ impl ComputerUseHost for FakeHost {
         Ok(())
     }
 
+    fn external_available(&self) -> BoxFuture<'_, bool> {
+        Box::pin(async { true })
+    }
+
+    fn execute_external<'a>(
+        &'a self,
+        _access: &'a crate::approval_broker::external::ExternalCall<'a>,
+        approval: crate::approval_broker::external::ExternalGuard,
+        _target: Option<crate::computer_use::ExternalDesktopTarget>,
+        arguments: Value,
+    ) -> BoxFuture<'a, Result<Value, AppError>> {
+        Box::pin(async move {
+            approval.check("default")?;
+            Ok(self.execute("fixture".into(), arguments).await)
+        })
+    }
+
     fn execute(&self, _run_id: String, arguments: Value) -> BoxFuture<'_, Value> {
         Box::pin(async move {
             self.executed.lock().unwrap().push(arguments);
@@ -384,4 +401,50 @@ fn content_values_become_mcp_blocks_and_plain_values_stay_one_text_block() {
         assert_eq!(result["content"].as_array().unwrap().len(), 1);
         assert_eq!(result["content"][0]["type"], "text");
     }
+}
+
+#[tokio::test]
+async fn external_computer_use_requires_exact_approval_without_publishing_an_internal_turn() {
+    use super::connectors_tests::wait_external_request;
+    use crate::approval_broker::external::ExternalApprovalBroker;
+    use crate::mcp_server::channel::ExternalConnection;
+    use std::time::Duration;
+
+    let repository = TestBroker::new([]).await;
+    let data = data(&repository);
+    let ctx = ToolCtx::unbound(&data);
+    let host = FakeHost::new();
+    let group = ComputerUseTools::with_host(host.clone());
+    let (peer, _close, _cancel) = ExternalConnection::test_connection();
+    let broker =
+        ExternalApprovalBroker::new(|| Some("default".into()), || {}, Duration::from_secs(5));
+    let access = broker.scope(&peer, "default", None);
+    assert_eq!(
+        group.external_descriptors(&ctx).await[0]["name"],
+        COMPUTER_USE_TOOL
+    );
+    let invalid = json!({"action":"capture","runId":"internal"});
+    assert!(group.call_external(&ctx, &access, &invalid).await.is_err());
+    assert!(broker.pending().is_empty());
+    let args = capture();
+    for approve in [false, true] {
+        let call = group.call_external(&ctx, &access, &args);
+        tokio::pin!(call);
+        let request = tokio::select! {
+            early = &mut call => panic!("answered before approval: {early:?}"),
+            pending = wait_external_request(&broker) => pending,
+        };
+        assert!(host.executed().is_empty());
+        broker
+            .decide(request["id"].as_str().unwrap(), approve)
+            .unwrap();
+        let result = call.await;
+        if approve {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert_eq!(result.unwrap_err().code, "user_denied");
+        }
+    }
+    assert_eq!(host.executed(), vec![args]);
+    assert!(host.leases.lock().unwrap().is_empty());
 }

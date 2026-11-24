@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { SPINNER_GRID_COLS, spinnerGrid } from "../lib/spinner-grid";
-import agentHudCss from "../styles/agent-hud.css?raw";
-import appCss from "../styles/app.css?raw";
 import spinnerCss from "../styles/dot-spinner.css?raw";
 import hudCss from "../styles/hud.css?raw";
 import tokensCss from "../styles/tokens.css?raw";
@@ -149,12 +147,6 @@ describe("neutral spinner grid", () => {
     );
     expect(tokensCss).toMatch(
       /--spinner-neutral:\s*color-mix\([^;]*var\(--muted-foreground\) 72%,\s*var\(--foreground\)/s,
-    );
-    // In-flow chat spinners stay on the neutral default — no themed override.
-    expect(appCss).not.toMatch(/\.agent-tool-spinner[^{]*{[^}]*--spinner-color/s);
-    expect(appCss).not.toMatch(/\.agent-tool-spinner\s*{[^}]*color:/s);
-    expect(agentHudCss).toMatch(
-      /\.agent-hud-status \.dot-spinner\s*{[^}]*--spinner-color: currentColor;/s,
     );
   });
 });

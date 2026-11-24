@@ -1,7 +1,6 @@
 #![recursion_limit = "256"]
 
 pub mod activity;
-pub mod agent_hud;
 pub mod agent_mcp;
 pub mod agent_recorder;
 pub mod agent_sessions;
@@ -343,13 +342,9 @@ pub fn run() {
             dictation::dictation_hud_shake,
             dictation::dictation_hotkey_status,
             dictation::latest_dictation_event,
-            agent_hud::agent_hud_show,
-            agent_hud::agent_hud_hide,
-            agent_hud::agent_hud_set_layout,
-            agent_hud::agent_hud_open_agent,
-            agent_hud::agent_hud_main_focused,
             notifications::send_app_notification,
             notifications::agent_open_ready,
+            notifications::routine_open_ready,
             notifications::today_open_ready,
             meeting_detection::queue_meeting_start_request,
             meeting_detection::pending_meeting_start_request,
@@ -448,6 +443,8 @@ pub fn run() {
             day_intelligence::day_intelligence_generate,
             mcp_server::mcp_server_status,
             mcp_server::mcp_server_set_enabled,
+            approval_broker::external::mcp_external_approvals,
+            approval_broker::external::mcp_external_approval_decide,
             chat_engine::chat_engine_catalog,
             chat_engine::chat_default_engine,
         ])
@@ -488,7 +485,6 @@ pub fn run() {
             setup_computer_use_asset_scope(app);
             updates::setup(app);
             dictation::setup(app);
-            agent_hud::setup(app);
             notifications::setup(app);
             meeting_detection::setup(app);
             browser::setup(app.handle()).map_err(|error| std::io::Error::other(error.message))?;

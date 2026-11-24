@@ -6,6 +6,7 @@
 //! selected-resource scoping is not verified in this preview. See ADR 0033.
 
 use crate::{
+    approval_broker::external::ExternalCall,
     connectors::{ConnectorAccountStatus, ConnectorProvider},
     domain::types::AppError,
 };
@@ -16,7 +17,7 @@ use sha2::{Digest, Sha256};
 use std::{
     future::Future,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         OnceLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -101,6 +102,7 @@ const NOTION_UPDATE_PAGE_ALLOWED_FIELDS: &[&str] = &[
     "name",
 ];
 static HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+static EXTERNAL_HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
 static CREDENTIAL_LIFECYCLE_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 static CONNECT_FLOW_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 static CONNECTION_REVISION: AtomicU64 = AtomicU64::new(0);
@@ -132,23 +134,34 @@ fn ensure_connection_revision(expected: u64) -> Result<(), AppError> {
 }
 
 fn http_client() -> Result<&'static reqwest::Client, AppError> {
-    HTTP_CLIENT
+    notion_http_client(false)
+}
+
+fn notion_http_client(external: bool) -> Result<&'static reqwest::Client, AppError> {
+    let cached = if external {
+        &EXTERNAL_HTTP_CLIENT
+    } else {
+        &HTTP_CLIENT
+    };
+    cached
         .get_or_init(|| {
             // Notion hosted MCP traffic carries user-granted connector tokens.
             // Keep it direct-to-provider for this preview instead of honoring
             // ambient process proxy variables that could redirect credentials.
             // This means proxy-required networks are intentionally unsupported
             // until Clovy has an explicit trusted-proxy connector setting.
-            crate::http_client::base_client_builder()
+            let mut builder = crate::http_client::base_client_builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(HTTP_CONNECT_TIMEOUT)
                 .user_agent(concat!(
                     "clovy/",
                     env!("CARGO_PKG_VERSION"),
                     " notion-hosted-mcp-preview"
-                ))
-                .build()
-                .map_err(|error| error.to_string())
+                ));
+            if external {
+                builder = builder.retry(reqwest::retry::never());
+            }
+            builder.build().map_err(|error| error.to_string())
         })
         .as_ref()
         .map_err(|error| {
@@ -277,6 +290,10 @@ pub async fn runtime_descriptors(app: &AppHandle) -> Result<Vec<serde_json::Valu
         client.hosted_tools_list().await
     })
     .await?;
+    Ok(runtime_descriptors_for(hosted_tools))
+}
+
+fn runtime_descriptors_for(hosted_tools: Vec<NotionMcpTool>) -> Vec<serde_json::Value> {
     let reads = filter_allowed_tools(hosted_tools.clone(), tool_allowed_for_agent);
     let mut actions = filter_allowed_tools(hosted_tools, action_tool_allowed_for_agent);
     for tool in &mut actions {
@@ -307,7 +324,288 @@ pub async fn runtime_descriptors(app: &AppHandle) -> Result<Vec<serde_json::Valu
             }));
         }
     }
-    Ok(descriptors)
+    descriptors
+}
+
+/// The external route uses only the saved hosted connection. The native/UI
+/// entry points retain their existing refresh and account health behavior.
+pub(crate) async fn external_descriptors(
+    app: &AppHandle,
+    access: &ExternalCall<'_>,
+) -> Result<Vec<serde_json::Value>, AppError> {
+    Ok(discover_external(&AppExternalNotion(app), access)
+        .await?
+        .descriptors)
+}
+
+pub(crate) async fn call_external(
+    app: &AppHandle,
+    access: &ExternalCall<'_>,
+    profile: &str,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, AppError> {
+    call_external_with(&AppExternalNotion(app), access, profile, name, arguments).await
+}
+
+trait ExternalNotionPort: Send + Sync {
+    fn lifecycle(&self) -> &AsyncMutex<()>;
+    fn revision(&self) -> u64;
+    fn load_cached(
+        &self,
+    ) -> futures_util::future::BoxFuture<'_, Result<StoredNotionConnection, AppError>>;
+    #[cfg(test)]
+    fn endpoint(&self) -> &str {
+        MCP_ENDPOINT
+    }
+}
+
+struct AppExternalNotion<'a>(&'a AppHandle);
+
+impl ExternalNotionPort for AppExternalNotion<'_> {
+    fn lifecycle(&self) -> &AsyncMutex<()> {
+        credential_lifecycle_lock()
+    }
+
+    fn revision(&self) -> u64 {
+        connection_revision()
+    }
+
+    fn load_cached(
+        &self,
+    ) -> futures_util::future::BoxFuture<'_, Result<StoredNotionConnection, AppError>> {
+        Box::pin(async {
+            if notion_health(self.0).await? != ConnectorAccountStatus::Connected {
+                return Err(external_connection_required());
+            }
+            load_connected().await
+        })
+    }
+}
+
+struct ExternalNotionCatalog {
+    revision: u64,
+    credential_fingerprint: [u8; 32],
+    descriptors: Vec<serde_json::Value>,
+}
+
+async fn discover_external(
+    host: &dyn ExternalNotionPort,
+    access: &ExternalCall<'_>,
+) -> Result<ExternalNotionCatalog, AppError> {
+    let discovery = async {
+        let _lifecycle = host.lifecycle().lock().await;
+        access.check_live()?;
+        let revision = host.revision();
+        let stored = host.load_cached().await?;
+        let gate = |_| {
+            access.check_live()?;
+            validate_external_cached_token(&stored, now_unix())
+        };
+        let client = external_http_client(host, &stored, &gate);
+        client.initialize().await?;
+        let descriptors = external_descriptors_for(client.hosted_tools_list().await?);
+        access.check_live()?;
+        Ok(ExternalNotionCatalog {
+            revision,
+            credential_fingerprint: external_connection_fingerprint(&stored),
+            descriptors,
+        })
+    };
+    tokio::select! {
+        biased;
+        _ = access.cancelled() => Err(external_scope_closed()),
+        result = tokio::time::timeout(MCP_ACTION_REQUEST_TIMEOUT, discovery) =>
+            result.map_err(|_| AppError::new("notion_mcp_discovery_timeout", "Notion did not answer tool discovery in time."))?,
+    }
+}
+
+fn external_descriptors_for(hosted_tools: Vec<NotionMcpTool>) -> Vec<serde_json::Value> {
+    runtime_descriptors_for(hosted_tools)
+        .into_iter()
+        .map(|mut descriptor| {
+            if descriptor["notionAction"] == false {
+                let description = descriptor["description"].as_str().unwrap_or_default();
+                descriptor["description"] = serde_json::Value::String(format!(
+                    "{description} Sharing Notion data with this MCP client requires approval."
+                ));
+                descriptor["requiresApproval"] = serde_json::Value::Bool(true);
+            }
+            if let Some(schema) = descriptor["parameters"].as_object_mut() {
+                schema.insert(
+                    "additionalProperties".into(),
+                    serde_json::Value::Bool(false),
+                );
+            }
+            descriptor
+        })
+        .collect()
+}
+
+async fn call_external_with(
+    host: &dyn ExternalNotionPort,
+    access: &ExternalCall<'_>,
+    profile: &str,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, AppError> {
+    let Some((tool, mutation)) = runtime_name_to_provider(name) else {
+        return Err(external_tool_unavailable());
+    };
+    if mutation {
+        preflight_action_arguments(tool, arguments)?;
+    } else {
+        preflight_read_tool_arguments(tool, arguments)?;
+    }
+    let catalog = discover_external(host, access).await?;
+    let schema = external_tool_schema(&catalog.descriptors, tool)?;
+    crate::mcp_server::tools::argument_validation::validate(schema, arguments)
+        .map_err(|error| AppError::new("agent_tool_arguments_invalid", error))?;
+
+    let mut target = serde_json::json!({
+        "account": NOTION_ACCOUNT_EMAIL,
+        "accountId": NOTION_ACCOUNT_ID,
+    });
+    let (title, description) = if mutation {
+        let (title, description, _, preview) = action_approval_presentation(tool, arguments);
+        target["action"] = serde_json::Value::String(preview);
+        (title, description)
+    } else {
+        (
+            "Read from Notion".to_string(),
+            "Clovy will send these arguments to your connected Notion account and share its answer with this MCP client.".to_string(),
+        )
+    };
+    let approval = access
+        .approve(tool, &title, &description, arguments, Some(&target))
+        .await?;
+    let sent = AtomicBool::new(false);
+    let operation = async {
+        let _lifecycle = host.lifecycle().lock().await;
+        approval.check(profile)?;
+        if host.revision() != catalog.revision {
+            return Err(external_connection_changed());
+        }
+        let stored = host.load_cached().await?;
+        if external_connection_fingerprint(&stored) != catalog.credential_fingerprint {
+            return Err(external_connection_changed());
+        }
+        let gate = |tool_call| {
+            approval.check(profile)?;
+            validate_external_cached_token(&stored, now_unix())?;
+            if host.revision() != catalog.revision {
+                return Err(external_connection_changed());
+            }
+            if tool_call {
+                sent.store(true, Ordering::Release);
+            }
+            Ok(())
+        };
+        let client = external_http_client(host, &stored, &gate);
+        client.initialize().await?;
+        let current = external_descriptors_for(client.hosted_tools_list().await?);
+        if external_tool_schema(&current, tool).ok() != Some(schema) {
+            return Err(AppError::new(
+                "notion_mcp_tool_changed",
+                "Notion changed the tool contract while approval was pending. Request the action again.",
+            ));
+        }
+        let result = client.call_tool(tool, arguments.clone()).await?;
+        if result.get("isError") == Some(&serde_json::Value::Bool(true)) {
+            return Err(AppError::new(
+                "notion_mcp_tool_call_failed",
+                "Notion rejected the hosted tool call.",
+            ));
+        }
+        if !mutation {
+            approval.check(profile)?;
+        }
+        Ok(serde_json::json!({ "toolName": tool, "result": result }))
+    };
+    let outcome = tokio::select! {
+        biased;
+        result = tokio::time::timeout(MCP_ACTION_REQUEST_TIMEOUT, operation) =>
+            result.unwrap_or_else(|_| Err(AppError::new("notion_mcp_action_timeout", "Notion did not answer in time."))),
+        _ = access.cancelled() => Err(external_scope_closed()),
+    };
+    match outcome {
+        Err(error) if mutation && sent.load(Ordering::Acquire) => {
+            let mut uncertain = AppError::new(
+                "notion_mcp_action_delivery_unknown",
+                "Notion may have received the approved action. Check Notion before retrying.",
+            );
+            uncertain.details = Some(serde_json::json!({
+                "cause":error.code,"delivery":"unknown","effect":"unknown","retrySafe":false
+            }));
+            Err(uncertain)
+        }
+        other => other,
+    }
+}
+
+fn external_tool_schema<'a>(
+    descriptors: &'a [serde_json::Value],
+    tool: &str,
+) -> Result<&'a serde_json::Value, AppError> {
+    let mut matches = descriptors
+        .iter()
+        .filter(|descriptor| descriptor["name"] == tool);
+    let schema = matches.next().ok_or_else(external_tool_unavailable)?;
+    if matches.next().is_some() {
+        return Err(external_tool_unavailable());
+    }
+    Ok(&schema["parameters"])
+}
+
+fn external_tool_unavailable() -> AppError {
+    AppError::new(
+        "notion_tool_not_allowed",
+        "This tool is unavailable in the connected Notion catalog.",
+    )
+}
+
+fn external_scope_closed() -> AppError {
+    AppError::new("mcp_external_cancelled", "The external MCP request closed.")
+}
+
+fn external_connection_changed() -> AppError {
+    AppError::new(
+        "notion_connection_changed",
+        "The saved Notion connection changed while Clovy was waiting. Request the operation again.",
+    )
+}
+
+fn external_connection_required() -> AppError {
+    AppError::new(
+        "notion_mcp_external_connection_required",
+        "Open Settings, Connectors to reconnect Notion before using it from an external MCP client.",
+    )
+}
+
+fn validate_external_cached_token(
+    stored: &StoredNotionConnection,
+    now: i64,
+) -> Result<(), AppError> {
+    if stored.endpoint != MCP_ENDPOINT
+        || stored.access_token.trim().is_empty()
+        || notion_token_expired_at(stored, now)
+    {
+        return Err(external_connection_required());
+    }
+    Ok(())
+}
+
+fn external_connection_fingerprint(stored: &StoredNotionConnection) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    for part in [
+        &stored.connection_id,
+        &stored.client_id,
+        &stored.access_token,
+    ] {
+        digest.update(part.len().to_le_bytes());
+        digest.update(part.as_bytes());
+    }
+    digest.finalize().into()
 }
 
 #[derive(Deserialize)]
@@ -1237,7 +1535,7 @@ fn refresh_failed(kind: RefreshFailureKind, error_code: Option<String>) -> AppEr
 
 async fn run_with_fresh_client<T, F, Fut>(app: &AppHandle, operation: F) -> Result<T, AppError>
 where
-    F: Fn(McpHttpClient) -> Fut,
+    F: Fn(McpHttpClient<'static>) -> Fut,
     Fut: Future<Output = Result<T, AppError>>,
 {
     let stored = load_connected_with_fresh_token(app).await?;
@@ -1511,16 +1809,38 @@ fn token_exchange_failed(error_code: Option<String>) -> AppError {
     AppError::new("notion_token_exchange_failed", message)
 }
 
-struct McpHttpClient {
+type NotionWireGate<'a> = dyn Fn(bool) -> Result<(), AppError> + Sync + 'a;
+
+struct McpHttpClient<'a> {
     access_token: String,
     session_id: std::sync::Mutex<Option<String>>,
+    gate: Option<&'a NotionWireGate<'a>>,
+    #[cfg(test)]
+    endpoint: &'a str,
 }
 
-impl McpHttpClient {
+fn external_http_client<'a>(
+    _host: &'a dyn ExternalNotionPort,
+    stored: &StoredNotionConnection,
+    gate: &'a NotionWireGate<'a>,
+) -> McpHttpClient<'a> {
+    McpHttpClient {
+        access_token: stored.access_token.clone(),
+        session_id: std::sync::Mutex::new(None),
+        gate: Some(gate),
+        #[cfg(test)]
+        endpoint: _host.endpoint(),
+    }
+}
+
+impl McpHttpClient<'_> {
     fn new(access_token: String) -> Self {
         Self {
             access_token,
             session_id: std::sync::Mutex::new(None),
+            gate: None,
+            #[cfg(test)]
+            endpoint: MCP_ENDPOINT,
         }
     }
 
@@ -1642,8 +1962,13 @@ impl McpHttpClient {
     }
 
     async fn post_json(&self, body: serde_json::Value) -> Result<reqwest::Response, AppError> {
-        let mut request = http_client()?
-            .post(MCP_ENDPOINT)
+        #[cfg(test)]
+        let endpoint = self.endpoint;
+        #[cfg(not(test))]
+        let endpoint = MCP_ENDPOINT;
+        let client = notion_http_client(self.gate.is_some())?;
+        let mut request = client
+            .post(endpoint)
             .bearer_auth(&self.access_token)
             .header("accept", "application/json, text/event-stream")
             .header("content-type", "application/json")
@@ -1653,16 +1978,24 @@ impl McpHttpClient {
         if let Some(session_id) = self.session_id() {
             request = request.header(MCP_SESSION_ID_HEADER, session_id);
         }
-        let response = request.send().await.map_err(|_| {
+        let request_error = |_| {
             AppError::new(
                 "notion_mcp_request_failed",
                 "Could not reach Notion hosted MCP.",
             )
-        })?;
+        };
+        let request = request.build().map_err(request_error)?;
+        if let Some(gate) = self.gate {
+            gate(body.get("method").and_then(serde_json::Value::as_str) == Some("tools/call"))?;
+        }
+        let response = client.execute(request).await.map_err(request_error)?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
             tracing::warn!(status, "notion MCP request failed");
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+                if self.gate.is_some() {
+                    return Err(external_connection_required());
+                }
                 return Err(AppError::new(
                     "notion_mcp_unauthorized",
                     "Notion rejected the saved connection. Clovy will refresh it and retry.",
@@ -2909,9 +3242,41 @@ pub fn notion_account_email() -> &'static str {
     NOTION_ACCOUNT_EMAIL
 }
 
+#[cfg(all(test, any(unix, windows)))]
+#[path = "notion_external_tests.rs"]
+mod external_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_notion_rejects_expired_or_blank_saved_tokens() {
+        let mut stored = StoredNotionConnection {
+            connection_id: "synthetic-connection".into(),
+            access_token: "synthetic-access".into(),
+            refresh_token: Some("synthetic-refresh".into()),
+            expires_at_unix: Some(1000),
+            client_id: "synthetic-client".into(),
+            client_secret: None,
+            endpoint: MCP_ENDPOINT.into(),
+            registration_redirect_uri: None,
+        };
+        assert!(validate_external_cached_token(&stored, 800).is_ok());
+        assert_eq!(
+            validate_external_cached_token(&stored, 940)
+                .unwrap_err()
+                .code,
+            "notion_mcp_external_connection_required"
+        );
+        stored.access_token.clear();
+        assert_eq!(
+            validate_external_cached_token(&stored, 800)
+                .unwrap_err()
+                .code,
+            "notion_mcp_external_connection_required"
+        );
+    }
 
     #[tokio::test]
     async fn bypass_receipt_cannot_be_claimed_after_connection_revision_changes() {

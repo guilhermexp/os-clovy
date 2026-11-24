@@ -4,7 +4,7 @@ import { useT } from "../../i18n";
 import { useBrowserSessions } from "../../lib/use-browser-sessions";
 import { BrowserSessionControls } from "../plugins/BrowserSessionControls";
 
-/** Human control remains reachable when the user leaves the originating chat. */
+/** Human control remains reachable for as long as the browser session is active. */
 export function BrowserSessionsTray() {
   const t = useT();
   const browser = useBrowserSessions();

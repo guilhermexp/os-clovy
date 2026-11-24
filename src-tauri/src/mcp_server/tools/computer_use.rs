@@ -22,7 +22,9 @@ use tauri::AppHandle;
 use uuid::Uuid;
 
 use super::{ToolCtx, ToolGroup};
+use crate::approval_broker::external::{ExternalCall, ExternalGuard};
 use crate::approval_broker::{ApprovalDenial, ApprovalKind, ApprovalRequest, ApprovalTurn};
+use crate::computer_use::ExternalDesktopTarget;
 use crate::domain::types::AppError;
 use crate::mcp_server::protocol;
 use crate::mcp_server::turns::{TurnBinding, TURN_REQUIRED};
@@ -70,6 +72,28 @@ pub(crate) trait ComputerUseHost: Send + Sync {
 
     /// Runs the approved action. Returns the broker's MCP-shaped result.
     fn execute(&self, run_id: String, arguments: Value) -> BoxFuture<'_, Value>;
+
+    fn external_available(&self) -> BoxFuture<'_, bool> {
+        Box::pin(async { false })
+    }
+
+    fn external_target(
+        &self,
+        _access: &ExternalCall<'_>,
+        _arguments: &Value,
+    ) -> Result<Option<ExternalDesktopTarget>, AppError> {
+        Ok(None)
+    }
+
+    fn execute_external<'a>(
+        &'a self,
+        _access: &'a ExternalCall<'a>,
+        _approval: ExternalGuard,
+        _target: Option<ExternalDesktopTarget>,
+        _arguments: Value,
+    ) -> BoxFuture<'a, Result<Value, AppError>> {
+        Box::pin(async { Err(external_unavailable()) })
+    }
 }
 
 /// The app's Computer use broker.
@@ -87,6 +111,37 @@ impl ComputerUseHost for AppHost<'_> {
             self.app, run_id, arguments,
         ))
     }
+
+    fn external_available(&self) -> BoxFuture<'_, bool> {
+        Box::pin(crate::computer_use::external_action_available(self.app))
+    }
+
+    fn external_target(
+        &self,
+        access: &ExternalCall<'_>,
+        arguments: &Value,
+    ) -> Result<Option<ExternalDesktopTarget>, AppError> {
+        crate::computer_use::external_action_target(self.app, access, arguments)
+    }
+
+    fn execute_external<'a>(
+        &'a self,
+        access: &'a ExternalCall<'a>,
+        approval: ExternalGuard,
+        target: Option<ExternalDesktopTarget>,
+        arguments: Value,
+    ) -> BoxFuture<'a, Result<Value, AppError>> {
+        Box::pin(crate::computer_use::handle_external_action(
+            self.app, access, approval, target, arguments,
+        ))
+    }
+}
+
+fn external_unavailable() -> AppError {
+    AppError::new(
+        "computer_use_unavailable",
+        "Computer use is unavailable for this connection.",
+    )
 }
 
 /// The computer use group. The registered instance acts through the app;
@@ -99,6 +154,65 @@ pub struct ComputerUseTools {
 pub static COMPUTER_USE: ComputerUseTools = ComputerUseTools { host: None };
 
 impl ComputerUseTools {
+    pub(super) async fn external_descriptors(&self, ctx: &ToolCtx<'_>) -> Vec<Value> {
+        let available = if let Some(host) = &self.host {
+            host.external_available().await
+        } else if let Some(app) = ctx.app {
+            AppHost { app }.external_available().await
+        } else {
+            false
+        };
+        if !available {
+            return Vec::new();
+        }
+        vec![json!({
+            "name": COMPUTER_USE_TOOL,
+            "description": "Use the existing Clovy Computer use broker. Each operation requires approval in MCP settings, and the exact app and window remain subject to the Computer use permissions. Start with list_apps. Credentials and payment fields require human input.",
+            "inputSchema": parameters(),
+            "annotations": { "readOnlyHint": false, "destructiveHint": true, "openWorldHint": true },
+        })]
+    }
+
+    pub(super) async fn call_external(
+        &self,
+        ctx: &ToolCtx<'_>,
+        access: &ExternalCall<'_>,
+        arguments: &Value,
+    ) -> Result<Value, AppError> {
+        let app_host = ctx.app.map(|app| AppHost { app });
+        let host = self
+            .host
+            .as_deref()
+            .or(app_host.as_ref().map(|host| host as &dyn ComputerUseHost))
+            .ok_or_else(external_unavailable)?;
+        if !host.external_available().await {
+            return Err(external_unavailable());
+        }
+        super::argument_validation::validate(&parameters(), arguments)
+            .map_err(|error| AppError::new("agent_tool_arguments_invalid", error))?;
+        let action = crate::computer_use::normalized_action(arguments)?;
+        let target = host.external_target(access, arguments)?;
+        let preview = target.as_ref().map(ExternalDesktopTarget::preview);
+        let description = format!("Clovy will run one Computer use operation ({action}). Existing app and window permissions still apply.");
+        let approval = access
+            .approve(
+                COMPUTER_USE_TOOL,
+                "Use this computer",
+                &description,
+                arguments,
+                preview.as_ref(),
+            )
+            .await?;
+        approval.check(&ctx.data.profile)?;
+        let result = host
+            .execute_external(access, approval.guard_owned(), target, arguments.clone())
+            .await?;
+        if is_error(&result) {
+            return Err(driver_error(&result));
+        }
+        Ok(content_for_cli(&result))
+    }
+
     #[cfg(test)]
     pub(crate) fn with_host(host: Arc<dyn ComputerUseHost>) -> Self {
         Self { host: Some(host) }

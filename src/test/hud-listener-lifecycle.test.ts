@@ -56,7 +56,6 @@ describe("HUD listener lifecycle", () => {
       value: {},
     });
     document.body.innerHTML = `
-      <main id="agent-hud"></main>
       <main id="hud"></main>
       <main id="mhud">
         <span class="mhud-bar"></span>
@@ -77,21 +76,16 @@ describe("HUD listener lifecycle", () => {
   it("releases every Tauri listener on beforeunload", async () => {
     // Each HUD window also follows the interface language over one Tauri
     // listener (subscribeInterfaceLocaleAcrossWindows).
-    await import("../agent-hud");
-    await vi.waitFor(() => {
-      expect(mocks.unlistenHandles).toHaveLength(9);
-    });
-
     await import("../hud");
     await vi.waitFor(() => {
-      expect(mocks.unlistenHandles).toHaveLength(18);
+      expect(mocks.unlistenHandles).toHaveLength(9);
     });
 
     await import("../meeting-hud");
     await vi.waitFor(() => {
       // Main's three meeting-hud listeners plus this branch's
       // meeting-end-state listener, plus the interface-locale listener.
-      expect(mocks.unlistenHandles).toHaveLength(23);
+      expect(mocks.unlistenHandles).toHaveLength(14);
     });
 
     window.dispatchEvent(new Event("beforeunload"));

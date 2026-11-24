@@ -1,32 +1,31 @@
-//! The media group: `generate_image`, `edit_image`, and `generate_video` for
-//! a CLI turn, with the same arguments, limits, and results as the native
-//! agent's tools. Each call uses the user's fal key directly and
-//! writes its file into `artifacts/` of the bound session's workspace and a
-//! row of `agent_artifacts`, so the group needs a turn but no approval (parity
-//! with the native engine; names fixed in the `clovy-mcp-server` delta of the
-//! OpenSpec change `cli-substitui-agente-nativo`).
+//! Image generation, image editing and video generation use the configured
+//! fal account. Bound tools keep artifacts in the session workspace and link
+//! them in `agent_artifacts`. The external catalog uses operation approvals
+//! and stores results in a directory owned by the external connection.
 //!
 //! An image comes back as MCP content blocks (`protocol::content_value`): the
 //! artifact (id, path, metadata) as text, never its base64, and the image as
 //! an `image` block while it fits the 3 MiB block limit.
-//!
-//! The helpers below the group are shared with the native tools
-//! (`agent_runtime/tools.rs`) until that engine is removed: the video job
-//! loop, the waiting-for-key result, and the artifact writes.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx_sqlite::SqlitePool;
 use tauri::AppHandle;
+use tokio::time::Instant;
+use uuid::Uuid;
 
 use super::computer_use::MAX_IMAGE_BASE64;
 use super::{ToolCtx, ToolGroup, TurnBinding};
 use crate::agent_sessions::{AgentRepository, AgentSafetyMode};
+use crate::approval_broker::external::ExternalCall;
 use crate::domain::types::AppError;
 use crate::mcp_server::protocol;
 use crate::mcp_server::turns::TURN_REQUIRED;
@@ -83,7 +82,7 @@ impl ToolGroup for MediaTools {
 fn turn_required() -> AppError {
     AppError::new(
         TURN_REQUIRED,
-        "Media tools are available only inside a Clovy chat turn.",
+        "Media tools require a bound Clovy run or an authorized external MCP connection.",
     )
 }
 
@@ -132,12 +131,21 @@ pub(crate) trait MediaApi: Send + Sync {
     fn edit_image(
         &self,
         request: EditImageRequest,
+        safe_mode: Option<bool>,
     ) -> BoxFuture<'_, Result<GeneratedImageDto, AppError>>;
     fn video_generate(
         &self,
         request: GenerateVideoRequest,
     ) -> BoxFuture<'_, Result<VideoJobDto, AppError>>;
     fn video_status(&self, job_id: String) -> BoxFuture<'_, Result<VideoStatusDto, AppError>>;
+
+    fn video_status_in<'a>(
+        &'a self,
+        _directory: &'a Path,
+        job_id: String,
+    ) -> BoxFuture<'a, Result<VideoStatusDto, AppError>> {
+        self.video_status(job_id)
+    }
 }
 
 /// The direct fal provider commands shared with the media screens.
@@ -157,8 +165,11 @@ impl MediaApi for FalMedia<'_> {
     fn edit_image(
         &self,
         request: EditImageRequest,
+        safe_mode: Option<bool>,
     ) -> BoxFuture<'_, Result<GeneratedImageDto, AppError>> {
-        Box::pin(crate::providers::edit_image(request))
+        Box::pin(crate::providers::edit_image_with_safe_mode(
+            request, safe_mode,
+        ))
     }
 
     fn video_generate(
@@ -182,6 +193,466 @@ impl MediaApi for FalMedia<'_> {
             )
             .await
         })
+    }
+
+    fn video_status_in<'a>(
+        &'a self,
+        directory: &'a Path,
+        job_id: String,
+    ) -> BoxFuture<'a, Result<VideoStatusDto, AppError>> {
+        Box::pin(crate::providers::fal::video_status_in(directory, job_id))
+    }
+}
+
+/// External media uses the same provider and schemas, with source handles
+/// owned by the relay, approval for cost and upload, and no session artifact.
+pub(super) fn external_descriptors(ctx: &ToolCtx<'_>, access: &ExternalCall<'_>) -> Vec<Value> {
+    if external_ready(ctx, access) {
+        return external_tool_schemas();
+    }
+    Vec::new()
+}
+
+fn external_ready(ctx: &ToolCtx<'_>, access: &ExternalCall<'_>) -> bool {
+    ctx.app.is_some() && access.recording_data().is_some() && crate::providers::fal_configured()
+}
+
+pub(super) fn external_tool_schemas() -> Vec<Value> {
+    let mut tools = descriptors();
+    for tool in &mut tools {
+        match tool["name"].as_str() {
+            Some(GENERATE_IMAGE) => {
+                tool["description"] = json!("Generate an image with the configured fal account. Approval is required. The result includes a local artifact and an image block when it fits.");
+            }
+            Some(EDIT_IMAGE) => {
+                tool["description"] = json!("Edit a Clovy image issued to this MCP connection. Use its artifactId as sourcePath. Approval is required to upload the selected image and generate a result.");
+                tool["inputSchema"]["properties"]["sourcePath"]["description"] =
+                    json!("The artifactId of an image generated through this connection.");
+            }
+            Some(GENERATE_VIDEO) => {
+                tool["description"] = json!("Generate a video with the configured fal account. Approval is required. If the job is still rendering, resume in this connection with only the returned jobId.");
+            }
+            _ => {}
+        }
+    }
+    tools.retain(|tool| {
+        tool["name"] != GENERATE_VIDEO || crate::feature_flags::VIDEO_GENERATION_ENABLED
+    });
+    tools
+}
+
+pub(super) async fn call_external(
+    ctx: &ToolCtx<'_>,
+    access: &ExternalCall<'_>,
+    name: &str,
+    arguments: &Value,
+) -> Result<Value, AppError> {
+    if !external_ready(ctx, access) {
+        return Err(media_unavailable());
+    }
+    let api = FalMedia { app: ctx.app };
+    crate::providers::fal::with_external_credential(call_external_with(
+        access,
+        &api,
+        VideoPolling {
+            interval: VIDEO_POLL_INTERVAL,
+            wait: Some(Duration::from_secs(25)),
+        },
+        name,
+        arguments,
+    ))
+    .await
+}
+
+struct ExternalVideoJob {
+    owner: MediaOwner,
+    native_id: String,
+    created: Instant,
+    polling: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
+
+type MediaOwner = (Uuid, u64, String);
+
+struct EditableImage {
+    owner: MediaOwner,
+    digest: [u8; 32],
+    created: Instant,
+}
+
+static EXTERNAL_JOBS: LazyLock<Mutex<HashMap<Uuid, ExternalVideoJob>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static EDITABLE_IMAGES: LazyLock<Mutex<HashMap<String, EditableImage>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+const JOB_TTL: Duration = Duration::from_secs(60 * 60);
+const MAX_EXTERNAL_JOBS: usize = 128;
+const MAX_EDITABLE_IMAGES: usize = 128;
+
+fn media_unavailable() -> AppError {
+    AppError::new(
+        "media_unavailable",
+        "The Clovy MCP media store is unavailable.",
+    )
+}
+
+fn job_unavailable() -> AppError {
+    AppError::new(
+        "video_job_unavailable",
+        "This connection has no such video job.",
+    )
+}
+
+fn external_owner(access: &ExternalCall<'_>) -> MediaOwner {
+    let (client, generation, profile) = access.ownership();
+    (client, generation, profile.to_owned())
+}
+
+async fn media_directory(access: &ExternalCall<'_>, create: bool) -> Result<PathBuf, AppError> {
+    let root = crate::mcp_server::channel::channel_dir(
+        access.recording_data().ok_or_else(media_unavailable)?,
+    )
+    .canonicalize()
+    .map_err(io_error)?;
+    let (client, generation, profile) = access.ownership();
+    let profile_key = format!("{:x}", Sha256::digest(profile.as_bytes()));
+    let path = root.join(format!(
+        "external-media-{}-{generation}-{profile_key}",
+        client.simple()
+    ));
+    if create {
+        access.check_live()?;
+        match tokio::fs::create_dir(&path).await {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(io_error(error)),
+        }
+    }
+    let metadata = tokio::fs::symlink_metadata(&path).await.map_err(io_error)?;
+    if !metadata.is_dir() || path.canonicalize().map_err(io_error)? != path {
+        return Err(media_unavailable());
+    }
+    Ok(path)
+}
+
+pub(super) async fn call_external_with(
+    access: &ExternalCall<'_>,
+    api: &dyn MediaApi,
+    polling: VideoPolling,
+    name: &str,
+    arguments: &Value,
+) -> Result<Value, AppError> {
+    access.check_live()?;
+    let descriptor = external_tool_schemas()
+        .into_iter()
+        .find(|tool| tool["name"] == name)
+        .ok_or_else(media_unavailable)?;
+    super::argument_validation::validate(&descriptor["inputSchema"], arguments)
+        .map_err(|error| AppError::new("agent_tool_arguments_invalid", error))?;
+    let owner = external_owner(access);
+    match name {
+        GENERATE_IMAGE => {
+            let prompt = required_string(arguments, "prompt")?.trim();
+            if prompt.is_empty() {
+                return Err(AppError::new("image_prompt_required", "Enter a prompt."));
+            }
+            let model = crate::providers::image_model();
+            let safe_mode = crate::providers::image_safe_mode();
+            let target = json!({"provider":"fal","model":model,"safeMode":safe_mode});
+            let approval = access
+                .approve(
+                    name,
+                    "Generate an image",
+                    "Send this prompt to fal. The configured fal account may be charged.",
+                    arguments,
+                    Some(&target),
+                )
+                .await?;
+            let directory = media_directory(access, true).await?;
+            approval.check(&owner.2)?;
+            check_image_safety_setting(safe_mode)?;
+            let generated = wait_for_media(
+                access,
+                api.generate_image(GenerateImageRequest {
+                    prompt: prompt.to_string(),
+                    model: Some(model),
+                    request_id: None,
+                    safe_mode: Some(safe_mode),
+                }),
+            )
+            .await?;
+            store_external_image(access, &directory, prompt, generated).await
+        }
+        EDIT_IMAGE => {
+            let id = required_string(arguments, "sourcePath")?;
+            let instruction = required_string(arguments, "instruction")?.trim();
+            if instruction.is_empty() {
+                return Err(AppError::new(
+                    "image_prompt_required",
+                    "Enter an edit instruction.",
+                ));
+            }
+            let directory = media_directory(access, false).await?;
+            let digest = EDITABLE_IMAGES
+                .lock()
+                .map_err(|_| media_unavailable())?
+                .get(id)
+                .filter(|image| image.owner == owner)
+                .map(|image| image.digest)
+                .ok_or_else(image_source_invalid)?;
+            let path = external_image_path(&directory, id).await?;
+            let (image, mime_type) = read_edit_source(&path).await?;
+            let current_digest: [u8; 32] = Sha256::digest(image.as_bytes()).into();
+            if current_digest != digest {
+                return Err(image_source_invalid());
+            }
+            let safe_mode = crate::providers::image_safe_mode();
+            let target = json!({
+                "provider":"fal", "artifactId":id, "mimeType":mime_type, "safeMode":safe_mode,
+                "file":crate::filesystem::normalize_path_for_external_use(&path),
+            });
+            let approval = access.approve(
+                name, "Edit a generated image",
+                "Upload this generated image and its edit instruction to fal. The configured account may be charged.",
+                arguments, Some(&target),
+            ).await?;
+            approval.check(&owner.2)?;
+            check_image_safety_setting(safe_mode)?;
+            let generated = wait_for_media(
+                access,
+                api.edit_image(
+                    EditImageRequest {
+                        image,
+                        prompt: instruction.to_string(),
+                        request_id: None,
+                        mime_type: Some(mime_type.to_string()),
+                        model: None,
+                    },
+                    Some(safe_mode),
+                ),
+            )
+            .await?;
+            store_external_image(access, &directory, instruction, generated).await
+        }
+        GENERATE_VIDEO => external_video(access, api, polling, arguments, owner).await,
+        _ => Err(AppError::new("mcp_tool_unknown", "Unknown media tool.")),
+    }
+}
+
+fn check_image_safety_setting(approved: bool) -> Result<(), AppError> {
+    if crate::providers::image_safe_mode() != approved {
+        return Err(AppError::new(
+            "mcp_external_scope_changed",
+            "The image safety setting changed while awaiting approval.",
+        ));
+    }
+    Ok(())
+}
+
+async fn wait_for_media<T>(
+    access: &ExternalCall<'_>,
+    operation: impl Future<Output = Result<T, AppError>>,
+) -> Result<T, AppError> {
+    access.check_live()?;
+    tokio::select! {
+        biased;
+        _ = access.cancelled() => {
+            let mut error = AppError::new(
+                "mcp_external_media_interrupted",
+                "The media request ended after dispatch. Check the provider before issuing another generation.",
+            );
+            error.details = Some(json!({"delivery":"unknown","effect":"unknown","retrySafe":false}));
+            Err(error)
+        }
+        outcome = operation => outcome,
+    }
+}
+
+async fn external_image_path(directory: &Path, id: &str) -> Result<PathBuf, AppError> {
+    let valid = id
+        .strip_prefix("generated-image-")
+        .and_then(|name| name.split_once('.'))
+        .is_some_and(|(uuid, extension)| {
+            uuid.len() == 32
+                && uuid.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && matches!(extension, "png" | "jpg" | "webp" | "gif")
+        });
+    if !valid {
+        return Err(image_source_invalid());
+    }
+    let path = directory.join(id);
+    let metadata = tokio::fs::symlink_metadata(&path)
+        .await
+        .map_err(|_| image_source_invalid())?;
+    if !metadata.is_file()
+        || metadata.len() > MAX_EDIT_SOURCE_BYTES as u64
+        || path.canonicalize().map_err(|_| image_source_invalid())? != path
+    {
+        return Err(image_source_invalid());
+    }
+    Ok(path)
+}
+
+fn image_source_invalid() -> AppError {
+    AppError::new(
+        "image_source_invalid",
+        "Select an unchanged generated image from this MCP connection.",
+    )
+}
+
+async fn store_external_image(
+    access: &ExternalCall<'_>,
+    directory: &Path,
+    prompt: &str,
+    generated: GeneratedImageDto,
+) -> Result<Value, AppError> {
+    use tokio::io::AsyncWriteExt;
+    let bytes = BASE64
+        .decode(&generated.image_base64)
+        .map_err(|error| AppError::new("image_response_invalid", error.to_string()))?;
+    let filename = image_filename(&generated.mime_type);
+    let path = directory.join(&filename);
+    access.check_live()?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .await
+        .map_err(io_error)?;
+    if let Err(error) = file.write_all(&bytes).await {
+        drop(file);
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(io_error(error));
+    }
+    let mut images = EDITABLE_IMAGES.lock().map_err(|_| media_unavailable())?;
+    if images.len() >= MAX_EDITABLE_IMAGES {
+        if let Some(key) = images
+            .iter()
+            .min_by_key(|(_, image)| image.created)
+            .map(|(key, _)| key.clone())
+        {
+            images.remove(&key);
+        }
+    }
+    images.insert(
+        filename.clone(),
+        EditableImage {
+            owner: external_owner(access),
+            digest: Sha256::digest(generated.image_base64.as_bytes()).into(),
+            created: Instant::now(),
+        },
+    );
+    Ok(image_blocks(&path, filename, prompt, generated))
+}
+
+async fn external_video(
+    access: &ExternalCall<'_>,
+    api: &dyn MediaApi,
+    polling: VideoPolling,
+    arguments: &Value,
+    owner: MediaOwner,
+) -> Result<Value, AppError> {
+    let call = parse_video_call(arguments, None)?;
+    let (job, native_id, directory, _permit) = match call {
+        VideoCall::Create(mut request) => {
+            let model = crate::providers::video_model();
+            request.model = Some(model.clone());
+            let target = json!({"provider":"fal","model":model});
+            let approval = access.approve(
+                GENERATE_VIDEO, "Generate a video",
+                "Send this prompt and generation options to fal. The configured account may be charged.",
+                arguments, Some(&target),
+            ).await?;
+            let directory = media_directory(access, true).await?;
+            {
+                let mut jobs = EXTERNAL_JOBS.lock().map_err(|_| media_unavailable())?;
+                jobs.retain(|_, job| job.created.elapsed() < JOB_TTL);
+                if jobs.len() >= MAX_EXTERNAL_JOBS {
+                    return Err(media_unavailable());
+                }
+            }
+            let job = Uuid::new_v4();
+            request.request_id = Some(job.to_string());
+            approval.check(&owner.2)?;
+            let native_id = wait_for_media(access, api.video_generate(request))
+                .await?
+                .job_id;
+            let polling = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+            let permit = polling.clone().lock_owned().await;
+            EXTERNAL_JOBS
+                .lock()
+                .map_err(|_| media_unavailable())?
+                .insert(
+                    job,
+                    ExternalVideoJob {
+                        owner,
+                        native_id: native_id.clone(),
+                        created: Instant::now(),
+                        polling,
+                    },
+                );
+            (job, native_id, directory, permit)
+        }
+        VideoCall::Resume { job_id } => {
+            if arguments.as_object().is_none_or(|args| args.len() != 1) {
+                return Err(AppError::new(
+                    "agent_tool_arguments_invalid",
+                    "Resume a video with only its jobId.",
+                ));
+            }
+            let job = Uuid::parse_str(&job_id).map_err(|_| job_unavailable())?;
+            let (native_id, polling) = EXTERNAL_JOBS
+                .lock()
+                .map_err(|_| media_unavailable())?
+                .get(&job)
+                .filter(|existing| existing.owner == owner && existing.created.elapsed() < JOB_TTL)
+                .map(|existing| (existing.native_id.clone(), existing.polling.clone()))
+                .ok_or_else(job_unavailable)?;
+            let permit = polling.try_lock_owned().map_err(|_| {
+                AppError::new("video_job_busy", "This video job is already being checked.")
+            })?;
+            access.approve(
+                GENERATE_VIDEO, "Finish the requested video",
+                "Check the same fal job and save the finished video when available. No new video is submitted.",
+                arguments, None,
+            ).await?.check(&owner.2)?;
+            let directory = media_directory(access, false).await?;
+            (job, native_id, directory, permit)
+        }
+    };
+    let (_, result) = wait_for_media(
+        access,
+        follow_video_call(
+            VideoCall::Resume { job_id: native_id },
+            |request| api.video_generate(request),
+            |id| api.video_status_in(&directory, id),
+            std::future::pending(),
+            polling,
+        ),
+    )
+    .await?;
+    match result {
+        VideoJobOutcome::Completed {
+            path,
+            mime_type,
+            model,
+        } => {
+            let path = PathBuf::from(path).canonicalize().map_err(io_error)?;
+            if path.parent() != Some(directory.as_path()) {
+                return Err(media_unavailable());
+            }
+            EXTERNAL_JOBS
+                .lock()
+                .map_err(|_| media_unavailable())?
+                .remove(&job);
+            Ok(json!({
+                "mediaType":"video", "status":"completed", "mimeType":mime_type, "model":model,
+                "path":crate::filesystem::normalize_path_for_external_use(&path)
+            }))
+        }
+        VideoJobOutcome::StillProcessing => Ok(json!({"status":"processing","jobId":job})),
+        VideoJobOutcome::WaitingForProviderKey { reason } => Ok(json!({
+            "status":"waitingForProviderKey","provider":"fal","jobId":job,"reason":reason,
+            "message":waiting_for_provider_key_message(&reason)
+        })),
     }
 }
 
@@ -237,13 +708,16 @@ pub(crate) async fn call(
             let instruction = required_string(arguments, "instruction")?.trim();
             let (image, mime_type) = read_edit_source(&source).await?;
             let generated = api
-                .edit_image(EditImageRequest {
-                    image,
-                    prompt: instruction.to_string(),
-                    request_id: None,
-                    mime_type: Some(mime_type.to_string()),
-                    model: None,
-                })
+                .edit_image(
+                    EditImageRequest {
+                        image,
+                        prompt: instruction.to_string(),
+                        request_id: None,
+                        mime_type: Some(mime_type.to_string()),
+                        model: None,
+                    },
+                    None,
+                )
                 .await?;
             mcp_image_result(&target, instruction, generated).await
         }
@@ -542,25 +1016,21 @@ async fn store_generated_image(
     let bytes = BASE64
         .decode(&generated.image_base64)
         .map_err(|error| AppError::new("image_response_invalid", error.to_string()))?;
-    let extension = match generated.mime_type.as_str() {
+    let path = artifact_path(target.workspace, &image_filename(&generated.mime_type)).await?;
+    tokio::fs::write(&path, &bytes).await.map_err(io_error)?;
+    let artifact_id =
+        record_artifact(target, &path, "created", None, Some(&generated.mime_type)).await?;
+    Ok((path, artifact_id))
+}
+
+fn image_filename(mime_type: &str) -> String {
+    let extension = match mime_type {
         "image/jpeg" => "jpg",
         "image/webp" => "webp",
         "image/gif" => "gif",
         _ => "png",
     };
-    let path = artifact_path(
-        target.workspace,
-        &format!(
-            "generated-image-{}.{}",
-            uuid::Uuid::new_v4().simple(),
-            extension
-        ),
-    )
-    .await?;
-    tokio::fs::write(&path, &bytes).await.map_err(io_error)?;
-    let artifact_id =
-        record_artifact(target, &path, "created", None, Some(&generated.mime_type)).await?;
-    Ok((path, artifact_id))
+    format!("generated-image-{}.{extension}", Uuid::new_v4().simple())
 }
 
 /// The MCP image result: a text block with the artifact (id, path,
@@ -573,11 +1043,20 @@ async fn mcp_image_result(
     generated: GeneratedImageDto,
 ) -> Result<Value, AppError> {
     let (path, artifact_id) = store_generated_image(target, &generated).await?;
+    Ok(image_blocks(&path, artifact_id, prompt, generated))
+}
+
+fn image_blocks(
+    path: &Path,
+    artifact_id: String,
+    prompt: &str,
+    generated: GeneratedImageDto,
+) -> Value {
     let inline = generated.image_base64.len() <= MAX_IMAGE_BASE64;
     let mut text = json!({
         "mediaType": "image",
         "artifactId": artifact_id,
-        "path": crate::filesystem::normalize_path_for_external_use(&path),
+        "path": crate::filesystem::normalize_path_for_external_use(path),
         "name": path.file_name().map(|name| name.to_string_lossy().into_owned()),
         "mimeType": generated.mime_type,
         "model": generated.model,
@@ -594,13 +1073,21 @@ async fn mcp_image_result(
             generated.mime_type,
         ));
     }
-    Ok(protocol::content_value(blocks))
+    protocol::content_value(blocks)
 }
 
 /// Reads a source image for `edit_image`: base64 and media type, refusing
 /// files over 20 MB and anything but PNG, JPEG, WebP, or GIF.
 pub(crate) async fn read_edit_source(source: &Path) -> Result<(String, &'static str), AppError> {
-    let bytes = tokio::fs::read(source).await.map_err(io_error)?;
+    use tokio::io::AsyncReadExt;
+    let mut bytes = Vec::new();
+    tokio::fs::File::open(source)
+        .await
+        .map_err(io_error)?
+        .take(MAX_EDIT_SOURCE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(io_error)?;
     if bytes.len() > MAX_EDIT_SOURCE_BYTES {
         return Err(AppError::new(
             "image_source_too_large",

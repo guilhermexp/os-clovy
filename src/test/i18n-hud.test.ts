@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AGENT_SESSION_STATUS_EVENT } from "../lib/agent-events";
 
 type TauriListener = (event: { payload: unknown }) => unknown;
 
@@ -391,38 +390,6 @@ describe("HUD windows in pt-BR", () => {
       "title",
       "Destino do ditado: Terminal",
     );
-  });
-
-  it("pluralizes the agent HUD pill and re-renders on a language change", async () => {
-    loadPage("agent-hud.html");
-    await import("../agent-hud");
-    await flush();
-
-    for (const title of ["First task", "Second task"]) {
-      window.dispatchEvent(
-        new CustomEvent(AGENT_SESSION_STATUS_EVENT, {
-          detail: { status: "waitingForUser", title, prompt: title },
-        }),
-      );
-    }
-    await flush();
-
-    const pill = document.querySelector("#agent-hud-pill");
-    expect(document.querySelector("#agent-hud-pill-label")).toHaveTextContent(
-      "2 precisam de resposta",
-    );
-    expect(pill).toHaveAttribute("aria-label", "Recolher atividade dos agentes");
-    expect(document.querySelector(".agent-hud-surface")).toHaveAttribute(
-      "aria-label",
-      "Atividade dos agentes",
-    );
-    expect(document.querySelector("#agent-hud-hide")).toHaveTextContent("Ocultar HUD de sessões");
-
-    await switchLocale("en");
-
-    expect(document.querySelector("#agent-hud-pill-label")).toHaveTextContent("2 need input");
-    expect(pill).toHaveAttribute("aria-label", "Collapse agent activity");
-    expect(document.querySelector("#agent-hud-hide")).toHaveTextContent("Hide sessions HUD");
   });
 
   it("labels the recording pill and meeting-end prompt in Portuguese", async () => {

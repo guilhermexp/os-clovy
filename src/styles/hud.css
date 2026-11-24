@@ -412,8 +412,7 @@ body {
  * 50%, soft 50%-mix shoulders, symmetric edges, no plateau, with the 20deg
  * tilt carried by the gradient angle. Base = transparent so the mark's own
  * color shows through, highlight = --mark-shine. Keep in sync with
- * .agent-hud-mark::before in agent-hud.css and .mhud-mark::before in
- * meeting-hud.css. */
+ * .mhud-mark::before in meeting-hud.css. */
 .hud-meeting-mark::before {
   position: absolute;
   inset: -2px auto -2px -110%;

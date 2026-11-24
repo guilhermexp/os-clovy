@@ -95,13 +95,13 @@ function parseSecretMap(raw: string, label: string, t: TFunction): Record<string
 function hasOauthRevocationHistory(server: AgentMcpServerDto): boolean {
   const history = server.metadata.oauthRevocationHistory;
   return (
-    Object.prototype.hasOwnProperty.call(server.metadata, "oauthRevocationHistory") &&
+    Object.hasOwn(server.metadata, "oauthRevocationHistory") &&
     !(Array.isArray(history) && history.length === 0)
   );
 }
 
 function hasOauthConnectCleanup(server: AgentMcpServerDto): boolean {
-  if (!Object.prototype.hasOwnProperty.call(server.metadata, "oauthConnectAttempts")) return false;
+  if (!Object.hasOwn(server.metadata, "oauthConnectAttempts")) return false;
   const attempts = server.metadata.oauthConnectAttempts;
   if (!Array.isArray(attempts)) return true;
   const fields = ["id", "secretRef", "revision", "epoch", "phase", "superseded"];
@@ -162,7 +162,11 @@ function diagnosticFromError(error: unknown): AgentMcpDiagnostic | undefined {
   }
 }
 
-function diagnosticContext(diagnostic: AgentMcpDiagnostic, t: TFunction): string {
+function diagnosticContext(
+  diagnostic: AgentMcpDiagnostic,
+  t: TFunction,
+  showAction = true,
+): string {
   const phases: Record<string, string> = {
     connect: t("settingsPanels.mcp.phaseConnect"),
     discover: t("settingsPanels.mcp.phaseDiscover"),
@@ -183,14 +187,19 @@ function diagnosticContext(diagnostic: AgentMcpDiagnostic, t: TFunction): string
     check_local_storage: t("settingsPanels.mcp.actionStorage"),
     check_connection: t("settingsPanels.mcp.actionConnection"),
     inspect_server: t("settingsPanels.mcp.actionServer"),
-    answer_in_chat: t("settingsPanels.mcp.actionAnswer"),
+    use_interactive_client: t("settingsPanels.mcp.actionInteractiveClient", {
+      server: diagnostic.server,
+    }),
+    answer_in_chat: t("settingsPanels.mcp.actionInteractiveClient", {
+      server: diagnostic.server,
+    }),
   };
   return [
     phases[diagnostic.phase] ?? diagnostic.phase,
     diagnostic.tool,
     diagnostic.code,
     typeof diagnostic.remoteCode === "number" ? diagnostic.remoteCode : undefined,
-    actions[diagnostic.action] ?? diagnostic.action,
+    showAction ? (actions[diagnostic.action] ?? diagnostic.action) : undefined,
   ]
     .filter((value) => value !== undefined && value !== null && value !== "" && value !== "none")
     .join(" · ");
@@ -592,7 +601,13 @@ export function AgentMcpServersSection() {
               const diagnostic =
                 server.id in diagnostics ? diagnostics[server.id] : server.diagnostic;
               const observedHealth = health[server.id] ?? diagnostic?.state;
-              const resultMessage = checkResultMessage(testResults[server.id], t);
+              const result = testResults[server.id];
+              const interactive = diagnostic?.code === "agent_mcp_elicitation_required";
+              const testedInteractive = interactive && result?.kind === "error";
+              const diagnosticMessage = interactive ? undefined : diagnostic?.message;
+              const resultMessage = testedInteractive
+                ? t("settingsPanels.mcp.actionInteractiveClient", { server: server.name })
+                : checkResultMessage(result, t);
               return (
                 <div className="settings-row" key={server.id}>
                   <div className="settings-row-info">
@@ -615,8 +630,8 @@ export function AgentMcpServersSection() {
                       {observedHealth
                         ? ` · ${t(observedHealth === "connected" ? "settingsPanels.mcp.healthConnected" : observedHealth === "reconnect_required" ? "settingsPanels.mcp.healthReconnect" : "settingsPanels.mcp.healthUnavailable")}`
                         : ""}
-                      {resultMessage || diagnostic?.message
-                        ? ` · ${resultMessage || diagnostic?.message}`
+                      {resultMessage || diagnosticMessage
+                        ? ` · ${resultMessage || diagnosticMessage}`
                         : ""}
                     </p>
                     {hasOauthRevocationHistory(server) ? (
@@ -631,7 +646,7 @@ export function AgentMcpServersSection() {
                     ) : null}
                     {diagnostic ? (
                       <p className="settings-row-description" role="status">
-                        {diagnosticContext(diagnostic, t)}
+                        {diagnosticContext(diagnostic, t, !testedInteractive)}
                       </p>
                     ) : null}
                   </div>

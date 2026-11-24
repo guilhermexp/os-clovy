@@ -348,6 +348,16 @@ pub async fn start_cli_turn(
     request: CliTurnRequest,
     ticket: TurnTicket,
 ) -> Result<(), AppError> {
+    start_cli_turn_guarded(app, repository, request, ticket, || Ok(())).await
+}
+
+pub(crate) async fn start_cli_turn_guarded(
+    app: &AppHandle,
+    repository: AgentRepository,
+    request: CliTurnRequest,
+    ticket: TurnTicket,
+    admit: impl FnOnce() -> Result<(), AppError>,
+) -> Result<(), AppError> {
     check_policy(request.kind, request.attended)?;
     let data_partition = crate::agent_sessions::run_partition::resolve(
         &repository.pool,
@@ -403,6 +413,7 @@ pub async fn start_cli_turn(
         app: app.clone(),
         repository: repository.clone(),
     };
+    admit()?;
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let run_id = context.run_id.clone();

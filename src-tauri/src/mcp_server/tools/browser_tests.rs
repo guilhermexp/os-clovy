@@ -1012,3 +1012,108 @@ async fn real_page_neutral_handler_waits_for_the_central_approval_decision() {
     browser.stop_session(session).unwrap();
     server.abort();
 }
+
+#[tokio::test]
+async fn external_browser_is_anonymous_and_bound_to_the_exact_peer() {
+    use super::connectors_tests::wait_external_request;
+    use crate::approval_broker::external::ExternalApprovalBroker;
+    use crate::mcp_server::channel::ExternalConnection;
+    use std::time::Duration;
+
+    let rig = Rig::new("Send", []).await;
+    let anonymous = FakeTransport::new(rig.transport.element.clone());
+    rig.browser.configure_transport(
+        BrowserTransportKind::Managed,
+        anonymous.clone(),
+        rig._dir.path().join("images"),
+        rig._dir.path().join("artifacts"),
+    );
+    let group = rig.group();
+    let ctx = rig.ctx(None);
+    let catalog = group.external_descriptors(&ctx);
+    assert_eq!(names(&catalog), BROWSER_TOOLS);
+
+    let approvals =
+        ExternalApprovalBroker::new(|| Some("default".into()), || {}, Duration::from_secs(5));
+    let (peer, close, _cancel) = ExternalConnection::test_connection();
+    let (other, _other_close, _other_cancel) = ExternalConnection::test_connection();
+    let access = approvals.scope(&peer, "default", None);
+    let other = approvals.scope(&other, "default", None);
+    let args = json!({});
+    assert!(group
+        .call_external(
+            &ctx,
+            &access,
+            "start_session",
+            &json!({"workspacePath":"internal"})
+        )
+        .await
+        .is_err());
+    let mut session = None;
+    for approve in [false, true] {
+        let call = group.call_external(&ctx, &access, "start_session", &args);
+        tokio::pin!(call);
+        let request = tokio::select! {
+            early = &mut call => panic!("answered before approval: {early:?}"),
+            pending = wait_external_request(&approvals) => pending,
+        };
+        assert!(anonymous.calls().is_empty());
+        approvals
+            .decide(request["id"].as_str().unwrap(), approve)
+            .unwrap();
+        let result = call.await;
+        if approve {
+            session = Some(result.unwrap()["sessionId"].as_str().unwrap().to_owned());
+        } else {
+            assert_eq!(result.unwrap_err().code, "user_denied");
+        }
+    }
+    let session = session.unwrap();
+    assert_eq!(anonymous.calls(), vec!["start_session"]);
+    assert!(rig.transport.calls().is_empty());
+    assert!(group
+        .call_external(&ctx, &other, "list_tabs", &json!({"session_id":session}))
+        .await
+        .is_err());
+    assert!(approvals.pending().is_empty());
+    let click = json!({"session_id":session,"tab_id":7,"ref":"e0:n1"});
+    *anonymous.interaction_class.lock().unwrap() = Some(json!(InteractionClass::HumanOnly));
+    assert_eq!(
+        group
+            .call_external(&ctx, &access, "click", &click)
+            .await
+            .unwrap_err()
+            .code,
+        "browser_human_takeover_required"
+    );
+    assert!(approvals.pending().is_empty());
+    *anonymous.interaction_class.lock().unwrap() = Some(json!(InteractionClass::ApprovalRequired));
+    for approve in [false, true] {
+        let call = group.call_external(&ctx, &access, "click", &click);
+        tokio::pin!(call);
+        let request = tokio::select! {
+            early = &mut call => panic!("answered before approval: {early:?}"),
+            pending = wait_external_request(&approvals) => pending,
+        };
+        assert_eq!(anonymous.actions(), 0);
+        assert!(request["preview"].as_str().unwrap().contains("Send"));
+        approvals
+            .decide(request["id"].as_str().unwrap(), approve)
+            .unwrap();
+        let result = call.await;
+        if approve {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert_eq!(result.unwrap_err().code, "user_denied");
+        }
+    }
+    assert_eq!(anonymous.actions(), 1);
+    close.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while anonymous.session_state(&session).is_ok() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}

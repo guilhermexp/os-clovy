@@ -81,7 +81,11 @@ mod native {
             };
             Ok(Self { directory })
         }
-        pub(crate) fn replace(&self, content: &str) -> io::Result<()> {
+        pub(crate) fn replace_checked(
+            &self,
+            content: &str,
+            authorize: impl FnOnce() -> io::Result<()>,
+        ) -> io::Result<()> {
             let parent = self.directory.as_raw_fd();
             for index in 0..128 {
                 let name =
@@ -109,6 +113,7 @@ mod native {
                 let result = file
                     .write_all(content.as_bytes())
                     .and_then(|()| file.sync_all())
+                    .and_then(|()| authorize())
                     .and_then(|()| {
                         if unsafe {
                             libc::renameat(parent, name.as_ptr(), parent, c"SKILL.md".as_ptr())
@@ -182,7 +187,9 @@ mod tests {
         std::fs::create_dir(&skill).unwrap();
         std::fs::create_dir(skill.join("SKILL.md")).unwrap();
         let anchored = AnchoredSkillDirectory::open(root.path(), "selected").unwrap();
-        assert!(anchored.replace("cannot replace a directory").is_err());
+        assert!(anchored
+            .replace_checked("cannot replace a directory", || Ok(()))
+            .is_err());
         assert!(skill.join("SKILL.md").is_dir());
         assert_eq!(std::fs::read_dir(&skill).unwrap().count(), 1);
     }
@@ -385,7 +392,11 @@ mod native {
             };
             Ok(Self { directory })
         }
-        pub(crate) fn replace(&self, content: &str) -> io::Result<()> {
+        pub(crate) fn replace_checked(
+            &self,
+            content: &str,
+            authorize: impl FnOnce() -> io::Result<()>,
+        ) -> io::Result<()> {
             for index in 0..128 {
                 let name = format!(".SKILL.{}.{index}.tmp", std::process::id());
                 let mut file = match open_relative(&self.directory, &name, false, true) {
@@ -396,6 +407,7 @@ mod native {
                 let result = file
                     .write_all(content.as_bytes())
                     .and_then(|()| file.sync_all())
+                    .and_then(|()| authorize())
                     .and_then(|()| {
                         let target: Vec<u16> =
                             std::ffi::OsStr::new("SKILL.md").encode_wide().collect();

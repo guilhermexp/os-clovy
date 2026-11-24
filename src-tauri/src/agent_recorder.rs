@@ -8,6 +8,9 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tokio::sync::oneshot;
 
+use crate::approval_broker::external::ExternalGuard;
+use crate::mcp_server::turns::TurnBinding;
+
 const REQUEST_EVENT: &str = "clovy://agent-recorder-request";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(420);
 const COMPLETED_CAP: usize = 32;
@@ -22,6 +25,7 @@ struct PendingRecorderRequest {
     sender: oneshot::Sender<ResolveAgentRecorderRequest>,
     target: AgentRecorderTarget,
     action: AgentRecorderAction,
+    source_mode: Option<RecordingSourceMode>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -39,7 +43,7 @@ pub enum AgentRecorderAction {
 #[serde(rename_all = "camelCase")]
 pub struct AgentRecorderTarget {
     #[serde(skip)]
-    pub(crate) binding: Option<crate::mcp_server::turns::TurnBinding>,
+    pub(crate) authority: Option<RecorderAuthority>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,6 +52,65 @@ pub struct AgentRecorderTarget {
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovery_action: Option<RecordingRecoveryAction>,
+}
+
+/// Host authority passed to the existing visible recorder bridge.
+#[derive(Debug, Clone)]
+pub(crate) enum RecorderAuthority {
+    Turn(Box<TurnBinding>),
+    External {
+        guard: ExternalGuard,
+        approved_note: Option<Box<serde_json::Value>>,
+    },
+}
+
+impl RecorderAuthority {
+    pub(crate) fn check_live(&self, profile: &str) -> Result<(), AppError> {
+        match self {
+            Self::Turn(binding) => binding.authority.check_live(),
+            Self::External { guard, .. } => guard.check(profile),
+        }
+    }
+
+    pub(crate) async fn revalidate(
+        &self,
+        app: &AppHandle,
+        pool: &sqlx_sqlite::SqlitePool,
+        profile: &str,
+    ) -> Result<(), AppError> {
+        match self {
+            Self::Turn(binding) => {
+                crate::mcp_server::tools::revalidate_binding(Some(app), pool, binding, profile)
+                    .await
+            }
+            Self::External { guard, .. } => guard.check(profile),
+        }
+    }
+
+    pub(crate) async fn check_saved_note(
+        &self,
+        tx: &mut sqlx::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
+        profile: &str,
+        note_id: &str,
+    ) -> Result<(), AppError> {
+        if let Self::External {
+            guard,
+            approved_note,
+        } = self
+        {
+            guard.check(profile)?;
+            let current =
+                crate::db::repositories::mcp_note_delete_target(tx, profile, note_id).await?;
+            if approved_note.as_deref() != Some(&current) {
+                return Err(AppError::new(
+                    "recording_target_mismatch",
+                    "The saved recording changed since the user approved it.",
+                ));
+            }
+            guard.check(profile)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +205,7 @@ impl AgentRecorderBroker {
                 sender,
                 target: target.clone(),
                 action,
+                source_mode,
             },
         );
         let _lease = PendingRecorderLease {
@@ -246,7 +310,7 @@ impl AgentRecorderBroker {
         let entry = pending.get(request_id).ok_or_else(|| {
             AppError::new(
                 "agent_recorder_request_not_found",
-                "The recorder request expired or its chat turn was cancelled.",
+                "The recorder request expired or was cancelled.",
             )
         })?;
         if entry.action == AgentRecorderAction::Start
@@ -270,12 +334,12 @@ impl AgentRecorderBroker {
         session_id: &str,
         action: AgentRecorderAction,
         recovery_action: Option<RecordingRecoveryAction>,
-    ) -> Result<crate::mcp_server::turns::TurnBinding, AppError> {
+    ) -> Result<RecorderAuthority, AppError> {
         let pending = self.pending.lock().map_err(|_| unavailable())?;
         let entry = pending.get(request_id).ok_or_else(|| {
             AppError::new(
                 "agent_recorder_request_not_found",
-                "The recorder request expired or its chat turn was cancelled.",
+                "The recorder request expired or was cancelled.",
             )
         })?;
         if entry.action != action
@@ -289,29 +353,18 @@ impl AgentRecorderBroker {
                 "The saved recording target or action differs from the approved request.",
             ));
         }
-        entry.target.binding.clone().ok_or_else(|| {
-            AppError::new(
-                "turn_expired",
-                "The recorder request has no controlling chat turn.",
-            )
-        })
+        request_authority(entry, profile)
     }
 
     pub(crate) fn request_authorization(
         &self,
         request_id: &str,
-    ) -> Result<(crate::mcp_server::turns::TurnBinding, String), AppError> {
+    ) -> Result<(RecorderAuthority, String), AppError> {
         let pending = self.pending.lock().map_err(|_| unavailable())?;
         let entry = pending.get(request_id).ok_or_else(|| {
             AppError::new(
                 "agent_recorder_request_not_found",
-                "The recorder request expired or its chat turn was cancelled.",
-            )
-        })?;
-        let binding = entry.target.binding.clone().ok_or_else(|| {
-            AppError::new(
-                "turn_expired",
-                "The recorder request has no controlling turn.",
+                "The recorder request expired or was cancelled.",
             )
         })?;
         let profile = entry.target.profile.clone().ok_or_else(|| {
@@ -320,7 +373,7 @@ impl AgentRecorderBroker {
                 "The recorder request has no bound data partition.",
             )
         })?;
-        Ok((binding, profile))
+        Ok((request_authority(entry, &profile)?, profile))
     }
 
     pub(crate) fn authorization_for_start(
@@ -328,10 +381,27 @@ impl AgentRecorderBroker {
         request_id: &str,
         profile: &str,
         note_id: &str,
-    ) -> Result<crate::mcp_server::turns::TurnBinding, AppError> {
+        source_mode: RecordingSourceMode,
+        has_video: bool,
+    ) -> Result<RecorderAuthority, AppError> {
         self.validate_target(request_id, profile, note_id)?;
-        self.request_authorization(request_id)
-            .map(|(binding, _)| binding)
+        let pending = self.pending.lock().map_err(|_| unavailable())?;
+        let entry = pending.get(request_id).ok_or_else(|| {
+            AppError::new(
+                "agent_recorder_request_not_found",
+                "The recorder request expired or was cancelled.",
+            )
+        })?;
+        let authority = request_authority(entry, profile)?;
+        if matches!(authority, RecorderAuthority::External { .. })
+            && (entry.source_mode != Some(source_mode) || has_video)
+        {
+            return Err(AppError::new(
+                "agent_recorder_target_mismatch",
+                "The recording sources differ from the approved request.",
+            ));
+        }
+        Ok(authority)
     }
 
     pub(crate) fn validate_request(&self, request_id: &str) -> Result<(), AppError> {
@@ -345,7 +415,7 @@ impl AgentRecorderBroker {
         }
         Err(AppError::new(
             "agent_recorder_request_not_found",
-            "The recorder request expired or its chat turn was cancelled.",
+            "The recorder request expired or was cancelled.",
         ))
     }
 
@@ -392,6 +462,20 @@ impl AgentRecorderBroker {
     }
 }
 
+fn request_authority(
+    entry: &PendingRecorderRequest,
+    profile: &str,
+) -> Result<RecorderAuthority, AppError> {
+    let authority = entry.target.authority.as_ref().ok_or_else(|| {
+        AppError::new(
+            "agent_recorder_authority_missing",
+            "The recorder request has no host authorization.",
+        )
+    })?;
+    authority.check_live(profile)?;
+    Ok(authority.clone())
+}
+
 fn uncertain_response(target: &AgentRecorderTarget, code: &str, message: &str) -> AppError {
     let mut error = AppError::new(code, message);
     error.details = Some(
@@ -435,10 +519,9 @@ pub async fn validate_agent_recorder_request(
             "Only the main window may control recorder requests.",
         ));
     }
-    let (binding, profile) = broker.request_authorization(&request_id)?;
+    let (authority, profile) = broker.request_authorization(&request_id)?;
     let repos = crate::commands::repositories(&app).await?;
-    crate::mcp_server::tools::revalidate_binding(Some(&app), &repos.pool, &binding, &profile)
-        .await?;
+    authority.revalidate(&app, &repos.pool, &profile).await?;
     broker.validate_request(&request_id)
 }
 
@@ -463,7 +546,7 @@ mod lifecycle_tests {
     }
     fn target() -> AgentRecorderTarget {
         AgentRecorderTarget {
-            binding: Some(crate::mcp_server::turns::TurnBinding {
+            authority: Some(RecorderAuthority::Turn(Box::new(TurnBinding {
                 authority: crate::domain::turn_authority::TurnAuthority::new(),
                 wire_names: None,
                 session_id: "conversation-a".into(),
@@ -473,7 +556,7 @@ mod lifecycle_tests {
                 safety_mode: crate::agent_sessions::domain::AgentSafetyMode::Sandboxed,
                 attended: true,
                 surface: "chat".into(),
-            }),
+            }))),
             profile: Some("partition-a".into()),
             note_id: Some("note-a".into()),
             session_id: Some("take-a".into()),
