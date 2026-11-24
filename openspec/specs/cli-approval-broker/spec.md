@@ -7,14 +7,6 @@ No fork, as decisões são locais ao app. O requisito anterior de aprovação pe
 
 ## Requirements
 
-### Requirement: Pedido de aprovação visível na sessão
-Uma ferramenta que exige aprovação SHALL registrar no broker um pedido ligado ao vínculo de turno. O app MUST gravar um item de interrupção na sessão do turno, pôr a execução em `waiting_for_user` e emitir o evento de runtime existente, para que o cartão de aprovação apareça na sessão como no motor nativo. A descrição e a prévia MUST ser geradas pelo app a partir dos argumentos sanitizados, não copiadas de texto livre do modelo.
-
-#### Scenario: Cartão aparece
-- **WHEN** um turno vinculado chama `create_routine`
-- **THEN** a sessão mostra um cartão pendente com a ferramenta e a prévia, e a execução fica aguardando
-- Test: integration — broker real, evento emitido e item persistido; component — cartão renderizado a partir do item com `engine: "cli"`
-
 ### Requirement: Decisão única
 O broker SHALL aceitar uma única decisão por pedido pelo comando de resolução existente. Aprovar MUST liberar a ferramenta; negar MUST devolver `isError` com `user_denied`. Escolhas `session` e `always` MUST valer como aprovação única. Uma segunda decisão MUST ser recusada sem efeito.
 
@@ -59,3 +51,14 @@ Quando o spike S1 confirmar o suporte, turnos Claude SHALL encaminhar os pedidos
 - **WHEN** o Claude pede permissão para rodar um comando e o usuário nega
 - **THEN** o CLI recebe a negação e o item da ferramenta aparece como recusado pelo usuário
 - Test: integration — CLI falso que chama `approve_action` como o Claude faria; smoke real com Claude na fase 3
+
+### Requirement: Aprovação externa visível no Clovy
+O broker SHALL disponibilizar aprovações de clientes MCP externos na área de MCP do Clovy, com indicador de pendências. A interface MUST identificar ação, alvo e perfil quando aplicável, oferecer uma decisão única e registrar o resultado. O efeito MUST respeitar a autorização emitida para a chamada.
+
+#### Scenario: Ação solicitada de fora
+- **WHEN** um cliente externo pede uma ação protegida e o usuário abre o pedido
+- **THEN** ele vê a ação e seu alvo e pode autorizar uma vez ou negar, sem abrir chat
+
+#### Scenario: Pedido cancelado
+- **WHEN** a chamada termina antes da decisão
+- **THEN** o pedido deixa de estar acionável e nenhuma aprovação tardia produz efeito

@@ -40,12 +40,15 @@ O servidor SHALL expor os recursos `clovy://context` (data, hora e fuso atuais) 
 - Test: unit — handler de recursos
 
 ### Requirement: Configuração para clientes
-As configurações SHALL mostrar o comando e o trecho de configuração prontos para Claude Code e Cursor, com botão de copiar, e o servidor MUST poder ser oferecido automaticamente às sessões de chat com motor CLI que aceitam MCP.
+As configurações SHALL mostrar o comando e o trecho de configuração prontos para Claude Code e Cursor, com botão de copiar. O transporte MUST continuar sendo o relay local autenticado por instalação.
 
 #### Scenario: Copiar configuração
-- **WHEN** o usuário liga o servidor e clica em copiar a configuração do Claude Code
-- **THEN** o clipboard recebe um trecho válido que aponta para o executável do servidor do Clovy instalado
-- Test: unit — gerador do trecho de configuração
+- **WHEN** o usuário abre Configurações MCP com o servidor ligado
+- **THEN** pode copiar o trecho de configuração para Claude Code ou Cursor
+
+#### Scenario: Cliente já configurado
+- **WHEN** um agente externo já configurado conecta após a atualização
+- **THEN** pode inicializar, listar e ler com as mesmas configurações e filtros
 
 ### Requirement: Vínculo de turno
 Cada turno CLI com ferramentas do Clovy SHALL receber um token de turno de uso único nos argumentos do `clovy-mcp` (`--turn <token>`), registrado pelo app com sessão, execução, CLI, modo de segurança e se o turno é assistido. O relay MUST enviar o token no handshake como campo aditivo `turn`, mantendo `clovyMcp: 1`. O token MUST NOT dispensar o segredo da instalação nem a checagem de usuário.
@@ -62,14 +65,6 @@ O app MUST revogar o token quando a execução termina, falha ou é cancelada e 
 - **WHEN** a execução é cancelada e um processo reusa o mesmo token
 - **THEN** o handshake é recusado com `turn_expired` e nenhuma ferramenta executa
 - Test: integration — socket real, cancelamento pelo `ChatEngineHost` e nova conexão com o token antigo
-
-### Requirement: Clientes sem vínculo continuam só leitura
-Conexões sem token de turno SHALL ver exatamente as ferramentas e recursos de leitura atuais. Ferramentas de escrita MUST NOT aparecer em `tools/list` sem vínculo, e chamá-las MUST retornar `isError` com `turn_required`.
-
-#### Scenario: Cliente externo
-- **WHEN** um cliente configurado pelo snippet de Configurações chama `tools/list` e depois `save_memory`
-- **THEN** a lista é a de leitura e a chamada falha com `turn_required`, sem gravar memória
-- Test: integration — relay real sem `--turn`, comparação com o catálogo de leitura e banco inalterado
 
 ### Requirement: Catálogo de paridade com nomes fixos
 O servidor SHALL oferecer a turnos vinculados as ferramentas dos três requisitos seguintes, com os mesmos argumentos, limites, gates e erros das ferramentas nativas equivalentes, salvo onde indicado. Nomes MUST ser exatamente os das tabelas; este delta é o dono deles.
@@ -169,3 +164,21 @@ Credenciais, headers e tokens de servidores MCP e conectores MUST permanecer no 
 - **WHEN** um turno Codex usa `mcp_linear_*`
 - **THEN** o argv, o ambiente e os arquivos temporários do CLI não contêm o token do Linear
 - Test: integration — CLI falso que grava argv/env/arquivos e busca pelo token de teste
+
+### Requirement: Autoridade de clientes MCP externos
+Clientes sem vínculo de turno interno SHALL manter o acesso de leitura existente. Somente conexões externas locais autenticadas pelo relay SHALL poder descobrir e invocar as ferramentas adicionais autorizadas para essa superfície. O host MUST vincular a chamada ao cliente e à autoridade de dados e, quando a operação puder produzir efeito ou custo, exigir aprovação da operação exata. Uma conexão sem identidade externa validada continua limitada à leitura.
+
+#### Scenario: Cliente externo pede gravação
+- **WHEN** um cliente externo autenticado pede para salvar uma memória
+- **THEN** a ferramenta registra a solicitação com a prévia, escreve apenas após aprovação e devolve o resultado ao mesmo cliente
+
+#### Scenario: Alvo ou autorização muda
+- **WHEN** um pedido é recusado, expira, é cancelado, perde sua conexão ou o perfil muda antes do efeito
+- **THEN** a chamada termina com erro sem aplicar a mudança
+
+### Requirement: Ferramentas para agentes externos
+O relay SHALL reutilizar os handlers e a validação do catálogo do Clovy para todas as ferramentas aplicáveis a um agente externo. O host MUST fornecer contexto isolado para ferramentas que dele precisem, anunciar apenas ferramentas realmente habilitadas e nunca vincular chamadas externas a conversas internas por ID fornecido pelo cliente. Extração de dados, alterações, conectores, mídia e automação devem continuar sujeitos aos escopos, permissões e pré-condições do produto.
+
+#### Scenario: Descoberta e chamada sem chat
+- **WHEN** o agente externo chama as ferramentas anunciadas através do relay
+- **THEN** recebe resultados no cliente externo, com aprovação no Clovy quando aplicável, sem abrir ou criar conversa no app
