@@ -94,16 +94,22 @@ async fn send_request<T: DeserializeOwned>(
         .await
         .map_err(|e| GoogleApiError::Network(e.to_string()))?;
     let status = response.status().as_u16();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| GoogleApiError::Network(e.to_string()))?;
     if status == 401 {
         return Err(GoogleApiError::Unauthorized);
     }
     if status == 410 {
         return Err(GoogleApiError::SyncTokenExpired);
     }
+    let body = response.text().await.map_err(|error| {
+        if (400..500).contains(&status) {
+            GoogleApiError::Api {
+                status,
+                message: "request rejected (response body unreadable)".to_owned(),
+            }
+        } else {
+            GoogleApiError::Network(error.to_string())
+        }
+    })?;
     if !(200..300).contains(&status) {
         return Err(GoogleApiError::Api {
             status,
@@ -1813,5 +1819,44 @@ mod tests {
         assert_eq!(body["attendees"].as_array().map(Vec::len), Some(1));
         assert_eq!(body["attendees"][0]["email"], "me@example.com");
         assert_eq!(body["attendees"][0]["responseStatus"], "declined");
+    }
+
+    #[tokio::test]
+    async fn google_rejection_status_survives_an_incomplete_response_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for status in [403_u16, 429] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 4096];
+                stream.read(&mut request).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 {status} Rejected\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort"
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            });
+            let result = send_request::<serde_json::Value>(
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                    .unwrap()
+                    .post(format!("http://{address}/")),
+            )
+            .await;
+            tokio::time::timeout(std::time::Duration::from_secs(5), peer)
+                .await
+                .unwrap()
+                .unwrap();
+            match result.unwrap_err() {
+                GoogleApiError::Api {
+                    status: observed, ..
+                } => assert_eq!(observed, status),
+                other => panic!("a definitive rejection became {other:?}"),
+            }
+        }
     }
 }
