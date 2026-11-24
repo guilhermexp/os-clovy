@@ -335,16 +335,7 @@ impl<D: ConnectorDriver> ConnectorTools<D> {
             result = operation => result,
         };
         match result {
-            Err(error)
-                if WRITES.contains(&name)
-                    && matches!(
-                        error.code.as_str(),
-                        "network_error"
-                            | "connector_google_api_error"
-                            | "github_upstream_error"
-                            | "agent_connector_response_invalid"
-                    ) =>
-            {
+            Err(error) if WRITES.contains(&name) && delivery_may_be_unknown(&error) => {
                 Err(uncertain_connector_delivery(&error.code))
             }
             other => other,
@@ -362,6 +353,18 @@ impl<D: ConnectorDriver> ConnectorTools<D> {
                     "This connected account tool is unavailable.",
                 )
             })
+    }
+}
+
+fn delivery_may_be_unknown(error: &AppError) -> bool {
+    match error.code.as_str() {
+        "connector_google_api_error" => error
+            .details
+            .as_ref()
+            .and_then(|details| details["httpStatus"].as_u64())
+            .map_or(true, |status| !(400..500).contains(&status)),
+        "network_error" | "github_upstream_error" | "agent_connector_response_invalid" => true,
+        _ => false,
     }
 }
 

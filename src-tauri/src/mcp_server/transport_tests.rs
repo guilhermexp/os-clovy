@@ -786,7 +786,10 @@ async fn independent_request_reconnects_after_partial_write_before_reader_drains
                     break;
                 }
                 let message: Value = serde_json::from_str(&line).unwrap();
-                let id = message["id"].clone();
+                let Some(id) = message.get("id").cloned() else {
+                    // Relay lifecycle notifications have no request or effect.
+                    continue;
+                };
                 // A real append and its receipt, rather than an echo peer.
                 std::fs::OpenOptions::new()
                     .append(true)

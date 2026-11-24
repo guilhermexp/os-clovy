@@ -71,10 +71,14 @@ impl From<GoogleApiError> for AppError {
             GoogleApiError::InvalidInput(message) => {
                 AppError::new("connector_invalid_input", message)
             }
-            GoogleApiError::Api { status, message } => AppError::new(
-                "connector_google_api_error",
-                format!("Google API request failed ({status}): {message}"),
-            ),
+            GoogleApiError::Api { status, message } => {
+                let mut error = AppError::new(
+                    "connector_google_api_error",
+                    format!("Google API request failed ({status}): {message}"),
+                );
+                error.details = Some(serde_json::json!({"httpStatus": status}));
+                error
+            }
             GoogleApiError::Network(message) => AppError::new("network_error", message),
         }
     }

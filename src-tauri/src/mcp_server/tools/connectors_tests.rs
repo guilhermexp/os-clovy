@@ -780,6 +780,7 @@ pub(super) async fn wait_external_request(
 struct FailedConnectorResponse {
     driver: HttpConnector,
     code: &'static str,
+    http_status: Option<u16>,
 }
 impl ConnectorDriver for FailedConnectorResponse {
     fn catalog<'a>(&'a self, ctx: &'a ToolCtx<'a>) -> BoxFuture<'a, Result<Vec<Value>, AppError>> {
@@ -793,7 +794,15 @@ impl ConnectorDriver for FailedConnectorResponse {
     ) -> BoxFuture<'a, Result<Value, AppError>> {
         Box::pin(async move {
             self.driver.invoke(ctx, call, approval_id).await?;
-            Err(AppError::new(self.code, "The response could not be read."))
+            let error = match self.http_status {
+                Some(status) => crate::connectors::google::GoogleApiError::Api {
+                    status,
+                    message: "The response could not be read.".into(),
+                }
+                .into(),
+                None => AppError::new(self.code, "The response could not be read."),
+            };
+            Err(error)
         })
     }
 }
@@ -804,10 +813,14 @@ async fn external_connector_failed_write_response_prevents_unsafe_retry() {
     use crate::mcp_server::channel::ExternalConnection;
     use std::time::Duration;
 
-    for code in [
-        "network_error",
-        "connector_google_api_error",
-        "github_upstream_error",
+    for (code, http_status, delivery_unknown) in [
+        ("network_error", None, true),
+        ("connector_google_api_error", Some(200), true),
+        ("connector_google_api_error", Some(503), true),
+        ("connector_google_api_error", Some(403), false),
+        ("connector_google_api_error", Some(429), false),
+        ("github_upstream_error", None, true),
+        ("github_api_error", None, false),
     ] {
         for tool in ["send_email", "list_unread"] {
             let http = HttpFixture::new().await;
@@ -817,6 +830,7 @@ async fn external_connector_failed_write_response_prevents_unsafe_retry() {
             let group = ConnectorTools::new(FailedConnectorResponse {
                 driver: driver(&http),
                 code,
+                http_status,
             });
             let broker = ExternalApprovalBroker::new(
                 || Some("default".into()),
@@ -842,7 +856,7 @@ async fn external_connector_failed_write_response_prevents_unsafe_retry() {
                 1,
                 "the server already received the request"
             );
-            if tool == "send_email" {
+            if tool == "send_email" && delivery_unknown {
                 assert_eq!(error.code, "connector_delivery_uncertain");
                 let details = error.details.unwrap();
                 assert_eq!(details["cause"], code);
