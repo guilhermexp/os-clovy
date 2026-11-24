@@ -7,7 +7,6 @@ import { useState } from "react";
 import { type MessageKey, useT } from "../../../i18n";
 import {
   ONBOARDING_AREAS,
-  ONBOARDING_AREA_MOOD_PRESETS,
   onboardingArea,
   saveOnboardingArea,
   type OnboardingArea,
@@ -72,7 +71,6 @@ export function AreaStep({ onContinue }: { onContinue: (area: OnboardingArea) =>
               key={area}
               className="onboarding-mood-option onboarding-area-option"
               data-area={area}
-              data-mood={ONBOARDING_AREA_MOOD_PRESETS[area]}
               data-selected={active ? "true" : undefined}
               data-focus-visible={focusVisible === area ? "true" : undefined}
             >

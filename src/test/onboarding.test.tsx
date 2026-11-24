@@ -4,7 +4,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OnboardingFlow } from "../components/onboarding/OnboardingFlow";
 import {
   applyOnboardingReplayFlag,
-  isAgentRiskAcknowledged,
   isOnboardingComplete,
   markOnboardingComplete,
   ONBOARDING_COMPLETED_EVENT,
@@ -331,7 +330,7 @@ describe("OnboardingFlow", () => {
 
     expect(isOnboardingComplete()).toBe(false);
     expect(onboardingResumeStep()).toBeNull();
-    expect(isAgentRiskAcknowledged()).toBe(true);
+    expect(localStorage.getItem("clovy.agent.riskAcknowledged")).toBe("true");
   });
 
   it("applies the replay flag only in development", () => {

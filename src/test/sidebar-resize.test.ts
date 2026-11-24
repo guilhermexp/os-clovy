@@ -1,16 +1,15 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { handleSidebarResizeStart } from "../app/sidebar-resize";
-import appCss from "../styles/app.css?raw";
 
-function setupResizeDom(sidebarState: "collapsed" | "expanded", composerAttrs = "") {
+function setupResizeDom(sidebarState: "collapsed" | "expanded") {
   document.body.innerHTML = `
     <main class="app-shell" data-sidebar="${sidebarState}">
       <aside class="sidebar"></aside>
       <div class="sidebar-resize-handle"></div>
       <div class="main-column">
         <div class="tab-bar"></div>
-        <section class="main-panel"><div class="agent-composer" ${composerAttrs}></div></section>
+        <section class="main-panel"></section>
       </div>
     </main>
   `;
@@ -20,7 +19,6 @@ function setupResizeDom(sidebarState: "collapsed" | "expanded", composerAttrs = 
     mainColumn: document.querySelector(".main-column") as HTMLElement,
     tabBar: document.querySelector(".tab-bar") as HTMLElement,
     mainPanel: document.querySelector(".main-panel") as HTMLElement,
-    composer: document.querySelector(".agent-composer") as HTMLElement,
   };
 }
 
@@ -38,12 +36,6 @@ function reactPointerEvent(
     currentTarget: handle,
     preventDefault: vi.fn(),
   } as unknown as ReactPointerEvent<HTMLDivElement>;
-}
-
-function loadAppStyles() {
-  const style = document.createElement("style");
-  style.textContent = appCss.replace(/^@import[^\n]+\n/gm, "");
-  document.head.append(style);
 }
 
 describe("handleSidebarResizeStart", () => {
@@ -67,7 +59,7 @@ describe("handleSidebarResizeStart", () => {
     window.dispatchEvent(pointerEvent("pointermove", 100));
 
     // The width var is the single source of truth — the card gutter, handle,
-    // tab strip and composer all derive their offset from it in CSS.
+    // and tab strip all derive their offset from it in CSS.
     expect(shell.dataset.sidebarPreview).toBe("collapsed");
     expect(shell.style.getPropertyValue("--sidebar-w-current")).toBe("0px");
 
@@ -125,8 +117,8 @@ describe("handleSidebarResizeStart", () => {
     window.dispatchEvent(pointerEvent("pointermove", 220));
 
     // The snap animates one value — the registered --sidebar-w-current length.
-    // Everything that rides the width (grid, card gutter, handle, tab strip,
-    // composer) derives from it in CSS, so they tween off this single clock and
+    // The grid, card gutter, handle and tab strip derive from it in CSS. They
+    // share one clock and
     // can't drift apart mid-snap.
     const tween = "--sidebar-w-current var(--t-med) var(--ease-out)";
     expect(shell.style.transition).toBe(tween);
@@ -192,41 +184,5 @@ describe("handleSidebarResizeStart", () => {
     expect(shell.style.getPropertyValue("--sidebar-w-current")).toBe("188px");
 
     window.dispatchEvent(pointerEvent("pointerup", 170));
-  });
-
-  it("does not apply docked composer transitions to the new-session hero composer", () => {
-    const { shell, handle, composer } = setupResizeDom("expanded", 'data-hero="true"');
-
-    handleSidebarResizeStart(reactPointerEvent(handle, 240), 240, {
-      collapseWidth: 160,
-      minWidth: 188,
-      maxWidth: () => 320,
-      onStart: vi.fn(),
-      onEnd: vi.fn(),
-      commit: (fn) => fn(),
-    });
-
-    window.dispatchEvent(pointerEvent("pointermove", 100));
-
-    expect(shell.dataset.sidebarPreview).toBe("collapsed");
-    expect(composer.style.transition).toBe("");
-
-    window.dispatchEvent(pointerEvent("pointerup", 100));
-  });
-
-  it("keeps hero composer offsets auto under sidebar preview CSS", () => {
-    setupResizeDom("expanded", 'data-hero="true"');
-    const shell = document.querySelector(".app-shell") as HTMLElement;
-    const composer = document.querySelector(".agent-composer") as HTMLElement;
-
-    shell.dataset.sidebarPreview = "expanded";
-    loadAppStyles();
-
-    const styles = getComputedStyle(composer);
-    expect(styles.position).toBe("relative");
-    expect(styles.left).toBe("auto");
-    expect(styles.right).toBe("auto");
-    expect(styles.bottom).toBe("auto");
-    expect(styles.top).toBe("auto");
   });
 });

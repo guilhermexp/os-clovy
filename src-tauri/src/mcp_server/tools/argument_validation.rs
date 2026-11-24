@@ -2,7 +2,7 @@
 //! a domain service. Domain code still owns semantic validation and authority.
 use serde_json::Value;
 
-pub(super) fn validate(schema: &Value, value: &Value) -> Result<(), String> {
+pub(crate) fn validate(schema: &Value, value: &Value) -> Result<(), String> {
     if let Some(types) = schema.get("type") {
         let matches = |kind: &str| match kind {
             "object" => value.is_object(),

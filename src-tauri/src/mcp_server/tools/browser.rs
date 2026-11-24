@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use tauri::Manager;
 
 use super::{ToolCtx, ToolGroup};
+use crate::approval_broker::external::ExternalCall;
 use crate::browser_broker::BrowserBroker;
 use crate::domain::types::AppError;
 use crate::mcp_server::protocol;
@@ -147,6 +148,49 @@ pub struct BrowserTools {
 pub static BROWSER: BrowserTools = BrowserTools { broker: None };
 
 impl BrowserTools {
+    pub(super) fn external_descriptors(&self, ctx: &ToolCtx<'_>) -> Vec<Value> {
+        if !self.broker(ctx).is_ok_and(|broker| broker.external_ready()) {
+            return Vec::new();
+        }
+        tool_specs().into_iter()
+            .map(|(name, description, schema)| {
+                let description = match name {
+                    "start_session" => "Start an anonymous browser task owned by this MCP connection. Clovy closes it when the connection ends.",
+                    "close_session" => "Close the anonymous browser task owned by this MCP connection.",
+                    "click" => "Click the exact inspected reference after explicit approval. Sensitive input requires the user at the provider.",
+                    "fill" => "Fill the exact inspected reference after explicit approval. Credentials and payment fields remain unavailable.",
+                    "press" => "Press a supported key on the exact inspected reference after explicit approval. Sensitive input remains unavailable.",
+                    _ => description,
+                };
+                json!({"name":name,"description":description,"inputSchema":schema,"annotations":{"readOnlyHint":READ_ONLY.contains(&name),"openWorldHint":true}})
+            }).collect()
+    }
+
+    pub(super) async fn call_external(
+        &self,
+        ctx: &ToolCtx<'_>,
+        access: &ExternalCall<'_>,
+        name: &str,
+        arguments: &Value,
+    ) -> Result<Value, AppError> {
+        validate_arguments(name, arguments)?;
+        let broker = self.broker(ctx)?;
+        if !broker.external_ready() {
+            return Err(AppError::new(
+                "browser_unavailable",
+                "Anonymous browser tasks are unavailable.",
+            ));
+        }
+        let result = broker
+            .execute_external(access, name, arguments.clone())
+            .await?;
+        Ok(if name == "screenshot" {
+            with_screenshot_image(&broker, result)
+        } else {
+            result
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn with_broker(broker: Arc<BrowserBroker>) -> Self {
         Self {

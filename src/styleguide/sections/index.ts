@@ -4,7 +4,6 @@
 
 import type { ComponentType } from "react";
 import { Buttons } from "./Buttons";
-import { ChatPattern } from "./ChatPattern";
 import { Color } from "./Color";
 import { Controls } from "./Controls";
 import { Elevation } from "./Elevation";
@@ -56,7 +55,6 @@ export const SECTIONS: Section[] = [
     group: "Patterns",
     component: SettingsPattern,
   },
-  { id: "chat-pattern", label: "Chat", group: "Patterns", component: ChatPattern },
 ];
 
 // Group labels rendered in the nav, in order. Groups with no registered

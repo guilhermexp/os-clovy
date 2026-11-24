@@ -149,8 +149,7 @@ const CAPABILITIES: &[Capability] = &[
 /// every start, retry, and resume so reconnects, scope changes, and selected
 /// team changes cannot leave an old tool available in a later run.
 pub async fn descriptors(app: &AppHandle) -> Result<Vec<Value>, AppError> {
-    let accounts = connectors::list_runtime_accounts(app).await?;
-    let mut descriptors = descriptors_from_accounts(&accounts);
+    let mut descriptors = account_descriptors(app).await?;
     match crate::connectors::notion::runtime_descriptors(app).await {
         Ok(notion_descriptors) => descriptors.extend(notion_descriptors),
         Err(error) => tracing::warn!(
@@ -159,6 +158,17 @@ pub async fn descriptors(app: &AppHandle) -> Result<Vec<Value>, AppError> {
         ),
     }
     Ok(descriptors)
+}
+
+pub(crate) async fn account_descriptors(app: &AppHandle) -> Result<Vec<Value>, AppError> {
+    let accounts = connectors::list_runtime_accounts(app).await?;
+    Ok(descriptors_from_accounts(&accounts))
+}
+
+pub(crate) async fn external_account_descriptors(app: &AppHandle) -> Result<Vec<Value>, AppError> {
+    let mut accounts = connectors::list_runtime_accounts(app).await?;
+    accounts.retain(|account| !account.via_gh);
+    Ok(descriptors_from_accounts(&accounts))
 }
 
 pub fn routine_tool_allowed(
@@ -514,12 +524,50 @@ pub(crate) trait GithubAccess: Send + Sync {
 
 struct AppGithub<'a>(&'a AppHandle);
 
+tokio::task_local! {
+    static EXTERNAL_ACCOUNT_CALL: (crate::approval_broker::external::ExternalGuard, String);
+}
+
+pub(crate) async fn dispatch_external(
+    app: &AppHandle,
+    name: &str,
+    arguments: Value,
+    guard: crate::approval_broker::external::ExternalGuard,
+    profile: &str,
+) -> Result<Option<Value>, AppError> {
+    EXTERNAL_ACCOUNT_CALL
+        .scope((guard, profile.to_owned()), dispatch(app, name, arguments))
+        .await
+}
+
+async fn account_access_token(
+    app: &AppHandle,
+    provider: ConnectorProvider,
+    account_id: &str,
+) -> Result<String, AppError> {
+    if let Ok((guard, profile)) = EXTERNAL_ACCOUNT_CALL.try_with(Clone::clone) {
+        guard.check(&profile)?;
+        let token = connectors::cached_access_token(provider, account_id).await?;
+        guard.check(&profile)?;
+        return Ok(token);
+    }
+    if provider == ConnectorProvider::Github {
+        connectors::github_access_token(app, account_id).await
+    } else {
+        connectors::google_access_token(app, account_id).await
+    }
+}
+
 impl GithubAccess for AppGithub<'_> {
     fn accounts(&self) -> BoxFuture<'_, Result<Vec<ConnectorAccount>, AppError>> {
         Box::pin(connectors::list_runtime_accounts(self.0))
     }
     fn token<'a>(&'a self, account_id: &'a str) -> BoxFuture<'a, Result<String, AppError>> {
-        Box::pin(connectors::github_access_token(self.0, account_id))
+        Box::pin(account_access_token(
+            self.0,
+            ConnectorProvider::Github,
+            account_id,
+        ))
     }
 }
 
@@ -636,7 +684,7 @@ async fn google_token(app: &AppHandle, arguments: &Value, scope: &str) -> Result
         false,
     )
     .await?;
-    connectors::google_access_token(app, &account.account_id).await
+    account_access_token(app, ConnectorProvider::Google, &account.account_id).await
 }
 
 async fn gmail_search_threads(app: &AppHandle, arguments: Value) -> Result<Value, AppError> {
@@ -867,7 +915,7 @@ async fn calendar_respond_to_invite(app: &AppHandle, arguments: Value) -> Result
         false,
     )
     .await?;
-    let token = connectors::google_access_token(app, &account.account_id).await?;
+    let token = account_access_token(app, ConnectorProvider::Google, &account.account_id).await?;
     let response = match required(&arguments, "response")?.as_str() {
         "accepted" => crate::connectors::google::InviteResponse::Accepted,
         "declined" => crate::connectors::google::InviteResponse::Declined,

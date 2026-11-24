@@ -166,6 +166,30 @@ describe("AgentMcpServersSection", () => {
     expect(mocks.disconnectOauth).not.toHaveBeenCalled();
   });
 
+  it("directs interactive requests to a capable client and keeps the failed check unavailable", async () => {
+    const details = {
+      origin: "clovy_managed",
+      server: "Tasks",
+      phase: "discover",
+      code: "agent_mcp_elicitation_required",
+      state: "unavailable",
+      action: "answer_in_chat",
+      message: "The MCP server requires an answer in chat.",
+    };
+    mocks.list.mockResolvedValue([{ ...server, diagnostic: details }]);
+    mocks.test.mockRejectedValue({ code: details.code, message: details.message, details });
+    const user = userEvent.setup();
+    render(<AgentMcpServersSection />);
+
+    const guidance = "Open Tasks in an MCP client that supports interactive requests";
+    expect(await screen.findByRole("status")).toHaveTextContent(guidance);
+    expect(screen.queryByText(/answer in chat|request in chat/i)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Test Tasks" }));
+    expect(await screen.findByText(/Last check: unavailable/)).toHaveTextContent(guidance);
+    expect(screen.queryByText(/tools? available/i)).toBeNull();
+    expect(screen.getByRole("switch", { name: "Tasks enabled" })).toBeChecked();
+  });
+
   it("reconciles a failed reconnect and renders its phase and recovery", async () => {
     const oauth = {
       ...server,

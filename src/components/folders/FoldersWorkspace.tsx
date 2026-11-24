@@ -40,7 +40,7 @@ import { CreateFolderDialog } from "./CreateFolderDialog";
 import { EditFolderDialog } from "./EditFolderDialog";
 import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
 import { ImportClaudeProjectsDialog } from "./ImportClaudeProjectsDialog";
-import { buildFolderItemIndex } from "./folder-item-index";
+import { indexNotesByFolder } from "./folder-item-index";
 
 const NO_FOLDERS: FolderDto[] = [];
 const NO_FOLDER_NOTES: readonly NoteListItemDto[] = [];
@@ -182,7 +182,7 @@ function FolderList({
       }
     });
   }, [folders, normalizedQuery, sort]);
-  const folderItems = useMemo(() => buildFolderItemIndex(notes, [], {}), [notes]);
+  const folderItems = useMemo(() => indexNotesByFolder(notes), [notes]);
 
   const content: ReactNode =
     sortedAndFiltered.length > 0 ? (
@@ -191,7 +191,7 @@ function FolderList({
           <FolderCard
             key={folder.id}
             folder={folder}
-            notes={folderItems.notesByFolderId.get(folder.id) ?? NO_FOLDER_NOTES}
+            notes={folderItems.get(folder.id) ?? NO_FOLDER_NOTES}
             menuOpen={menu?.folderId === folder.id}
             onOpen={() => onSelectFolder(folder.id)}
             onDropNote={(noteId) => {

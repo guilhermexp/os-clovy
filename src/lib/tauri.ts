@@ -953,33 +953,6 @@ export async function setMemoryEnabled(enabled: boolean) {
   return invoke<MemorySettingsDto>("set_memory_enabled", { enabled });
 }
 
-export async function agentHudShow() {
-  return invoke<void>("agent_hud_show");
-}
-
-export async function agentHudHide() {
-  return invoke<void>("agent_hud_hide");
-}
-
-export async function agentHudSetLayout(input: {
-  expanded: boolean;
-  cardCount?: number;
-  contextMenuOpen?: boolean;
-  width?: number;
-  height?: number;
-  placement?: "top-left" | "top-right" | "bottom-left" | "bottom-right";
-}) {
-  return invoke<void>("agent_hud_set_layout", { request: input });
-}
-
-export async function agentHudMainFocused() {
-  return invoke<boolean>("agent_hud_main_focused");
-}
-
-export async function agentHudOpenAgent(session?: AgentSessionDto, storedSessionId?: string) {
-  return invoke<void>("agent_hud_open_agent", { session, storedSessionId });
-}
-
 export async function sendAppNotification(input: {
   title: string;
   body: string;

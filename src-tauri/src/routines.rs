@@ -10,7 +10,7 @@ use crate::{
     agent_sessions::{AgentItemPayload, AgentRepository, AgentSafetyMode, MessagePayload},
     browser_broker::{BrowserBroker, RoutineBrowserGrant},
     commands::repositories,
-    db::repositories::RoutineBrowserGrantRecord,
+    db::repositories::{McpMutation, RoutineBrowserGrantRecord},
     domain::types::AppError,
 };
 use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
@@ -23,12 +23,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
-type BoundRoutineTurn<'a> = Option<(
-    &'a str,
-    &'a str,
-    &'a str,
-    &'a crate::domain::turn_authority::TurnAuthority,
-)>;
+pub(crate) type RoutineMutation<'a> = Option<(&'a str, McpMutation<'a>)>;
 
 const CLAIM_STALE_AFTER_MINUTES: i64 = 10;
 const SCHEDULER_TICK_SECONDS: u64 = 30;
@@ -179,15 +174,113 @@ fn resolve_routine_model(
         .map(crate::chat_engine::engine_model_id)
 }
 
-async fn guard_routine_turn(
+async fn guard_routine_mutation(
     transaction: &mut Transaction<'_, Sqlite>,
-    turn: BoundRoutineTurn<'_>,
+    mutation: RoutineMutation<'_>,
+    routine_id: Option<&str>,
 ) -> Result<(), AppError> {
-    if let Some((profile, session, run, authority)) = turn {
-        crate::db::repositories::guard_bound_turn(transaction, profile, session, run, authority)
-            .await?;
+    if let Some((profile, authority)) = mutation {
+        authority.guard(transaction, profile).await?;
+        if let (Some(id), McpMutation::External(_)) = (routine_id, authority) {
+            let actual = approved_routine_target(transaction, id).await?;
+            if authority
+                .external_target()
+                .and_then(|target| target.get("routine"))
+                != Some(&actual)
+            {
+                return Err(AppError::new(
+                    "routine_conflict",
+                    "The routine or its grants changed after approval was requested.",
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+fn check_routine_mutation(mutation: RoutineMutation<'_>) -> Result<(), AppError> {
+    match mutation {
+        Some((profile, authority)) => authority.before_commit(profile),
+        None => Ok(()),
+    }
+}
+
+pub(crate) async fn external_target(
+    pool: &SqlitePool,
+    routine_id: &str,
+) -> Result<Value, AppError> {
+    let mut transaction = pool.begin().await.map_err(app_error)?;
+    let target = approved_routine_target(&mut transaction, routine_id).await?;
+    transaction.commit().await.map_err(app_error)?;
+    Ok(target)
+}
+
+async fn approved_routine_target(
+    transaction: &mut Transaction<'_, Sqlite>,
+    routine_id: &str,
+) -> Result<Value, AppError> {
+    use sha2::{Digest, Sha256};
+
+    let routine = get_in_transaction(transaction, routine_id).await?;
+    let identity = query("SELECT claim_token, tool_catalog_version FROM routines WHERE id = ?")
+        .bind(routine_id)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(app_error)?;
+    let browser =
+        query("SELECT enabled, server_name, token FROM routine_browser_grants WHERE job_id = ?")
+            .bind(routine_id)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(app_error)?;
+    let connectors = query("SELECT provider, server_name, tools, token, account_id FROM connector_grants WHERE job_id = ? ORDER BY provider")
+        .bind(routine_id).fetch_all(&mut **transaction).await.map_err(app_error)?;
+    let browser_enabled = browser
+        .as_ref()
+        .is_some_and(|row| row.get::<i64, _>("enabled") != 0);
+    let tools = enabled_toolsets_from_metadata(
+        &routine.metadata,
+        identity.get::<i64, _>("tool_catalog_version") == 0,
+    );
+    let connector_actions = connectors.iter().filter_map(|row| {
+        let server: String = row.get("server_name");
+        if !tools.contains(&server) {
+            return None;
+        }
+        Some(json!({
+            "provider":row.get::<String,_>("provider"),
+            "account":row.get::<String,_>("account_id"),
+            "tools":serde_json::from_str::<Value>(&row.get::<String,_>("tools")).unwrap_or_default(),
+        }))
+    }).collect::<Vec<_>>();
+    // Freeze the execution and grants without displaying internal tokens,
+    // private metadata, or linkage to any stored agent session.
+    let fingerprint = Sha256::digest(serde_json::to_vec(&json!({
+        "routine":routine,
+        "claim":identity.get::<Option<String>,_>("claim_token"),
+        "toolCatalogVersion":identity.get::<i64,_>("tool_catalog_version"),
+        "browser":browser.as_ref().map(|row| json!([row.get::<String,_>("server_name"),row.get::<String,_>("token"),browser_enabled])),
+        "connectors":connectors.iter().map(|row| json!([row.get::<String,_>("provider"),row.get::<String,_>("server_name"),row.get::<String,_>("tools"),row.get::<String,_>("token"),row.get::<String,_>("account_id")])).collect::<Vec<_>>(),
+    })).map_err(|error| AppError::new("routine_snapshot_invalid",error.to_string()))?);
+    Ok(json!({
+        "id":routine.id,"name":routine.name,"prompt":routine.prompt,
+        "schedule":routine.schedule,"timezone":routine.timezone,"repeat":routine.repeat,
+        "model":routine.model,"safetyMode":routine.safety_mode,"state":routine.state,
+        "enabled":routine.enabled,"nextRunAt":routine.next_run_at,
+        "toolsets":tools,"browserAccess":browser_enabled,"connectorActions":connector_actions,
+        "fingerprint":format!("{fingerprint:x}"),
+    }))
+}
+
+pub(crate) fn external_routine_model(
+    stored_model: &str,
+    env: &crate::llm::shell_env::LoginEnv,
+) -> Result<String, AppError> {
+    let installed: Vec<_> = crate::llm::registry::UNATTENDED_CLIS
+        .into_iter()
+        .filter(|kind| env.which(kind.id()).is_some())
+        .collect();
+    resolve_routine_model(stored_model, &installed)
 }
 
 /// Create a durable Routine. The first next run is derived before insertion so
@@ -196,19 +289,19 @@ pub async fn create(
     pool: &SqlitePool,
     request: CreateAgentRoutineRequest,
 ) -> Result<AgentRoutineDto, AppError> {
-    create_for_turn(pool, request, None).await
+    create_authorized(pool, request, None).await
 }
 
-pub(crate) async fn create_for_turn(
+pub(crate) async fn create_authorized(
     pool: &SqlitePool,
     request: CreateAgentRoutineRequest,
-    turn: BoundRoutineTurn<'_>,
+    mutation: RoutineMutation<'_>,
 ) -> Result<AgentRoutineDto, AppError> {
     let mut transaction = pool
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(app_error)?;
-    guard_routine_turn(&mut transaction, turn).await?;
+    guard_routine_mutation(&mut transaction, mutation, None).await?;
     let name = request
         .name
         .as_deref()
@@ -248,6 +341,7 @@ pub(crate) async fn create_for_turn(
         .bind(safety_mode.as_db()).bind(&state).bind(enabled).bind(&timestamp).bind(&timestamp)
         .bind(next_run_at).bind(metadata_json(metadata)).execute(&mut *transaction).await.map_err(app_error)?;
     let result = get_in_transaction(&mut transaction, &id).await?;
+    check_routine_mutation(mutation)?;
     transaction.commit().await.map_err(app_error)?;
     Ok(result)
 }
@@ -294,13 +388,13 @@ pub async fn update(
     pool: &SqlitePool,
     request: UpdateAgentRoutineRequest,
 ) -> Result<AgentRoutineDto, AppError> {
-    update_for_turn(pool, request, None).await
+    update_authorized(pool, request, None).await
 }
 
-pub(crate) async fn update_for_turn(
+pub(crate) async fn update_authorized(
     pool: &SqlitePool,
     request: UpdateAgentRoutineRequest,
-    turn: BoundRoutineTurn<'_>,
+    mutation: RoutineMutation<'_>,
 ) -> Result<AgentRoutineDto, AppError> {
     // Routine edits derive state and metadata from the stored row. Serialize
     // that read with terminal claim release so a stale edit cannot overwrite
@@ -309,7 +403,7 @@ pub(crate) async fn update_for_turn(
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(app_error)?;
-    guard_routine_turn(&mut transaction, turn).await?;
+    guard_routine_mutation(&mut transaction, mutation, Some(&request.routine_id)).await?;
     let current = get_in_transaction(&mut transaction, &request.routine_id).await?;
     let routine_id = request.routine_id;
     let state = request.state.unwrap_or(current.state);
@@ -360,24 +454,25 @@ pub(crate) async fn update_for_turn(
         .bind(next_run_at).bind(metadata_json(metadata)).bind(tool_catalog_updated)
         .bind(&routine_id)
         .execute(&mut *transaction).await.map_err(app_error)?;
+    check_routine_mutation(mutation)?;
     transaction.commit().await.map_err(app_error)?;
     get(pool, &routine_id).await
 }
 
 pub async fn pause(pool: &SqlitePool, id: &str) -> Result<AgentRoutineDto, AppError> {
-    pause_for_turn(pool, id, None).await
+    pause_authorized(pool, id, None).await
 }
 
-pub(crate) async fn pause_for_turn(
+pub(crate) async fn pause_authorized(
     pool: &SqlitePool,
     id: &str,
-    turn: BoundRoutineTurn<'_>,
+    mutation: RoutineMutation<'_>,
 ) -> Result<AgentRoutineDto, AppError> {
     let mut transaction = pool
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(app_error)?;
-    guard_routine_turn(&mut transaction, turn).await?;
+    guard_routine_mutation(&mut transaction, mutation, Some(id)).await?;
     // Pausing stops future scheduling but does not cancel a claimed run. Keep
     // its claim association until terminal projection records status and
     // repeat progress, then releases the claim transactionally.
@@ -387,24 +482,25 @@ pub(crate) async fn pause_for_turn(
         return Err(AppError::new("routine_not_found", "Routine was not found."));
     }
     let result = get_in_transaction(&mut transaction, id).await?;
+    check_routine_mutation(mutation)?;
     transaction.commit().await.map_err(app_error)?;
     Ok(result)
 }
 
 pub async fn resume(pool: &SqlitePool, id: &str) -> Result<AgentRoutineDto, AppError> {
-    resume_for_turn(pool, id, None).await
+    resume_authorized(pool, id, None).await
 }
 
-pub(crate) async fn resume_for_turn(
+pub(crate) async fn resume_authorized(
     pool: &SqlitePool,
     id: &str,
-    turn: BoundRoutineTurn<'_>,
+    mutation: RoutineMutation<'_>,
 ) -> Result<AgentRoutineDto, AppError> {
     let mut transaction = pool
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(app_error)?;
-    guard_routine_turn(&mut transaction, turn).await?;
+    guard_routine_mutation(&mut transaction, mutation, Some(id)).await?;
     let current = get_in_transaction(&mut transaction, id).await?;
     if requires_legacy_execution_review(&current.metadata) {
         return Err(AppError::new(
@@ -415,24 +511,25 @@ pub(crate) async fn resume_for_turn(
     let next = next_run_after(&current.schedule, &current.timezone, Utc::now())?.map(format_time);
     query("UPDATE routines SET state = 'scheduled', enabled = 1, next_run_at = ?, updated_at = ? WHERE id = ?")
         .bind(next).bind(crate::db::repositories::timestamp()).bind(id).execute(&mut *transaction).await.map_err(app_error)?;
+    check_routine_mutation(mutation)?;
     transaction.commit().await.map_err(app_error)?;
     get(pool, id).await
 }
 
 pub async fn delete(pool: &SqlitePool, id: &str) -> Result<(), AppError> {
-    delete_for_turn(pool, id, None).await
+    delete_authorized(pool, id, None).await
 }
 
-pub(crate) async fn delete_for_turn(
+pub(crate) async fn delete_authorized(
     pool: &SqlitePool,
     id: &str,
-    turn: BoundRoutineTurn<'_>,
+    mutation: RoutineMutation<'_>,
 ) -> Result<(), AppError> {
     let mut transaction = pool
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(app_error)?;
-    guard_routine_turn(&mut transaction, turn).await?;
+    guard_routine_mutation(&mut transaction, mutation, Some(id)).await?;
     let deleted = query("DELETE FROM routines WHERE id = ?")
         .bind(id)
         .execute(&mut *transaction)
@@ -441,6 +538,7 @@ pub(crate) async fn delete_for_turn(
     if deleted.rows_affected() == 0 {
         Err(AppError::new("routine_not_found", "Routine was not found."))
     } else {
+        check_routine_mutation(mutation)?;
         transaction.commit().await.map_err(app_error)?;
         Ok(())
     }
@@ -518,7 +616,7 @@ async fn claim_with_connector_guard(
     connector: Option<ConnectorClaimGuard<'_>>,
 ) -> Result<Option<Claim>, AppError> {
     let env = crate::llm::shell_env::login_env().await;
-    claim_with_connector_guard_for_turn(
+    claim_with_connector_guard_authorized(
         pool,
         routine_id,
         trigger_kind,
@@ -530,13 +628,13 @@ async fn claim_with_connector_guard(
     .await
 }
 
-async fn claim_with_connector_guard_for_turn(
+async fn claim_with_connector_guard_authorized(
     pool: &SqlitePool,
     routine_id: &str,
     trigger_kind: &str,
     require_due: bool,
     connector: Option<ConnectorClaimGuard<'_>>,
-    turn: BoundRoutineTurn<'_>,
+    mutation: RoutineMutation<'_>,
     env: &crate::llm::shell_env::LoginEnv,
 ) -> Result<Option<Claim>, AppError> {
     // Resolve executable presence before acquiring the SQLite writer. No CLI
@@ -552,7 +650,7 @@ async fn claim_with_connector_guard_for_turn(
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(app_error)?;
-    guard_routine_turn(&mut transaction, turn).await?;
+    guard_routine_mutation(&mut transaction, mutation, Some(routine_id)).await?;
     let trigger_id = connector.as_ref().map(|guard| guard.trigger_id);
     let trigger_guard_kind = connector.as_ref().map(|guard| guard.kind);
     let trigger_account_id = connector.as_ref().map(|guard| guard.account_id);
@@ -577,6 +675,16 @@ async fn claim_with_connector_guard_for_turn(
     let timestamp = crate::db::repositories::timestamp();
     let stored_model: String = routine.get("model");
     let model = resolve_routine_model(&stored_model, &installed)?;
+    if let Some((_, authority)) = mutation {
+        if let Some(expected) = authority.external_target() {
+            if expected["resolvedModel"].as_str() != Some(&model) {
+                return Err(AppError::new(
+                    "routine_conflict",
+                    "The routine engine changed after approval was requested.",
+                ));
+            }
+        }
+    }
     let safety_mode = AgentSafetyMode::from(routine.get::<String, _>("safety_mode").as_str());
     let metadata = serde_json::from_str::<Value>(&routine.get::<String, _>("metadata_json"))
         .unwrap_or_else(|_| json!({}));
@@ -593,6 +701,7 @@ async fn claim_with_connector_guard_for_turn(
     query("INSERT INTO routine_runs (id, routine_id, claim_token, trigger_kind, status, scheduled_for, model, safety_mode, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)")
         .bind(&run_id).bind(routine_id).bind(&token).bind(trigger_kind).bind(scheduled_for).bind(&model).bind(safety_mode.as_db()).bind(&timestamp).bind(&timestamp)
         .execute(&mut *transaction).await.map_err(app_error)?;
+    check_routine_mutation(mutation)?;
     transaction.commit().await.map_err(app_error)?;
     Ok(Some(Claim {
         routine_id: routine.get("id"),
@@ -629,7 +738,7 @@ mod bound_claim_tests {
             .await
             .unwrap();
         let env = crate::llm::shell_env::LoginEnv::from_vars(Default::default());
-        let result = claim_with_connector_guard_for_turn(
+        let result = claim_with_connector_guard_authorized(
             broker.pool(),
             &routine.id,
             "manual",
@@ -637,9 +746,7 @@ mod bound_claim_tests {
             None,
             Some((
                 "default",
-                &binding.session_id,
-                &binding.run_id,
-                &binding.authority,
+                McpMutation::Turn(&binding.session_id, &binding.run_id, &binding.authority),
             )),
             &env,
         )
@@ -651,7 +758,7 @@ mod bound_claim_tests {
             .is_empty());
         // The refused admission leaves the claim available to the scheduler.
         let (_directory, env) = super::selection_tests::environment(&[CliKind::Claude]);
-        assert!(claim_with_connector_guard_for_turn(
+        assert!(claim_with_connector_guard_authorized(
             broker.pool(),
             &routine.id,
             "schedule",
@@ -682,7 +789,7 @@ async fn claim_due_with_env(
         .bind(crate::db::repositories::timestamp()).fetch_all(pool).await.map_err(app_error)?.into_iter().map(|row| row.get("id")).collect();
     let mut claims = Vec::new();
     for id in ids {
-        match claim_with_connector_guard_for_turn(pool, &id, "schedule", true, None, None, env)
+        match claim_with_connector_guard_authorized(pool, &id, "schedule", true, None, None, env)
             .await
         {
             Ok(Some(claim)) => claims.push(claim),
@@ -965,25 +1072,36 @@ pub async fn start_claim(
     pool: &SqlitePool,
     claim: Claim,
 ) -> Result<AgentRoutineRunDto, AppError> {
+    start_claim_authorized(app, pool, claim, None).await
+}
+
+pub(crate) async fn start_claim_authorized(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    claim: Claim,
+    mutation: RoutineMutation<'_>,
+) -> Result<AgentRoutineRunDto, AppError> {
     let repository = AgentRepository::new(pool.clone());
     let session_id = Uuid::new_v4().to_string();
-    let workspace = routine_workspace(app, &session_id)?;
-    tokio::fs::create_dir_all(&workspace)
-        .await
-        .map_err(|error| AppError::new("routine_workspace_failed", error.to_string()))?;
     let timestamp = crate::db::repositories::timestamp();
     let mut created_agent_run_id = None;
     let cli =
         crate::chat_engine::cli_for_model(&claim.model).unwrap_or(crate::llm::cli::CliKind::Claude);
     let started = async {
+        check_routine_mutation(mutation)?;
+        let workspace = routine_workspace(app, &session_id)?;
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .map_err(|error| AppError::new("routine_workspace_failed", error.to_string()))?;
+        check_routine_mutation(mutation)?;
         let run_id = persist_claim_run(
-            pool,
             &repository,
             &claim,
             &session_id,
             &workspace,
             &timestamp,
             &mut created_agent_run_id,
+            mutation,
         )
         .await?;
         start_cli_claim(
@@ -991,9 +1109,9 @@ pub async fn start_claim(
             &repository,
             &claim,
             cli,
-            &session_id,
-            &run_id,
+            (&session_id, &run_id),
             &workspace,
+            mutation,
         )
         .await?;
         Ok::<_, AppError>(run_id)
@@ -1055,21 +1173,42 @@ pub async fn trigger_and_start(
     pool: &SqlitePool,
     routine_id: &str,
 ) -> Result<Option<AgentRoutineRunDto>, AppError> {
-    trigger_and_start_for_turn(app, pool, routine_id, None).await
+    trigger_and_start_authorized(app, pool, routine_id, None).await
 }
 
-pub(crate) async fn trigger_and_start_for_turn(
+pub(crate) async fn trigger_and_start_authorized(
     app: &AppHandle,
     pool: &SqlitePool,
     routine_id: &str,
-    turn: BoundRoutineTurn<'_>,
+    mutation: RoutineMutation<'_>,
 ) -> Result<Option<AgentRoutineRunDto>, AppError> {
     reconcile(pool).await?;
     let env = crate::llm::shell_env::login_env().await;
-    match claim_with_connector_guard_for_turn(pool, routine_id, "manual", false, None, turn, &env)
-        .await?
-    {
-        Some(claim) => start_claim(app, pool, claim).await.map(Some),
+    trigger_using(pool, routine_id, mutation, &env, |claim| {
+        start_claim_authorized(app, pool, claim, mutation)
+    })
+    .await
+}
+
+/// The durable admission is shared by Tauri, the external tool and fixtures;
+/// the callback owns CLI dispatch after the approved routine is claimed.
+pub(crate) async fn trigger_using<F, Fut>(
+    pool: &SqlitePool,
+    routine_id: &str,
+    mutation: RoutineMutation<'_>,
+    env: &crate::llm::shell_env::LoginEnv,
+    launch: F,
+) -> Result<Option<AgentRoutineRunDto>, AppError>
+where
+    F: FnOnce(Claim) -> Fut,
+    Fut: std::future::Future<Output = Result<AgentRoutineRunDto, AppError>>,
+{
+    let claim = claim_with_connector_guard_authorized(
+        pool, routine_id, "manual", false, None, mutation, env,
+    )
+    .await?;
+    match claim {
+        Some(claim) => launch(claim).await.map(Some),
         None => Ok(None),
     }
 }
@@ -1102,16 +1241,37 @@ pub async fn trigger_from_connector(
 /// written to `created` as soon as the run exists, so a later failure can
 /// terminalize it.
 async fn persist_claim_run(
-    pool: &SqlitePool,
     repository: &AgentRepository,
     claim: &Claim,
     session_id: &str,
     workspace: &std::path::Path,
     timestamp: &str,
     created: &mut Option<String>,
+    mutation: RoutineMutation<'_>,
 ) -> Result<String, AppError> {
+    let pool = &repository.pool;
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(app_error)?;
+    check_routine_mutation(mutation)?;
     query("INSERT INTO agent_sessions (id, title, status, model, safety_mode, workspace_path, source, created_at, updated_at) VALUES (?, ?, 'idle', ?, ?, ?, 'routine', ?, ?)")
-        .bind(session_id).bind(&claim.routine_name).bind(&claim.model).bind(claim.safety_mode.as_db()).bind(workspace.to_string_lossy().as_ref()).bind(timestamp).bind(timestamp).execute(pool).await.map_err(app_error)?;
+        .bind(session_id).bind(&claim.routine_name).bind(&claim.model).bind(claim.safety_mode.as_db()).bind(workspace.to_string_lossy().as_ref()).bind(timestamp).bind(timestamp).execute(&mut *transaction).await.map_err(app_error)?;
+    if let Some((profile, McpMutation::External(_))) = mutation {
+        if profile != "default" {
+            query(
+                "INSERT INTO session_profiles (session_id, profile, assigned_at) VALUES (?, ?, ?)",
+            )
+            .bind(session_id)
+            .bind(profile)
+            .bind(timestamp)
+            .execute(&mut *transaction)
+            .await
+            .map_err(app_error)?;
+        }
+    }
+    check_routine_mutation(mutation)?;
+    transaction.commit().await.map_err(app_error)?;
     let run = repository
         .create_run(session_id, &claim.model, Some("medium"))
         .await
@@ -1162,9 +1322,9 @@ async fn start_cli_claim(
     repository: &AgentRepository,
     claim: &Claim,
     kind: crate::llm::cli::CliKind,
-    session_id: &str,
-    run_id: &str,
+    (session_id, run_id): (&str, &str),
     workspace: &std::path::Path,
+    mutation: RoutineMutation<'_>,
 ) -> Result<(), AppError> {
     repository
         .set_run_config(
@@ -1174,7 +1334,7 @@ async fn start_cli_claim(
         .await?;
     let engines = app.state::<crate::chat_engine::ChatEngineHost>();
     let ticket = engines.register(run_id)?;
-    let started = crate::chat_engine::start_cli_turn(
+    let started = crate::chat_engine::start_cli_turn_guarded(
         app,
         repository.clone(),
         crate::chat_engine::CliTurnRequest {
@@ -1195,6 +1355,7 @@ async fn start_cli_claim(
             ),
         },
         ticket,
+        || check_routine_mutation(mutation),
     )
     .await;
     crate::chat_engine::finish_cli_dispatch(app, repository, session_id, run_id, started).await
@@ -1775,7 +1936,7 @@ mod tests {
     ) -> Result<Option<Claim>, AppError> {
         let (_directory, env) =
             super::selection_tests::environment(&[crate::llm::cli::CliKind::Claude]);
-        super::claim_with_connector_guard_for_turn(pool, id, trigger, due, None, None, &env).await
+        super::claim_with_connector_guard_authorized(pool, id, trigger, due, None, None, &env).await
     }
 
     async fn claim_due(pool: &SqlitePool) -> Result<Vec<Claim>, AppError> {
@@ -3057,13 +3218,13 @@ mod tests {
             let session_id = Uuid::new_v4().to_string();
             let mut created = None;
             let run_id = persist_claim_run(
-                &pool,
                 &repository,
                 &claimed,
                 &session_id,
                 workspace.path(),
                 &crate::db::repositories::timestamp(),
                 &mut created,
+                None,
             )
             .await
             .unwrap();
@@ -3242,7 +3403,7 @@ mod selection_tests {
         for only in [CliKind::Claude, CliKind::Codex] {
             let (_directory, env) = environment(&[only]);
             let pool = fixture("auto").await;
-            let claimed = claim_with_connector_guard_for_turn(
+            let claimed = claim_with_connector_guard_authorized(
                 &pool,
                 "selection",
                 "manual",
@@ -3308,7 +3469,7 @@ mod selection_tests {
         ] {
             let (_directory, env) = environment(&installed);
             let pool = fixture(model).await;
-            let error = claim_with_connector_guard_for_turn(
+            let error = claim_with_connector_guard_authorized(
                 &pool,
                 "selection",
                 "manual",

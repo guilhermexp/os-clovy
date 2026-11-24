@@ -7,7 +7,7 @@
 //! ADR-0058 describes, and calling a bound-only tool answers `turn_required`.
 
 mod activity_management;
-mod argument_validation;
+pub(crate) mod argument_validation;
 pub(crate) mod browser;
 #[cfg(test)]
 mod browser_tests;

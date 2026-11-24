@@ -2,7 +2,8 @@
 //! authority across conversations, turns, tabs or human takeover.
 use crate::{
     approval_broker::{
-        ApprovalBroker, ApprovalKind, ApprovalOutcome, ApprovalRequest, ApprovalTurn,
+        external::ExternalCall, ApprovalBroker, ApprovalKind, ApprovalOutcome, ApprovalRequest,
+        ApprovalTurn,
     },
     browser::policy::{interaction_route, InteractionClass, InteractionRoute, InteractiveElement},
     db::repositories::Repositories,
@@ -77,14 +78,31 @@ pub(crate) struct TransportArtifact {
     pub bytes: Vec<u8>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum BrowserOwner {
+    Turn {
+        conversation: String,
+        run: String,
+    },
+    External {
+        connection: uuid::Uuid,
+        generation: u64,
+        profile: String,
+    },
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Owner {
-    conversation: String,
-    run: String,
+    identity: BrowserOwner,
     routine: Option<String>,
 }
 impl Owner {
+    fn run(&self) -> Option<&str> {
+        match &self.identity {
+            BrowserOwner::Turn { run, .. } => Some(run),
+            BrowserOwner::External { .. } => None,
+        }
+    }
     fn kind(&self) -> BrowserTransportKind {
-        if self.routine.is_some() {
+        if self.routine.is_some() || matches!(self.identity, BrowserOwner::External { .. }) {
             BrowserTransportKind::Managed
         } else {
             BrowserTransportKind::Attended
@@ -132,7 +150,7 @@ fn err(code: &str, message: &str) -> AppError {
 fn missing() -> AppError {
     err(
         "browser_session_not_found",
-        "This browser session does not belong to this conversation and run, or has ended.",
+        "This browser session does not belong to the current task, or has ended.",
     )
 }
 fn unavailable() -> AppError {
@@ -140,6 +158,40 @@ fn unavailable() -> AppError {
         "browser_unavailable",
         "Clovy's dedicated browser is not ready. Prepare or reinstall its bundled resources.",
     )
+}
+async fn wait_for_browser_scope<T>(
+    external: Option<&ExternalCall<'_>>,
+    step: impl Future<Output = T>,
+) -> Result<T, AppError> {
+    let Some(access) = external else {
+        return Ok(step.await);
+    };
+    access.check_live()?;
+    tokio::select! {
+        biased;
+        _ = access.cancelled() => Err(err("mcp_external_cancelled", "The browser request closed before dispatch.")),
+        value = step => Ok(value),
+    }
+}
+
+async fn approve_external_browser(
+    external: Option<&ExternalCall<'_>>,
+    tool: &str,
+    args: &Value,
+) -> Result<(), AppError> {
+    if let Some(access) = external {
+        access
+            .approve(
+                tool,
+                "Use the anonymous browser",
+                "Clovy will apply this operation to a browser task owned by this connection.",
+                args,
+                None,
+            )
+            .await?;
+        access.check_live()?;
+    }
+    Ok(())
 }
 impl BrowserBroker {
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -220,7 +272,7 @@ impl BrowserBroker {
     }
     pub(crate) fn terminate_run(&self, id: &str) {
         self.lock().ended.insert(id.into());
-        self.terminate_matching(|s| s.owner.run == id);
+        self.terminate_matching(|s| s.owner.run() == Some(id));
     }
     pub(crate) fn terminate_sessions(&self, deadline: crate::shutdown::ShutdownDeadline) {
         let Some(mut state) = deadline.try_lock(&self.state) else {
@@ -255,7 +307,7 @@ impl BrowserBroker {
                 "Enable Browser use in experimental settings first.",
             ));
         }
-        if s.ended.contains(&owner.run) {
+        if owner.run().is_some_and(|run| s.ended.contains(run)) {
             return Err(missing());
         }
         if let Some(job) = &owner.routine {
@@ -325,7 +377,7 @@ impl BrowserBroker {
         approvals: &ApprovalBroker,
         routine: Option<&str>,
         tool: &str,
-        mut arguments: Value,
+        arguments: Value,
     ) -> Result<Value, AppError> {
         if (!binding.attended && routine.is_none()) || (binding.attended && routine.is_some()) {
             return Err(err(
@@ -334,18 +386,94 @@ impl BrowserBroker {
             ));
         }
         let owner = Owner {
-            conversation: binding.session_id.clone(),
-            run: binding.run_id.clone(),
+            identity: BrowserOwner::Turn {
+                conversation: binding.session_id.clone(),
+                run: binding.run_id.clone(),
+            },
             routine: routine.map(str::to_owned),
         };
+        self.execute_owned(owner, Some((binding, approvals)), None, tool, arguments)
+            .await
+    }
+
+    pub(crate) fn external_ready(&self) -> bool {
+        self.is_enabled()
+            && self.transport(BrowserTransportKind::Managed).is_ok()
+            && self.lock().repositories.is_some()
+    }
+
+    pub(crate) async fn execute_external(
+        self: &Arc<Self>,
+        access: &ExternalCall<'_>,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<Value, AppError> {
+        access.check_live()?;
+        let (connection, generation, profile) = access.ownership();
+        let owner = Owner {
+            identity: BrowserOwner::External {
+                connection,
+                generation,
+                profile: profile.to_owned(),
+            },
+            routine: None,
+        };
+        let result = self
+            .execute_owned(owner, None, Some(access), tool, arguments)
+            .await?;
+        if tool == "start_session" {
+            let id = string(&result, "sessionId")?.to_owned();
+            let broker = Arc::downgrade(self);
+            let end = access.connection_end();
+            tokio::spawn(async move {
+                tokio::pin!(end);
+                loop {
+                    tokio::select! {
+                        _ = &mut end => {
+                            if let Some(broker) = broker.upgrade() {
+                                let _ = broker.stop_session(&id);
+                            }
+                            break;
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                            if !broker.upgrade().is_some_and(|broker| broker.lock().sessions.contains_key(&id)) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        Ok(result)
+    }
+
+    async fn execute_owned(
+        &self,
+        owner: Owner,
+        turn: Option<(&TurnBinding, &ApprovalBroker)>,
+        external: Option<&ExternalCall<'_>>,
+        tool: &str,
+        mut arguments: Value,
+    ) -> Result<Value, AppError> {
         self.revalidate(&owner, None).await?;
         let transport = self.transport(owner.kind())?;
         if tool == "start_session" {
+            approve_external_browser(external, tool, &arguments).await?;
+            self.revalidate(&owner, None).await?;
             let id = uuid::Uuid::new_v4().to_string();
             {
                 let mut s = self.lock();
-                if s.ended.contains(&owner.run) {
+                if owner.run().is_some_and(|run| s.ended.contains(run)) {
                     return Err(missing());
+                }
+                if let Some(access) = external {
+                    access.check_live()?;
+                    if s.sessions.values().any(|session| session.owner == owner) {
+                        return Err(err(
+                            "browser_session_exists",
+                            "This connection already owns a browser session.",
+                        ));
+                    }
                 }
                 transport.reserve_session(&id)?;
                 s.sessions.insert(
@@ -364,6 +492,7 @@ impl BrowserBroker {
                     tool,
                     json!({"session_id":id}),
                     transport.clone(),
+                    external,
                 )
                 .await;
             match started {
@@ -399,10 +528,15 @@ impl BrowserBroker {
         let operation = self.require_session(&owner, &id)?;
         // Stop never waits for a call/approval/CDP mutex.
         if tool == "close_session" {
+            approve_external_browser(external, tool, &arguments).await?;
+            self.revalidate(&owner, Some(&id)).await?;
+            if let Some(access) = external {
+                access.check_live()?;
+            }
             self.stop_session(&id)?;
             return Ok(json!({"closed":true}));
         }
-        let mut operation_guard = Some(operation.lock().await);
+        let mut operation_guard = Some(wait_for_browser_scope(external, operation.lock()).await?);
         self.revalidate(&owner, Some(&id)).await?;
         if !matches!(
             tool,
@@ -434,17 +568,30 @@ impl BrowserBroker {
                 ));
             }
         }
-        if matches!(tool, "click" | "fill" | "press") {
-            let inspected = transport
-                .execute(
+        let interaction = matches!(tool, "click" | "fill" | "press");
+        if external.is_some() && !interaction {
+            drop(operation_guard.take());
+            approve_external_browser(external, tool, &arguments).await?;
+            operation_guard = Some(wait_for_browser_scope(external, operation.lock()).await?);
+            self.revalidate(&owner, Some(&id)).await?;
+        }
+        if interaction {
+            let attended = external.is_some() || turn.is_some_and(|(binding, _)| binding.attended);
+            if let Some(access) = external {
+                access.check_live()?;
+            }
+            let inspected = wait_for_browser_scope(
+                external,
+                transport.execute(
                     "inspect_reference",
                     json!({
                         "session_id": id,
                         "tab_id": integer(&arguments, "tab_id")?,
                         "ref": string(&arguments, "ref")?,
                     }),
-                )
-                .await?;
+                ),
+            )
+            .await??;
             let expected: Inspection =
                 serde_json::from_value(inspected.data).map_err(|_| unavailable())?;
             match tool {
@@ -461,11 +608,13 @@ impl BrowserBroker {
             // Redacted metadata cannot safely be classified again here. The
             // required host enum was computed from original facts and is bound
             // into metadataId/expected for the final guard.
-            match interaction_route(expected.interaction_class, binding.attended) {
+            match interaction_route(expected.interaction_class, attended) {
                 InteractionRoute::HumanOnly => {
                     return Err(err(
                         "browser_human_takeover_required",
-                        if binding.attended {
+                        if external.is_some() {
+                            "Complete sensitive input directly at the provider. This anonymous browser task has no sign-in or takeover access."
+                        } else if attended {
                             "First call request_clarification and keep it pending while the user takes over the dedicated browser, completes sensitive input and resumes control. Then list tabs and inspect a fresh snapshot; never enter credentials or repeat this input."
                         } else {
                             "This routine uses an anonymous browser and cannot enter sensitive fields or use a login profile."
@@ -483,31 +632,40 @@ impl BrowserBroker {
                     // central approval card waits. The exact inspection is
                     // retained and guarded again after reacquiring authority.
                     drop(operation_guard.take());
-                    let decision = approvals.request(
-                        &ApprovalTurn::from(binding),
-                        ApprovalRequest {
-                            tool: tool.into(),
-                            call_id: Some(uuid::Uuid::new_v4().to_string()),
-                            kind: ApprovalKind::Approval {
-                                title: "Use the browser".into(),
-                                description: "Clovy will interact with the inspected page. The page can attach effects to any click, field change or key.".into(),
-                                arguments: json!({
-                                    "session_id": id,
-                                    "tab_id": integer(&arguments, "tab_id")?,
-                                    "operation": tool,
-                                    "origin": expected.origin,
-                                }),
-                                preview: Some(browser_action_preview(tool, &expected)),
+                    if let Some(access) = external {
+                        let target = json!({"inspect": browser_action_preview(tool, &expected)});
+                        access.approve(tool, "Use the anonymous browser",
+                            "Clovy will interact with the inspected page. Its elements can trigger effects.",
+                            &arguments, Some(&target)).await?;
+                    } else {
+                        let (binding, approvals) = turn.ok_or_else(missing)?;
+                        let decision = approvals.request(
+                            &ApprovalTurn::from(binding),
+                            ApprovalRequest {
+                                tool: tool.into(),
+                                call_id: Some(uuid::Uuid::new_v4().to_string()),
+                                kind: ApprovalKind::Approval {
+                                    title: "Use the browser".into(),
+                                    description: "Clovy will interact with the inspected page. The page can attach effects to any click, field change or key.".into(),
+                                    arguments: json!({
+                                        "session_id": id,
+                                        "tab_id": integer(&arguments, "tab_id")?,
+                                        "operation": tool,
+                                        "origin": expected.origin,
+                                    }),
+                                    preview: Some(browser_action_preview(tool, &expected)),
+                                },
                             },
-                        },
-                    ).await.map_err(|d| AppError::new(d.code(), d.message()))?;
-                    if decision != ApprovalOutcome::Approved {
-                        return Err(err(
-                            "browser_action_declined",
-                            "The browser action was not approved.",
-                        ));
+                        ).await.map_err(|d| AppError::new(d.code(), d.message()))?;
+                        if decision != ApprovalOutcome::Approved {
+                            return Err(err(
+                                "browser_action_declined",
+                                "The browser action was not approved.",
+                            ));
+                        }
                     }
-                    operation_guard = Some(operation.lock().await);
+                    operation_guard =
+                        Some(wait_for_browser_scope(external, operation.lock()).await?);
                     self.revalidate(&owner, Some(&id)).await?;
                 }
             }
@@ -527,7 +685,14 @@ impl BrowserBroker {
             ));
         }
         let mut data = self
-            .dispatch(&owner, &id, tool, arguments.clone(), transport.clone())
+            .dispatch(
+                &owner,
+                &id,
+                tool,
+                arguments.clone(),
+                transport.clone(),
+                external,
+            )
             .await?;
         if let Err(error) = self.revalidate(&owner, Some(&id)).await {
             if !matches!(tool, "snapshot" | "screenshot" | "list_tabs") {
@@ -574,6 +739,7 @@ impl BrowserBroker {
         tool: &str,
         arguments: Value,
         transport: Arc<dyn BrowserTransport>,
+        external: Option<&ExternalCall<'_>>,
     ) -> Result<Value, AppError> {
         let repos = Some(self.lock().repositories.clone().ok_or_else(|| {
             err(
@@ -600,10 +766,18 @@ impl BrowserBroker {
                 })?;
         }
         self.revalidate(owner, Some(id)).await?;
-        let result = transport
-            .execute(tool, arguments)
-            .await
-            .and_then(|response| self.finish_response(response));
+        let response = if let Some(access) = external {
+            access.check_live()?;
+            tokio::select! {
+                biased;
+                _ = access.cancelled() => Err(err("browser_outcome_unknown", "Browser authority ended during dispatch. The operation may have happened.")),
+                result = transport.execute(tool, arguments) => result,
+            }
+        } else {
+            transport.execute(tool, arguments).await
+        };
+        let result =
+            response.and_then(|response| self.finish_response(response, external.is_some()));
         if result
             .as_ref()
             .err()
@@ -640,7 +814,11 @@ impl BrowserBroker {
         }
         result
     }
-    fn finish_response(&self, mut response: TransportResponse) -> Result<Value, AppError> {
+    fn finish_response(
+        &self,
+        mut response: TransportResponse,
+        external: bool,
+    ) -> Result<Value, AppError> {
         if let Some(artifact) = response.artifact {
             let root = self.lock().screenshots.clone().ok_or_else(unavailable)?;
             if artifact.kind != "screenshot"
@@ -663,6 +841,18 @@ impl BrowserBroker {
             .and_then(Value::as_str)
             .is_some_and(|s| s.len() > 200 * 1024)
         {
+            if external {
+                // External callers get bounded text, without a private host path.
+                const LIMIT: usize = 200 * 1024;
+                let snapshot = response.data["snapshot"].as_str().unwrap_or_default();
+                let mut end = LIMIT;
+                while !snapshot.is_char_boundary(end) {
+                    end -= 1;
+                }
+                response.data["snapshot"] = json!(&snapshot[..end]);
+                response.data["truncated"] = json!(true);
+                return Ok(response.data);
+            }
             let root = self.lock().artifacts.clone().ok_or_else(unavailable)?;
             let filename = format!("browser-snapshot-{}.json", uuid::Uuid::new_v4().simple());
             atomic_write(&root, &filename, response.data.to_string().as_bytes())?;

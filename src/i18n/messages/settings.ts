@@ -36,16 +36,6 @@ export default defineMessages({
     "settings.theme.systemAria": "Match system theme",
     "settings.theme.lightAria": "Use light theme",
     "settings.theme.darkAria": "Use dark theme",
-    "settings.background.title": "Background",
-    "settings.background.description": "The background in New session and Home.",
-    "settings.background.drift": "Drift",
-    "settings.background.none": "None",
-    "settings.background.image": "Image",
-    "settings.background.choose": "Choose image",
-    "settings.background.remove": "Remove",
-    "settings.background.missing": "Image unavailable. Choose another file.",
-    "settings.background.error":
-      "Could not use this image. Choose a readable PNG, JPEG or WebP up to 20 MB and 8192 pixels per side. Try reducing its resolution.",
     "settings.textSize.title": "Text size",
     "settings.textSize.description":
       "Make text across the app larger. Applies to labels and notes.",
@@ -57,12 +47,6 @@ export default defineMessages({
     "settings.accent.description":
       "The brand color used across buttons, highlights, and the recorder.",
     "settings.accent.aria": "Accent color: {color}",
-    "settings.dateFormat.title": "Date format",
-    "settings.dateFormat.description": "Choose how calendar dates appear.",
-    "settings.dateFormat.aria": "Date format: {format}",
-    "settings.dateFormat.system": "System",
-    "settings.dateFormat.monthFirst": "Jul 9",
-    "settings.dateFormat.dayFirst": "9 Jul",
 
     "settings.tabs.general": "General",
     "settings.tabs.shortcuts": "Shortcuts",
@@ -341,16 +325,6 @@ export default defineMessages({
     "settings.dictionary.saveChanges": "Save changes",
     "settings.dictionary.field": "Word or phrase",
     "settings.dictionary.placeholder": "e.g. Anthropic, ARR, Jane Doe",
-
-    "settings.personality.loadError": "Unable to load Clovy's personality.",
-    "settings.personality.saveError": "Unable to save Clovy's personality.",
-    "settings.personality.saved": "Saved",
-    "settings.personality.title": "Personality",
-    "settings.personality.description":
-      "Choose the voice Clovy uses in Home and new agent sessions.",
-    "settings.personality.loading": "Loading Clovy's personality",
-    "settings.personality.legend": "Choose Clovy's personality",
-    "settings.personality.applies": "Applies to future Home replies and the next agent run.",
   },
   "pt-BR": {
     "settings.localTranscription.engine": "Motor de transcrição",
@@ -387,16 +361,6 @@ export default defineMessages({
     "settings.theme.systemAria": "Seguir o tema do sistema",
     "settings.theme.lightAria": "Usar tema claro",
     "settings.theme.darkAria": "Usar tema escuro",
-    "settings.background.title": "Fundo",
-    "settings.background.description": "O fundo da Nova sessão e do Início.",
-    "settings.background.drift": "Drift",
-    "settings.background.none": "Nenhum",
-    "settings.background.image": "Imagem",
-    "settings.background.choose": "Escolher imagem",
-    "settings.background.remove": "Remover",
-    "settings.background.missing": "Imagem indisponível. Escolha outro arquivo.",
-    "settings.background.error":
-      "Não foi possível usar esta imagem. Escolha um PNG, JPEG ou WebP legível de até 20 MB e 8192 pixels por lado. Tente reduzir a resolução.",
     "settings.textSize.title": "Tamanho do texto",
     "settings.textSize.description":
       "Aumente o texto em todo o app. Afeta todos os rótulos, notas e conversas.",
@@ -407,13 +371,6 @@ export default defineMessages({
     "settings.accent.title": "Destaque",
     "settings.accent.description": "A cor da marca usada em botões, realces e no gravador.",
     "settings.accent.aria": "Cor de destaque: {color}",
-    "settings.dateFormat.title": "Formato de data",
-    "settings.dateFormat.description":
-      "Escolha como as datas de sessões mais antigas aparecem na barra lateral.",
-    "settings.dateFormat.aria": "Formato de data: {format}",
-    "settings.dateFormat.system": "Sistema",
-    "settings.dateFormat.monthFirst": "jul 9",
-    "settings.dateFormat.dayFirst": "9 jul",
 
     "settings.tabs.general": "Geral",
     "settings.tabs.shortcuts": "Atalhos",
@@ -700,16 +657,5 @@ export default defineMessages({
     "settings.dictionary.saveChanges": "Salvar alterações",
     "settings.dictionary.field": "Palavra ou frase",
     "settings.dictionary.placeholder": "ex.: Anthropic, ARR, Maria Silva",
-
-    "settings.personality.loadError": "Não foi possível carregar a personalidade do Clovy.",
-    "settings.personality.saveError": "Não foi possível salvar a personalidade do Clovy.",
-    "settings.personality.saved": "Salvo",
-    "settings.personality.title": "Personalidade",
-    "settings.personality.description":
-      "Escolha a voz que o Clovy usa no Início e em novas sessões do agente.",
-    "settings.personality.loading": "Carregando a personalidade do Clovy",
-    "settings.personality.legend": "Escolha a personalidade do Clovy",
-    "settings.personality.applies":
-      "Vale para as próximas respostas no Início e a próxima execução do agente.",
   },
 });

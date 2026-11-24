@@ -32,13 +32,13 @@ async fn dispatch_failure_cannot_replace_the_cancelled_routine_history() {
     let repo = AgentRepository::new(pool.clone());
     let dir = tempfile::tempdir().unwrap();
     let run = persist_claim_run(
-        &pool,
         &repo,
         &claim,
         "routine-session",
         dir.path(),
         "now",
         &mut None,
+        None,
     )
     .await
     .unwrap();

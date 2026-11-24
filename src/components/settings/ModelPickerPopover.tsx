@@ -778,7 +778,7 @@ export function ModelPickerPopover({
       {detail && portalTarget
         ? createPortal(
             // Portaled to the body and fixed-positioned so no scroll container
-            // or panel (e.g. the note-chat panel) can clip it or paint over it.
+            // or panel can clip it or paint over it.
             // Rendered as a .hovercard (position: fixed + z 140 + the slide
             // animation) rather than the absolute .flyout, but keeps
             // .agent-composer-model-detail for the card's own surface styles.

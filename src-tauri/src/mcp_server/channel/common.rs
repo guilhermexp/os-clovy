@@ -40,12 +40,36 @@ pub struct ExternalConnection {
 }
 
 impl ExternalConnection {
+    #[cfg(test)]
+    pub(crate) fn test_connection() -> (Self, watch::Sender<bool>, watch::Sender<bool>) {
+        let (close, closed) = watch::channel(false);
+        let (cancel, cancelled) = watch::channel(false);
+        (
+            Self {
+                id: uuid::Uuid::new_v4(),
+                closed,
+                cancelled,
+            },
+            close,
+            cancel,
+        )
+    }
+
     pub(crate) fn id(&self) -> uuid::Uuid {
         self.id
     }
 
     pub(crate) fn is_live(&self) -> bool {
-        !*self.closed.borrow() && self.closed.has_changed().is_ok() && !*self.cancelled.borrow()
+        self.is_peer_live() && !*self.cancelled.borrow()
+    }
+
+    pub(crate) fn is_peer_live(&self) -> bool {
+        !*self.closed.borrow() && self.closed.has_changed().is_ok()
+    }
+
+    pub(crate) async fn peer_closed(&self) {
+        let mut closed = self.closed.clone();
+        let _ = closed.wait_for(|closed| *closed).await;
     }
 
     pub(crate) async fn closed(&self) {

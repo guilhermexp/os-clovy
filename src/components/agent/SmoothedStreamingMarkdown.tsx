@@ -354,7 +354,7 @@ function nextRevealEnd(text: string, currentEnd: number, safeEnd: number): numbe
  * Presents append-only assistant text as word-paced reveals. Provider deltas
  * are transport details and may contain whole paragraphs, so the visible
  * stream advances in small word-bounded steps instead. The authoritative text
- * remains the raw stream in AgentWorkspace.
+ * remains the raw source held by the caller.
  */
 export function SmoothedStreamingMarkdown({
   markdown,

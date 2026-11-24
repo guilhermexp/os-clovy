@@ -275,9 +275,23 @@ vincular e desvincular notas de projetos, apagar ditados retidos e atualizar ou
 pausar a captura de Atividade quando aplicável. Cada mudança exige aprovação.
 Prévia grande demais para exibir por inteiro impede a solicitação. Os handlers
 aplicam as regras de retenção, escopo, configuração de memória e revisões de
-nota. Ferramentas de conector, mídia, Browser use, Computer use e controle de
-gravação que exigem autoridade interna permanecem sujeitas ao contexto de
-seus próprios handlers.
+nota.
+
+| Grupo | Contexto externo |
+| --- | --- |
+| Rotinas | Criação, edição, pausa, retomada, exclusão e execução usam a rotina salva. A execução usa a política desassistida. Alterações externas que habilitariam execução irrestrita são recusadas. |
+| Skills | Leitura explícita, edição e ativação usam a raiz gerenciada, com revalidação do arquivo e das configurações depois da aprovação. |
+| Conectores e gateway | Contas com escopo suficiente do Gmail, Google Calendar e GitHub, além das ferramentas anunciadas pelo Notion e pelo Linear conectados. O gateway também descobre servidores HTTP habilitados para uso no modo restrito. Cada chamada exige aprovação e usa a credencial vigente. Renovação, login e solicitações interativas acontecem no cliente ou na configuração apropriada. |
+| Mídia | `generate_image`, `edit_image` e `generate_video` usam o fal configurado e pedem aprovação para cada operação com custo. O `sourcePath` externo identifica uma imagem gerada pela mesma conexão. A retomada de vídeo usa o identificador de trabalho da conexão e consulta o trabalho existente. |
+| Browser use | Ferramentas do navegador gerenciado usam uma sessão anônima reservada à conexão. O navegador precisa estar habilitado. Cada operação exige aprovação e entrada sensível continua sujeita à política do navegador. A desconexão ou troca de perfil encerra a sessão. |
+| Computer use | O controlador existente exige autorização local, driver e permissões do sistema. `list_apps` informa as janelas. Captura e foco exigem app e janela explícitos. Ações de entrada dependem de uma captura atual da mesma conexão. Cada ação exige aprovação. Outra tarefa ativa mantém o controle até concluir ou ser interrompida pelo usuário. |
+| Gravação | O status e os artefatos usam a partição ativa. A janela principal conduz as operações aprovadas de início, pausa, retomada, encerramento, recuperação e nova tentativa de processamento, com fonte e alvo fixados pelo host. |
+
+Servidores de terceiros configurados como comandos stdio e contas GitHub
+fornecidas pelo login do `gh` ainda dependem de um contexto local capaz de
+executar os respectivos processos. Conversas e preferências de uma conversa
+existente ficam restritas aos consumidores internos. Um erro de entrega
+incerta pede conferência do alvo antes de repetir a operação.
 
 O shell lista pedidos por `mcp_external_approvals`, decide por
 `mcp_external_approval_decide` e atualiza o conteúdo no evento

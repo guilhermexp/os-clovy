@@ -1,6 +1,12 @@
 import type { AnimationEvent, ReactNode } from "react";
 
-import { repairContractionSpacing } from "../../lib/agent-chat-runtime";
+const CONTRACTION_GLUE = /([A-Za-z])('(?:s|re|ve|ll|m|d|t))(?=[A-Za-z])/gi;
+
+function repairContractionSpacing(text: string): string {
+  return text.replace(CONTRACTION_GLUE, (whole, pre: string, enclitic: string) =>
+    pre.toLowerCase() === "s" ? whole : `${pre}${enclitic} `,
+  );
+}
 
 // Shared with the streaming holdback so text is classified by the same inline
 // grammar before and after it reaches the renderer. Emphasis delimiters must
@@ -9,9 +15,7 @@ export function createInlineMarkdownPattern(): RegExp {
   return /(\*\*([^*\s](?:[^*]*[^*\s])?)\*\*|\*([^*\s](?:[^*]*[^*\s])?)\*|~~([^~]+)~~|`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\))/g;
 }
 
-/** The agent-side markdown renderer, extracted from AgentWorkspace so other
- * chat surfaces (the note chat panel) render assistant prose identically.
- * Deliberately hand-rolled and conservative — see renderMarkdownBlocks. */
+/** Renders formatted output from routine results and incremental Markdown. */
 export function MarkdownContent({
   markdown,
   highlight,

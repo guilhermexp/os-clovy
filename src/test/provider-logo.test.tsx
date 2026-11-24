@@ -1,6 +1,5 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { ClovyAlive } from "../components/brand/ClovyAlive";
 import {
   CLOVY_LIME,
   CLOVY_LIME_SHADE,
@@ -67,25 +66,6 @@ describe("Clovy logo", () => {
     const wordmark = screen.getByRole("img", { name: "Clovy wordmark" });
     expect(Array.from(wordmark.querySelectorAll("path"), (path) => path.getAttribute("d"))).toEqual(
       CLOVY_WORDMARK_PATHS,
-    );
-  });
-
-  it("gives the living Home character the marketing material and independent eyes", () => {
-    render(<ClovyAlive label="Living Clovy" />);
-
-    const character = screen.getByRole("img", { name: "Living Clovy" });
-    expect(character).toHaveAttribute("data-palette", "identity");
-    expect(character.querySelector(".clovy-alive-sheen")).toBeInTheDocument();
-    expect(character.querySelectorAll(".clovy-alive-eye")).toHaveLength(2);
-    expect(character.querySelector(".clovy-alive-body")).toBeInTheDocument();
-  });
-
-  it("allows the Home character to opt into the Appearance palette", () => {
-    render(<ClovyAlive label="Themed Clovy" palette="appearance" />);
-
-    expect(screen.getByRole("img", { name: "Themed Clovy" })).toHaveAttribute(
-      "data-palette",
-      "appearance",
     );
   });
 });

@@ -5,10 +5,11 @@
 use super::connectors::{approve, bound, ensure_active, TurnCache};
 use super::{ToolCtx, ToolGroup};
 use crate::agent_mcp::{
-    self, AgentMcpError, AgentMcpRepository, AgentMcpSubsystem, KeychainMcpSecretStore,
-    McpSecretStore, McpToolPolicy, RuntimeToolDescriptorJson,
+    self, AgentMcpError, AgentMcpRepository, AgentMcpSubsystem, ExternalLinearAccount,
+    KeychainMcpSecretStore, McpSecretStore, McpToolPolicy, RuntimeToolDescriptorJson,
 };
 use crate::agent_sessions::{AgentRepository, AgentSafetyMode};
+use crate::approval_broker::external::ExternalCall;
 use crate::approval_broker::{ApprovalKind, ApprovalOutcome, ApprovalRequest, ApprovalTurn};
 use crate::domain::types::AppError;
 use futures_util::future::BoxFuture;
@@ -51,6 +52,148 @@ impl<D: GatewayDriver> GatewayTools<D> {
             calls: OnceLock::new(),
         }
     }
+
+    fn subsystem(&self, ctx: &ToolCtx<'_>) -> AgentMcpSubsystem<D::Secrets> {
+        AgentMcpSubsystem::new(
+            AgentMcpRepository::new(ctx.data.notes.clone()),
+            self.driver.secrets(),
+        )
+    }
+
+    async fn external_inventory(
+        &self,
+        ctx: &ToolCtx<'_>,
+        subsystem: &AgentMcpSubsystem<D::Secrets>,
+    ) -> Result<
+        (
+            Vec<RuntimeToolDescriptorJson>,
+            Option<ExternalLinearAccount>,
+        ),
+        AgentMcpError,
+    > {
+        let mut tools = subsystem.refresh_registry_for_workspace(true, None).await?;
+        let linear = match ctx.app {
+            Some(app) => match subsystem.discover_external_linear(app).await {
+                Ok(discovery) => discovery,
+                Err(error) => {
+                    tracing::warn!(%error, "Linear inventory unavailable to external MCP");
+                    None
+                }
+            },
+            None => None,
+        };
+        if let Some((account, descriptors)) = linear {
+            tools.retain(|tool| !descriptors.iter().any(|linear| linear.name == tool.name));
+            tools.extend(descriptors);
+            return Ok((tools, Some(account)));
+        }
+        Ok((tools, None))
+    }
+
+    pub(super) async fn external_catalog(
+        &self,
+        ctx: &ToolCtx<'_>,
+        access: &ExternalCall<'_>,
+    ) -> Vec<Value> {
+        agent_mcp::in_external_call(async {
+            let subsystem = self.subsystem(ctx);
+            tokio::select! {
+                biased;
+                _ = access.cancelled() => Vec::new(),
+                catalog = self.external_inventory(ctx, &subsystem) =>
+                    catalog.map(|(tools, _)| tools.iter().map(descriptor).collect()).unwrap_or_default(),
+            }
+        })
+        .await
+    }
+
+    pub(super) async fn call_external(
+        &self,
+        ctx: &ToolCtx<'_>,
+        access: &ExternalCall<'_>,
+        name: &str,
+        arguments: &Value,
+    ) -> Result<Value, AppError> {
+        agent_mcp::in_external_call(async {
+            access.check_live()?;
+            let subsystem = self.subsystem(ctx);
+            let (tools, linear_account) = tokio::select! {
+                biased;
+                _ = access.cancelled() => return Err(external_cancelled()),
+                tools = self.external_inventory(ctx, &subsystem) =>
+                    tools.map_err(mcp_discovery_error)?,
+            };
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .ok_or_else(|| mcp_call_error(AgentMcpError::ToolUnavailable, "gateway", name))?;
+            super::argument_validation::validate(&tool.parameters, arguments)
+                .map_err(|error| AppError::new("agent_tool_arguments_invalid", error))?;
+            let server = subsystem
+                .server_name_for_tool(name)
+                .map_err(mcp_discovery_error)?
+                .ok_or_else(|| mcp_call_error(AgentMcpError::ToolUnavailable, "gateway", name))?;
+            let linear = linear_account
+                .as_ref()
+                .filter(|_| tool.approval_provider.as_deref() == Some("Linear"));
+            let target = if let Some(linear) = linear {
+                json!({"server": server, "tool": name, "workspaceId": linear.account.account_id,
+                    "workspace": linear.account.workspace_name})
+            } else {
+                json!({"server": server, "tool": name})
+            };
+            let approval = access
+                .approve(
+                    name,
+                    "Call a connected MCP server",
+                    "Clovy will send these arguments to the configured MCP server.",
+                    arguments,
+                    Some(&target),
+                )
+                .await?;
+            approval.check(&ctx.data.profile)?;
+
+            // The registered dispatcher compares the original server and
+            // policy fingerprint again under its credential lifecycle lock.
+            let operation = agent_mcp::with_external_approval(
+                approval.guard_owned(),
+                &ctx.data.profile,
+                async {
+                    if let Some(linear) = linear {
+                        let app = ctx.app.ok_or(AgentMcpError::ToolUnavailable)?;
+                        subsystem
+                            .invoke_external_linear(app, linear, name, arguments.clone())
+                            .await
+                    } else {
+                        subsystem
+                            .invoke_in_workspace_with_elicitation(
+                                name,
+                                arguments.clone(),
+                                true,
+                                None,
+                                None,
+                            )
+                            .await
+                    }
+                },
+            );
+            tokio::select! {
+                biased;
+                _ = access.cancelled() => Err(after_dispatch(external_cancelled(), &server, name)),
+                result = operation => result.map_err(|error| {
+                    let error = if matches!(error, AgentMcpError::ElicitationRequired(_)) {
+                        // This scope cannot return an answer to a parked
+                        // remote request. Disposal closes only this call's
+                        // transport; the server may already have applied it.
+                        error.after_elicitation()
+                    } else { error };
+                    mcp_call_error(error, &server, name)
+                }),
+            }
+        })
+        .await
+    }
+
     async fn discover(&self, ctx: &ToolCtx<'_>) -> Result<Arc<Catalog<D::Secrets>>, AppError> {
         let binding = bound(ctx)?;
         let session = AgentRepository::new(ctx.data.notes.clone())
@@ -59,10 +202,7 @@ impl<D: GatewayDriver> GatewayTools<D> {
         let workspace = PathBuf::from(session.workspace_path.ok_or_else(|| {
             AppError::new("agent_workspace_missing", "This turn has no workspace.")
         })?);
-        let subsystem = AgentMcpSubsystem::new(
-            AgentMcpRepository::new(ctx.data.notes.clone()),
-            self.driver.secrets(),
-        );
+        let subsystem = self.subsystem(ctx);
         let sandboxed = binding.safety_mode == AgentSafetyMode::Sandboxed;
         let descriptors = agent_mcp::in_cli_turn(&binding.run_id, async {
             match ctx.app {
@@ -295,6 +435,10 @@ impl<D: GatewayDriver> GatewayTools<D> {
             name,
         ))
     }
+}
+
+fn external_cancelled() -> AppError {
+    AppError::new("mcp_external_cancelled", "The external MCP request closed.")
 }
 fn after_dispatch(error: AppError, server: &str, tool: &str) -> AppError {
     let mut diagnostic =

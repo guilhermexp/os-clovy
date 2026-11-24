@@ -54,7 +54,8 @@ export default defineMessages({
     "settingsPanels.mcp.actionStorage": "Check local database and secure storage access",
     "settingsPanels.mcp.actionConnection": "Check the server connection",
     "settingsPanels.mcp.actionServer": "Check the tool and server response",
-    "settingsPanels.mcp.actionAnswer": "Answer the request in chat",
+    "settingsPanels.mcp.actionInteractiveClient":
+      "Open {server} in an MCP client that supports interactive requests",
     "settingsPanels.mcp.healthConnected": "Last check: connected",
     "settingsPanels.mcp.healthReconnect": "Last check: reconnect required",
     "settingsPanels.mcp.healthUnavailable": "Last check: unavailable",
@@ -121,17 +122,6 @@ export default defineMessages({
     "settingsPanels.agent.experience": "Experience",
     "settingsPanels.agent.experienceDescription":
       "Control how Clovy keeps you informed while she works.",
-    "settingsPanels.agent.hudTitle": "Sessions HUD",
-    "settingsPanels.agent.hudDescription":
-      "Show a small pill with live session status while you are in other apps.",
-    "settingsPanels.agent.hudShow": "Show sessions HUD",
-    "settingsPanels.agent.hudPosition": "HUD position",
-    "settingsPanels.agent.hudPositionDescription": "The screen corner where the pill parks.",
-    "settingsPanels.agent.hudPositionAria": "Sessions HUD position",
-    "settingsPanels.agent.topLeft": "Top left",
-    "settingsPanels.agent.topRight": "Top right",
-    "settingsPanels.agent.bottomLeft": "Bottom left",
-    "settingsPanels.agent.bottomRight": "Bottom right",
     "settingsPanels.agent.sounds": "Agent sounds",
     "settingsPanels.agent.soundsDescription":
       "Play a sound when a routine finishes or needs attention.",
@@ -551,7 +541,8 @@ export default defineMessages({
       "Verifique o acesso ao banco local e ao armazenamento seguro",
     "settingsPanels.mcp.actionConnection": "Verifique a conexão com o servidor",
     "settingsPanels.mcp.actionServer": "Verifique a ferramenta e a resposta do servidor",
-    "settingsPanels.mcp.actionAnswer": "Responda à solicitação no chat",
+    "settingsPanels.mcp.actionInteractiveClient":
+      "Abra {server} em um cliente MCP que aceite solicitações interativas",
     "settingsPanels.mcp.healthConnected": "Última verificação: conectado",
     "settingsPanels.mcp.healthReconnect": "Última verificação: reconexão necessária",
     "settingsPanels.mcp.healthUnavailable": "Última verificação: indisponível",
@@ -619,17 +610,6 @@ export default defineMessages({
     "settingsPanels.agent.experience": "Experiência",
     "settingsPanels.agent.experienceDescription":
       "Controle como o Clovy mantém você informado enquanto trabalha.",
-    "settingsPanels.agent.hudTitle": "HUD de sessões",
-    "settingsPanels.agent.hudDescription":
-      "Mostra uma pequena pílula com o status da sessão ao vivo enquanto você usa outros apps.",
-    "settingsPanels.agent.hudShow": "Mostrar HUD de sessões",
-    "settingsPanels.agent.hudPosition": "Posição do HUD",
-    "settingsPanels.agent.hudPositionDescription": "O canto da tela onde a pílula fica.",
-    "settingsPanels.agent.hudPositionAria": "Posição do HUD de sessões",
-    "settingsPanels.agent.topLeft": "Superior esquerdo",
-    "settingsPanels.agent.topRight": "Superior direito",
-    "settingsPanels.agent.bottomLeft": "Inferior esquerdo",
-    "settingsPanels.agent.bottomRight": "Inferior direito",
     "settingsPanels.agent.sounds": "Sons do agente",
     "settingsPanels.agent.soundsDescription":
       "Toca um som quando uma rotina termina ou precisa de atenção.",

@@ -572,6 +572,25 @@ async fn refresh_google_access_token_with_freshness_gate(
     }
 }
 
+pub(crate) async fn cached_access_token(
+    provider: ConnectorProvider,
+    account_id: &str,
+) -> Result<String, AppError> {
+    store::load_tokens(provider, account_id)
+        .await?
+        .filter(|tokens| {
+            access_token_is_fresh(tokens.expires_at_unix, now_unix())
+                && !tokens.access_token.is_empty()
+        })
+        .map(|tokens| tokens.access_token.clone())
+        .ok_or_else(|| {
+            AppError::new(
+                "connector_reconnect_required",
+                "Use Clovy's connector settings to renew the connected account before retrying.",
+            )
+        })
+}
+
 /// Resolve a usable access token for the Linear workspace: the cached token
 /// when it is comfortably fresh, otherwise a refreshed one. The account id
 /// is the workspace id; it shares [`REFRESH_LOCKS`] with Google accounts

@@ -1132,3 +1132,136 @@ async fn mcp_external_relay_refuses_project_cascade_when_only_an_artifact_change
     client.close().await;
     fixture.listener.stop_and_wait().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_external_gateway_uses_an_approved_http_call_without_a_turn() {
+    use clovy_lib::agent_mcp::{AgentMcpRepository, McpServerDefinition, McpTransport};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::AsyncReadExt as _;
+    use tokio::net::TcpListener;
+
+    let fixture = ExternalFixture::new(StdDuration::from_secs(30)).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut server = McpServerDefinition::new("externalfixture", McpTransport::StreamableHttp);
+    server.url = Some(format!("http://{}", listener.local_addr().unwrap()));
+    server.safety.requires_approval = false;
+    AgentMcpRepository::new(fixture.notes.clone())
+        .create(&server)
+        .await
+        .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let sessions_closed = Arc::new(AtomicUsize::new(0));
+    let closed = sessions_closed.clone();
+    let endpoint = tokio::spawn(async move {
+        let mut next_session = 0;
+        let mut sessions = std::collections::HashSet::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            let mut stream = BufReader::new(stream);
+            let mut request_line = String::new();
+            stream.read_line(&mut request_line).await.unwrap();
+            let mut length = 0;
+            let mut session = None;
+            loop {
+                let mut line = String::new();
+                if stream.read_line(&mut line).await.unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse().unwrap();
+                    } else if name.eq_ignore_ascii_case("mcp-session-id") {
+                        session = Some(value.trim().to_owned());
+                    }
+                }
+            }
+            if request_line.starts_with("DELETE ") {
+                assert!(sessions.remove(&session.expect("the exact remote session id")));
+                closed.fetch_add(1, Ordering::SeqCst);
+                stream
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                continue;
+            }
+            let mut bytes = vec![0; length];
+            stream.read_exact(&mut bytes).await.unwrap();
+            let request: Value = serde_json::from_slice(&bytes).unwrap();
+            let mut new_session_header = String::new();
+            let response = match request["method"].as_str() {
+                Some("initialize") => {
+                    next_session += 1;
+                    let id = format!("fixture-{next_session}");
+                    new_session_header = format!("mcp-session-id: {id}\r\n");
+                    sessions.insert(id);
+                    json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}})
+                }
+                Some("tools/list") => json!({"tools":[{
+                    "name":"apply_marker", "description":"Apply a synthetic marker",
+                    "inputSchema":{"type":"object","properties":{"marker":{"type":"string"}},"required":["marker"],"additionalProperties":false}
+                }]}),
+                Some("tools/call") => {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    json!({"content":[{"type":"text","text":"fixture applied"}]})
+                }
+                _ => Value::Null,
+            };
+            let body = if response.is_null() {
+                String::new()
+            } else {
+                json!({"jsonrpc":"2.0","id":request["id"],"result":response}).to_string()
+            };
+            let status = if body.is_empty() {
+                "202 Accepted"
+            } else {
+                "200 OK"
+            };
+            stream.get_mut().write_all(format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{new_session_header}connection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        }
+    });
+    let name = "mcp_externalfixture_apply_marker";
+    let mut client = fixture.connect().await;
+    let tools = client.request("tools/list", json!({})).await;
+    assert!(tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["name"] == name));
+    let invalid = client
+        .call(name, json!({"marker":"fixture","workspacePath":"decoy"}))
+        .await;
+    assert!(invalid
+        .unwrap_err()
+        .contains("agent_tool_arguments_invalid"));
+    assert!(fixture.approvals.pending().is_empty());
+
+    for approve in [false, true] {
+        let call = tokio::spawn(async move {
+            let result = client.call(name, json!({"marker":"fixture"})).await;
+            (client, result)
+        });
+        let pending = fixture.pending(1).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        fixture.decide(&pending[0], approve).unwrap();
+        let (returned, result) = call.await.unwrap();
+        client = returned;
+        if approve {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert!(result.unwrap_err().contains("user_denied"));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    tokio::time::timeout(StdDuration::from_secs(3), async {
+        while sessions_closed.load(Ordering::SeqCst) < 4 {
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("all four external transport scopes close their remote sessions");
+    client.close().await;
+    fixture.listener.stop_and_wait().await;
+    endpoint.abort();
+}

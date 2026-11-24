@@ -18,3 +18,5 @@
 - [ ] 3.3 Revisar a árvore com o gate do harness. Conferir hash da entrega, aceitar, arquivar esta change, sincronizar o projeto e integrar localmente. Preservar provas e limpar apenas recursos comprovadamente usados pela entrega.
 
 Recibos de 3.3 em `.tmp/verify/retirar-chat-do-clovy/review-pair/1/summary.md` e, para a contingência por exit 4, em `.tmp/verify/retirar-chat-do-clovy/manual-review/1/summary.md` (revisão manual).
+
+Recibos da rodada de correção em `.tmp/verify/retirar-chat-do-clovy-round2/review-pair/1/summary.md` e `.tmp/verify/retirar-chat-do-clovy-round2/manual-review/1/summary.md` (revisão manual). Relatório da rodada em `.tmp/verify/retirar-chat-do-clovy-round2/worker-report.md`.

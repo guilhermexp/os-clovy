@@ -1,11 +1,6 @@
 import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
 import { t } from "../i18n/translate";
 import { dispatchAgentRunSettled, dispatchAgentSessionStatus } from "./agent-events";
-import {
-  loadQueuedAgentFollowUps,
-  reconcileConsumedAgentFollowUp,
-  type QueuedAgentFollowUps,
-} from "./agent-follow-up-queue";
 import type { AgentRuntimeEvent } from "./agent-runtime-contract";
 
 const AGENT_RUNTIME_EVENT = "clovy://agent-runtime-event";
@@ -22,32 +17,13 @@ type ListenToRuntimeEvents = (
 export type AgentRunSettlementRelayOptions = {
   /** Current title for a stored session id, when the caller knows one. */
   resolveTitle: (sessionId: string) => string | undefined;
-  /** The persisted follow-up queue; the Agent workspace submits a session's
-   * queued follow-up as the next run once the current one completes. */
-  readQueuedFollowUps?: () => QueuedAgentFollowUps;
   listen?: ListenToRuntimeEvents;
 };
 
-/**
- * Announces each successfully completed Agent run once, independently of the
- * React surface that submitted it, so the Agent HUD and the "ready"
- * notification still hear about runs that finish while the user is elsewhere.
- *
- * Only `run.completed` settles, and only once the session is really idle: a
- * completed run whose session still holds a queued follow-up (not consumed
- * as live steering) continues automatically, so the next run's completion
- * announces instead. A failed run of any session, open or in the
- * background, is announced here once as a `failed` session status (the
- * surfaces showing the session leave that status to this relay); an explicit
- * Stop stays silent, matching the run monitor this replaces. Streamed frames
- * only track which runs are still active.
- */
+/** Announces completed and failed runs once, even while another view is open. */
 export function startAgentRunSettlementRelay(options: AgentRunSettlementRelayOptions) {
   const listen = options.listen ?? (tauriListen as ListenToRuntimeEvents);
-  const readQueuedFollowUps = options.readQueuedFollowUps ?? loadQueuedAgentFollowUps;
-  const activeRuns = new Map<string, string>();
-  /** `steering:<messageId>` items each active run consumed, by run id. */
-  const consumedSteering = new Map<string, string[]>();
+  const activeRuns = new Set<string>();
   const finishedRuns = new Set<string>();
   let disposed = false;
   let unlisten: UnlistenFn | undefined;
@@ -68,18 +44,10 @@ export function startAgentRunSettlementRelay(options: AgentRunSettlementRelayOpt
       payload.method === "run.cancelled" ||
       payload.method === "run.failed";
     if (!terminal) {
-      activeRuns.set(payload.runId, payload.sessionId);
-      if (payload.method === "steering.consumed") {
-        consumedSteering.set(payload.runId, [
-          ...(consumedSteering.get(payload.runId) ?? []),
-          `steering:${payload.data.messageId}`,
-        ]);
-      }
+      activeRuns.add(payload.runId);
       return;
     }
-    const consumed = consumedSteering.get(payload.runId) ?? [];
     activeRuns.delete(payload.runId);
-    consumedSteering.delete(payload.runId);
     rememberFinished(payload.runId);
     if (payload.method === "run.failed") {
       const title = options.resolveTitle(payload.sessionId)?.trim();
@@ -93,18 +61,10 @@ export function startAgentRunSettlementRelay(options: AgentRunSettlementRelayOpt
       return;
     }
     if (payload.method !== "run.completed") return;
-    const continuation = reconcileConsumedAgentFollowUp(
-      readQueuedFollowUps(),
-      payload.sessionId,
-      consumed,
-    )[payload.sessionId];
-    if (continuation) return;
     dispatchAgentRunSettled({
       sessionId: payload.sessionId,
       title: options.resolveTitle(payload.sessionId)?.trim() ?? "",
       summary: t("lib.agentNotify.finished"),
-      // The HUD sweeps anonymous pending rows only when no other run can
-      // still own one of them.
       activeCount: activeRuns.size,
     });
   })

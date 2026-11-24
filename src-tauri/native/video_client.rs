@@ -2867,7 +2867,7 @@ mod tests {
             .unwrap();
         let denied = async { Err(AppError::new("turn_expired", "Stopped")) };
         let error =
-            crate::commands::discard_recoverable_recording(&f.repos, &f.paths, &info, denied)
+            crate::commands::discard_recoverable_recording(&f.repos, &f.paths, &info, None, denied)
                 .await
                 .unwrap_err();
         assert_eq!(error.code, "turn_expired");
@@ -2887,14 +2887,30 @@ mod tests {
                 .bind(&f.session_id).fetch_one(&f.repos.pool).await.unwrap();
             let info = f.repos.recording_recovery_info(&f.session_id).await.unwrap().unwrap();
             sqlx::query::query(trigger).execute(&f.repos.pool).await.unwrap();
-            assert!(crate::commands::discard_recoverable_recording(&f.repos, &f.paths, &info, std::future::ready(Ok(()))).await.is_err());
+            assert!(crate::commands::discard_recoverable_recording(
+                &f.repos,
+                &f.paths,
+                &info,
+                None,
+                std::future::ready(Ok(None)),
+            )
+            .await
+            .is_err());
             assert!(f.owned_files().iter().all(|file| file.exists()));
             assert!(f.repos.video_artifact_exists(&f.session_id).await.unwrap());
             let after: String = sqlx::query_scalar::query_scalar("SELECT status FROM recording_sessions WHERE id=?")
                 .bind(&f.session_id).fetch_one(&f.repos.pool).await.unwrap();
             assert_eq!(after, original, "every earlier write must roll back");
             sqlx::query::query("DROP TRIGGER reject_discard").execute(&f.repos.pool).await.unwrap();
-            crate::commands::discard_recoverable_recording(&f.repos, &f.paths, &info, std::future::ready(Ok(()))).await.unwrap();
+            crate::commands::discard_recoverable_recording(
+                &f.repos,
+                &f.paths,
+                &info,
+                None,
+                std::future::ready(Ok(None)),
+            )
+            .await
+            .unwrap();
             assert!(f.owned_files().iter().all(|file| !file.exists()));
             assert!(!f.repos.video_artifact_exists(&f.session_id).await.unwrap());
         }

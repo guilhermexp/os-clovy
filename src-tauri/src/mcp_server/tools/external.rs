@@ -6,8 +6,9 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::{
-    activity_management, argument_validation, dictation, memory, notes, projects, routines,
-    vault_skills, ToolCtx, ToolGroup, TURN_REQUIRED,
+    activity_management, argument_validation, browser, computer_use, connectors, dictation,
+    gateway, media, memory, notes, projects, recorder, routines, vault_skills, ToolCtx, ToolGroup,
+    TURN_REQUIRED,
 };
 use crate::approval_broker::external::ExternalCall;
 use crate::domain::types::AppError;
@@ -82,14 +83,22 @@ impl ExternalGroup {
                             | "resume_activity"
                     )
             }
-            Self::Routines => matches!(name, "list_routines" | "list_routine_runs"),
+            Self::Routines => name != "run_routine" || ctx.app.is_some(),
             Self::Skills => {
-                matches!(name, "list_skills" | "load_skill")
-                    && ctx.app.is_some_and(|app| {
-                        crate::agent_sessions::skills::skill_roots(app)
-                            .first()
-                            .is_some_and(|(_, managed)| *managed)
-                    })
+                matches!(
+                    name,
+                    "list_skills"
+                        | "load_skill"
+                        | "list_skill_settings"
+                        | "read_skill"
+                        | "update_skill"
+                        | "enable_skill"
+                        | "disable_skill"
+                ) && ctx.app.is_some_and(|app| {
+                    crate::agent_sessions::skills::skill_roots(app)
+                        .first()
+                        .is_some_and(|(_, managed)| *managed)
+                })
             }
         }
     }
@@ -108,6 +117,21 @@ pub(crate) async fn external_descriptors(
                 .is_some_and(|name| group.enabled(ctx, access, memory_settings, name))
         }));
     }
+    tools.extend(connectors::CONNECTORS.external_catalog(ctx).await);
+    if let Some(app) = ctx.app {
+        tools.extend(
+            crate::connectors::notion::external_descriptors(app, access)
+                .await
+                .unwrap_or_default()
+                .iter()
+                .map(connectors::descriptor),
+        );
+    }
+    tools.extend(gateway::GATEWAY.external_catalog(ctx, access).await);
+    tools.extend(browser::BROWSER.external_descriptors(ctx));
+    tools.extend(computer_use::COMPUTER_USE.external_descriptors(ctx).await);
+    tools.extend(media::external_descriptors(ctx, access));
+    tools.extend(recorder::external_descriptors(ctx));
     tools
 }
 
@@ -124,6 +148,48 @@ pub(crate) async fn call_external(
         let result = super::call(ctx, name, arguments).await?;
         access.check_read_scope()?;
         return Ok(result);
+    }
+    if connectors::is_account_tool(name) {
+        return connectors::CONNECTORS
+            .call_external(ctx, access, name, arguments)
+            .await;
+    }
+    if crate::connectors::notion::runtime_name_to_provider(name).is_some() {
+        let app = ctx.app.ok_or_else(|| {
+            AppError::new(
+                "connector_unavailable",
+                "The connector host is unavailable.",
+            )
+        })?;
+        return crate::connectors::notion::call_external(
+            app,
+            access,
+            &ctx.data.profile,
+            name,
+            arguments,
+        )
+        .await;
+    }
+    if gateway::GATEWAY.owns(name) {
+        return gateway::GATEWAY
+            .call_external(ctx, access, name, arguments)
+            .await;
+    }
+    if browser::is_browser_tool(name) {
+        return browser::BROWSER
+            .call_external(ctx, access, name, arguments)
+            .await;
+    }
+    if computer_use::COMPUTER_USE.owns(name) {
+        return computer_use::COMPUTER_USE
+            .call_external(ctx, access, arguments)
+            .await;
+    }
+    if media::MediaTools.owns(name) {
+        return media::call_external(ctx, access, name, arguments).await;
+    }
+    if recorder::RecorderTools.owns(name) {
+        return recorder::call_external(ctx, access, name, arguments).await;
     }
     let group = ExternalGroup::ALL
         .into_iter()
@@ -160,7 +226,7 @@ pub(crate) async fn call_external(
         ExternalGroup::Activity => {
             activity_management::call_external(ctx, access, name, arguments).await?
         }
-        ExternalGroup::Routines => routines::read(ctx, name, arguments, true).await?,
+        ExternalGroup::Routines => routines::dispatch(ctx, Some(access), name, arguments).await?,
         ExternalGroup::Skills => vault_skills::dispatch(ctx, Some(access), name, arguments).await?,
     };
     if descriptor["annotations"]["readOnlyHint"] == true {

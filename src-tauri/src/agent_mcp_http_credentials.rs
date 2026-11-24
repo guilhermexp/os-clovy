@@ -27,7 +27,9 @@ pub(super) fn apply(
     has_oauth: bool,
 ) -> reqwest::RequestBuilder {
     for (key, value) in headers {
-        if has_oauth && key.eq_ignore_ascii_case("authorization") {
+        if (has_oauth && key.eq_ignore_ascii_case("authorization"))
+            || (super::external_mcp_scope() && key.eq_ignore_ascii_case("mcp-session-id"))
+        {
             continue;
         }
         request = request.header(key, value);

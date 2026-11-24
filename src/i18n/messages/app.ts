@@ -73,7 +73,6 @@ export default defineMessages({
     "app.deleteNote.confirm": "Delete note",
     "app.audio.downloaded": "Audio downloaded",
     "app.audio.showFile": "Show file",
-    "app.session.renameFailed": "Could not save the session name. It may revert after a restart.",
     "app.projects.added": { one: "{count} project added", other: "{count} projects added" },
   },
   "pt-BR": {
@@ -144,8 +143,6 @@ export default defineMessages({
     "app.deleteNote.confirm": "Excluir nota",
     "app.audio.downloaded": "Áudio baixado",
     "app.audio.showFile": "Mostrar arquivo",
-    "app.session.renameFailed":
-      "Não foi possível salvar o nome da sessão. Ele pode voltar ao anterior depois de reiniciar.",
     "app.projects.added": {
       one: "{count} projeto adicionado",
       other: "{count} projetos adicionados",

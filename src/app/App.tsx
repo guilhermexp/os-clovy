@@ -538,7 +538,6 @@ export function App() {
     () =>
       startAgentRunSettlementRelay({
         resolveTitle: () => undefined,
-        readQueuedFollowUps: () => ({}),
       }),
     [],
   );

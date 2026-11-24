@@ -1,6 +1,7 @@
 //! Approval of one operation from an authenticated external MCP connection.
 //! External requests have no session, run, tool grant, or bypass policy.
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -48,7 +49,7 @@ pub struct ExternalApprovalBroker {
     current_profile: Arc<Profile>,
     notify: Box<Notify>,
     timeout: Duration,
-    generation: AtomicU64,
+    generation: Arc<AtomicU64>,
 }
 
 impl ExternalApprovalBroker {
@@ -62,7 +63,7 @@ impl ExternalApprovalBroker {
             current_profile: Arc::new(current_profile),
             notify: Box::new(notify),
             timeout,
-            generation: AtomicU64::new(0),
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -121,11 +122,15 @@ impl ExternalApprovalBroker {
     ) -> ExternalCall<'a> {
         ExternalCall {
             broker: self,
-            connection,
-            profile,
             recording_data,
-            deadline: Instant::now() + self.timeout,
-            generation: self.generation.load(Ordering::Acquire),
+            guard: ExternalGuard {
+                connection: connection.clone(),
+                profile: profile.to_owned(),
+                current_profile: Arc::clone(&self.current_profile),
+                current_generation: Arc::clone(&self.generation),
+                generation: self.generation.load(Ordering::Acquire),
+                deadline: Instant::now() + self.timeout,
+            },
         }
     }
 
@@ -146,21 +151,34 @@ impl Pending {
 
 pub(crate) struct ExternalCall<'a> {
     broker: &'a ExternalApprovalBroker,
-    connection: &'a ExternalConnection,
-    profile: &'a str,
     recording_data: Option<&'a Path>,
+    guard: ExternalGuard,
+}
+
+/// Authority for an approved request that has to cross an asynchronous host
+/// bridge. Private fields keep caller-supplied IDs out of the authority.
+#[derive(Clone)]
+pub(crate) struct ExternalGuard {
+    connection: ExternalConnection,
+    profile: String,
+    current_profile: Arc<Profile>,
+    current_generation: Arc<AtomicU64>,
     deadline: Instant,
     generation: u64,
 }
 
-impl ExternalCall<'_> {
-    pub(crate) fn recording_data(&self) -> Option<&Path> {
-        self.recording_data
+impl std::fmt::Debug for ExternalGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExternalGuard")
+            .finish_non_exhaustive()
     }
+}
 
-    pub(crate) fn check_read_scope(&self) -> Result<(), AppError> {
-        if self.broker.generation.load(Ordering::Acquire) != self.generation
-            || (self.broker.current_profile)().as_deref() != Some(self.profile)
+impl ExternalGuard {
+    fn check_read_scope(&self) -> Result<(), AppError> {
+        if (self.current_profile)().as_deref() != Some(self.profile.as_str())
+            || self.current_generation.load(Ordering::Acquire) != self.generation
         {
             return Err(AppError::new(
                 "mcp_external_scope_changed",
@@ -173,7 +191,7 @@ impl ExternalCall<'_> {
         Ok(())
     }
 
-    pub(crate) fn check_live(&self) -> Result<(), AppError> {
+    fn check_live(&self) -> Result<(), AppError> {
         if !self.connection.is_live() {
             return Err(AppError::new(
                 "mcp_external_cancelled",
@@ -181,6 +199,69 @@ impl ExternalCall<'_> {
             ));
         }
         self.check_read_scope()
+    }
+
+    pub(crate) fn check(&self, profile: &str) -> Result<(), AppError> {
+        if self.profile != profile {
+            return Err(AppError::new(
+                "mcp_external_scope_changed",
+                "The operation's data partition changed.",
+            ));
+        }
+        self.check_live()
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        while self.check_live().is_ok() {
+            tokio::select! {
+                _ = self.connection.closed() => return,
+                _ = tokio::time::sleep_until(self.deadline) => return,
+                _ = tokio::time::sleep(PROFILE_RECHECK) => {}
+            }
+        }
+    }
+}
+
+impl ExternalCall<'_> {
+    pub(crate) fn recording_data(&self) -> Option<&Path> {
+        self.recording_data
+    }
+
+    pub(crate) fn check_read_scope(&self) -> Result<(), AppError> {
+        self.guard.check_read_scope()
+    }
+
+    pub(crate) fn check_live(&self) -> Result<(), AppError> {
+        self.guard.check_live()
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        self.guard.cancelled().await;
+    }
+
+    pub(crate) fn ownership(&self) -> (Uuid, u64, &str) {
+        (
+            self.guard.connection.id(),
+            self.guard.generation,
+            &self.guard.profile,
+        )
+    }
+
+    /// Revoke resources shared by operations on this connection. A request's
+    /// cancellation and deadline are separate from the connection lifetime.
+    pub(crate) fn connection_end(&self) -> impl Future<Output = ()> + Send + 'static {
+        let guard = self.guard.clone();
+        async move {
+            while guard.connection.is_peer_live()
+                && (guard.current_profile)().as_deref() == Some(guard.profile.as_str())
+                && guard.current_generation.load(Ordering::Acquire) == guard.generation
+            {
+                tokio::select! {
+                    _ = guard.connection.peer_closed() => return,
+                    _ = tokio::time::sleep(PROFILE_RECHECK) => {}
+                }
+            }
+        }
     }
 
     pub(crate) async fn approve<'a>(
@@ -206,37 +287,28 @@ impl ExternalCall<'_> {
                     id: id.clone(),
                     tool: tool.to_string(),
                     title: title.to_string(),
-                    profile: self.profile.to_string(),
+                    profile: self.guard.profile.clone(),
                     preview,
                 },
-                connection: self.connection.clone(),
-                deadline: self.deadline,
-                generation: self.generation,
+                connection: self.guard.connection.clone(),
+                deadline: self.guard.deadline,
+                generation: self.guard.generation,
                 decision,
             },
         );
         (self.broker.notify)();
-        let result = loop {
-            if let Err(error) = self.check_live() {
-                break Err(error);
-            }
-            tokio::select! {
-                biased;
-                _ = self.connection.closed() => break Err(self.check_live().err().unwrap_or_else(stale)),
-                _ = tokio::time::sleep_until(self.deadline) => break Err(stale()),
-                decision = &mut answer => {
-                    break match decision {
-                        Ok(true) => self.check_live().map(|()| ExternalApproval { call: self, target }),
-                        Ok(false) => Err(AppError::new("user_denied", "The user denied this MCP action.")),
-                        Err(_) => self.check_live().and_then(|()| Err(stale())),
-                    };
-                },
-                _ = tokio::time::sleep(PROFILE_RECHECK) => {}
+        let result = tokio::select! {
+            biased;
+            _ = self.cancelled() => Err(self.check_live().err().unwrap_or_else(stale)),
+            decision = &mut answer => match decision {
+                Ok(true) => self.check_live().map(|()| ExternalApproval { call: self, target }),
+                Ok(false) => Err(AppError::new("user_denied", "The user denied this MCP action.")),
+                Err(_) => self.check_live().and_then(|()| Err(stale())),
             }
         };
         tracing::info!(
             request_id = %id,
-            connection_id = %self.connection.id(),
+            connection_id = %self.guard.connection.id(),
             tool,
             outcome = result.as_ref().map_or_else(|error| error.code.as_str(), |_| "approved"),
             "External MCP approval settled"
@@ -255,13 +327,11 @@ pub(crate) struct ExternalApproval<'a> {
 
 impl<'a> ExternalApproval<'a> {
     pub(crate) fn check(&self, profile: &str) -> Result<(), AppError> {
-        if self.call.profile != profile {
-            return Err(AppError::new(
-                "mcp_external_scope_changed",
-                "The operation's data partition changed.",
-            ));
-        }
-        self.call.check_live()
+        self.call.guard.check(profile)
+    }
+
+    pub(crate) fn guard_owned(&self) -> ExternalGuard {
+        self.call.guard.clone()
     }
 
     pub(crate) fn target(&self) -> Option<&'a Value> {
@@ -370,4 +440,18 @@ pub async fn mcp_external_approval_decide(
     approve: bool,
 ) -> Result<(), AppError> {
     app_broker(&app, &window)?.decide(&id, approve)
+}
+
+#[cfg(test)]
+pub(crate) async fn one_pending(broker: &ExternalApprovalBroker) -> Value {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(request) = broker.pending().pop() {
+                return serde_json::to_value(request).unwrap();
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the external operation should wait for approval")
 }

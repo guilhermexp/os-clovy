@@ -2,7 +2,6 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../app/App";
-import { HERO_GREETINGS } from "../components/agent/AgentWorkspace";
 import {
   dispatchDataPartitionChanged,
   resetCurrentDataPartitionForTests,
@@ -25,11 +24,6 @@ import type {
   RecordingSourceReadinessDto,
   ProviderModelDto,
 } from "../lib/tauri";
-
-// The hero greeting cycles per visit, so tests match any entry in the pool.
-const HERO_GREETING = new RegExp(
-  `^(?:${HERO_GREETINGS.map((greeting) => greeting.replace("?", "\\?")).join("|")})$`,
-);
 
 function stubNavigatorPlatform(platform: string, userAgent: string) {
   const ownPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
@@ -103,9 +97,7 @@ const mocks = vi.hoisted(() => ({
   dictationHelperCommand: vi.fn(),
   listDictationHistory: vi.fn(),
   osAccountsStatus: vi.fn(),
-  agentHudShow: vi.fn(),
   agentOpenReady: vi.fn().mockResolvedValue(null),
-  agentHudHide: vi.fn(),
   listAgentTasks: vi.fn(),
   listAgentSessions: vi.fn(),
   listSessionFolders: vi.fn(),
@@ -241,10 +233,8 @@ vi.mock("../lib/tauri", () => ({
   dictationHelperCommand: mocks.dictationHelperCommand,
   listDictationHistory: mocks.listDictationHistory,
   dictationSettings: vi.fn().mockRejectedValue(new Error("dictation settings unavailable")),
-  agentHudShow: mocks.agentHudShow,
   agentOpenReady: mocks.agentOpenReady,
   routineOpenReady: vi.fn().mockResolvedValue(null),
-  agentHudHide: mocks.agentHudHide,
   pendingMeetingStartRequest: mocks.readPendingMeetingStartRequest,
   acknowledgeMeetingStartRequest: mocks.acknowledgeMeetingStartRequest,
   startMeetingRecording: mocks.startMeetingRecording,

@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { formatTime } from "../components/activity-timeline/timeline-utils";
 import { applyInterfaceLocale } from "../i18n/locale";
 import { formatNumber, intlLocale, t } from "../i18n/translate";
-import { clovyHomeDayLabel } from "../lib/clovy-home";
 import { formatCalendarDate, formatListTimestamp } from "../lib/date-format";
 import { messageForErrorCode, messageFromError } from "../lib/errors";
 import { humanizeSchedule } from "../lib/routine-schedule";
@@ -23,7 +22,6 @@ function plain(text: string) {
 
 // Thursday, October 15, 2026; three days after Monday, October 12.
 const NOW = new Date(2026, 9, 15, 10, 0);
-const MONDAY_8AM = new Date(2026, 9, 12, 8, 0).toISOString();
 
 describe("interface language owns every date and time", () => {
   beforeEach(() => applyInterfaceLocale("en"));
@@ -35,7 +33,6 @@ describe("interface language owns every date and time", () => {
   it("reads Monday at 8:00 AM in English on a Portuguese system", () => {
     withSystemLocale("pt-BR");
     applyInterfaceLocale("en");
-    expect(plain(clovyHomeDayLabel(MONDAY_8AM, NOW))).toBe("Monday at 8:00 AM");
     expect(intlLocale()).toBe("en");
     expect(formatListTimestamp(new Date(2026, 9, 12, 8), NOW)).toBe("Mon");
     expect(plain(formatTime(new Date(2026, 9, 15, 9, 30).toISOString()))).toBe("9:30 AM");
@@ -47,7 +44,6 @@ describe("interface language owns every date and time", () => {
     withSystemLocale("en-US");
     applyInterfaceLocale("pt-BR");
     expect(formatTime(new Date(2026, 9, 15, 9, 30).toISOString())).toBe("09:30");
-    expect(clovyHomeDayLabel(MONDAY_8AM, NOW)).toBe("Segunda-feira às 08:00");
     expect(formatListTimestamp(new Date(2026, 9, 12, 8), NOW)).toBe("seg.");
     expect(humanizeSchedule("0 8 * * 1")).toBe("Toda segunda-feira às 08:00");
   });
@@ -75,21 +71,19 @@ describe("interface language owns every date and time", () => {
     expect(formatCalendarDate(date, "day-first")).toBe("12 out.");
   });
 
-  it("writes one clock shape per language across Home, Routines, and the Timeline", () => {
+  it("writes one clock shape per language across Routines and the Timeline", () => {
     const at930 = new Date(2026, 9, 15, 9, 30);
     withSystemLocale("en-US");
     applyInterfaceLocale("pt-BR");
     expect(formatTime(at930.toISOString())).toBe("09:30");
     expect(formatListTimestamp(at930, NOW)).toBe("09:30");
     expect(humanizeSchedule("30 9 * * *")).toBe("Todo dia às 09:30");
-    expect(clovyHomeDayLabel(at930.toISOString(), NOW)).toBe("Hoje às 09:30");
 
     withSystemLocale("pt-BR");
     applyInterfaceLocale("en");
     expect(plain(formatTime(at930.toISOString()))).toBe("9:30 AM");
     expect(plain(formatListTimestamp(at930, NOW))).toBe("9:30 AM");
     expect(plain(humanizeSchedule("30 9 * * *"))).toBe("Every day at 9:30 AM");
-    expect(plain(clovyHomeDayLabel(at930.toISOString(), NOW))).toBe("Today at 9:30 AM");
   });
 
   it("phrases stored intervals in the interface language", () => {

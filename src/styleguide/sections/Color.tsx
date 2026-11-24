@@ -63,7 +63,6 @@ const COLOR_GROUPS: { label: string; names: string[] }[] = [
       "--brand-line-strong",
       "--warm-soft",
       "--warm-strong",
-      "--agent-background-ink",
     ],
   },
   {

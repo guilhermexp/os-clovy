@@ -9,6 +9,7 @@ mod queue;
 
 use crate::domain::types::AppError;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -86,8 +87,35 @@ fn client() -> Result<&'static client::FalClient, AppError> {
         .as_ref()
         .map_err(Clone::clone)
 }
+tokio::task_local! { static EXTERNAL_FAL_CREDENTIAL: [u8; 32]; }
+
+pub(crate) async fn with_external_credential<T>(
+    operation: impl std::future::Future<Output = Result<T, AppError>>,
+) -> Result<T, AppError> {
+    let key = fal_key()?.ok_or_else(external_credential_changed)?;
+    let fingerprint = Sha256::digest(key.as_bytes()).into();
+    drop(key);
+    EXTERNAL_FAL_CREDENTIAL.scope(fingerprint, operation).await
+}
+
+fn external_credential_changed() -> AppError {
+    AppError::new(
+        "mcp_external_scope_changed",
+        "The configured fal credential changed. Request the media operation again.",
+    )
+}
+
 fn fal_key() -> Result<Option<String>, AppError> {
-    crate::providers::provider_api_key(crate::providers::BuiltinProvider::Fal)
+    let key = crate::providers::provider_api_key(crate::providers::BuiltinProvider::Fal)?;
+    if let Ok(expected) = EXTERNAL_FAL_CREDENTIAL.try_with(|fingerprint| *fingerprint) {
+        let actual = key
+            .as_ref()
+            .map(|key| <[u8; 32]>::from(Sha256::digest(key.as_bytes())));
+        if actual != Some(expected) {
+            return Err(external_credential_changed());
+        }
+    }
+    Ok(key)
 }
 
 pub async fn generate_image(
@@ -140,6 +168,18 @@ pub async fn video_generate(params: VideoGenerateParams) -> Result<VideoJobDto, 
 }
 
 pub async fn video_status(app: &AppHandle, job_id: String) -> Result<VideoStatusDto, AppError> {
+    let directory = crate::app_paths::app_data_dir(app)
+        .map_err(|error| AppError::new("video_write_failed", error.to_string()))?
+        .join("agent-workspaces")
+        .join("generated-media")
+        .join("videos");
+    video_status_in(&directory, job_id).await
+}
+
+pub(crate) async fn video_status_in(
+    directory: &std::path::Path,
+    job_id: String,
+) -> Result<VideoStatusDto, AppError> {
     let key = fal_key()?;
     match client()?.video_status(key.as_deref(), &job_id).await? {
         client::VideoPoll::Processing => Ok(VideoStatusDto::Processing {
@@ -152,12 +192,7 @@ pub async fn video_status(app: &AppHandle, job_id: String) -> Result<VideoStatus
             mime_type,
             model,
         } => {
-            let directory = crate::app_paths::app_data_dir(app)
-                .map_err(|error| AppError::new("video_write_failed", error.to_string()))?
-                .join("agent-workspaces")
-                .join("generated-media")
-                .join("videos");
-            tokio::fs::create_dir_all(&directory)
+            tokio::fs::create_dir_all(directory)
                 .await
                 .map_err(write_error)?;
             let extension = if mime_type == "video/webm" {

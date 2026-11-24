@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyInterfaceLocale } from "../i18n/locale";
-import { toolActivityLabel, toolActivitySentence } from "../lib/agent-tool-labels";
 import { autonomyUnlockHint } from "../lib/connectors";
 import { LANGUAGE_OPTIONS, languageLabel } from "../lib/dictation-languages";
 import { FONT_SCALE_PRESETS } from "../lib/font-scale";
@@ -43,7 +42,6 @@ describe("lib copy in English (default)", () => {
       "Large",
       "Larger",
     ]);
-    expect(toolActivityLabel("web_search")).toBe("Searching web");
     expect(humanizeSchedule("*/15 * * * *")).toBe("Every 15 minutes");
     expect(autonomyUnlockHint(policy, 2)).toBe(
       "Runs 1 more time under approval to unlock autonomous.",
@@ -71,13 +69,6 @@ describe("lib copy in Brazilian Portuguese", () => {
     applyInterfaceLocale("pt-BR");
     expect(languageLabel("es")).toBe("Espanhol");
     expect(FONT_SCALE_PRESETS.map((preset) => preset.label)).toEqual(["Padrão", "Grande", "Maior"]);
-  });
-
-  it("translates tool activity labels", () => {
-    expect(toolActivityLabel("web_search")).toBe("Buscando na web");
-    expect(toolActivityLabel("bash", { command: "pnpm test" })).toBe("Executando testes");
-    expect(toolActivitySentence("read_file", { path: "a.ts" })).toBe("Lendo arquivos.");
-    expect(toolActivitySentence("___")).toBe("Usando uma ferramenta.");
   });
 
   it("picks plural forms for counted copy", () => {

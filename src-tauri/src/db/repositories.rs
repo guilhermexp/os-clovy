@@ -5814,21 +5814,30 @@ impl Repositories {
         note_id: &str,
     ) -> Result<(), sqlx::error::Error> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        Self::discard_recording_rows(&mut transaction, session_id, note_id).await?;
+        transaction.commit().await
+    }
+
+    pub(crate) async fn discard_recording_rows(
+        transaction: &mut sqlx::transaction::Transaction<'_, Sqlite>,
+        session_id: &str,
+        note_id: &str,
+    ) -> Result<(), sqlx::error::Error> {
         query("UPDATE recording_sessions SET status = 'failed', last_error = 'Discarded by user' WHERE id = ?")
-            .bind(session_id).execute(&mut *transaction).await?;
+            .bind(session_id).execute(&mut **transaction).await?;
         query("UPDATE audio_artifacts SET status = 'discarded', last_error = 'Discarded by user' WHERE recording_session_id = ?")
-            .bind(session_id).execute(&mut *transaction).await?;
+            .bind(session_id).execute(&mut **transaction).await?;
         query("DELETE FROM video_artifacts WHERE recording_session_id=?")
             .bind(session_id)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
         query("UPDATE notes SET processing_status=?, last_error=?, updated_at=? WHERE id=? RETURNING id")
             .bind(ProcessingStatus::Failed.as_db())
             .bind("Recording discarded")
             .bind(timestamp())
             .bind(note_id)
-            .fetch_one(&mut *transaction).await?;
-        transaction.commit().await
+            .fetch_one(&mut **transaction).await?;
+        Ok(())
     }
 
     pub async fn mark_recording_discarded(

@@ -3,7 +3,7 @@
 use super::{ToolCtx, ToolGroup};
 use crate::agent_sessions::skill_identity::canonical_skill_id;
 use crate::agent_sessions::AgentRepository;
-use crate::approval_broker::{external::ExternalCall, ApprovalKind, ApprovalRequest, ApprovalTurn};
+use crate::approval_broker::{external::ExternalCall, ApprovalKind, ApprovalRequest};
 use crate::domain::types::AppError;
 use crate::mcp_server::turns::TURN_REQUIRED;
 use futures_util::future::BoxFuture;
@@ -78,6 +78,12 @@ pub(super) async fn dispatch(
         )
     })?;
     if name == "get_obsidian_vault" {
+        if external.is_some() {
+            return Err(AppError::new(
+                TURN_REQUIRED,
+                "Vault discovery requires its own host context.",
+            ));
+        }
         return vault_result(crate::obsidian::discovery_for_app(app));
     }
     let roots = crate::agent_sessions::skills::skill_roots(app);
@@ -89,20 +95,7 @@ pub(super) async fn dispatch(
             "Managed skill storage is unavailable.",
         ));
     }
-    let mut value = call_scoped(ctx, external, name, arguments, &skill_roots(app)).await?;
-    if external.is_some() {
-        fn remove_path(object: &mut Value) {
-            if let Some(fields) = object.as_object_mut() {
-                fields.remove("path");
-                fields.remove("localPath");
-            }
-        }
-        remove_path(&mut value);
-        if let Some(skills) = value.get_mut("skills").and_then(Value::as_array_mut) {
-            skills.iter_mut().for_each(remove_path);
-        }
-    }
-    Ok(value)
+    call_scoped(ctx, external, name, arguments, &skill_roots(app)).await
 }
 
 pub(crate) fn vault_result(
@@ -122,7 +115,7 @@ pub(super) async fn call_with_roots(
     call_scoped(ctx, None, name, arguments, roots).await
 }
 
-async fn call_scoped(
+pub(super) async fn call_scoped(
     ctx: &ToolCtx<'_>,
     external: Option<&ExternalCall<'_>>,
     name: &str,
@@ -131,11 +124,6 @@ async fn call_scoped(
 ) -> Result<Value, AppError> {
     if external.is_none() {
         require_tool(ctx, name).await?;
-    } else if !matches!(name, "list_skills" | "load_skill") {
-        return Err(AppError::new(
-            TURN_REQUIRED,
-            "This skill operation requires a Clovy turn.",
-        ));
     }
     ctx.revalidate_local(external).await?;
     let requested = if !matches!(name, "list_skills" | "list_skill_settings") {
@@ -162,15 +150,43 @@ async fn call_scoped(
         .collect::<Vec<_>>();
     let catalog =
         crate::agent_sessions::skills::catalog_from_roots(typed_roots.clone(), &enabled).await?;
-    match name {
+    let mut result = match name {
         "list_skill_settings" => Ok(json!({"skills":catalog})),
         "list_skills" => list_skills_from_roots(roots, &enabled, true).await,
         "read_skill" => {
-            crate::agent_sessions::skills::read_from_roots(
-                &typed_roots,
-                requested.unwrap_or_default(),
-            )
-            .await
+            let id = requested.unwrap_or_default();
+            if let Some(external) = external {
+                let target = crate::agent_sessions::skills::external_target(
+                    &ctx.data.notes,
+                    &typed_roots,
+                    id,
+                )
+                .await?;
+                let approval = external
+                    .approve(
+                        name,
+                        "Read skill instructions",
+                        "Share the selected skill's instructions with this MCP client.",
+                        arguments,
+                        Some(&target),
+                    )
+                    .await?;
+                let read = crate::agent_sessions::skills::read_from_roots(&typed_roots, id).await?;
+                if crate::agent_sessions::skills::external_target(&ctx.data.notes, &typed_roots, id)
+                    .await?
+                    != target
+                    || !crate::agent_sessions::skills::read_matches_target(&read, &target)
+                {
+                    return Err(AppError::new(
+                        "agent_skill_conflict",
+                        "The skill changed after approval was requested.",
+                    ));
+                }
+                approval.check(&ctx.data.profile)?;
+                Ok(read)
+            } else {
+                crate::agent_sessions::skills::read_from_roots(&typed_roots, id).await
+            }
         }
         "load_skill" => {
             let allowed = catalog
@@ -185,9 +201,10 @@ async fn call_scoped(
                     && skill["configuredEnabled"] == true
                     && skill["readable"] == false
             }) {
-                return crate::agent_sessions::skills::read_from_roots(&typed_roots, id).await;
+                crate::agent_sessions::skills::read_from_roots(&typed_roots, id).await
+            } else {
+                load_skill_from_roots(roots, &allowed, id).await
             }
-            load_skill_from_roots(roots, &allowed, id).await
         }
         "update_skill" | "enable_skill" | "disable_skill" => {
             let id = requested.unwrap_or_default();
@@ -203,54 +220,63 @@ async fn call_scoped(
                     "Only existing managed skills can be changed.",
                 ));
             }
-            let binding = ctx.binding.ok_or_else(|| {
-                AppError::new(TURN_REQUIRED, "Skill changes require a Clovy turn.")
-            })?;
-            ctx.broker()?
-                .request(
-                    &ApprovalTurn::from(binding),
+            let content = if name == "update_skill" {
+                Some(
+                    arguments
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            AppError::new("invalid_arguments", "content is required.")
+                        })?,
+                )
+            } else {
+                None
+            };
+            let target = if external.is_some() {
+                Some(
+                    crate::agent_sessions::skills::external_target(
+                        &ctx.data.notes,
+                        &typed_roots,
+                        id,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+            let authority = ctx
+                .approve_local(
+                    external,
                     ApprovalRequest {
                         tool: name.into(),
                         call_id: Some(uuid::Uuid::new_v4().to_string()),
                         kind: ApprovalKind::Approval {
-                            title: "Change a skill".into(),
-                            description: "Change the selected managed skill in Clovy.".into(),
+                            title: match name {
+                                "update_skill" => "Update a managed skill",
+                                "enable_skill" => "Enable a managed skill",
+                                _ => "Disable a managed skill",
+                            }
+                            .into(),
+                            description: "Change this managed skill for future Clovy runs.".into(),
                             arguments: arguments.clone(),
                             preview: None,
                         },
                     },
+                    target.as_ref(),
                 )
-                .await
-                .map_err(|denial| AppError::new(denial.code(), denial.message()))?;
-            ctx.revalidate().await?;
-            require_tool(ctx, name).await?;
-            // Resolve again after approval; neither an old catalog nor an id is
-            // a grant to write a replaced global file or an escaped symlink.
-            let catalog =
-                crate::agent_sessions::skills::catalog_from_roots(typed_roots.clone(), &enabled)
-                    .await?;
-            if !editable(&catalog) {
-                return Err(AppError::new(
-                    "agent_skill_read_only",
-                    "Only existing managed skills can be changed.",
-                ));
+                .await?;
+            ctx.revalidate_local(external).await?;
+            if external.is_none() {
+                require_tool(ctx, name).await?;
             }
-            if name == "update_skill" {
-                let content = arguments
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| AppError::new("invalid_arguments", "content is required."))?;
-                crate::agent_sessions::skills::update_for_turn(
+            if let Some(content) = content {
+                crate::agent_sessions::skills::update_authorized(
                     &ctx.data.notes,
                     &typed_roots,
                     id,
                     content,
-                    (
-                        &ctx.data.profile,
-                        &binding.session_id,
-                        &binding.run_id,
-                        &binding.authority,
-                    ),
+                    &ctx.data.profile,
+                    authority,
                 )
                 .await?;
             } else {
@@ -259,12 +285,7 @@ async fn call_scoped(
                     &typed_roots,
                     id,
                     name == "enable_skill",
-                    Some((
-                        &ctx.data.profile,
-                        &binding.session_id,
-                        &binding.run_id,
-                        &binding.authority,
-                    )),
+                    Some((&ctx.data.profile, authority)),
                 )
                 .await?;
             }
@@ -296,7 +317,21 @@ async fn call_scoped(
             "mcp_tool_unknown",
             "Unknown vault or skill tool.",
         )),
+    }?;
+    if external.is_some() {
+        fn remove_paths(value: &mut Value) {
+            if let Some(fields) = value.as_object_mut() {
+                fields.remove("path");
+                fields.remove("localPath");
+                fields.remove("root");
+            }
+        }
+        remove_paths(&mut result);
+        if let Some(skills) = result.get_mut("skills").and_then(Value::as_array_mut) {
+            skills.iter_mut().for_each(remove_paths);
+        }
     }
+    Ok(result)
 }
 
 fn is_mutation(name: &str) -> bool {

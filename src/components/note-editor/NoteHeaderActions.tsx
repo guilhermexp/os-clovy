@@ -6,7 +6,7 @@ import { IconTrashCan } from "central-icons/IconTrashCan";
 import { useEffect, useRef, useState } from "react";
 
 import { useT } from "../../i18n";
-import { noteReferenceToken } from "../agent/composer/noteReference";
+import { noteReferenceToken } from "../../lib/note-reference";
 import { toast } from "../ui/Toaster";
 
 export function NoteHeaderActions({
