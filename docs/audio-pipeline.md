@@ -388,81 +388,95 @@ processing. Durable note-transcription jobs record exact Source spans and
 attempt state; interrupted `running` jobs return to `pending`, and explicit
 Retry resumes only jobs whose fingerprint has not already succeeded.
 
-## Local transcription
+## Audio transcription engines
 
-Local requires macOS 14+ Apple Silicon. Settings > Models > Transcription offers
-an explicit 632,162,964-byte installation, byte progress, Cancel, retry/resume,
-and removal. Files live under `app_paths::app_data_dir()/models/parakeet-ultra-coreml/`.
-Downloads use the pinned Hugging Face revision and per-file SHA-256 manifest in
-`src-tauri/resources/local-transcriber-model.json`; `.mlmodelc` directories are
-expanded into their inner files. Complete files are reused and `.part` files
-resume using HTTP Range. Startup verifies the saved model on a blocking worker, then emits readiness; it
-does not hash model weights on the window thread. Verification shares the install
-and removal lock. `installed.json` caches the verified manifest; missing
-markers or size changes trigger revalidation. No database migration is needed.
+Settings > Models > Audio transcription selects Local, Groq or OpenRouter for
+dictation, saved notes and live preview. An operation captures its provider and
+model together. Groq keeps its timed Turn packs, pacing and quota handling.
+OpenRouter and Local transcribe each Turn separately and use its saved bounds
+for attribution. Long audio keeps the existing 600-second chunks and 10-second
+overlap. Saved audio and completed chunks remain available for an explicit retry.
 
-The Rust `TranscriptionBackend` selects the transport before reading credentials.
-All dictation, saved-note turns, 600-second chunks (10-second overlap), turn packs,
-and live preview use that backend. Local skips Groq's 25 MB cap and hourly pacer;
-helper errors are not retried against another provider. A saved Local choice with
-a missing model fails with installation guidance. Unsupported platforms normalize
-the saved choice to Groq. Explicit removal changes Local selections and profile
-overrides to Groq, and the UI warns about that transition.
+### Local model installation
 
-`Clovy Local Transcriber.app` is a separately signed, lazily spawned arm64 helper.
-The SwiftPM package pins FluidAudio v0.18.0 at
-`e15287985625dbf544a343df679436789ffb03fb`; its source and resolution file are hashed
-by `scripts/prepare-local-transcriber.mjs`. Swift 6.2+ disables optional package
-traits. The helper uses `AsrModels.loadLocal`, not the downloading `load` API.
-stdin/stdout carry one JSON request/response per line:
+Local runs on Apple Silicon. Settings shows the download size, installation
+progress, and occupied bytes per model. Selecting a missing model starts its
+download. The current choice stays effective until verification and saving
+succeed. Choosing a different model or provider supersedes the pending choice.
+The management list can install without changing the active model.
+
+| Model | Model ID | Minimum macOS | Download bytes |
+| --- | --- | --- | ---: |
+| Whisper large-v3-turbo | `whisper-large-v3-turbo-local` | 14 | 1,641,229,178 |
+| Parakeet Ultra | `parakeet-ultra` | 14 | 632,162,964 |
+| Fluid Speech Pro | `fluid-speech-pro` | 15 | 652,304,885 |
+| Phonon-2.5 | `phonon-2.5` | 15 | 289,793,778 |
+
+Each model has a fixed directory under `app_paths::app_data_dir()/models/`.
+The existing `parakeet-ultra-coreml` directory and verified receipt are reused.
+The bundled `src-tauri/resources/local-transcriber-model*.json` manifests pin
+repositories, revisions, byte counts and every file's SHA-256. Whisper has
+separate file sources for its pinned multilingual tokenizer. Install verifies
+SHA-256 before finalizing a file and writes `installed.json` after all files
+pass. Resume reuses intact files and requests the remaining bytes for a partial
+file. Startup checks receipts and metadata. Without a valid receipt or when
+sizes change, it verifies files on a worker.
+
+Manage local models removes the selected package's weights, partial files and
+receipt. The app refuses removal while a transcription holds the model.
+Removing the active model requires agreeing to the switch to Groq. The app
+saves the new choice before deleting the active model's files. If saving fails,
+the previous choice and files remain. The app-specific model directories have
+no shared download or tokenizer caches. Core ML owns its system-managed caches.
+
+### Offline helper
+
+`Clovy Local Transcriber.app` is an arm64 SwiftPM helper with minimum macOS 14.
+Build it with `pnpm local-transcriber:prepare`. The build checks the pinned
+package sources and resolution and embeds the licenses and
+`Model-Attribution.txt`. FluidAudio v0.18.3
+(`c8b41f98eae668794dd0083bbe028fe7e6585051`, Apache-2.0) loads Ultra and Phonon-2.5
+with `loadLocal`. Phonon-2.5 uses the GPU encoder. The Fluid Speech Pro adapter
+checks its Core ML tensor shapes and passes its four model components and
+vocabulary to the FluidAudio v3 decoder. WhisperKit v1.1.1
+(`1bbc57cb7fe6410248a685b1c5a3c6d56adc2ed4`, MIT) loads the pinned Turbo files and
+tokenizer from managed directories. The helper supplies an offline tokenizer
+loader that fails locally when its files are missing or invalid.
+[FluidAudio v0.18.3](https://github.com/FluidInference/FluidAudio/releases/tag/v0.18.3),
+[WhisperKit v1.1.1](https://github.com/argmaxinc/argmax-oss-swift/releases/tag/v1.1.1)
+
+The JSON-lines protocol correlates `request_id` and `model_id` in both directions.
 
 ```json
-{"op":"load","model_dir":"/absolute/model/directory","version":"ultra"}
-{"op":"transcribe","audio_path":"/absolute/take.m4a","language":"pt"}
-{"op":"unload"}
+{"op":"load","request_id":1,"model_id":"parakeet-ultra","model_dir":"/absolute/model/directory"}
+{"op":"transcribe","request_id":2,"model_id":"parakeet-ultra","audio_path":"/absolute/take.m4a","language":"pt"}
+{"op":"unload","request_id":3,"model_id":"parakeet-ultra"}
 ```
 
-Successful transcription returns `text`, `tokens` (`t`, `start_ms`, `end_ms`),
-`duration_ms`, and the accepted language hint. Unknown hints become nil; the
-hint constrains the alphabet and does not force Portuguese. The SDK decodes
-WAV/M4A directly. Each request resets decoder state while keeping the model loaded.
-Rust serializes requests, bounds responses and deadlines, groups tokens across
-pauses shorter than 400 ms, and treats empty text as `no_speech`. Closing stdin
-ends the helper; switching to Groq, removal, shutdown, timeout or broken protocol
-terminates the owned process. Initial Core ML loading is slower than warm calls.
-Allow roughly 600–800 MB of helper memory; actual usage and latency require a
-real-model measurement on the target Mac.
+The helper keeps the active model loaded between takes. Rust serializes calls,
+bounds responses and retires a superseded helper after any in-flight call
+finishes. Each transcription creates fresh decoder state. Local requires no
+remote credentials and reports a local error if loading or inference fails.
+The self-test takes the path to a run-owned debug data directory and uses the
+repository's synthetic Portuguese WAV.
 
-Local note turns use one request per turn. The three-turn regression shows that
-an imprecise token end can bridge a 500 ms packed gap under the 400 ms grouping
-rule, assigning text to another turn. This uses the per-turn alternative in the
-accepted design; 600-second chunking, saved jobs and retries stay intact. Groq
-continues to pack turns and split its timed response.
+### OpenRouter transcription
 
-Build/check the helper using `pnpm local-transcriber:prepare`. After installing
-through the dev app's Install button, run:
-
-```sh
-pnpm local-transcriber:self-test "$DEV_APP_DATA"
-```
-
-Set DEV_APP_DATA to the run-owned debug profile's actual absolute app data directory. The self-test
-never installs weights and explicitly skips when no installation exists. It uses
-the repository's synthesized Portuguese WAV. Do not point proof builds at the
-owner's production or ordinary development profile.
-
-The model is [FluidInference/parakeet-ultra-coreml](https://huggingface.co/FluidInference/parakeet-ultra-coreml/tree/95eaa59a39d4394f047a4dc5cce480388a60d1b6),
-revision `95eaa59a39d4394f047a4dc5cce480388a60d1b6`, under CC BY 4.0. Credit:
-Fluid Inference, Parakeet Ultra Core ML conversion; model files are used unmodified.
-FluidAudio v0.18.0 is Apache-2.0 (its actual pinned LICENSE, copied into the helper
-bundle), rather than MIT. Clovy's license does not replace these licenses.
-Optional transcript cleanup, Notes generation and CLI chat retain their separate
-network boundaries. See [ADR-0074](adr/0074-local-transcription-uses-a-pinned-offline-helper.md).
-
-Switching from Local to Groq terminates the helper. A Local note run already in
-progress fails locally and retains its audio; an explicit retry uses the new
-selection. Remaining Local audio is never silently forwarded to Groq.
-
+OpenRouter uses its dedicated `/api/v1/audio/transcriptions` endpoint and the
+user's existing OpenRouter credential. The curated audio catalog contains
+`openai/whisper-large-v3-turbo` (default), `openai/whisper-large-v3` and
+`openai/whisper-1`. Each request uploads one canonical audio part with
+`response_format=json`, the selected language when available, and the
+dictionary hint when present. Multipart audio is limited to 25 MiB.
+OpenRouter documents a 60-second upstream deadline. The desktop allows 60
+seconds total for dictation and preview, and 600 seconds for saved-note
+requests to allow time for uploads on slower connections. Results use the
+returned text and the locally known offsets. Missing or rejected keys,
+timeouts, network failures, oversized audio and empty results have distinct
+error handling. A failed OpenRouter Turn does not cause a second upload of the
+full Source. The captured account must still be configured before each upload.
+[OpenRouter speech-to-text guide](https://openrouter.ai/docs/guides/overview/multimodal/stt),
+[OpenRouter transcription API](https://openrouter.ai/docs/api/api-reference/stt/create-transcription)
 
 ## 2026-11-01: Bound audio admission after preparation
 

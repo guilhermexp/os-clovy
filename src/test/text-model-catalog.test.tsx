@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppSettings } from "../components/settings/AppSettings";
@@ -6,12 +6,22 @@ import { applyInterfaceLocale } from "../i18n/locale";
 import { setCurrentDataPartitionName } from "../lib/data-partition";
 import type { LlmProvidersDto } from "../lib/llm-providers";
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  listeners: new Map<string, Set<(event: { payload: unknown }) => void>>(),
+}));
 vi.mock("@tauri-apps/api/core", async (original) => ({
   ...(await original<typeof import("@tauri-apps/api/core")>()),
   invoke: mocks.invoke,
 }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => vi.fn()) }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: async (event: string, handle: (event: { payload: unknown }) => void) => {
+    const listeners = mocks.listeners.get(event) ?? new Set();
+    listeners.add(handle);
+    mocks.listeners.set(event, listeners);
+    return () => listeners.delete(handle);
+  },
+}));
 
 const models = ["vendor/one", "vendor/two", "vendor/three"].map((id, index) => ({
   id,
@@ -47,6 +57,7 @@ function generationReads() {
 
 beforeEach(() => {
   mocks.invoke.mockReset();
+  mocks.listeners.clear();
   setCurrentDataPartitionName("default");
   applyInterfaceLocale("en");
   catalogFails = false;
@@ -113,6 +124,27 @@ beforeEach(() => {
     return undefined;
   });
 });
+
+it("refreshes the persisted audio selection after Settings was reopened during installation", async () => {
+  settings = { ...settings, localTranscriptionSupported: true };
+  const first = renderSettings();
+  const provider = () => screen.getByRole("combobox", { name: "Provider" });
+  await waitFor(() => expect(provider()).toHaveValue("groq"));
+  first.unmount();
+  renderSettings();
+  await waitFor(() => expect(provider()).toHaveValue("groq"));
+  settings = {
+    ...settings,
+    transcriptionProvider: "local",
+    transcriptionModel: "phonon-2.5",
+  };
+  act(() => {
+    for (const notify of mocks.listeners.get("transcription-selection-changed") ?? []) {
+      notify({ payload: null });
+    }
+  });
+  await waitFor(() => expect(provider()).toHaveValue("local"));
+});
 afterEach(() => {
   cleanup();
   setCurrentDataPartitionName("default");
@@ -158,8 +190,9 @@ describe("OpenRouter text model catalog", () => {
     };
     const user = userEvent.setup();
     renderSettings();
-    const transcription = await screen.findByRole("button", { name: "Change transcription model" });
-    await waitFor(() => expect(transcription).toHaveTextContent("research-transcription"));
+    const transcription = await screen.findByRole("combobox", { name: "Model" });
+    await waitFor(() => expect(transcription).toHaveValue("research-transcription"));
+    expect(transcription).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "More options for text" }));
     const input = screen.getByLabelText("OpenRouter API key");
     const row = input.closest(".settings-row") as HTMLElement;
@@ -172,7 +205,7 @@ describe("OpenRouter text model catalog", () => {
         within(row).getByRole("button", { name: operation === "save" ? "Remove" : "Save" }),
       ).toBeVisible(),
     );
-    expect(transcription).toHaveTextContent("research-transcription");
+    expect(transcription).toHaveValue("research-transcription");
     expect(screen.getByRole("button", { name: "Change image model" })).toHaveTextContent(
       "research-image",
     );

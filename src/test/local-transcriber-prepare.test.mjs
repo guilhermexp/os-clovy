@@ -23,10 +23,13 @@ function sandbox({ release = false } = {}) {
     "Package.resolved",
     "Sources/main.swift",
     "FluidAudio-LICENSE",
+    "WhisperKit-LICENSE",
+    "Model-Attribution.txt",
   ]) {
     fs.writeFileSync(path.join(source, file), file);
     hash.update(file).update("\0").update(file).update("\0");
   }
+  fs.chmodSync(path.join(source, "WhisperKit-LICENSE"), 0o444);
   fs.writeFileSync(
     path.join(source, "pin.json"),
     JSON.stringify({ sourceSha256: hash.digest("hex") }),
@@ -90,6 +93,39 @@ it("reuses unchanged signed output without invoking Swift again", () => {
   build.run();
   expect(build.builds()).toBe(1);
   expect(fs.readFileSync(build.executable, "utf8")).toBe("trusted-build-signed");
+});
+
+it("bundles both runtime licenses and the model attribution with the helper", () => {
+  const build = sandbox();
+  build.run();
+  const resources = path.join(path.dirname(path.dirname(build.executable)), "Resources");
+  for (const file of ["FluidAudio-LICENSE", "WhisperKit-LICENSE", "Model-Attribution.txt"]) {
+    expect(fs.readFileSync(path.join(resources, file), "utf8")).toBe(file);
+  }
+});
+
+it("makes the copied SwiftPM license writable for incremental Tauri resource copies", () => {
+  const build = sandbox();
+  build.run();
+  const license = path.join(
+    path.dirname(path.dirname(build.executable)),
+    "Resources/WhisperKit-LICENSE",
+  );
+  expect(fs.statSync(license).mode & 0o200).toBe(0o200);
+});
+
+it("restores missing and modified notices without rebuilding the executable", () => {
+  const build = sandbox();
+  build.run();
+  const resources = path.join(path.dirname(path.dirname(build.executable)), "Resources");
+  const license = path.join(resources, "WhisperKit-LICENSE");
+  const attribution = path.join(resources, "Model-Attribution.txt");
+  fs.unlinkSync(license);
+  fs.writeFileSync(attribution, "altered");
+  build.run();
+  expect(build.builds()).toBe(1);
+  expect(fs.readFileSync(license, "utf8")).toBe("WhisperKit-LICENSE");
+  expect(fs.readFileSync(attribution, "utf8")).toBe("Model-Attribution.txt");
 });
 
 it("drops the cargo placeholder from built and reused helpers", () => {

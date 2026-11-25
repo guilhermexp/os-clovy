@@ -1,7 +1,9 @@
 {
-  "fluidAudioVersion": "0.18.0",
-  "fluidAudioRevision": "e15287985625dbf544a343df679436789ffb03fb",
+  "fluidAudioVersion": "0.18.3",
+  "fluidAudioRevision": "c8b41f98eae668794dd0083bbe028fe7e6585051",
   "minimumMacOSVersion": "14.0",
   "architecture": "arm64",
-  "sourceSha256": "16f4d8e74ee35f1a101bc56cd2c6f0e314ff767861061692b960a51d553f84a4"
+  "sourceSha256": "00d5c9962c59d251f4fa8192024a97342ec5ed25e876c0ae21c67a302c8b50d6",
+  "whisperKitVersion": "1.1.1",
+  "whisperKitRevision": "1bbc57cb7fe6410248a685b1c5a3c6d56adc2ed4"
 }

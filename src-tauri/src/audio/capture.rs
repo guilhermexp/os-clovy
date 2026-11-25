@@ -414,7 +414,13 @@ pub fn start_capture_with_cancel(
     // source: when off, no preview audio leaves the device and nothing is
     // billed (JUN-375).
     let live_preview_available = crate::providers::live_transcription()
-        && crate::providers::transcription::current_backend().is_ok();
+        && match crate::providers::transcription::current_backend() {
+            Ok(_) => true,
+            Err(error) => {
+                super::live_preview::publish_preview_key_error(&app, &session_id, &error);
+                false
+            }
+        };
     let live_preview = if live_preview_available {
         Some(start_live_transcript_preview(
             app.clone(),

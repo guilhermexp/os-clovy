@@ -79,13 +79,12 @@ describe("settings in Portuguese (Brazil)", () => {
     expect(screen.queryByRole("button", { name: "Verificar servidor" })).not.toBeInTheDocument();
   });
 
-  it("translates the Models panel headings and model picker labels", () => {
+  it("translates the audio transcription heading and selectors", () => {
     renderSettings("models");
     expect(screen.getByRole("heading", { name: "Modelos" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Voz" })).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Alterar modelo de transcrição" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Transcrição de áudio" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Provedor" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Modelo" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Mais opções de voz" })).toBeInTheDocument();
   });
 

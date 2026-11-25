@@ -2,23 +2,43 @@ import { defineMessages } from "../define";
 
 export default defineMessages({
   en: {
-    "settings.localTranscription.engine": "Transcription engine",
-    "settings.localTranscription.groq": "Groq",
-    "settings.localTranscription.groqDescription": "Cloud, with your own key",
-    "settings.localTranscription.local": "Local (Parakeet Ultra)",
-    "settings.localTranscription.localDescription": "On this device, 25 languages",
-    "settings.localTranscription.install": "Install model (632 MB)",
-    "settings.localTranscription.required": "Install the model to use it",
+    "settings.localTranscription.provider": "Provider",
+    "settings.localTranscription.model": "Model",
+    "settings.localTranscription.chooseModel": "Choose a model",
+    "settings.localTranscription.install": "Install",
+    "settings.localTranscription.installModel": "Install {model}",
     "settings.localTranscription.cancel": "Cancel",
+    "settings.localTranscription.cancelModel": "Cancel downloading {model}",
     "settings.localTranscription.ready": "Ready · {size}",
+    "settings.localTranscription.partial": "Partially downloaded · {size}",
+    "settings.localTranscription.available": "Download · {size}",
+    "settings.localTranscription.active": "Active",
+    "settings.localTranscription.manage": "Manage local models",
     "settings.localTranscription.remove": "Remove",
-    "settings.localTranscription.failed": "Failed: {reason}",
-    "settings.localTranscription.networkFailed":
-      "Could not download {file}. Check your connection and try again.",
+    "settings.localTranscription.removeModel": "Remove {model}",
+    "settings.localTranscription.removeAndSwitch": "Remove and use Groq",
+    "settings.localTranscription.removeActiveDescription":
+      "Transcription will switch to Groq when you remove this model.",
+    "settings.localTranscription.stillActive": "{model} is still active.",
+    "settings.localTranscription.keepActive": "Keep {model}",
+    "settings.localTranscription.keepCurrent": "Keep current model",
+    "settings.localTranscription.pending": "{pending} · {status}. {model} is still active.",
+    "settings.localTranscription.openrouterKey":
+      "Add your OpenRouter API key under Text > More options > Provider API keys.",
+    "settings.localTranscription.modelRequiresMacos": "{model} requires macOS {version}.",
+    "settings.localTranscription.inUse":
+      "This model is in use. Try again after transcription finishes.",
+    "settings.localTranscription.busy": "This model is busy. Try again shortly.",
+    "settings.localTranscription.removeFailed":
+      "Could not remove all files for this model. Try again.",
+    "settings.localTranscription.requiresMacos": "Requires macOS {version}",
+    "settings.localTranscription.failed": "Download failed ({reason}).",
+    "settings.localTranscription.networkFailed": "Connection interrupted while downloading {file}.",
     "settings.localTranscription.retry": "Try again",
+    "settings.localTranscription.retryModel": "Try downloading {model} again",
     "settings.localTranscription.removed": "The model was removed. Transcription switched to Groq.",
-    "settings.localTranscription.loading": "Checking model…",
-    "settings.localTranscription.progress": "Model download",
+    "settings.localTranscription.loading": "Checking local models…",
+    "settings.localTranscription.progress": "Downloading {model}",
 
     "settings.appearance.title": "Appearance",
     "settings.appearance.blurb":
@@ -144,12 +164,9 @@ export default defineMessages({
       "Microphone test recorded, but playback is unavailable.",
 
     "settings.models.blurb": "Choose the models Clovy uses for voice, text, image, and video.",
-    "settings.models.voice": "Voice",
-    "settings.models.voiceDescription":
-      "Choose the model Clovy uses for note transcription and dictation.",
     "settings.models.partitionNote":
       "Showing models for the current data set: {name}. Switch to the default data set to edit global models.",
-    "settings.models.transcription": "Transcription",
+    "settings.models.transcription": "Audio transcription",
     "settings.models.transcriptionDescription": "Speech-to-text for note recordings and dictation.",
     "settings.models.moreVoiceAria": "More options for voice",
     "settings.models.moreVoiceDescription": "Advanced voice settings",
@@ -327,23 +344,43 @@ export default defineMessages({
     "settings.dictionary.placeholder": "e.g. Anthropic, ARR, Jane Doe",
   },
   "pt-BR": {
-    "settings.localTranscription.engine": "Motor de transcrição",
-    "settings.localTranscription.groq": "Groq",
-    "settings.localTranscription.groqDescription": "Na nuvem, com sua chave",
-    "settings.localTranscription.local": "Local (Parakeet Ultra)",
-    "settings.localTranscription.localDescription": "No dispositivo, 25 idiomas",
-    "settings.localTranscription.install": "Instalar modelo (632 MB)",
-    "settings.localTranscription.required": "Instale o modelo para usar",
+    "settings.localTranscription.provider": "Provedor",
+    "settings.localTranscription.model": "Modelo",
+    "settings.localTranscription.chooseModel": "Escolha um modelo",
+    "settings.localTranscription.install": "Instalar",
+    "settings.localTranscription.installModel": "Instalar {model}",
     "settings.localTranscription.cancel": "Cancelar",
+    "settings.localTranscription.cancelModel": "Cancelar download de {model}",
     "settings.localTranscription.ready": "Pronto · {size}",
+    "settings.localTranscription.partial": "Download parcial · {size}",
+    "settings.localTranscription.available": "Download · {size}",
+    "settings.localTranscription.active": "Ativo",
+    "settings.localTranscription.manage": "Gerenciar modelos locais",
     "settings.localTranscription.remove": "Remover",
-    "settings.localTranscription.failed": "Falhou: {reason}",
-    "settings.localTranscription.networkFailed":
-      "Não foi possível baixar {file}. Verifique sua conexão e tente de novo.",
+    "settings.localTranscription.removeModel": "Remover {model}",
+    "settings.localTranscription.removeAndSwitch": "Remover e usar Groq",
+    "settings.localTranscription.removeActiveDescription":
+      "Ao remover este modelo, a transcrição passará a usar a Groq.",
+    "settings.localTranscription.stillActive": "{model} continua ativo.",
+    "settings.localTranscription.keepActive": "Manter {model}",
+    "settings.localTranscription.keepCurrent": "Manter modelo atual",
+    "settings.localTranscription.pending": "{pending} · {status}. {model} continua ativo.",
+    "settings.localTranscription.openrouterKey":
+      "Adicione sua chave da OpenRouter em Texto > Mais opções > Chaves de API de provedores.",
+    "settings.localTranscription.modelRequiresMacos": "{model} requer macOS {version}.",
+    "settings.localTranscription.inUse":
+      "O modelo está em uso. Tente de novo quando a transcrição terminar.",
+    "settings.localTranscription.busy": "O modelo está ocupado. Tente de novo em instantes.",
+    "settings.localTranscription.removeFailed":
+      "Não foi possível remover todos os arquivos do modelo. Tente de novo.",
+    "settings.localTranscription.requiresMacos": "Requer macOS {version}",
+    "settings.localTranscription.failed": "Falha no download ({reason}).",
+    "settings.localTranscription.networkFailed": "A conexão foi interrompida ao baixar {file}.",
     "settings.localTranscription.retry": "Tentar de novo",
+    "settings.localTranscription.retryModel": "Tentar baixar {model} de novo",
     "settings.localTranscription.removed": "O modelo foi removido. A transcrição mudou para Groq.",
-    "settings.localTranscription.loading": "Verificando modelo…",
-    "settings.localTranscription.progress": "Download do modelo",
+    "settings.localTranscription.loading": "Verificando modelos locais…",
+    "settings.localTranscription.progress": "Baixando {model}",
 
     "settings.appearance.title": "Aparência",
     "settings.appearance.blurb":
@@ -471,12 +508,9 @@ export default defineMessages({
       "O teste do microfone foi gravado, mas a reprodução não está disponível.",
 
     "settings.models.blurb": "Escolha os modelos que o Clovy usa para voz, texto, imagem e vídeo.",
-    "settings.models.voice": "Voz",
-    "settings.models.voiceDescription":
-      "Escolha o modelo que o Clovy usa para a transcrição de notas e o ditado.",
     "settings.models.partitionNote":
       "Mostrando os modelos do conjunto de dados atual: {name}. Mude para o conjunto de dados padrão para editar os modelos globais.",
-    "settings.models.transcription": "Transcrição",
+    "settings.models.transcription": "Transcrição de áudio",
     "settings.models.transcriptionDescription":
       "Conversão de fala em texto para gravações de notas e ditado.",
     "settings.models.moreVoiceAria": "Mais opções de voz",

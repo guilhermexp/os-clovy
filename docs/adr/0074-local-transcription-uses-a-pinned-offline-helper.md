@@ -57,3 +57,25 @@ per note turn. Keep the timed adapter's 400 ms rule, 600-second chunking, durabl
 jobs and retries. Groq packing is unchanged. This trades fewer helper calls for
 correct attribution; all Local calls still reuse the resident model without
 network access or provider fallback.
+
+
+## Addendum, 2026-11-25: model selection and OpenRouter audio
+
+Local has four separately installed and verified packages. Keep the Ultra
+identity, directory and receipt format for existing installations. Use
+FluidAudio v0.18.3 for Ultra, Phonon-2.5 GPU and the application-owned adapter
+for Fluid Speech Pro. WhisperKit v1.1.1 loads the pinned Turbo and tokenizer
+through a local-only factory. Each package declares its system requirement
+while the helper continues to support macOS 14.
+
+An explicit selection of a missing local model creates an installation intent.
+The latest intent can activate the model only after integrity checks and a
+successful preferences write. The management list can install without an
+intent. Each operation holds its chosen provider and model, and a local lease
+prevents removal until use ends. Explicit removal of the active model
+requires confirmation of the transition to Groq.
+
+OpenRouter audio uses the provider's dedicated transcription endpoint and
+existing credential. OpenRouter and Local use individual Turn requests and
+the saved Turn boundaries. Groq retains its existing timed packs and pacing.
+See [the audio pipeline](../audio-pipeline.md#audio-transcription-engines).

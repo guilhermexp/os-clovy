@@ -851,6 +851,27 @@ describe("notes recording reliability", () => {
     expect(screen.queryByText(/Transcribing audio/)).not.toBeInTheDocument();
   });
 
+  it("shows OpenRouter preview setup once while recording continues", async () => {
+    await startRecordingOnFirstNote();
+    const warning = "live-transcript-key-unavailable";
+    await waitFor(() => expect(mocks.listeners.has(warning)).toBe(true));
+    await act(async () => {
+      const event = {
+        payload: {
+          sessionId: "rec-1",
+          error: { code: "openrouter_audio_key_missing", message: "fixture backend message" },
+        },
+      };
+      await mocks.listeners.get(warning)?.(event);
+      await mocks.listeners.get(warning)?.(event);
+    });
+    expect(mocks.toast.error).toHaveBeenCalledTimes(1);
+    expect(mocks.toast.error).toHaveBeenCalledWith(
+      expect.stringContaining("Add your OpenRouter API key"),
+    );
+    expect(screen.getByRole("button", { name: "Done" })).toBeVisible();
+  });
+
   it("keeps provisional transcript visible after Stop while saved-audio processing is pending", async () => {
     const pendingFinish = deferred<never>();
     mocks.finishRecording.mockReturnValue(pendingFinish.promise);

@@ -44,6 +44,52 @@ pub(crate) struct DirectTransport<'a> {
     pub(crate) retired_api_base: String,
 }
 
+impl DirectTransport<'_> {
+    /// A captured account still has to be authorized when a queued upload starts.
+    /// Keep the account matched to the run's pacer even across retries.
+    pub(super) fn revalidate_transcription_key(
+        &self,
+        provider: BuiltinProvider,
+        captured: &str,
+    ) -> Result<(), AppError> {
+        #[cfg(test)]
+        let current = if let Ok(key) = TEST_TRANSCRIPTION_KEY.try_with(|read| read()) {
+            key?
+        } else {
+            let fake = match provider {
+                BuiltinProvider::Groq => self.groq_base != GROQ_API_BASE,
+                BuiltinProvider::OpenRouter => self.openrouter_base != OPENROUTER_API_BASE,
+                _ => false,
+            };
+            if fake {
+                return Ok(());
+            }
+            dictation_user_key(provider)?
+        };
+        #[cfg(not(test))]
+        let current = dictation_user_key(provider)?;
+        if current.as_deref() == Some(captured) {
+            return Ok(());
+        }
+        if current.is_some() {
+            return Err(AppError::new(
+                "transcription_key_changed",
+                "Your transcription API key changed. Try again to use the new key.",
+            ));
+        }
+        match provider {
+            BuiltinProvider::Groq => super::groq::require_groq_key(None).map(|_| ()),
+            BuiltinProvider::OpenRouter => super::openrouter::require_audio_key(None).map(|_| ()),
+            _ => unreachable!("only transcription providers send audio"),
+        }
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_TRANSCRIPTION_KEY: Box<dyn Fn() -> Result<Option<String>, AppError> + Send + Sync>;
+}
+
 /// Notes use a 600-second deadline because each audio part can be up to 25 MB.
 pub(super) fn production_notes_transport() -> DirectTransport<'static> {
     DirectTransport {

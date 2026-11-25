@@ -31,7 +31,7 @@ _Avoid_: move, rename (the old profile stays), upgrade.
 
 **Direct provider**:
 An external service called directly by the desktop with the user's key:
-**Groq** for audio, **OpenRouter** for remote text, and **fal** for media.
+**Groq** for audio, **OpenRouter** for audio or remote text, and **fal** for media.
 There is no Clovy inference server or service-managed credential fallback.
 _Avoid_: proxy, shared service key, automatic fallback.
 
@@ -189,24 +189,28 @@ speaker identity is inferred).
 
 **Transcription engine** (OpenSpec: _motor de transcrição_):
 The selected implementation that converts audio to text for dictation, note
-Turns, fixed chunks, Turn packs, and Live transcript preview. Groq uses the
-user's key; Local (Parakeet Ultra) runs on-device on macOS 14+ Apple Silicon.
-It is independent of the Notes engine and Dictation cleanup. A Local error
-never selects Groq automatically.
+Turns, fixed chunks, Turn packs, and Live transcript preview. Groq and
+OpenRouter use the corresponding user key. Local runs the selected model on
+Apple Silicon, subject to the model's macOS requirement. The audio choice is
+independent of the Notes engine and Dictation cleanup. Each operation keeps
+its selected model and provider through completion.
 _Avoid_: chat engine, Notes engine, offline app (other features may use a network).
 
 **Local transcription model** (OpenSpec: _modelo local_):
-The pinned Parakeet Ultra Core ML files installed explicitly through Settings.
-Their installation state is absent, downloading, ready, or failed; readiness
-is required to select Local. The model id is `parakeet-ultra`.
+Pinned Core ML files managed independently through Settings. An explicit
+selection can start installation. The previous selection remains effective
+until the chosen model is ready and the preference is saved. The catalog
+contains Whisper large-v3-turbo, Parakeet Ultra, Fluid Speech Pro, and Phonon-2.5.
+The Parakeet Ultra model id remains `parakeet-ultra`.
 _Avoid_: downloaded provider, local Groq, embedded model (it is optional).
 
 **Turn pack** (OpenSpec: _pacote de turnos_):
 Consecutive Turns of one Source sent to Groq as one final-transcription
 request of up to 600 s, 0.5 s apart, and split back per Turn by the
 provider's segment times. Each Turn keeps its own durable job; only the
-Groq route with the user's key supports packs. Local sends one request per Turn
-to avoid assigning text across imprecise token boundaries (ADR-0074 addendum).
+Groq route with the user's key supports packs. Local and OpenRouter send one
+request per Turn to preserve attribution using the Turn's own boundaries
+(ADR-0074 addendum).
 _Avoid_: batch, chunk (a chunk is a fixed split of one long audio file).
 
 **Speaker bleed (echo)**:
@@ -733,7 +737,7 @@ _Avoid_: "GitHub release" (unqualified).
 **Provider settings / Model mode**:
 The persisted model selection for each remote action, separate from
 **provider use** choices for CLI and endpoint engines. Current upstreams
-are Groq for audio, OpenRouter for remote text, and fal for media. Web search
+are Groq for audio, OpenRouter for audio or remote text, and fal for media. Web search
 belongs to the CLI engine.
 _Avoid_: model config (unqualified).
 

@@ -243,17 +243,21 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   `openrouter_api_key_missing` before network access. There is no Auto or
   fallback route. A one-time migration rewrites the old server selection to
   OpenRouter and the old Auto model to the default. CLI/endpoint choices stay.
-- **Note transcription.** `transcribe_saved_audio` in the provider layer (final turns, the
-  per-source fallback, live preview) posts straight to Groq with the user's
+- **Audio transcription.** Settings > Models selects Local, Groq or OpenRouter
+  independently of Notes and dictation cleanup. Local uses one of the four
+  installed packages. OpenRouter uses its dedicated audio endpoint and
+  existing credential. It sends individual Turn requests, with the saved bounds
+  for attribution. A saved-audio run captures its provider and model at admission.
+  [Audio pipeline](audio-pipeline.md#audio-transcription-engines)
+- **Groq note transcription.** The provider layer posts straight to Groq with the user's
   own Groq key, with the transcription parameters (`response_format=json`,
   canonical `audio.wav`/`audio.m4a` name, dictionary prompt, language, 25 MB
   cap, one retry of a 408/5xx or transport failure; an empty transcript is
   `no_speech`). Without a key it returns `groq_api_key_missing` before a request.
   A Groq 429 carries its `retry-after` (else `x-ratelimit-reset-requests`) as
   `details.retryAfterMs`; `send_direct` waits it out only up to 2 s. Final
-  transcription reads one route per request (the saved key, the run's
-  model, that key's pacer) and its kept chunks, pacer and transport all use
-  it; the key is never read again for that request. A saved key the credential store cannot return
+  transcription captures a route with the saved key, run model and that
+  key's pacer. Kept chunks, pacing and transport use that route. A saved key the credential store cannot return
   fails the request with `provider_api_key_unavailable` (the note says to
   save it again) and the live preview sends nothing. It runs behind the
   pacer of that route (`domain/processing.rs` `RequestPacer`): one per Groq account, keyed by the

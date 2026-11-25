@@ -1,6 +1,6 @@
 use crate::{
     audio::turns::normalize_wav_for_transcription,
-    domain::types::{RecordingSource, RecordingSourceMode},
+    domain::types::{AppError, RecordingSource, RecordingSourceMode},
     providers::groq::TranscriptionRequest,
 };
 use hound::{SampleFormat, WavSpec, WavWriter};
@@ -20,6 +20,23 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub const LIVE_TRANSCRIPT_EVENT: &str = "live-transcript-event";
+pub const LIVE_TRANSCRIPT_KEY_EVENT: &str = "live-transcript-key-unavailable";
+
+pub fn publish_preview_key_error(app: &AppHandle, session_id: &str, error: &AppError) -> bool {
+    if !matches!(
+        error.code.as_str(),
+        "openrouter_audio_key_missing"
+            | "openrouter_audio_key_unavailable"
+            | "openrouter_audio_key_rejected"
+    ) {
+        return false;
+    }
+    app.emit(
+        LIVE_TRANSCRIPT_KEY_EVENT,
+        serde_json::json!({ "sessionId": session_id, "error": error }),
+    )
+    .is_ok()
+}
 
 const PREVIEW_BATCH_BUFFER: usize = 512;
 const PREVIEW_STALE_BATCH_THRESHOLD: usize = PREVIEW_BATCH_BUFFER / 2;
@@ -221,6 +238,7 @@ async fn run_live_preview_worker(params: LivePreviewWorkerParams) {
     let mut buffer: Vec<i16> = Vec::with_capacity(chunk_samples * 2);
     let mut buffer_start_sample = 0_u64;
     let mut segment_index = 0_i64;
+    let mut sent_key_warning = false;
 
     while let Some(batch) = receiver.recv().await {
         if cancelled.load(Ordering::Acquire) {
@@ -257,18 +275,25 @@ async fn run_live_preview_worker(params: LivePreviewWorkerParams) {
                 continue;
             };
             let segment_id = preview_segment_id(source, segment_index);
-            if let Some(event) = transcribe_preview_chunk(PreviewChunkRequest {
-                note_id: &note_id,
-                session_id: &session_id,
-                source_mode,
-                source,
-                segment_id: &segment_id,
-                start_ms,
-                end_ms,
-                sample_rate,
-                channels,
-                samples: &samples,
-            })
+            if let Some(event) = transcribe_preview_chunk(
+                PreviewChunkRequest {
+                    note_id: &note_id,
+                    session_id: &session_id,
+                    source_mode,
+                    source,
+                    segment_id: &segment_id,
+                    start_ms,
+                    end_ms,
+                    sample_rate,
+                    channels,
+                    samples: &samples,
+                },
+                |error| {
+                    if !sent_key_warning {
+                        sent_key_warning = publish_preview_key_error(&app, &session_id, error);
+                    }
+                },
+            )
             .await
             {
                 if cancelled.load(Ordering::Acquire) {
@@ -296,6 +321,7 @@ async fn run_system_live_preview_worker(
     let mut buffer_start_sample = 0_u64;
     let mut segment_index = 0_i64;
     let mut current_format = None;
+    let mut sent_key_warning = false;
 
     while !cancelled.load(Ordering::Acquire) {
         let mut had_samples = false;
@@ -346,18 +372,26 @@ async fn run_system_live_preview_worker(
                         continue;
                     };
                     let segment_id = preview_segment_id(RecordingSource::System, segment_index);
-                    if let Some(event) = transcribe_preview_chunk(PreviewChunkRequest {
-                        note_id: &note_id,
-                        session_id: &session_id,
-                        source_mode,
-                        source: RecordingSource::System,
-                        segment_id: &segment_id,
-                        start_ms,
-                        end_ms,
-                        sample_rate: read.sample_rate,
-                        channels: read.channels,
-                        samples: &samples,
-                    })
+                    if let Some(event) = transcribe_preview_chunk(
+                        PreviewChunkRequest {
+                            note_id: &note_id,
+                            session_id: &session_id,
+                            source_mode,
+                            source: RecordingSource::System,
+                            segment_id: &segment_id,
+                            start_ms,
+                            end_ms,
+                            sample_rate: read.sample_rate,
+                            channels: read.channels,
+                            samples: &samples,
+                        },
+                        |error| {
+                            if !sent_key_warning {
+                                sent_key_warning =
+                                    publish_preview_key_error(&app, &session_id, error);
+                            }
+                        },
+                    )
                     .await
                     {
                         if cancelled.load(Ordering::Acquire) {
@@ -586,6 +620,7 @@ fn read_wav_layout(path: &Path) -> std::io::Result<Option<WavLayout>> {
 
 async fn transcribe_preview_chunk(
     request: PreviewChunkRequest<'_>,
+    mut on_error: impl FnMut(&AppError),
 ) -> Option<LiveTranscriptEventDto> {
     let PreviewChunkRequest {
         note_id,
@@ -604,7 +639,13 @@ async fn transcribe_preview_chunk(
     // the hour's audio, and otherwise drops the chunk (ADR-0002 lets preview
     // audio be dropped). The chunk then goes with the same key whose pacer
     // gave it the request.
-    let route = crate::domain::processing::live_preview_route(end_ms - start_ms)?;
+    let route = match crate::domain::processing::live_preview_route(end_ms - start_ms) {
+        Ok(route) => route?,
+        Err(error) => {
+            on_error(&error);
+            return None;
+        }
+    };
     let temp_path = preview_chunk_path(session_id, segment_id);
     if let Err(error) = write_preview_wav(&temp_path, sample_rate, channels, samples) {
         let _ = std::fs::remove_file(&temp_path);
@@ -628,7 +669,12 @@ async fn transcribe_preview_chunk(
         }
     };
 
-    let request = preview_transcription_request(audio_path.clone(), session_id, segment_id);
+    let request = preview_transcription_request(
+        audio_path.clone(),
+        session_id,
+        segment_id,
+        route.backend.provider(),
+    );
     let result = crate::domain::processing::transcribe_on_route(route, request).await;
     let _ = std::fs::remove_file(&temp_path);
     if audio_path != temp_path {
@@ -654,6 +700,7 @@ async fn transcribe_preview_chunk(
             })
         }
         Err(error) => {
+            on_error(&error);
             eprintln!(
                 "live transcript preview transcription failed: {} ({})",
                 error.message, error.code
@@ -675,9 +722,10 @@ fn preview_transcription_request(
     audio_path: PathBuf,
     session_id: &str,
     segment_id: &str,
+    provider: &str,
 ) -> TranscriptionRequest {
     TranscriptionRequest {
-        provider: crate::providers::configured_transcription_provider(),
+        provider: provider.into(),
         audio_path,
         title: "Live transcript preview".to_string(),
         // Never feed unverified preview guesses back into ASR. A single
@@ -959,8 +1007,12 @@ mod tests {
         assert_eq!(reader.spec().sample_rate, 16_000);
         assert_eq!(reader.spec().channels, 1);
 
-        let request =
-            preview_transcription_request(normalized_path.clone(), "recording-session", "system-0");
+        let request = preview_transcription_request(
+            normalized_path.clone(),
+            "recording-session",
+            "system-0",
+            "groq",
+        );
         assert!(request.context.is_none());
         assert_eq!(
             request.operation_id.as_deref(),

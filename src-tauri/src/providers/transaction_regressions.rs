@@ -13,6 +13,7 @@ impl Fixture {
         let mut settings = default_settings();
         settings.provider_api_keys_configured.set(provider, true);
         let state = ProviderSettingsState {
+            transcription_intent: Default::default(),
             path: directory.path().join("settings.json"),
             settings: Mutex::new(settings.clone()),
         };
@@ -262,6 +263,7 @@ fn f2_rejected_settings_candidate_is_never_published_or_saved() {
 async fn f3_native_media_catalog_uses_curated_models_without_a_server() {
     let directory = tempfile::tempdir().unwrap();
     let state = ProviderSettingsState {
+        transcription_intent: Default::default(),
         path: directory.path().join("settings.json"),
         settings: Mutex::new(default_settings()),
     };

@@ -6,6 +6,81 @@ use tokio::{
     net::TcpListener,
 };
 
+#[tokio::test]
+async fn transcription_model_stale_install_status_can_be_repaired() {
+    let directory = tempfile::tempdir().unwrap();
+    let http = server(false, false).await;
+    let model = TranscriptionModel::new(directory.path().join("managed"), manifest());
+    model.install(&http.url, |_| {}).await.unwrap();
+    std::fs::remove_file(model.directory().join("installed.json")).unwrap();
+    assert_eq!(model.state(), ModelState::Absent);
+    model.install(&http.url, |_| {}).await.unwrap();
+    assert!(matches!(model.state(), ModelState::Ready { .. }));
+    assert_eq!(http.seen.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn transcription_model_concurrent_install_requests_join_the_same_download() {
+    let directory = tempfile::tempdir().unwrap();
+    let http = server(false, true).await;
+    let model = TranscriptionModel::new(directory.path().join("managed"), manifest());
+    let (primary, joined) = tokio::join!(
+        model.install(&http.url, |_| {}),
+        model.install(&http.url, |_| {}),
+    );
+    assert!(primary.is_ok());
+    assert_eq!(joined, primary);
+    assert_eq!(http.seen.lock().unwrap().len(), 2);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_removal_keeps_an_intact_model_ready_and_protects_external_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let http = server(false, false).await;
+    let model = Arc::new(TranscriptionModel::new(
+        directory.path().join("managed"),
+        manifest(),
+    ));
+    model.install(&http.url, |_| {}).await.unwrap();
+    let external = directory.path().join("external");
+    std::fs::write(&external, b"keep this").unwrap();
+    std::os::unix::fs::symlink(
+        &external,
+        model.directory().join("parakeet_vocab.json.part"),
+    )
+    .unwrap();
+
+    assert!(model.remove().await.is_err());
+    assert_eq!(model.state(), ModelState::Ready { bytes: 17 });
+    assert!(model.acquire().is_some());
+    assert_eq!(std::fs::read(&external).unwrap(), b"keep this");
+}
+
+#[tokio::test]
+async fn failed_removal_reports_remaining_weights_without_making_them_available() {
+    let directory = tempfile::tempdir().unwrap();
+    let http = server(false, false).await;
+    let model = Arc::new(TranscriptionModel::new(
+        directory.path().join("managed"),
+        manifest(),
+    ));
+    model.install(&http.url, |_| {}).await.unwrap();
+    // Removal deletes the receipt and the first weight before reaching this
+    // directory at the first partial-file path. The vocabulary must survive.
+    std::fs::create_dir(model.directory().join("Encoder.mlmodelc/model.mil.part")).unwrap();
+
+    assert!(model.remove().await.is_err());
+    assert_eq!(model.state(), ModelState::Absent);
+    assert!(!model.directory().join("installed.json").exists());
+    assert!(!model
+        .directory()
+        .join("Encoder.mlmodelc/model.mil")
+        .exists());
+    assert_eq!(model.installed_bytes(), b"vocabulary".len() as u64);
+    assert!(model.acquire().is_none());
+}
+
 fn manifest() -> Manifest {
     let files = [
         ("Encoder.mlmodelc/model.mil", b"encoder".as_slice()),
@@ -16,6 +91,7 @@ fn manifest() -> Manifest {
         path: path.into(),
         bytes: data.len() as u64,
         sha256: format!("{:x}", Sha256::digest(data)),
+        source: None,
     })
     .collect();
     Manifest {
@@ -144,6 +220,78 @@ async fn corrupt_file_preserves_verified_files_and_retry_fetches_only_missing() 
     let good = server(false, false).await;
     model.install(&good.url, |_| {}).await.unwrap();
     assert_eq!(good.seen.lock().unwrap().len(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn install_refuses_a_partial_link_without_writing_outside_the_model() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = server(false, false).await;
+    let dir = temp.path().join("model");
+    let outside = temp.path().join("personal-file");
+    std::fs::create_dir_all(dir.join("Encoder.mlmodelc")).unwrap();
+    std::fs::write(&outside, b"original").unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("Encoder.mlmodelc/model.mil.part")).unwrap();
+
+    let model = TranscriptionModel::new(dir, manifest());
+    let result = model.install(&server.url, |_| {}).await;
+
+    assert_eq!(std::fs::read(outside).unwrap(), b"original");
+    assert!(result.is_err());
+    assert!(server.seen.lock().unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn disk_refresh_does_not_accept_weights_in_a_linked_component() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("model");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("model.mil"), b"encoder").unwrap();
+    std::fs::write(dir.join("parakeet_vocab.json"), b"vocabulary").unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("Encoder.mlmodelc")).unwrap();
+
+    assert_eq!(reopened_state(dir).await, ModelState::Absent);
+}
+
+#[tokio::test]
+async fn four_model_directories_install_independently_and_keep_other_files_on_removal() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = server(false, false).await;
+    let models: Vec<_> = LocalModelId::ALL
+        .into_iter()
+        .map(|id| {
+            let (directory, pinned) = pinned_model(id);
+            assert!(pinned.total_bytes > 0);
+            Arc::new(TranscriptionModel::new(
+                temp.path().join(directory),
+                manifest(),
+            ))
+        })
+        .collect();
+    for model in &models {
+        model.install(&server.url, |_| {}).await.unwrap();
+    }
+    assert_eq!(server.seen.lock().unwrap().len(), 8);
+    let active = models[0].acquire().unwrap();
+    let error = models[0]
+        .begin_removal()
+        .err()
+        .expect("in-use model is protected");
+    assert_eq!(error.code, "local_model_in_use");
+    let unrelated = models[1].dir.join("my-file.txt");
+    std::fs::write(&unrelated, b"owner").unwrap();
+    models[1].remove().await.unwrap();
+    assert_eq!(std::fs::read(&unrelated).unwrap(), b"owner");
+    assert_eq!(models[1].state(), ModelState::Absent);
+    assert_eq!(models[0].state(), ModelState::Ready { bytes: 17 });
+    assert_eq!(models[2].state(), ModelState::Ready { bytes: 17 });
+    assert_eq!(models[3].state(), ModelState::Ready { bytes: 17 });
+    drop(active);
+    models[0].remove().await.unwrap();
+    assert!(!models[0].dir.exists());
 }
 #[tokio::test]
 async fn cancel_returns_absent_and_resume_uses_range() {

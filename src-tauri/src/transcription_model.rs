@@ -1,6 +1,10 @@
-//! User-installed, pinned speech model. Transcription itself never downloads files.
+//! User-installed, pinned speech models. Transcription itself never downloads files.
+use crate::{domain::types::AppError, providers::transcription::LocalModelId};
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+};
 
 #[cfg(test)]
 tokio::task_local! {
@@ -20,6 +24,14 @@ pub struct ModelFile {
     pub path: String,
     pub bytes: u64,
     pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ModelFileSource>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelFileSource {
+    pub repository: String,
+    pub revision: String,
+    pub path: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
@@ -27,6 +39,61 @@ pub struct Manifest {
     pub revision: String,
     pub total_bytes: u64,
     pub files: Vec<ModelFile>,
+}
+
+impl Manifest {
+    fn validate(&self) -> bool {
+        fn pinned(repository: &str, revision: &str) -> bool {
+            repository
+                .split_once('/')
+                .is_some_and(|(owner, repo)| safe_component(owner) && safe_component(repo))
+                && valid_hex(revision, 40)
+        }
+        let mut paths = std::collections::HashSet::new();
+        !self.files.is_empty()
+            && pinned(&self.repository, &self.revision)
+            && self.files.iter().all(|file| {
+                safe_file(&file.path)
+                    && paths.insert(&file.path)
+                    && file.bytes > 0
+                    && valid_hex(&file.sha256, 64)
+                    && file.source.as_ref().map_or(true, |source| {
+                        pinned(&source.repository, &source.revision) && safe_file(&source.path)
+                    })
+            })
+            && self
+                .files
+                .iter()
+                .try_fold(0u64, |total, file| total.checked_add(file.bytes))
+                == Some(self.total_bytes)
+    }
+
+    fn base_url(&self) -> String {
+        format!(
+            "https://huggingface.co/{}/resolve/{}",
+            self.repository, self.revision
+        )
+    }
+}
+
+fn valid_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn safe_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+fn safe_file(value: &str) -> bool {
+    value.split('/').all(safe_component) && !value.ends_with(".part") && value != "installed.json"
 }
 
 // A wakeable cancellation token backed by Tokio watch; no additional crate.
@@ -51,15 +118,43 @@ pub struct TranscriptionModel {
     dir: PathBuf,
     manifest: Manifest,
     state: Mutex<ModelState>,
-    cancellation: Mutex<Option<std::sync::Arc<CancellationToken>>>,
+    installation: Mutex<Option<Installation>>,
     operation: tokio::sync::Mutex<()>,
-    removals: std::sync::atomic::AtomicUsize,
+    use_state: Mutex<ModelUseState>,
 }
 
-pub struct RemovalGuard<'a>(&'a std::sync::atomic::AtomicUsize);
+type InstallResult = Result<(), String>;
+
+struct Installation {
+    cancellation: Arc<CancellationToken>,
+    result: tokio::sync::watch::Receiver<Option<InstallResult>>,
+}
+
+struct InstallOwner<'a>(&'a Mutex<Option<Installation>>);
+
+impl Drop for InstallOwner<'_> {
+    fn drop(&mut self) {
+        *lock(self.0) = None;
+    }
+}
+
+#[derive(Default)]
+struct ModelUseState {
+    readers: usize,
+    removing: bool,
+}
+
+pub struct ModelUse(Arc<TranscriptionModel>);
+impl Drop for ModelUse {
+    fn drop(&mut self) {
+        lock(&self.0.use_state).readers -= 1;
+    }
+}
+
+pub struct RemovalGuard<'a>(&'a TranscriptionModel);
 impl Drop for RemovalGuard<'_> {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        lock(&self.0.use_state).removing = false;
     }
 }
 
@@ -84,9 +179,9 @@ impl TranscriptionModel {
             dir,
             manifest,
             state: Mutex::new(state),
-            cancellation: Mutex::new(None),
+            installation: Mutex::new(None),
             operation: tokio::sync::Mutex::new(()),
-            removals: std::sync::atomic::AtomicUsize::new(0),
+            use_state: Mutex::new(ModelUseState::default()),
         }
     }
     /// Startup registers immediately; disk verification runs away from the window thread.
@@ -96,7 +191,7 @@ impl TranscriptionModel {
         on_ready: impl FnOnce() + Send,
     ) {
         let _operation = self.operation.lock().await;
-        if self.removals.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        if lock(&self.use_state).removing {
             return;
         }
         let dir = self.dir.clone();
@@ -104,7 +199,7 @@ impl TranscriptionModel {
         let ready = tokio::task::spawn_blocking(move || installed(&dir, &manifest))
             .await
             .unwrap_or(false);
-        if self.removals.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        if lock(&self.use_state).removing {
             return;
         }
         self.publish(
@@ -125,20 +220,42 @@ impl TranscriptionModel {
         &self.dir
     }
     pub fn state(&self) -> ModelState {
-        if self.removals.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        if lock(&self.use_state).removing {
             return ModelState::Absent;
         }
-        lock(&self.state).clone()
+        let state = lock(&self.state).clone();
+        if matches!(state, ModelState::Ready { .. }) && !marker_matches(&self.dir, &self.manifest) {
+            return ModelState::Absent;
+        }
+        state
     }
-    pub fn begin_removal(&self) -> RemovalGuard<'_> {
-        self.removals
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    fn acquire(self: &Arc<Self>) -> Option<Arc<ModelUse>> {
+        let mut state = lock(&self.use_state);
+        if state.removing
+            || !matches!(*lock(&self.state), ModelState::Ready { .. })
+            || !marker_matches(&self.dir, &self.manifest)
+        {
+            return None;
+        }
+        state.readers += 1;
+        Some(Arc::new(ModelUse(self.clone())))
+    }
+    pub fn begin_removal(&self) -> Result<RemovalGuard<'_>, AppError> {
+        let mut state = lock(&self.use_state);
+        if state.readers > 0 || state.removing {
+            return Err(AppError::new(
+                "local_model_in_use",
+                "This model is in use. Try again after transcription finishes.",
+            ));
+        }
+        state.removing = true;
+        drop(state);
         self.cancel();
-        RemovalGuard(&self.removals)
+        Ok(RemovalGuard(self))
     }
     pub fn cancel(&self) {
-        if let Some(token) = lock(&self.cancellation).as_ref() {
-            token.cancel();
+        if let Some(installation) = lock(&self.installation).as_ref() {
+            installation.cancellation.cancel();
         }
     }
     fn publish(&self, state: ModelState, progress: &impl Fn(ModelState)) {
@@ -150,25 +267,63 @@ impl TranscriptionModel {
         base: &str,
         progress: impl Fn(ModelState) + Send + Sync,
     ) -> Result<(), String> {
-        let _operation = self
-            .operation
-            .try_lock()
-            .map_err(|_| "local_model_busy".to_string())?;
-        let token = std::sync::Arc::new(CancellationToken::new());
-        *lock(&self.cancellation) = Some(token.clone());
-        if self.removals.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        let (producer, mut result) = {
+            let mut active = lock(&self.installation);
+            if let Some(existing) = active.as_ref() {
+                (None, existing.result.clone())
+            } else {
+                let token = Arc::new(CancellationToken::new());
+                let (sender, receiver) = tokio::sync::watch::channel(None);
+                *active = Some(Installation {
+                    cancellation: Arc::clone(&token),
+                    result: receiver.clone(),
+                });
+                (
+                    Some((InstallOwner(&self.installation), token, sender)),
+                    receiver,
+                )
+            }
+        };
+        let Some((_owner, token, sender)) = producer else {
+            return result
+                .wait_for(Option::is_some)
+                .await
+                .map_err(|_| "Installation stopped before completion.".to_string())?
+                .as_ref()
+                .expect("completed installation")
+                .clone();
+        };
+        let _operation = self.operation.lock().await;
+        if lock(&self.use_state).removing {
             token.cancel();
+        }
+        let result = self.install_owned(base, &progress, &token).await;
+        sender.send_replace(Some(result.clone()));
+        result
+    }
+
+    async fn install_owned(
+        &self,
+        base: &str,
+        progress: &(impl Fn(ModelState) + Send + Sync),
+        token: &CancellationToken,
+    ) -> InstallResult {
+        if token.is_cancelled() {
+            return Ok(());
+        }
+        if matches!(self.state(), ModelState::Ready { .. }) {
+            return Ok(());
         }
         self.publish(
             ModelState::Downloading {
                 received: 0,
                 total: self.manifest.total_bytes,
             },
-            &progress,
+            progress,
         );
         // Only network waits are interrupted. Dropping Tokio filesystem operations
         // can leave blocking writes running after the operation lock is released.
-        let result = self.download(base, &progress, &token).await;
+        let result = self.download(base, progress, token).await;
         let result = if token.is_cancelled() {
             Ok(false)
         } else {
@@ -184,10 +339,11 @@ impl TranscriptionModel {
             },
         };
         if !matches!(final_state, ModelState::Ready { .. }) {
-            let _ = tokio::fs::remove_file(self.dir.join("installed.json")).await;
+            if let Ok(path) = managed_path(&self.dir, "installed.json") {
+                let _ = tokio::fs::remove_file(path).await;
+            }
         }
-        *lock(&self.cancellation) = None;
-        self.publish(final_state, &progress);
+        self.publish(final_state, progress);
         result.map(|_| ())
     }
     async fn download(
@@ -199,6 +355,11 @@ impl TranscriptionModel {
         use futures_util::StreamExt;
         use sha2::{Digest, Sha256};
         use tokio::io::AsyncWriteExt;
+        for file in &self.manifest.files {
+            managed_path(&self.dir, &file.path)?;
+            managed_path(&self.dir, &format!("{}.part", file.path))?;
+        }
+        managed_path(&self.dir, "installed.json")?;
         tokio::fs::create_dir_all(&self.dir)
             .await
             .map_err(|e| e.to_string())?;
@@ -212,7 +373,7 @@ impl TranscriptionModel {
             if token.is_cancelled() {
                 return Ok(());
             }
-            let destination = self.dir.join(&file.path);
+            let destination = managed_path(&self.dir, &file.path)?;
             if verified_during_install(&destination, file, token).await? {
                 completed += file.bytes;
                 self.publish(
@@ -228,7 +389,8 @@ impl TranscriptionModel {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| e.to_string())?;
-            let part = self.dir.join(format!("{}.part", file.path));
+            let part_path = format!("{}.part", file.path);
+            let part = managed_path(&self.dir, &part_path)?;
             let mut offset = tokio::fs::metadata(&part)
                 .await
                 .map(|m| m.len())
@@ -252,8 +414,17 @@ impl TranscriptionModel {
             if offset >= file.bytes {
                 offset = 0;
             }
+            let url = file.source.as_ref().map_or_else(
+                || format!("{}/{}", base.trim_end_matches('/'), file.path),
+                |source| {
+                    format!(
+                        "https://huggingface.co/{}/resolve/{}/{}",
+                        source.repository, source.revision, source.path
+                    )
+                },
+            );
             let mut request = client
-                .get(format!("{}/{}", base.trim_end_matches('/'), file.path))
+                .get(url)
                 .header(reqwest::header::ACCEPT_ENCODING, "identity");
             if offset > 0 {
                 request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
@@ -282,12 +453,15 @@ impl TranscriptionModel {
             if offset > 0 {
                 hash = hash_resume_prefix(&part, token).await?;
             }
-            let mut output = tokio::fs::OpenOptions::new()
+            let mut options = tokio::fs::OpenOptions::new();
+            #[cfg(unix)]
+            options.custom_flags(libc::O_NOFOLLOW);
+            let mut output = options
                 .create(true)
                 .write(true)
                 .truncate(offset == 0)
                 .append(offset > 0)
-                .open(&part)
+                .open(managed_path(&self.dir, &part_path)?)
                 .await
                 .map_err(|e| e.to_string())?;
             let mut received = offset;
@@ -341,29 +515,87 @@ impl TranscriptionModel {
                 let _ = tokio::fs::remove_file(&part).await;
                 return Err(format!("checksum: {}", file.path));
             }
-            tokio::fs::rename(&part, &destination)
-                .await
-                .map_err(|e| e.to_string())?;
+            tokio::fs::rename(
+                managed_path(&self.dir, &part_path)?,
+                managed_path(&self.dir, &file.path)?,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
             completed += file.bytes;
         }
         write_marker(&self.dir, &self.manifest).map_err(|e| e.to_string())
     }
-    pub async fn remove(&self) -> Result<(), String> {
-        let _removal = self.begin_removal();
+    pub async fn remove_files(&self, _removal: &RemovalGuard<'_>) -> Result<(), String> {
         let _operation = self.operation.lock().await;
-        // Disable selection before removing any files.
-        *lock(&self.state) = ModelState::Absent;
-        match tokio::fs::remove_dir_all(&self.dir).await {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => {
-                *lock(&self.state) = ModelState::Failed {
-                    reason: error.to_string(),
-                };
-                Err(error.to_string())
+        let result = self.remove_owned_files().await;
+        // The command reports removal errors separately. Keep an intact
+        // installation ready if deletion was rejected before any files changed.
+        *lock(&self.state) = if result.is_err() && marker_matches(&self.dir, &self.manifest) {
+            ModelState::Ready {
+                bytes: self.manifest.total_bytes,
             }
+        } else {
+            ModelState::Absent
+        };
+        result
+    }
+
+    async fn remove_owned_files(&self) -> Result<(), String> {
+        let mut paths = vec![managed_path(&self.dir, "installed.json")?];
+        for file in &self.manifest.files {
+            paths.push(managed_path(&self.dir, &file.path)?);
+            paths.push(managed_path(&self.dir, &format!("{}.part", file.path))?);
+        }
+        let mut dirs = std::collections::BTreeSet::new();
+        for path in paths {
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.to_string()),
+            }
+            dirs.extend(
+                path.ancestors()
+                    .skip(1)
+                    .take_while(|dir| dir.starts_with(&self.dir))
+                    .map(Path::to_owned),
+            );
+        }
+        for dir in dirs.into_iter().rev() {
+            // A nonempty directory may contain files outside the manifest.
+            let _ = tokio::fs::remove_dir(dir).await;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    async fn remove(&self) -> Result<(), String> {
+        let removal = self.begin_removal().map_err(|error| error.code)?;
+        self.remove_files(&removal).await
+    }
+}
+
+fn managed_path(dir: &Path, relative: &str) -> Result<PathBuf, String> {
+    fn check(path: &Path) -> Result<(), String> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                Err("A local model path is a symbolic link.".into())
+            }
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
         }
     }
+    if !relative.split('/').all(safe_component) {
+        return Err("Invalid local model file path.".into());
+    }
+    check(dir.parent().ok_or("Invalid local model directory.")?)?;
+    check(dir)?;
+    let mut current = dir.to_owned();
+    for component in relative.split('/') {
+        current.push(component);
+        check(&current)?;
+    }
+    Ok(current)
 }
 
 async fn hash_resume_prefix(
@@ -432,13 +664,12 @@ fn verified(path: &std::path::Path, file: &ModelFile) -> bool {
 }
 fn write_marker(dir: &std::path::Path, manifest: &Manifest) -> std::io::Result<()> {
     use std::io::Write;
+    let path = managed_path(dir, "installed.json").map_err(std::io::Error::other)?;
     let mut marker = tempfile::NamedTempFile::new_in(dir)?;
     serde_json::to_writer(&mut marker, manifest)?;
     marker.flush()?;
     marker.as_file().sync_all()?;
-    marker
-        .persist(dir.join("installed.json"))
-        .map_err(|e| e.error)?;
+    marker.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
 fn marker_matches(dir: &std::path::Path, manifest: &Manifest) -> bool {
@@ -446,13 +677,15 @@ fn marker_matches(dir: &std::path::Path, manifest: &Manifest) -> bool {
     // A matching pinned manifest and file sizes avoid rehashing 632 MB at each startup.
     // Missing receipts or size changes rehash below; same-size external edits are outside
     // this readiness check (see ADR-0074 and the change's design.md, D5).
-    let marker = std::fs::read(dir.join("installed.json"))
+    let marker = managed_path(dir, "installed.json")
         .ok()
+        .and_then(|path| std::fs::read(path).ok())
         .and_then(|b| serde_json::from_slice::<Manifest>(&b).ok());
     marker.as_ref() == Some(manifest)
         && manifest.files.iter().all(|file| {
-            std::fs::symlink_metadata(dir.join(&file.path))
-                .is_ok_and(|m| m.is_file() && m.len() == file.bytes)
+            managed_path(dir, &file.path).is_ok_and(|path| {
+                std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() == file.bytes)
+            })
         })
 }
 fn installed(dir: &std::path::Path, manifest: &Manifest) -> bool {
@@ -462,7 +695,7 @@ fn installed(dir: &std::path::Path, manifest: &Manifest) -> bool {
     if manifest
         .files
         .iter()
-        .all(|file| verified(&dir.join(&file.path), file))
+        .all(|file| managed_path(dir, &file.path).is_ok_and(|path| verified(&path, file)))
     {
         return write_marker(dir, manifest).is_ok();
     }
@@ -470,53 +703,162 @@ fn installed(dir: &std::path::Path, manifest: &Manifest) -> bool {
 }
 
 pub const MODEL_STATE_EVENT: &str = "local-transcription-model-state";
-static MODEL: std::sync::OnceLock<std::sync::Arc<TranscriptionModel>> = std::sync::OnceLock::new();
+static MODELS: OnceLock<std::collections::HashMap<LocalModelId, Arc<TranscriptionModel>>> =
+    OnceLock::new();
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelStatus {
+    model_id: &'static str,
+    name: &'static str,
+    minimum_macos: u32,
+    compatible: bool,
+    download_bytes: u64,
+    installed_bytes: u64,
+    status: ModelState,
+}
+
+fn pinned_model(id: LocalModelId) -> (&'static str, Manifest) {
+    let (directory, json) = match id {
+        LocalModelId::WhisperTurbo => (
+            "whisper-large-v3-turbo-coreml",
+            include_str!("../resources/local-transcriber-model-whisper.json"),
+        ),
+        LocalModelId::ParakeetUltra => (
+            "parakeet-ultra-coreml",
+            include_str!("../resources/local-transcriber-model.json"),
+        ),
+        LocalModelId::FluidSpeechPro => (
+            "fluid-speech-pro-coreml",
+            include_str!("../resources/local-transcriber-model-pro.json"),
+        ),
+        LocalModelId::Phonon25 => (
+            "phonon-2.5-coreml",
+            include_str!("../resources/local-transcriber-model-phonon.json"),
+        ),
+    };
+    let manifest: Manifest = serde_json::from_str(json).expect("pinned model manifest");
+    assert!(
+        manifest.validate(),
+        "invalid model manifest for {}",
+        id.as_str()
+    );
+    (directory, manifest)
+}
 
 pub fn setup(app: &mut tauri::App) -> Result<(), tauri::Error> {
-    use tauri::{Emitter, Manager};
+    use tauri::Emitter;
     if !crate::providers::local_transcription_supported() {
         return Ok(());
     }
-    let dir = crate::app_paths::app_data_dir(app.handle())?.join("models/parakeet-ultra-coreml");
-    let manifest = serde_json::from_str(include_str!("../resources/local-transcriber-model.json"))
-        .expect("pinned model manifest");
-    let model = MODEL.get_or_init(|| std::sync::Arc::new(TranscriptionModel::new(dir, manifest)));
-    app.manage(model.clone());
-    let model = model.clone();
+    let root = crate::app_paths::app_data_dir(app.handle())?.join("models");
+    let models = MODELS.get_or_init(|| {
+        LocalModelId::ALL
+            .into_iter()
+            .map(|id| {
+                let (directory, manifest) = pinned_model(id);
+                (
+                    id,
+                    Arc::new(TranscriptionModel::new(root.join(directory), manifest)),
+                )
+            })
+            .collect()
+    });
     let app = app.handle().clone();
     tauri::async_runtime::spawn(async move {
-        model
-            .refresh_from_disk(
-                |state| {
-                    let _ = app.emit(MODEL_STATE_EVENT, state);
-                },
-                crate::providers::local_transcriber::selection_changed,
-            )
-            .await;
+        let settings = crate::providers::effective_current_settings();
+        let selected = (settings.transcription_provider == crate::providers::PROVIDER_LOCAL)
+            .then(|| LocalModelId::parse(&settings.transcription_model))
+            .flatten();
+        let ids = selected.into_iter().chain(
+            LocalModelId::ALL
+                .into_iter()
+                .filter(|id| Some(*id) != selected),
+        );
+        for id in ids {
+            let model = &models[&id];
+            model
+                .refresh_from_disk(
+                    |state| {
+                        let _ = app.emit(MODEL_STATE_EVENT, model.status(id, state));
+                    },
+                    crate::providers::local_transcriber::selection_changed,
+                )
+                .await;
+        }
     });
     Ok(())
 }
-pub fn runtime(
-) -> Result<&'static std::sync::Arc<TranscriptionModel>, crate::domain::types::AppError> {
-    MODEL.get().ok_or_else(|| {
-        crate::domain::types::AppError::new(
-            "local_model_not_installed",
-            "Install the local model in Settings > Models.",
-        )
-    })
+
+impl TranscriptionModel {
+    pub fn status(&self, id: LocalModelId, status: ModelState) -> ModelStatus {
+        use crate::providers::transcription::macos_major;
+        let installed_bytes = if let ModelState::Downloading { received, .. } = status {
+            received
+        } else {
+            self.installed_bytes()
+        };
+        ModelStatus {
+            model_id: id.as_str(),
+            name: id.name(),
+            minimum_macos: id.minimum_macos(),
+            compatible: id.compatible(macos_major()),
+            download_bytes: self.manifest.total_bytes,
+            installed_bytes,
+            status,
+        }
+    }
+
+    fn installed_bytes(&self) -> u64 {
+        self.manifest
+            .files
+            .iter()
+            .map(|file| {
+                let bytes = |relative: &str| {
+                    managed_path(&self.dir, relative)
+                        .ok()
+                        .and_then(|path| std::fs::symlink_metadata(path).ok())
+                        .filter(std::fs::Metadata::is_file)
+                        .map_or(0, |metadata| metadata.len())
+                };
+                bytes(&file.path) + bytes(&format!("{}.part", file.path))
+            })
+            .sum()
+    }
+
+    pub async fn install_pinned(
+        &self,
+        progress: impl Fn(ModelState) + Send + Sync,
+    ) -> Result<(), String> {
+        self.install(&self.manifest.base_url(), progress).await
+    }
 }
-pub fn ready_directory() -> Option<PathBuf> {
-    let model = runtime().ok()?;
-    matches!(model.state(), ModelState::Ready { .. }).then(|| model.dir.clone())
+
+pub fn runtime(id: LocalModelId) -> Result<&'static Arc<TranscriptionModel>, AppError> {
+    MODELS
+        .get()
+        .and_then(|models| models.get(&id))
+        .ok_or_else(|| {
+            AppError::new(
+                "local_model_not_installed",
+                "Install the local model in Settings > Models.",
+            )
+        })
 }
-pub fn download_base() -> String {
-    let manifest: Manifest =
-        serde_json::from_str(include_str!("../resources/local-transcriber-model.json"))
-            .expect("pinned model manifest");
-    format!(
-        "https://huggingface.co/{}/resolve/{}",
-        manifest.repository, manifest.revision
-    )
+
+pub fn snapshots() -> Vec<ModelStatus> {
+    LocalModelId::ALL
+        .into_iter()
+        .filter_map(|id| {
+            let model = runtime(id).ok()?;
+            Some(model.status(id, model.state()))
+        })
+        .collect()
+}
+
+pub fn acquire(id: LocalModelId) -> Option<(PathBuf, Arc<ModelUse>)> {
+    let model = runtime(id).ok()?;
+    Some((model.dir.clone(), model.acquire()?))
 }
 
 #[cfg(test)]

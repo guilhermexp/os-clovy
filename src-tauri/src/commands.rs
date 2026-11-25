@@ -4777,81 +4777,126 @@ mod tests {
     }
 }
 
-fn require_local_transcription_support() -> Result<(), AppError> {
-    if crate::providers::local_transcription_supported() {
-        Ok(())
-    } else {
-        Err(AppError::new(
-            "local_transcription_unsupported",
-            "Local transcription requires macOS 14 or later and Apple Silicon.",
-        ))
-    }
+#[cfg(target_os = "macos")]
+fn local_model_id(
+    model_id: &str,
+) -> Result<crate::providers::transcription::LocalModelId, AppError> {
+    crate::providers::transcription::LocalModelId::parse(model_id).ok_or_else(|| {
+        AppError::new(
+            "provider_model_unavailable",
+            "This model is not available. Choose another model.",
+        )
+    })
 }
 
 #[tauri::command]
-pub fn local_transcription_model_state() -> Result<serde_json::Value, AppError> {
-    require_local_transcription_support()?;
+pub fn local_transcription_model_state() -> serde_json::Value {
     #[cfg(target_os = "macos")]
-    return Ok(serde_json::json!(
-        crate::transcription_model::runtime()?.state()
-    ));
+    return serde_json::json!(crate::transcription_model::snapshots());
     #[cfg(not(target_os = "macos"))]
-    unreachable!()
+    serde_json::json!([])
 }
 
 #[tauri::command]
 pub async fn install_local_transcription_model(
     app: AppHandle,
-    channel: tauri::ipc::Channel<serde_json::Value>,
-) -> Result<(), AppError> {
-    require_local_transcription_support()?;
+    settings: State<'_, crate::providers::ProviderSettingsState>,
+    model_id: String,
+    activate: bool,
+) -> Result<serde_json::Value, AppError> {
     #[cfg(target_os = "macos")]
     {
-        crate::transcription_model::runtime()?
-            .install(&crate::transcription_model::download_base(), |state| {
-                let _ = channel.send(serde_json::json!(state));
-                let _ = app.emit(crate::transcription_model::MODEL_STATE_EVENT, state);
+        let id = local_model_id(&model_id)?;
+        crate::providers::transcription::require_compatible(id)?;
+        let model = crate::transcription_model::runtime(id)?;
+        let revision =
+            activate.then(|| crate::providers::start_transcription_install(&settings, id));
+        let installed = model
+            .install_pinned(|status| {
+                let _ = app.emit(
+                    crate::transcription_model::MODEL_STATE_EVENT,
+                    model.status(id, status),
+                );
+            })
+            .await;
+        let settings = if let Some(revision) = revision {
+            let ready = installed.is_ok()
+                && matches!(
+                    model.state(),
+                    crate::transcription_model::ModelState::Ready { .. }
+                );
+            let app_for_commit = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let settings = app_for_commit.state::<crate::providers::ProviderSettingsState>();
+                crate::providers::finish_transcription_install(&settings, id, revision, ready)
             })
             .await
-            .map_err(|reason| AppError::new("local_model_install_failed", reason))
+            .map_err(|error| AppError::new("provider_settings_save_failed", error.to_string()))??
+        } else {
+            None
+        };
+        installed.map_err(|reason| AppError::new("local_model_install_failed", reason))?;
+        if settings.is_some() {
+            let _ = app.emit(crate::providers::TRANSCRIPTION_SELECTION_CHANGED, ());
+        }
+        Ok(serde_json::json!({ "settings": settings }))
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, channel);
-        unreachable!()
+        let _ = (app, settings, model_id, activate);
+        Err(crate::providers::transcription::unsupported_local_error())
     }
 }
 
 #[tauri::command]
-pub fn cancel_local_transcription_model_install() -> Result<(), AppError> {
-    require_local_transcription_support()?;
+pub fn cancel_local_transcription_model_install(
+    settings: State<'_, crate::providers::ProviderSettingsState>,
+    model_id: String,
+) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
-    crate::transcription_model::runtime()?.cancel();
-    Ok(())
+    {
+        let id = local_model_id(&model_id)?;
+        crate::providers::cancel_transcription_install(&settings, id);
+        crate::transcription_model::runtime(id)?.cancel();
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (settings, model_id);
+        Err(crate::providers::transcription::unsupported_local_error())
+    }
 }
 
 #[tauri::command]
 pub async fn remove_local_transcription_model(
     app: AppHandle,
     state: State<'_, crate::providers::ProviderSettingsState>,
+    model_id: String,
+    confirm_active: bool,
 ) -> Result<serde_json::Value, AppError> {
-    require_local_transcription_support()?;
     #[cfg(target_os = "macos")]
     {
-        let model = crate::transcription_model::runtime()?;
-        let removal = model.begin_removal();
-        let switched = crate::providers::remove_local_transcription_selection(&state)?;
-        crate::providers::local_transcriber::shutdown().await;
-        let removed = model.remove().await;
+        let id = local_model_id(&model_id)?;
+        let model = crate::transcription_model::runtime(id)?;
+        let (removal, switched) =
+            crate::providers::prepare_local_model_removal(&state, id, model, confirm_active)?;
+        if switched {
+            let _ = app.emit(crate::providers::TRANSCRIPTION_SELECTION_CHANGED, ());
+        }
+        crate::providers::local_transcriber::unload(id, model.directory()).await;
+        let removed = model.remove_files(&removal).await;
         drop(removal);
-        let _ = app.emit(crate::transcription_model::MODEL_STATE_EVENT, model.state());
+        let _ = app.emit(
+            crate::transcription_model::MODEL_STATE_EVENT,
+            model.status(id, model.state()),
+        );
         removed.map_err(|reason| AppError::new("local_model_remove_failed", reason))?;
         Ok(serde_json::json!({ "switched_to_groq": switched }))
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, state);
-        unreachable!()
+        let _ = (app, state, model_id, confirm_active);
+        Err(crate::providers::transcription::unsupported_local_error())
     }
 }
 

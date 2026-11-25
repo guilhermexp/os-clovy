@@ -7,7 +7,7 @@ O dono determinou a retirada completa da dependência de Venice, preservando tod
 ## What Changes
 
 - **BREAKING**: remover implementações, configuração, seleção, IPC/DTOs, credenciais/header, aliases, catálogos, branding e fallbacks ativos de Venice; migrar todos os consumidores, sem shims. Histórico e ADRs aceitos continuam históricos, não dependências ativas.
-- Usar Groq/Whisper para o áudio do ditado e das notas; padrão multilíngue `whisper-large-v3-turbo`, sem fallback para Venice. Preservar gravação, idioma, contexto/dicionário, chunks, preview, transcrição e inserção existentes.
+- O escopo de transcrição de áudio foi substituído em 2026-11-25 pela change `selecionar-modelos-transcricao`, autorizada pelo dono: Groq, OpenRouter e quatro modelos locais. Esta change conserva somente as demais capacidades do corte de provedores.
 - Usar OpenRouter para texto remoto: chat via API, geração de notas, limpeza do ditado e consumidores de inferência textual; preservar motores CLI/endpoints já existentes e a escolha Claude do chat do dono.
 - Usar fal para geração/edição de imagens e geração/animação de vídeos, com modelos/endpoints reais, filas e resultados finais, sem botões/API quebrados ou implementações simuladas.
 - Usar Tavily para busca web e extração de páginas, preservando os resultados consumidos pelas ferramentas existentes.
@@ -18,7 +18,6 @@ O dono determinou a retirada completa da dependência de Venice, preservando tod
 
 ### New Capabilities
 
-- `audio-transcription`: transcrição de áudio de ditado/notas por Groq com os contratos locais existentes.
 - `remote-text-inference`: inferência de texto OpenRouter, catálogo/capacidades/preço e continuidade das rotas CLI/endpoints.
 - `generated-media`: geração/edição de imagem e geração/animação de vídeo por fal, até o asset utilizável.
 - `web-augmentation`: busca e extração Tavily com resultados, erros e limites das ferramentas existentes.
@@ -26,7 +25,7 @@ O dono determinou a retirada completa da dependência de Venice, preservando tod
 
 ### Modified Capabilities
 
-Nenhuma: `openspec list --specs` não encontrou specs principais. As changes anteriores de captura/MCP e permissões dev continuam abertas e seus critérios não são reduzidos por este corte.
+Nenhuma neste plano histórico; a transcrição vigente é regida pelas specs canônicas `local-transcription` e `llm-providers`, com delta em `selecionar-modelos-transcricao`. As changes anteriores de captura/MCP e permissões dev continuam abertas e seus critérios não são reduzidos por este corte.
 
 ## Impact
 

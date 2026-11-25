@@ -60,7 +60,7 @@ O sistema SHALL oferecer, para cada provedor, um teste de conexão que executa u
 - Test: unit — validação de seleção por nível de capacidade
 
 ### Requirement: Seleção de provedor por uso
-O sistema SHALL permitir escolher o provedor separadamente para: chat/agente, geração de notas, limpeza de ditado, transcrição de áudio e recursos de atividade (relatórios, resumo do dia, resumo de sessões de agentes). O chat MUST aceitar só motores CLI. As notas MUST aceitar CLI, endpoint cadastrado ou OpenRouter com a chave do usuário. A limpeza de ditado usa a OpenRouter. A transcrição MUST aceitar Groq (com a chave do usuário) ou Local (modelo instalado na máquina, só onde suportado); o padrão é Groq. Nenhum uso MUST passar pelo Clovy API. Para recursos de atividade, o padrão MUST ser "nenhum", e sem provedor escolhido esses recursos ficam desligados.
+O sistema SHALL permitir escolher o provedor separadamente para: chat/agente, geração de notas, limpeza de ditado, transcrição de áudio e recursos de atividade (relatórios, resumo do dia, resumo de sessões de agentes). O chat MUST aceitar só motores CLI. As notas MUST aceitar CLI, endpoint cadastrado ou OpenRouter com a chave do usuário. A limpeza de ditado usa a OpenRouter. A transcrição MUST aceitar Groq ou OpenRouter (com a chave do próprio provedor), ou Local (um dos quatro modelos instalados e compatíveis na máquina); o padrão é Groq. Nenhum uso MUST passar pelo Clovy API. Para recursos de atividade, o padrão MUST ser "nenhum", e sem provedor escolhido esses recursos ficam desligados.
 
 #### Scenario: Atividade sem provedor
 - **WHEN** nenhum provedor de atividade foi escolhido e chega a hora de gerar o resumo do dia
@@ -86,6 +86,11 @@ O sistema SHALL permitir escolher o provedor separadamente para: chat/agente, ge
 - **WHEN** um perfil tem override de transcrição para `local` e o modelo não está pronto
 - **THEN** a transcrição desse perfil falha com `local_model_not_installed`, sem requisição à Groq, e a nota ou o ditado mostra a mensagem do motor local
 - Test: unit — `effective_settings_for_profile` com estado do modelo falso; integration — servidor sentinela Groq com zero requisições
+
+#### Scenario: Seleção de áudio independente de texto
+- **WHEN** o usuário seleciona OpenRouter e Whisper para transcrição
+- **THEN** a escolha de geração de notas, Atividade e limpeza de ditado permanece como estava
+- Test: unit — persistência isolada e frontend.
 
 ### Requirement: Execução isolada de CLIs em geração pontual
 Chamadas de geração pontual a CLIs SHALL rodar sem persistir sessão no CLI, sem ferramentas e sem carregar arquivos de contexto/skills, com tempo limite, e MUST marcar o prompt com o marcador de autoria do Clovy para que a ingestão de sessões de agentes as ignore. CLIs que não garantem todas as ferramentas desligadas (hoje `codex`, `agy`, `cursor-agent`, `copilot`) MUST ser recusados para notas, limpeza de ditado e atividade, sem redirecionamento silencioso; continuam disponíveis como motor do chat. Chamadas em segundo plano dos recursos de atividade MUST ser serializadas (uma por vez).
@@ -119,7 +124,7 @@ O sistema SHALL permitir escolher um CLI como motor de uma sessão de chat. Ness
 - Test: integration — CLI falso de longa duração e verificação de término do processo
 
 ### Requirement: Notas com chave própria vão direto ao provedor
-Com o motor de Notas = OpenRouter, o desktop SHALL mandar a transcrição de nota ao motor de transcrição escolhido (Groq direto com a chave do usuário, ou Local no dispositivo) e a geração e a limpeza da nota à OpenRouter, sempre direto, com um modelo explícito. A requisição MUST levar só a chave do provedor chamado. Não existe rota de reserva: sem a chave, a chamada falha como descrito em "Falha clara sem chave nem servidor".
+Com o motor de Notas = OpenRouter, o desktop SHALL mandar a transcrição de nota ao motor de transcrição escolhido (Groq ou OpenRouter direto com sua própria chave, ou o modelo Local escolhido no dispositivo) e a geração e a limpeza da nota à OpenRouter, sempre direto, com um modelo explícito. A requisição MUST levar só a chave do provedor chamado. Não existe rota de reserva: sem a chave, a chamada falha como descrito em "Falha clara sem chave nem servidor".
 
 #### Scenario: Transcrição final com chave Groq
 - **WHEN** o motor de transcrição é Groq, a chave Groq está salva e um turno da reunião é transcrito
@@ -181,8 +186,14 @@ Com o motor de Notas = OpenRouter, o desktop SHALL mandar a transcrição de not
 - **THEN** com Auto o app troca, uma vez, pelo modelo padrão explícito e a geração vai direto à OpenRouter; sem chave a geração falha com `openrouter_api_key_missing` sem requisição
 - Test: unit (Rust) — carga de settings com Auto; integration — sem chave, zero requisições
 
+#### Scenario: Transcrição OpenRouter por trechos
+- **WHEN** OpenRouter é o motor de transcrição e uma nota possui turnos e prévia autorizada
+- **THEN** os trechos são enviados individualmente à API de transcrição OpenRouter com seus offsets próprios, sem depender de timestamps opcionais nem do pacer exclusivo da Groq
+- **AND** cada requisição leva apenas a chave OpenRouter e o áudio previsto pelo trecho, sem fallback ou negociação paga automática de formato
+- Test: integration — OpenRouter falsa, dois turnos, prévia e sentinela Groq sem acessos.
+
 ### Requirement: Falha clara sem chave nem servidor
-Quando falta a chave do provedor de que a nota precisa, a nota SHALL dizer, na língua da interface (pt-BR ou en), qual chave falta e onde salvá-la (Configurações > Modelos > Mais opções > Chaves de API de provedores), sem tentar outra rota, e MUST NOT mostrar o erro cru da biblioteca HTTP. A chave Groq só é exigida com o motor de transcrição Groq; com o motor Local, a falha de transcrição é a do motor local. O áudio fica salvo e "Tentar de novo" continua disponível. Sem a chave OpenRouter, a limpeza da transcrição é pulada e a nota segue.
+Quando falta a chave do provedor de que a nota precisa, a nota SHALL dizer, na língua da interface (pt-BR ou en), qual chave falta e onde salvá-la (Configurações > Modelos > Mais opções > Chaves de API de provedores), sem tentar outra rota, e MUST NOT mostrar o erro cru da biblioteca HTTP. A chave Groq só é exigida para transcrição Groq e a chave OpenRouter para transcrição OpenRouter; com Local nenhuma chave remota é exigida. O áudio fica salvo e "Tentar de novo" continua disponível. Sem a chave OpenRouter, a limpeza opcional da transcrição é pulada; a transcrição que escolheu OpenRouter falha claramente, sem trocar de rota.
 
 #### Scenario: Transcrição sem chave Groq e sem servidor
 - **WHEN** o motor de transcrição é Groq, não há chave Groq e uma gravação termina
@@ -198,6 +209,11 @@ Quando falta a chave do provedor de que a nota precisa, a nota SHALL dizer, na l
 - **WHEN** o motor de Notas é OpenRouter e não há chave OpenRouter
 - **THEN** a geração falha com `openrouter_api_key_missing` e a nota mostra a frase de transcrição salva que pede a chave OpenRouter
 - Test: integration — nenhuma requisição; unit — `processing.rs` mapeia o código para a frase; `note-failure-banner.test.tsx`
+
+#### Scenario: OpenRouter de áudio sem chave
+- **WHEN** o motor de transcrição é OpenRouter e não há chave disponível
+- **THEN** transcrição e prévia não enviam áudio e mostram a configuração necessária da OpenRouter, preservando o áudio salvo para tentar novamente
+- Test: integration — ausência de chave, erro do cofre, sentinelas sem acessos; unit frontend — mensagem traduzida.
 
 ### Requirement: Limite de taxa da Groq na transcrição de nota
 Na transcrição direta à Groq, um 429 SHALL virar espera pelo tempo que a Groq informa, e não falha da nota. As requisições de transcrição final MUST respeitar um ritmo comum às duas faixas. Uma espera longa SHALL pausar a nota com o progresso salvo, mostrar quando ela continua e retomar sozinha; os turnos prontos MUST NOT ser reenviados.
@@ -297,3 +313,29 @@ Ao escolher para Atividade uma CLI instalada, com modo one-shot e sem nível de 
 #### Scenario: Antigravity sem login no perfil do Clovy
 - **WHEN** o teste automático falha por falta de autenticação
 - **THEN** a escolha não é aplicada e a mensagem pede "Autenticar no Clovy", sem falar de JSON schema
+
+### Requirement: Whisper por OpenRouter
+O sistema SHALL oferecer Whisper large-v3-turbo, Whisper large-v3 e Whisper-1 da OpenRouter para transcrição, com Turbo como padrão desse provedor. SHALL usar a API dedicada de transcrição, conservar idioma e vocabulário autorizado e validar resposta e limites sem usar chat multimodal ou trocar de provedor. A chave existente MUST ser reutilizada sem ser exibida ou registrada.
+
+#### Scenario: Requisição em português
+- **WHEN** OpenRouter e Whisper Turbo estão selecionados e há uma chave disponível
+- **THEN** o áudio é enviado a `/api/v1/audio/transcriptions` com o identificador do modelo, idioma pt quando escolhido e formato suportado; o texto válido volta ao ditado ou à nota
+- Test: integration — servidor HTTP falso confere credencial, corpo, idioma, modelo, limite de upload, resposta vazia, rejeição de chave e timeout.
+
+#### Scenario: Catálogo separado por modalidade
+- **WHEN** o usuário abre a escolha de modelo de transcrição OpenRouter
+- **THEN** aparecem os Whisper de transcrição e os modelos exclusivos de chat não aparecem
+- Test: unit — catálogo STT e seletor.
+
+### Requirement: Seleção de transcrição e gerenciamento sem duplicação
+Configurações SHALL apresentar um único grupo coerente para selecionar provedor e modelo de áudio, com disponibilidade, tamanho e estado de instalação por modelo local. O usuário SHALL poder gerenciar e remover modelos inativos sem trocar o modelo em uso. Todos os estados e ações MUST ter rótulos acessíveis e traduzidos, com navegação por teclado e recuperação clara de falhas.
+
+#### Scenario: Navegação pelo seletor
+- **WHEN** o usuário usa teclado para escolher Local, um modelo ausente e sua instalação
+- **THEN** a interface anuncia progresso e o modelo ativo, permite cancelar ou tentar novamente e só mostra a nova escolha como ativa após confirmação persistida
+- Test: unit frontend — interação pelo papel acessível e respostas assíncronas; visual — capturas pt-BR/en na largura mínima suportada e ampla.
+
+#### Scenario: Gerenciar modelos de teste
+- **WHEN** dois modelos estão instalados e o usuário abre o gerenciamento
+- **THEN** cada modelo mostra estado e tamanho real e pode ser removido individualmente, com aviso claro ao remover o ativo
+- Test: unit frontend e prova nativa com diretórios isolados.
