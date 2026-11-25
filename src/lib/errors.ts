@@ -81,6 +81,7 @@ const ERROR_CODE_MESSAGES: Record<string, MessageKey | ErrorWording[]> = {
   openrouter_audio_failed: "notes.failure.openrouterAudioFailed",
   openrouter_audio_too_large: "notes.failure.openrouterAudioTooLarge",
   openrouter_audio_response_invalid: "notes.failure.openrouterAudioFailed",
+  transcription_key_changed: "notes.failure.transcriptionKeyChanged",
   audio_too_large: "notes.failure.audioTooLarge",
   groq_api_key_missing: "notes.failure.groqKeyMissing",
   // A capture start refused while an update installs (src-tauri/src/update_gate.rs)

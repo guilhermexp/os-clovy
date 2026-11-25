@@ -609,6 +609,24 @@ mod audio_tests {
     }
 
     #[tokio::test]
+    async fn openrouter_audio_reports_a_replaced_key_without_uploading_the_turn() {
+        let sentinel = super::super::local_transcriber::NetworkSentinel::start().await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("take.wav");
+        std::fs::write(&path, b"synthetic audio").unwrap();
+        let client = reqwest::Client::new();
+        let route = transport(&client, &sentinel.origin, &sentinel);
+        let response = TEST_TRANSCRIPTION_KEY
+            .scope(
+                Box::new(|| Ok(Some("next-fixture".into()))),
+                transcribe_audio_via(&route, Some("previous-fixture"), MODEL, &path, None, None),
+            )
+            .await;
+        assert_eq!(response.unwrap_err().code, "transcription_key_changed");
+        sentinel.assert_unused();
+    }
+
+    #[tokio::test]
     async fn openrouter_audio_missing_key_or_oversized_file_sends_nothing() {
         let sentinel = super::super::local_transcriber::NetworkSentinel::start().await;
         let directory = tempfile::tempdir().unwrap();

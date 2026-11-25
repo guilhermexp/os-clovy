@@ -21,6 +21,17 @@ describe("userFacingFailureMessage", () => {
     );
   });
 
+  it("explains that the saved transcription key changed while the note was queued", () => {
+    applyInterfaceLocale("pt-BR");
+    expect(
+      userFacingFailureMessage(
+        "Microphone: Your transcription API key changed. Try again to use the new key.",
+      ),
+    ).toBe(
+      "Microfone: Sua chave de API de transcrição mudou. Tente de novo para usar a nova chave.",
+    );
+  });
+
   it("turns no-speech provider codes into useful guidance", () => {
     expect(userFacingFailureMessage("Microphone: upstream_provider_failed; no_speech")).toBe(
       "Microphone: No speech detected. Try speaking louder or moving closer to the microphone.",

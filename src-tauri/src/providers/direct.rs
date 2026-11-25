@@ -71,6 +71,12 @@ impl DirectTransport<'_> {
         if current.as_deref() == Some(captured) {
             return Ok(());
         }
+        if current.is_some() {
+            return Err(AppError::new(
+                "transcription_key_changed",
+                "Your transcription API key changed. Try again to use the new key.",
+            ));
+        }
         match provider {
             BuiltinProvider::Groq => super::groq::require_groq_key(None).map(|_| ()),
             BuiltinProvider::OpenRouter => super::openrouter::require_audio_key(None).map(|_| ()),

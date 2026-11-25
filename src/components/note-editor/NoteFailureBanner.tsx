@@ -27,6 +27,7 @@ export function userFacingFailureMessage(message?: string) {
  * banner shows it in the interface language. */
 const STORED_FAILURE_KEYS: MessageKey[] = [
   "notes.failure.transcriptionEngineChanged",
+  "notes.failure.transcriptionKeyChanged",
   "notes.failure.localTranscriberFailed",
   "notes.failure.noSpeech",
   "notes.failure.silenceSystem",

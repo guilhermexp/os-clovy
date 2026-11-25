@@ -2,6 +2,8 @@ import { defineMessages } from "../define";
 
 export default defineMessages({
   en: {
+    "notes.failure.transcriptionKeyChanged":
+      "Your transcription API key changed. Try again to use the new key.",
     "notes.failure.transcriptionEngineChanged":
       "The transcription engine changed during processing. Retry to transcribe with the current engine.",
     "notes.failure.namedLocalTranscriberFailed":
@@ -317,6 +319,8 @@ export default defineMessages({
     "notes.projects.relative.days": "{count}d ago",
   },
   "pt-BR": {
+    "notes.failure.transcriptionKeyChanged":
+      "Sua chave de API de transcrição mudou. Tente de novo para usar a nova chave.",
     "notes.failure.transcriptionEngineChanged":
       "O motor de transcrição mudou durante o processamento. Tente de novo para transcrever com o motor atual.",
     "notes.failure.namedLocalTranscriberFailed":
