@@ -4543,10 +4543,12 @@ fn update_settings(
         .settings
         .lock()
         .map_err(|_| AppError::new("dictation_settings_unavailable", "Settings lock failed."))?;
-    update(&mut settings);
-    save_settings(state, &settings)?;
-    replace_current_settings(settings.clone());
-    Ok(settings.clone())
+    let mut candidate = settings.clone();
+    update(&mut candidate);
+    save_settings(state, &candidate)?;
+    *settings = candidate.clone();
+    replace_current_settings(candidate.clone());
+    Ok(candidate)
 }
 
 fn save_settings(
@@ -6947,7 +6949,7 @@ where
         other => other,
     };
     DictationPipelineResult {
-        outcome: if cleanup.enabled {
+        outcome: if cleanup.enabled && cleanup_skipped.is_none() {
             outcome_from_transcription_result(result, observed_audio_level, cleanup.style)
         } else {
             outcome_from_raw_transcription_result(result, observed_audio_level)
@@ -7019,14 +7021,21 @@ async fn clean_dictation_transcript<C: DictationCleaner + Sync>(
         tracing::info!(chunk_count = chunks.len(), "dictation cleanup ran chunked");
         Ok(join_cleaned_dictation_chunks(&cleaned))
     };
-    tokio::time::timeout((config.timeout)(text.len()), work)
+    let cleaned = tokio::time::timeout((config.timeout)(text.len()), work)
         .await
         .unwrap_or_else(|_| {
             Err(AppError::new(
                 "dictation_cleanup_timeout",
                 "Dictation cleanup timed out.",
             ))
-        })
+        })?;
+    if is_blank_transcript(&cleaned) {
+        return Err(AppError::new(
+            "provider_response_invalid",
+            "Dictation cleanup response did not contain text output.",
+        ));
+    }
+    Ok(cleaned)
 }
 
 /// Trim a single-call cleanup result (the historical behavior).
@@ -7091,7 +7100,13 @@ async fn cleanup_dictation_call<C: DictationCleaner + Sync>(
             "Dictation cleanup response did not contain text output.",
         ));
     }
-    if looks_like_instruction_response(trimmed) {
+    // Check for preambles exposed by the filler backstop without rewriting the output.
+    if looks_like_instruction_response(trimmed)
+        || looks_like_instruction_response(&clean_dictation_fillers(
+            trimmed,
+            DictationStyle::Standard,
+        ))
+    {
         return Err(AppError::new(
             "dictation_cleanup_invalid",
             "Dictation cleanup returned an instruction response.",
@@ -7564,7 +7579,14 @@ fn outcome_from_transcription_result(
         }
         Ok(mut transcript) => {
             let had_speech_before_cleaning = !transcript.text.trim().is_empty();
-            transcript.text = clean_dictation_fillers(&transcript.text, style);
+            // The local transcriber echoes the language hint. Groq reports the transcript language.
+            transcript.text = if transcript.provider == PROVIDER_GROQ
+                && is_english_transcript_language(transcript.language.as_deref())
+            {
+                clean_dictation_fillers(&transcript.text, style)
+            } else {
+                transcript.text.trim().to_string()
+            };
             if had_speech_before_cleaning && transcript.text.trim().is_empty() {
                 // Filler-only capture (e.g. "Um, uh."): the provider DID return
                 // speech that we stripped to nothing. Discard quietly with a
@@ -7579,7 +7601,7 @@ fn outcome_from_transcription_result(
     }
 }
 
-/// Cleanup off (spec "Limpeza desligada"): the Whisper text, only trimmed.
+/// Cleanup off or skipped: the original transcription text, only trimmed.
 /// No filler backstop and no style; an empty transcript is still no speech.
 fn outcome_from_raw_transcription_result(
     result: Result<TranscriptionProviderResult, AppError>,
@@ -7700,6 +7722,24 @@ fn outcome_from_clean_transcript(
             quarantine_transcript: None,
         },
     }
+}
+
+fn is_english_transcript_language(language: Option<&str>) -> bool {
+    let Some(language) = language.map(str::trim) else {
+        return false;
+    };
+    if language.eq_ignore_ascii_case("en") || language.eq_ignore_ascii_case("english") {
+        return true;
+    }
+    let Some((primary, region)) = language.split_once('-') else {
+        return false;
+    };
+    primary.eq_ignore_ascii_case("en")
+        && match region.len() {
+            2 => region.bytes().all(|byte| byte.is_ascii_alphabetic()),
+            3 => region.bytes().all(|byte| byte.is_ascii_digit()),
+            _ => false,
+        }
 }
 
 fn clean_dictation_fillers(text: &str, style: DictationStyle) -> String {
@@ -10475,6 +10515,8 @@ mod tests {
     /// A transcriber that returns a fixed result and counts its calls.
     struct FakeTranscriber {
         result: Result<String, AppError>,
+        language: Option<String>,
+        provider: &'static str,
         calls: std::sync::atomic::AtomicUsize,
     }
 
@@ -10482,8 +10524,15 @@ mod tests {
         fn text(text: &str) -> Self {
             Self {
                 result: Ok(text.to_string()),
+                language: None,
+                provider: PROVIDER_GROQ,
                 calls: Default::default(),
             }
+        }
+
+        fn with_language(mut self, language: Option<&str>) -> Self {
+            self.language = language.map(str::to_owned);
+            self
         }
     }
 
@@ -10495,8 +10544,8 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.result.clone().map(|text| TranscriptionProviderResult {
                 text,
-                language: None,
-                provider: "groq".to_string(),
+                language: self.language.clone(),
+                provider: self.provider.to_string(),
             })
         }
     }
@@ -10514,6 +10563,7 @@ mod tests {
         failure_code: Option<&'static str>,
         /// Calls whose text contains it answer with empty text.
         blank_on: Option<String>,
+        answer: Option<&'static str>,
         /// Answers without any sentence punctuation.
         unpunctuated: bool,
     }
@@ -10543,6 +10593,9 @@ mod tests {
                 .is_some_and(|marker| call.text.contains(marker))
             {
                 return Ok(String::new());
+            }
+            if let Some(answer) = self.answer {
+                return Ok(answer.to_string());
             }
             if self.unpunctuated {
                 return Ok(call.text.to_uppercase());
@@ -10591,7 +10644,7 @@ mod tests {
 
     #[tokio::test]
     async fn dictation_with_cleanup_off_pastes_the_transcript_without_calling_the_cleaner() {
-        let transcriber = FakeTranscriber::text("send it to samir");
+        let transcriber = FakeTranscriber::text("send it to samir").with_language(Some("en"));
         let cleaner = FakeCleaner::default();
         let result = run_dictation_pipeline(
             &transcriber,
@@ -10636,7 +10689,7 @@ mod tests {
 
     #[tokio::test]
     async fn dictation_with_cleanup_on_pastes_the_cleaned_text_from_the_chosen_model() {
-        let transcriber = FakeTranscriber::text("send it to samir");
+        let transcriber = FakeTranscriber::text("send it to samir").with_language(Some("en"));
         let cleaner = FakeCleaner::default();
         let result = run_dictation_pipeline(
             &transcriber,
@@ -10666,54 +10719,186 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_cleanup_pastes_the_raw_transcript_and_reports_the_skip() {
-        let transcriber = FakeTranscriber::text("send it to samir");
-        let cleaner = FakeCleaner {
-            fail_on: Some("samir".to_string()),
-            ..FakeCleaner::default()
-        };
-        let result = run_dictation_pipeline(
-            &transcriber,
-            &cleaner,
-            pipeline_request(),
-            &cleanup_config(true),
-            DictationCleanupContext::default(),
-            Some(0.3),
+    async fn successful_cleanup_preserves_portuguese_words_with_non_english_or_unknown_language() {
+        let phrases = [
+            "Preciso de um relatório.",
+            "Um relatório por favor.",
+            "Já enviei um.",
+            "um",
+            "  Preciso de um relatório.\n\n\nJá enviei  um.  ",
+        ];
+        let languages = [
+            Some("pt"),
+            Some("pt-BR"),
+            Some("portuguese"),
+            Some("de"),
+            Some("en-"),
+            Some("en-x"),
+            Some("en-u"),
+            Some("en-x-foo"),
+            Some("en-US-u-ca-gregory"),
+            Some("en-Latn-US"),
+            Some("en-01"),
             None,
-        )
-        .await;
-        assert_eq!(pasted_text(&result), Some("send it to samir"));
+        ];
+        let mut pasted = Vec::new();
+        for language in languages {
+            for phrase in phrases {
+                let transcriber =
+                    FakeTranscriber::text("transcrição original").with_language(language);
+                let cleaner = FakeCleaner {
+                    answer: Some(phrase),
+                    ..FakeCleaner::default()
+                };
+                let mut request = pipeline_request();
+                request.language = Some("en".into());
+                let result = run_dictation_pipeline(
+                    &transcriber,
+                    &cleaner,
+                    request,
+                    &cleanup_config(true),
+                    DictationCleanupContext::default(),
+                    None,
+                    None,
+                )
+                .await;
+                assert_eq!(cleaner.calls.lock().unwrap().len(), 1);
+                assert!(result.cleanup_skipped.is_none());
+                pasted.push((language, pasted_text(&result).map(str::to_owned)));
+            }
+        }
+        let expected: Vec<_> = languages
+            .into_iter()
+            .flat_map(|language| phrases.map(|phrase| (language, Some(phrase.trim().to_owned()))))
+            .collect();
+        assert_eq!(pasted, expected);
+    }
+
+    #[tokio::test]
+    async fn successful_cleanup_preserves_portuguese_with_english_hint_from_other_providers() {
+        let phrase = "Preciso de um relatório.";
+        let providers = ["local", "Groq", "other"];
+        let mut pasted = Vec::new();
+        for provider in providers {
+            let mut transcriber = FakeTranscriber::text(phrase).with_language(Some("en"));
+            transcriber.provider = provider;
+            let mut request = pipeline_request();
+            request.language = Some("en".into());
+            let result = run_dictation_pipeline(
+                &transcriber,
+                &FakeCleaner {
+                    answer: Some(phrase),
+                    ..FakeCleaner::default()
+                },
+                request,
+                &cleanup_config(true),
+                DictationCleanupContext::default(),
+                None,
+                None,
+            )
+            .await;
+            assert!(result.cleanup_skipped.is_none());
+            pasted.push((provider, pasted_text(&result).map(str::to_owned)));
+        }
         assert_eq!(
-            result.cleanup_skipped.map(|error| error.code).as_deref(),
-            Some("clovy_request_failed")
+            pasted,
+            providers.map(|provider| (provider, Some(phrase.to_owned())))
         );
     }
 
     #[tokio::test]
-    async fn timed_out_cleanup_pastes_the_raw_transcript() {
-        let transcriber = FakeTranscriber::text("send it to samir");
-        let cleaner = FakeCleaner {
-            delay: Duration::from_millis(500),
-            ..FakeCleaner::default()
-        };
+    async fn successful_cleanup_applies_the_filler_backstop_to_english_variants() {
+        for language in ["en", "english", "en-US", " EN-gb ", "en-001"] {
+            let transcriber =
+                FakeTranscriber::text("send the report").with_language(Some(language));
+            let cleaner = FakeCleaner {
+                answer: Some("  Um, send the report, uh, today.  "),
+                ..FakeCleaner::default()
+            };
+            let result = run_dictation_pipeline(
+                &transcriber,
+                &cleaner,
+                pipeline_request(),
+                &cleanup_config(true),
+                DictationCleanupContext::default(),
+                None,
+                None,
+            )
+            .await;
+            assert!(result.cleanup_skipped.is_none());
+            assert_eq!(
+                pasted_text(&result),
+                Some("Send the report today."),
+                "{language:?}"
+            );
+        }
+    }
+
+    const RAW_FALLBACK_TRANSCRIPT: &str = "  Um, preciso de um relatório.\n\n  Já enviei um. Uh.  ";
+
+    async fn assert_cleanup_falls_back_to_raw(
+        text: &str,
+        cleaner: &FakeCleaner,
+        cleanup: &DictationCleanupConfig,
+        code: &str,
+    ) {
+        // Use English metadata so a language gate alone cannot hide a fallback regression.
+        let transcriber = FakeTranscriber::text(text).with_language(Some("en"));
         let result = run_dictation_pipeline(
             &transcriber,
-            &cleaner,
+            cleaner,
             pipeline_request(),
-            &DictationCleanupConfig {
-                timeout: |_| Duration::from_millis(20),
-                ..cleanup_config(true)
-            },
+            cleanup,
             DictationCleanupContext::default(),
             Some(0.3),
             None,
         )
         .await;
-        assert_eq!(pasted_text(&result), Some("send it to samir"));
         assert_eq!(
-            result.cleanup_skipped.map(|error| error.code).as_deref(),
-            Some("dictation_cleanup_timeout")
+            result.cleanup_skipped.as_ref().map(|e| e.code.as_str()),
+            Some(code)
         );
+        assert_eq!(pasted_text(&result), Some(text.trim()));
+        assert_eq!(
+            result.outcome.transcript.as_ref().map(|t| t.text.as_str()),
+            Some(text.trim())
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_cleanup_pastes_the_raw_transcript_and_reports_the_skip() {
+        let cleaner = FakeCleaner {
+            fail_on: Some("relatório".to_string()),
+            ..FakeCleaner::default()
+        };
+        assert_cleanup_falls_back_to_raw(
+            RAW_FALLBACK_TRANSCRIPT,
+            &cleaner,
+            &DictationCleanupConfig {
+                style: DictationStyle::Formal,
+                ..cleanup_config(true)
+            },
+            "clovy_request_failed",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn timed_out_cleanup_pastes_the_raw_transcript() {
+        let cleaner = FakeCleaner {
+            delay: Duration::from_millis(500),
+            ..FakeCleaner::default()
+        };
+        assert_cleanup_falls_back_to_raw(
+            RAW_FALLBACK_TRANSCRIPT,
+            &cleaner,
+            &DictationCleanupConfig {
+                timeout: |_| Duration::from_millis(20),
+                ..cleanup_config(true)
+            },
+            "dictation_cleanup_timeout",
+        )
+        .await;
     }
 
     #[test]
@@ -10734,27 +10919,160 @@ mod tests {
 
     #[tokio::test]
     async fn missing_openrouter_key_pastes_raw_dictation_with_a_reason_for_the_notice() {
-        let transcriber = FakeTranscriber::text("send it to samir");
         let cleaner = FakeCleaner {
-            fail_on: Some("samir".to_string()),
+            fail_on: Some("relatório".to_string()),
             failure_code: Some("openrouter_api_key_missing"),
             ..FakeCleaner::default()
         };
-        let result = run_dictation_pipeline(
-            &transcriber,
+        assert_cleanup_falls_back_to_raw(
+            RAW_FALLBACK_TRANSCRIPT,
             &cleaner,
+            &cleanup_config(true),
+            "openrouter_api_key_missing",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn whitespace_cleanup_answer_pastes_raw_dictation_and_reports_invalid_response() {
+        assert_cleanup_falls_back_to_raw(
+            RAW_FALLBACK_TRANSCRIPT,
+            &FakeCleaner {
+                answer: Some(" \t\n "),
+                ..FakeCleaner::default()
+            },
+            &cleanup_config(true),
+            "provider_response_invalid",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn instruction_cleanup_answer_pastes_raw_dictation_and_reports_rejection() {
+        assert_cleanup_falls_back_to_raw(
+            RAW_FALLBACK_TRANSCRIPT,
+            &FakeCleaner {
+                answer: Some("Here is the transcript: replacement."),
+                ..FakeCleaner::default()
+            },
+            &cleanup_config(true),
+            "dictation_cleanup_invalid",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn instruction_cleanup_answer_revealed_by_normalization_falls_back_to_raw() {
+        let answers = [
+            "Um, sure, I can help.",
+            "Here  is the transcript:\nPreciso de um relatório.",
+        ];
+        let mut observed = Vec::new();
+        let mut expected = Vec::new();
+        for language in [Some("pt"), None] {
+            for answer in answers {
+                let transcriber =
+                    FakeTranscriber::text(RAW_FALLBACK_TRANSCRIPT).with_language(language);
+                let result = run_dictation_pipeline(
+                    &transcriber,
+                    &FakeCleaner {
+                        answer: Some(answer),
+                        ..FakeCleaner::default()
+                    },
+                    pipeline_request(),
+                    &cleanup_config(true),
+                    DictationCleanupContext::default(),
+                    None,
+                    None,
+                )
+                .await;
+                observed.push((
+                    language,
+                    answer,
+                    result
+                        .cleanup_skipped
+                        .as_ref()
+                        .map(|error| error.code.clone()),
+                    pasted_text(&result).map(str::to_owned),
+                    result.outcome.transcript.map(|transcript| transcript.text),
+                ));
+                expected.push((
+                    language,
+                    answer,
+                    Some("dictation_cleanup_invalid".into()),
+                    Some(RAW_FALLBACK_TRANSCRIPT.trim().into()),
+                    Some(RAW_FALLBACK_TRANSCRIPT.trim().into()),
+                ));
+            }
+        }
+        assert_eq!(observed, expected);
+    }
+
+    #[tokio::test]
+    async fn punctuation_only_cleanup_answer_pastes_raw_dictation_and_reports_invalid_response() {
+        assert_cleanup_falls_back_to_raw(
+            RAW_FALLBACK_TRANSCRIPT,
+            &FakeCleaner {
+                answer: Some("..."),
+                ..FakeCleaner::default()
+            },
+            &cleanup_config(true),
+            "provider_response_invalid",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_punctuation_chunk_is_valid_after_joining_with_text() {
+        struct PunctuationCleaner;
+        impl DictationCleaner for PunctuationCleaner {
+            async fn clean(&self, call: DictationCleanupCall) -> Result<String, AppError> {
+                Ok(if call.text == "reticências" {
+                    "..."
+                } else {
+                    "Relatório pronto"
+                }
+                .to_string())
+            }
+        }
+        let original = format!("{} reticências", "palavra".repeat(115));
+        assert_eq!(
+            split_dictation_cleanup_chunks(&original, DICTATION_CLEANUP_CHUNK_TARGET_BYTES)
+                .last()
+                .copied(),
+            Some("reticências")
+        );
+        let result = run_dictation_pipeline(
+            &FakeTranscriber::text(&original),
+            &PunctuationCleaner,
             pipeline_request(),
             &cleanup_config(true),
             DictationCleanupContext::default(),
-            Some(0.3),
+            None,
             None,
         )
         .await;
-        assert_eq!(pasted_text(&result), Some("send it to samir"));
-        assert_eq!(
-            result.cleanup_skipped.map(|error| error.code).as_deref(),
-            Some("openrouter_api_key_missing")
+        assert!(result.cleanup_skipped.is_none());
+        assert_eq!(pasted_text(&result), Some("Relatório pronto..."));
+    }
+
+    #[tokio::test]
+    async fn cleanup_punctuation_only_joined_result_falls_back_to_the_whole_original() {
+        let original = long_transcript(3, "relatorio");
+        assert!(
+            split_dictation_cleanup_chunks(&original, DICTATION_CLEANUP_CHUNK_TARGET_BYTES).len()
+                > 1
         );
+        assert_cleanup_falls_back_to_raw(
+            &original,
+            &FakeCleaner {
+                answer: Some("..."),
+                ..FakeCleaner::default()
+            },
+            &cleanup_config(true),
+            "provider_response_invalid",
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -10814,30 +11132,27 @@ mod tests {
 
     #[tokio::test]
     async fn a_chunk_with_an_invalid_answer_pastes_the_whole_raw_transcript() {
-        let transcript = long_transcript(6, "blankme");
+        let transcript = format!(
+            "{RAW_FALLBACK_TRANSCRIPT}\n{}",
+            long_transcript(6, "blankme")
+        );
         let chunks =
             split_dictation_cleanup_chunks(&transcript, DICTATION_CLEANUP_CHUNK_TARGET_BYTES);
         let cleaner = FakeCleaner {
             blank_on: Some("blankme".to_string()),
             ..FakeCleaner::default()
         };
-        let result = run_dictation_pipeline(
-            &FakeTranscriber::text(&transcript),
+        assert_cleanup_falls_back_to_raw(
+            &transcript,
             &cleaner,
-            pipeline_request(),
             &cleanup_config(true),
-            DictationCleanupContext::default(),
-            Some(0.3),
-            None,
+            "provider_response_invalid",
         )
         .await;
-        let pasted = pasted_text(&result).unwrap();
-        assert!(!pasted.contains('.'), "no cleaned chunk survives: {pasted}");
-        assert_eq!(
-            result.cleanup_skipped.map(|error| error.code).as_deref(),
-            Some("provider_response_invalid")
-        );
-        assert!(cleaner.calls.lock().unwrap().len() <= chunks.len());
+        let calls = cleaner.calls.lock().unwrap();
+        assert!((2..=chunks.len()).contains(&calls.len()));
+        assert!(calls[0].text.contains("relatório"));
+        assert!(calls.iter().any(|call| call.text.contains("blankme")));
     }
 
     #[tokio::test]
@@ -10963,6 +11278,8 @@ mod tests {
         for message in ["no_speech", "dictation_text_empty"] {
             let transcriber = FakeTranscriber {
                 result: Err(AppError::new("clovy_request_failed", message)),
+                language: None,
+                provider: PROVIDER_GROQ,
                 calls: Default::default(),
             };
             let result = run_dictation_pipeline(
@@ -11085,6 +11402,104 @@ mod tests {
             settings.push_to_talk_shortcut
         );
         assert_eq!(reloaded.toggle_shortcut, settings.toggle_shortcut);
+    }
+
+    #[test]
+    fn settings_update_publishes_only_after_a_successful_write() {
+        // Use the provider transaction tests' child-process isolation for global settings.
+        const CHILD: &str = "CLOVY_TEST_DICTATION_SETTINGS_WRITE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "dictation::tests::settings_update_publishes_only_after_a_successful_write",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let mut mutated_on_failure = Vec::new();
+        for (case, before_enabled, after_enabled, model, style) in [
+            (
+                "on to off",
+                true,
+                false,
+                "test/before",
+                DictationStyle::Standard,
+            ),
+            (
+                "off to on",
+                false,
+                true,
+                "test/before",
+                DictationStyle::Standard,
+            ),
+            (
+                "model and style",
+                true,
+                true,
+                "test/after",
+                DictationStyle::Formal,
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let before = DictationSettings {
+                cleanup_enabled: before_enabled,
+                cleanup_model: "test/before".into(),
+                language: Some("pt".into()),
+                hud_placement: DictationHudPlacement::Top,
+                microphone: DictationMicrophoneSetting {
+                    id: Some("mic".into()),
+                    name: Some("USB mic".into()),
+                },
+                ..DictationSettings::default()
+            };
+            let state = DictationSettingsState {
+                path: directory.path().join("dictation-settings.json"),
+                settings: Mutex::new(before.clone()),
+            };
+            replace_current_settings(before.clone());
+            let update = |settings: &mut DictationSettings| {
+                settings.cleanup_enabled = after_enabled;
+                settings.cleanup_model = model.into();
+                settings.style = style;
+            };
+
+            fs::create_dir(&state.path).unwrap();
+            let error = update_settings(&state, update).unwrap_err();
+            assert_eq!(error.code, "dictation_settings_save_failed", "{case}");
+            assert_eq!(*settings_store().lock().unwrap(), before, "{case}");
+            if *state.settings.lock().unwrap() != before {
+                mutated_on_failure.push(case);
+            }
+
+            fs::remove_dir(&state.path).unwrap();
+            let expected = DictationSettings {
+                cleanup_enabled: after_enabled,
+                cleanup_model: model.into(),
+                style,
+                ..before
+            };
+            assert_eq!(update_settings(&state, update).unwrap(), expected, "{case}");
+            assert_eq!(*state.settings.lock().unwrap(), expected, "{case}");
+            assert_eq!(*settings_store().lock().unwrap(), expected, "{case}");
+            let reloaded: DictationSettings =
+                serde_json::from_slice(&fs::read(&state.path).unwrap()).unwrap();
+            assert_eq!(reloaded, expected, "{case}");
+        }
+        assert!(
+            mutated_on_failure.is_empty(),
+            "managed settings changed after a failed write: {mutated_on_failure:?}"
+        );
     }
 
     #[test]
