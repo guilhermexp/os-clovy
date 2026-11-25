@@ -102,7 +102,7 @@ A seleção efetiva do motor Local SHALL exigir que o modelo específico escolhi
 - **WHEN** algo tenta gravar o motor Local sem modelo pronto
 - **THEN** a gravação falha com `local_model_not_installed` e a configuração anterior permanece
 
-Test: unit (Rust) — `set_provider_model` com estado do modelo falso; unit (frontend) — opção desabilitada.
+Test: unit (Rust) — `set_provider_model` com estado do modelo falso; unit (frontend) — seleção de modelo ausente inicia instalação sem mudar o motor efetivo antes da gravação bem-sucedida.
 
 #### Scenario: Escolha muda durante download
 - **WHEN** B está baixando e o usuário escolhe A ou um provedor remoto antes de B terminar

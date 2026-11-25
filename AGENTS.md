@@ -19,7 +19,7 @@ and activity processing. The app owns persisted history and the common tool
 gateway; execution failure never silently switches engines. The desktop calls
 **Groq**, **OpenRouter**, and **fal** directly with
 the user's own keys; transcription may instead use the user-installed local
-Parakeet engine (macOS Apple Silicon only, ADR-0074). CLI and endpoint note routes remain separate. There is
+model (Whisper large-v3-turbo, Parakeet Ultra, Fluid Speech Pro or Phonon-2.5; macOS Apple Silicon only, ADR-0074). CLI and endpoint note routes remain separate. There is
 no Clovy inference server, native agent sidecar, local bearer token, sign-in,
 sharing service, or credit balance. Clovy tools remain available through MCP.
 
@@ -39,7 +39,7 @@ os-clovy/
 ├── src-tauri/               # Rust native shell (Cargo package `clovy`)
 │   ├── src/audio/           # recording, source separation, turn detection, live preview
 │   ├── src/agent_sessions/  # engine-neutral sessions, events, persistence, and migration
-│   ├── src/providers/       # model settings, direct Groq/OpenRouter/fal clients and catalogs; `transcription.rs` resolves Groq vs Local, `local_transcriber.rs` drives the helper (docs/audio-pipeline.md)
+│   ├── src/providers/       # model settings, direct Groq/OpenRouter/fal clients and catalogs; `transcription.rs` resolves Groq, OpenRouter or Local, `local_transcriber.rs` drives the helper (docs/audio-pipeline.md)
 │   ├── src/llm/             # own providers: agent CLIs (resolved from the login-shell PATH on macOS; the app's `Path` + `PATHEXT` + installer dirs on Windows, `shell_env.rs`), OpenAI-compatible endpoints, per-use selection (docs/llm-providers.md; tests: `cargo test llm`)
 │   ├── src/activity/        # text-only capture: macOS AX/Vision, windows/ UIA/WGC/OCR; encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057); timeline/ = ETL, gaps, categories, FTS search, agent tools (docs/activity-timeline.md); tests: `cargo test activity`
 │   ├── src/coding_agents/   # read-only ingest of local coding-agent transcripts, blocks, tool-free summaries (docs/coding-agent-sessions.md; tests: `cargo test coding_agents`)
@@ -47,7 +47,7 @@ os-clovy/
 │   ├── src/mcp_server/      # Clovy MCP server: `clovy-mcp` stdio relay, authenticated private IPC (macOS Unix socket; Windows named pipe), authenticated external calls, per-action approvals and host-bound tools (docs/mcp-server.md, ADR-0058/0059; tests: `cargo test mcp_server`)
 │   ├── src/chat_engine/     # CLI execution for routines and preserved session history: resume, persisted results, cancel, Clovy tools via MCP (docs/llm-providers.md; tests: `cargo test chat_engine`)
 │   ├── src/commands.rs      # the Tauri command surface; every command invoked from `src/` must be in `lib.rs` `generate_handler!` (guard: `src/test/tauri-command-registry.test.ts`)
-│   └── native/              # macOS system-audio helper (Swift) + dictation helper + dev launcher (`dev-launcher/`, ADR-0060) + `mac-local-transcriber/` (SwiftPM + FluidAudio, pinned model manifest in `resources/local-transcriber-model.json`, built by `scripts/prepare-local-transcriber.mjs`; plain `cargo` builds bundle only a placeholder, so local transcription needs `pnpm local-transcriber:prepare`)
+│   └── native/              # macOS system-audio helper (Swift) + dictation helper + dev launcher (`dev-launcher/`, ADR-0060) + `mac-local-transcriber/` (SwiftPM + FluidAudio + WhisperKit, pinned model manifests under `src-tauri/resources/`, built by `scripts/prepare-local-transcriber.mjs`; plain `cargo` builds bundle only a placeholder, so local transcription needs `pnpm local-transcriber:prepare`)
 ├── docs/                    # see docs/index.md — ADRs, subsystem docs, runbooks, PRDs, QA
 ├── specs/                   # Spec Kit feature specs (001-003)
 ├── spec/                    # enforceable coding rules (see spec/index.md) — distinct from specs/
@@ -237,9 +237,9 @@ build scripts in `pnpm-workspace.yaml` — live in
   name again ([ADR-0068](docs/adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md),
   superseding ADR-0055).
 - **The app never calls a Clovy inference server.** Groq transcription,
-  OpenRouter text, and fal media use the user's own provider key directly.
+  OpenRouter transcription/text, and fal media use the user's own provider key directly.
   Transcription has one user-chosen engine for dictation, notes and live
-  preview: Groq, or the Local Parakeet model installed from Settings; with
+  preview: Groq, OpenRouter, or a compatible Local model installed from Settings; with
   Local chosen no audio leaves the machine and a missing model is an error,
   never a switch to Groq. Missing or unreadable keys fail clearly before a
   request; never substitute a service key, another provider, a local bearer
