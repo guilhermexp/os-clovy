@@ -1,5 +1,7 @@
 import type { DiscardedTranscriptSpanDto, LiveTranscriptEventDto, TranscriptDto } from "./tauri";
 
+export const LIVE_TRANSCRIPT_KEY_EVENT = "live-transcript-key-unavailable";
+
 const LIVE_TRANSCRIPT_COHERENCE_GAP_MS = 500;
 const LIVE_TRANSCRIPT_WINDOW_MS = 2 * 60 * 60 * 1000;
 export const LIVE_TRANSCRIPT_MAX_EVENTS_PER_SESSION = 2048;

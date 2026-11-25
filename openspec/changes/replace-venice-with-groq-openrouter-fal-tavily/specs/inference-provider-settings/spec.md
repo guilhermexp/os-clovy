@@ -19,7 +19,7 @@ O sistema SHALL migrar seleções globais e overrides legados para modelos váli
 
 #### Scenario: Perfil legado e override
 - **WHEN** um perfil com modelos Venice, overrides e escolhas CLI existentes é atualizado
-- **THEN** áudio passa a Whisper/Groq, texto remoto a OpenRouter e mídia a modelos fal válidos, mantendo CLI/endpoints e história intactos após save/restart
+- **THEN** áudio legado migra conforme `selecionar-modelos-transcricao` preservando seleções válidas, texto remoto a OpenRouter e mídia a modelos fal válidos, mantendo CLI/endpoints e história intactos após save/restart
 - Test: unit — migração consumer-visible com mapa de overrides e histórico preservado; e2e em cópia sandbox com restart/read-back.
 
 ### Requirement: Credenciais ficam na fronteira correta

@@ -1,11 +1,11 @@
 //! Offline JSON-lines client for the pinned Swift helper.
 use super::groq::{TimedTranscription, TranscriptSegment, TranscriptionProviderResult};
+use super::transcription::{LocalModelId, LocalSelection};
 use crate::domain::types::AppError;
 use serde::Deserialize;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, OnceLock,
-};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, OnceLock};
 use std::{
     future::Future,
     path::{Path, PathBuf},
@@ -93,7 +93,7 @@ impl LocalTranscription {
 pub trait LocalTranscribe: Send + Sync {
     fn transcribe<'a>(
         &'a self,
-        model_dir: &'a Path,
+        model: &'a LocalSelection,
         audio_path: &'a Path,
         language: Option<&'a str>,
     ) -> Pin<Box<dyn Future<Output = Result<LocalTranscription, AppError>> + Send + 'a>>;
@@ -103,10 +103,18 @@ struct Process {
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
+    model_id: LocalModelId,
     model_dir: PathBuf,
+    request_id: u64,
 }
 impl Process {
-    async fn request(&mut self, value: serde_json::Value) -> Result<serde_json::Value, AppError> {
+    async fn request(
+        &mut self,
+        mut value: serde_json::Value,
+    ) -> Result<serde_json::Value, AppError> {
+        self.request_id += 1;
+        value["request_id"] = self.request_id.into();
+        value["model_id"] = self.model_id.as_str().into();
         let mut bytes = serde_json::to_vec(&value).map_err(|_| failed())?;
         bytes.push(b'\n');
         self.input.write_all(&bytes).await.map_err(|_| failed())?;
@@ -133,7 +141,10 @@ impl Process {
             }
         }
         let value: serde_json::Value = serde_json::from_slice(&response).map_err(|_| failed())?;
-        if value["ok"] != true {
+        if value["ok"] != true
+            || value["request_id"] != self.request_id
+            || value["model_id"] != self.model_id.as_str()
+        {
             return Err(failed());
         }
         Ok(value)
@@ -146,35 +157,58 @@ impl Process {
 pub struct LocalTranscriber {
     executable: PathBuf,
     timeout: Duration,
-    process: Arc<Mutex<Option<Process>>>,
-    stop: watch::Sender<u64>,
-    enabled: Arc<AtomicBool>,
+    process: Mutex<Option<Process>>,
+    stop: watch::Sender<bool>,
+    selected: std::sync::Mutex<Option<LocalModelId>>,
 }
+
 impl LocalTranscriber {
     fn new(executable: PathBuf, timeout: Duration) -> Self {
         Self {
             executable,
             timeout,
-            process: Arc::new(Mutex::new(None)),
-            stop: watch::channel(0).0,
-            enabled: Arc::new(AtomicBool::new(true)),
+            process: Mutex::new(None),
+            stop: watch::channel(false).0,
+            selected: std::sync::Mutex::new(None),
         }
     }
+
+    fn selected(&self) -> Option<LocalModelId> {
+        *self
+            .selected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn select(&self, model: Option<LocalModelId>) {
+        *self
+            .selected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = model;
+    }
+
     async fn call(
         &self,
-        model_dir: &Path,
+        model: &LocalSelection,
         request: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, AppError> {
-        let mut cancelled = self.stop.subscribe();
-        let generation = *cancelled.borrow();
+        let mut stopped = self.stop.subscribe();
         let mut slot = self.process.lock().await;
-        if !self.enabled.load(Ordering::SeqCst) || *cancelled.borrow() != generation {
+        if *stopped.borrow() {
             return Err(failed());
         }
-        // Own the process while awaiting: cancellation/drop cannot leave an unread response in the pipe.
+        if request.is_none() && self.selected() != Some(model.id) {
+            return Ok(serde_json::json!({"ok": true}));
+        }
+
+        // Own the process while awaiting: cancellation/drop cannot leave an
+        // unread response in the pipe. A selection change never interrupts it.
         let mut process = slot.take();
         let operation = async {
-            if process.as_ref().is_some_and(|p| p.model_dir != model_dir) {
+            if process
+                .as_ref()
+                .is_some_and(|p| p.model_id != model.id || p.model_dir != model.directory)
+            {
                 if let Some(old) = process.take() {
                     old.stop().await;
                 }
@@ -193,14 +227,14 @@ impl LocalTranscriber {
                     child,
                     input,
                     output,
-                    model_dir: model_dir.into(),
+                    model_id: model.id,
+                    model_dir: model.directory.clone(),
+                    request_id: 0,
                 });
                 process
                     .as_mut()
                     .ok_or_else(failed)?
-                    .request(
-                        serde_json::json!({"op":"load","model_dir":model_dir,"version":"ultra"}),
-                    )
+                    .request(serde_json::json!({"op":"load","model_dir":model.directory}))
                     .await?;
             }
             match request {
@@ -210,56 +244,61 @@ impl LocalTranscriber {
         };
         let result = tokio::select! {
             result = tokio::time::timeout(self.timeout, operation) => result.unwrap_or_else(|_| Err(failed())),
-            _ = cancelled.changed() => Err(failed()),
+            _ = stopped.changed() => Err(failed()),
         };
-        let result = if !self.enabled.load(Ordering::SeqCst) || *cancelled.borrow() != generation {
-            Err(failed())
-        } else {
-            result
-        };
-        if result.is_ok() {
+        if result.is_ok() && self.selected() == Some(model.id) {
             *slot = process;
         } else if let Some(process) = process {
             process.stop().await;
         }
         result
     }
-    pub async fn warm(&self, model_dir: &Path) -> Result<(), AppError> {
-        self.call(model_dir, None).await.map(|_| ())
+
+    async fn warm(&self, model: &LocalSelection) -> Result<(), AppError> {
+        self.call(model, None).await.map(|_| ())
     }
-    pub async fn shutdown(&self) {
-        self.stop
-            .send_modify(|generation| *generation = generation.wrapping_add(1));
+
+    async fn shutdown(&self) {
+        self.stop.send_replace(true);
         if let Some(process) = self.process.lock().await.take() {
             process.stop().await;
         }
     }
-    pub fn disable(&self) {
-        self.enabled.store(false, Ordering::SeqCst);
-        self.stop
-            .send_modify(|generation| *generation = generation.wrapping_add(1));
-        let process = self.process.clone();
-        let enabled = self.enabled.clone();
-        tauri::async_runtime::spawn(async move {
-            let mut slot = process.lock().await;
-            // A later explicit Local selection may already have reused the client.
-            if !enabled.load(Ordering::SeqCst) {
-                if let Some(process) = slot.take() {
-                    process.stop().await;
-                }
+
+    async fn retire_unselected(&self) {
+        let mut slot = self.process.lock().await;
+        if slot
+            .as_ref()
+            .is_some_and(|process| self.selected() != Some(process.model_id))
+        {
+            if let Some(process) = slot.take() {
+                process.stop().await;
             }
-        });
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn unload(&self, id: LocalModelId, dir: &Path) {
+        let mut slot = self.process.lock().await;
+        if slot
+            .as_ref()
+            .is_some_and(|process| process.model_id == id && process.model_dir == dir)
+        {
+            if let Some(process) = slot.take() {
+                process.stop().await;
+            }
+        }
     }
 }
 impl LocalTranscribe for LocalTranscriber {
     fn transcribe<'a>(
         &'a self,
-        model_dir: &'a Path,
+        model: &'a LocalSelection,
         audio_path: &'a Path,
         language: Option<&'a str>,
     ) -> Pin<Box<dyn Future<Output = Result<LocalTranscription, AppError>> + Send + 'a>> {
         Box::pin(async move {
-            let result = self.call(model_dir, Some(serde_json::json!({"op":"transcribe","audio_path":audio_path,"language":language}))).await?;
+            let result = self.call(model, Some(serde_json::json!({"op":"transcribe","audio_path":audio_path,"language":language}))).await?;
             serde_json::from_value(result).map_err(|_| failed())
         })
     }
@@ -292,38 +331,67 @@ pub fn setup(app: &mut tauri::App) {
     }
 }
 pub async fn transcribe(
-    model_dir: &Path,
+    model: &LocalSelection,
     audio_path: &Path,
     language: Option<&str>,
 ) -> Result<LocalTranscription, AppError> {
-    #[cfg(test)]
-    if let Ok(fake) = TEST_LOCAL.try_with(Arc::clone) {
-        return fake.transcribe(model_dir, audio_path, language).await;
+    let result = async {
+        #[cfg(test)]
+        if let Ok(fake) = TEST_LOCAL.try_with(Arc::clone) {
+            return fake.transcribe(model, audio_path, language).await;
+        }
+        CLIENT
+            .get()
+            .ok_or_else(failed)?
+            .transcribe(model, audio_path, language)
+            .await
     }
-    CLIENT
-        .get()
-        .ok_or_else(failed)?
-        .transcribe(model_dir, audio_path, language)
-        .await
+    .await;
+    result.map_err(|mut error| {
+        error.message = format!(
+            "{} failed to transcribe. Try again or reinstall it in Settings > Models.",
+            model.id.name()
+        );
+        error.details = Some(serde_json::json!({ "model": model.id.name() }));
+        error
+    })
 }
+
 pub fn selection_changed() {
     if let Some(client) = CLIENT.get() {
-        if super::configured_transcription_provider() == super::PROVIDER_LOCAL {
-            client.enabled.store(true, Ordering::SeqCst);
-            if let Some(dir) = super::transcription::ready_directory() {
-                let client = client.clone();
-                tauri::async_runtime::spawn(async move {
-                    let _ = client.warm(&dir).await;
-                });
+        let selected = {
+            let mut slot = client
+                .selected
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let settings = super::effective_current_settings();
+            *slot = (settings.transcription_provider == super::PROVIDER_LOCAL)
+                .then(|| LocalModelId::parse(&settings.transcription_model))
+                .flatten();
+            *slot
+        };
+        let client = client.clone();
+        tauri::async_runtime::spawn(async move {
+            client.retire_unselected().await;
+            if let Some(model) =
+                selected.and_then(|id| super::transcription::acquire_local(id).ok())
+            {
+                let _ = client.warm(&model).await;
             }
-        } else {
-            client.disable();
-        }
+        });
     }
 }
+
+#[cfg(target_os = "macos")]
+pub async fn unload(id: LocalModelId, dir: &Path) {
+    if let Some(client) = CLIENT.get() {
+        client.unload(id, dir).await;
+    }
+}
+
 pub async fn shutdown() {
     if let Some(client) = CLIENT.get() {
-        client.disable();
+        client.select(None);
         client.shutdown().await;
     }
 }
@@ -343,26 +411,39 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-        (dir, LocalTranscriber::new(script, timeout))
+        let helper = LocalTranscriber::new(script, timeout);
+        helper.select(Some(LocalModelId::ParakeetUltra));
+        (dir, helper)
     }
     const GOOD: &str = r#"echo $$ >> pids
 while IFS= read -r line; do
  echo "$line" >> requests
+ request_id=${line#*'"request_id":'}
+ request_id=${request_id%%[!0-9]*}
+ model_id=${line#*'"model_id":"'}
+ model_id=${model_id%%\"*}
  case "$line" in
- *'"op":"load"'*) echo '{"ok":true}';;
- *) echo '{"ok":true,"text":"Olá mundo","tokens":[{"t":"▁Olá","start_ms":0,"end_ms":100},{"t":"▁mundo","start_ms":500,"end_ms":700}],"duration_ms":700,"language":"pt"}';;
+ *'"op":"load"'*) printf '{"ok":true,"request_id":%s,"model_id":"%s"}\n' "$request_id" "$model_id";;
+ *) printf '{"ok":true,"request_id":%s,"model_id":"%s","text":"Olá mundo","tokens":[{"t":"▁Olá","start_ms":0,"end_ms":100},{"t":"▁mundo","start_ms":500,"end_ms":700}],"duration_ms":700,"language":"pt"}\n' "$request_id" "$model_id";;
  esac
 done"#;
     #[tokio::test]
     async fn parakeet_review_disable_reaps_a_process_returned_by_an_overlapping_call() {
         let (_dir, helper) = fake(GOOD, Duration::from_secs(2));
-        helper.warm(Path::new("/model")).await.unwrap();
+        helper
+            .warm(&LocalSelection::fixture(
+                "/model",
+                LocalModelId::ParakeetUltra,
+            ))
+            .await
+            .unwrap();
         // A successful call owns the slot until it has restored its process.
         let mut slot = helper.process.lock().await;
         let process = slot.take();
-        helper.disable();
+        helper.select(None);
         *slot = process;
         drop(slot);
+        helper.retire_unselected().await;
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if helper.process.lock().await.is_none() {
@@ -378,10 +459,17 @@ done"#;
     #[tokio::test]
     async fn helper_reuses_load_serializes_and_shutdown_reaps() {
         let (dir, helper) = fake(GOOD, Duration::from_secs(2));
-        helper.warm(Path::new("/model")).await.unwrap();
+        helper
+            .warm(&LocalSelection::fixture(
+                "/model",
+                LocalModelId::ParakeetUltra,
+            ))
+            .await
+            .unwrap();
+        let model = LocalSelection::fixture("/model", LocalModelId::ParakeetUltra);
         let (a, b) = tokio::join!(
-            helper.transcribe(Path::new("/model"), Path::new("/take.m4a"), Some("pt")),
-            helper.transcribe(Path::new("/model"), Path::new("/take.wav"), None)
+            helper.transcribe(&model, Path::new("/take.m4a"), Some("pt")),
+            helper.transcribe(&model, Path::new("/take.wav"), None)
         );
         assert_eq!(a.unwrap().plain().unwrap().text, "Olá mundo");
         assert_eq!(b.unwrap().timed().unwrap().segments.len(), 2);
@@ -395,14 +483,16 @@ done"#;
             .parse()
             .unwrap();
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
-        helper.warm(Path::new("/model")).await.unwrap();
-        helper.shutdown().await;
+        assert!(helper
+            .transcribe(&model, Path::new("/late.wav"), None)
+            .await
+            .is_err());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("pids"))
                 .unwrap()
                 .lines()
                 .count(),
-            2
+            1
         );
     }
     #[tokio::test]
@@ -414,7 +504,13 @@ done"#;
             "read line; echo '{\"ok\":false,\"error\":\"broken\"}'",
         ] {
             let (_dir, helper) = fake(body, Duration::from_millis(60));
-            let error = helper.warm(Path::new("/model")).await.unwrap_err();
+            let error = helper
+                .warm(&LocalSelection::fixture(
+                    "/model",
+                    LocalModelId::ParakeetUltra,
+                ))
+                .await
+                .unwrap_err();
             assert_eq!(error.code, "local_transcriber_failed");
             assert_eq!(error.message, LOCAL_TRANSCRIBER_FAILED_MESSAGE);
             helper.shutdown().await;
@@ -477,7 +573,7 @@ pub(crate) struct FakeLocalTranscriber {
 impl LocalTranscribe for FakeLocalTranscriber {
     fn transcribe<'a>(
         &'a self,
-        _model_dir: &'a Path,
+        _model: &'a LocalSelection,
         audio_path: &'a Path,
         language: Option<&'a str>,
     ) -> Pin<Box<dyn Future<Output = Result<LocalTranscription, AppError>> + Send + 'a>> {

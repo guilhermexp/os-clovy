@@ -127,6 +127,40 @@ pub(crate) async fn transcribe_saved_audio_timed_with(
     transcribe_saved_audio_timed_via(&production_notes_transport(), groq_key, model, request).await
 }
 
+#[cfg(test)]
+#[tokio::test]
+async fn groq_retry_does_not_upload_again_after_credential_removal() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let sentinel = super::local_transcriber::NetworkSentinel::start().await;
+    let client = reqwest::Client::new();
+    let route = DirectTransport {
+        direct_client: &client,
+        groq_base: format!("{}/openai/v1", sentinel.origin),
+        openrouter_base: sentinel.origin.clone(),
+        retired_api_base: sentinel.origin.clone(),
+    };
+    let checks = AtomicUsize::new(0);
+    let result = TEST_TRANSCRIPTION_KEY
+        .scope(
+            Box::new(move || {
+                Ok((checks.fetch_add(1, Ordering::SeqCst) == 0).then(|| "fixture".into()))
+            }),
+            send_groq_transcription(
+                &route,
+                "fixture",
+                "whisper-large-v3-turbo",
+                Path::new("take.wav"),
+                b"RIFF synthetic audio".to_vec(),
+                None,
+                Some("pt".into()),
+                true,
+            ),
+        )
+        .await;
+    assert!(matches!(result, Err(error) if error.code == "groq_api_key_missing"));
+    assert_eq!(sentinel.requests.load(Ordering::SeqCst), 1);
+}
+
 pub(crate) async fn transcribe_saved_audio_via(
     transport: &DirectTransport<'_>,
     groq_key: Option<&str>,
@@ -200,6 +234,7 @@ pub(super) async fn send_groq_transcription(
         if let Some(language) = language.clone() {
             form = form.text("language", language);
         }
+        transport.revalidate_transcription_key(BuiltinProvider::Groq, groq_key)?;
         Ok(transport
             .direct_client
             .post(&url)

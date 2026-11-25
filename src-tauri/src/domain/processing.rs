@@ -888,7 +888,12 @@ pub(crate) async fn process_saved_audio(
             .await);
         }
     };
-    let transcription_provider = crate::providers::configured_transcription_provider();
+    let selection = crate::providers::effective_current_settings();
+    let transcription_provider = selection.transcription_provider.clone();
+    let route = note_route_for_backend_result(
+        selection.transcription_model.clone(),
+        crate::providers::transcription::backend_for_settings(&selection),
+    );
     let dictionary_entries = match repos.list_dictionary_entries().await {
         Ok(entries) => entries,
         Err(error) => {
@@ -905,7 +910,10 @@ pub(crate) async fn process_saved_audio(
         }
     };
     let dictionary = build_transcription_dictionary(&dictionary_entries);
-    let transcriber = instrument_turn_transcriber(default_turn_transcriber(), timeline.clone());
+    let transcriber = instrument_turn_transcriber(
+        routed(paced(note_provider_call()), fixed_resolver(route)),
+        timeline.clone(),
+    );
     let transcription = match transcribe_prepared_audio(
         transcriber,
         TranscribePreparedAudioRequest {
@@ -1328,10 +1336,13 @@ async fn process_saved_source_audio_pipeline(
     let processing_started = Instant::now();
     let note_transcription_started = Instant::now();
     let timeline = FirstEventTimeline::new(timing);
-    let transcription_provider = crate::providers::configured_transcription_provider();
-    // Read once per run: every request of the run, its durable identity and
-    // its kept chunks use this model.
-    let transcription_model = crate::providers::transcription_model();
+    let selection = crate::providers::effective_current_settings();
+    let transcription_provider = selection.transcription_provider.clone();
+    let transcription_model = selection.transcription_model.clone();
+    let route = note_route_for_backend_result(
+        transcription_model.clone(),
+        crate::providers::transcription::backend_for_settings(&selection),
+    );
     let dictionary_entries = match repos.list_dictionary_entries().await {
         Ok(entries) => entries,
         Err(error) => {
@@ -1522,10 +1533,15 @@ async fn process_saved_source_audio_pipeline(
                 .map(|dictionary| dictionary.context.as_str()),
             &transcription_model,
         );
-        let mut fallback_plans = build_source_fallback_plans(&all_preparation_jobs)
-            .into_iter()
-            .filter(SourceFallbackPlan::eligible)
-            .collect::<Vec<_>>();
+        let mut fallback_plans = if transcription_provider == crate::providers::PROVIDER_OPENROUTER
+        {
+            Vec::new()
+        } else {
+            build_source_fallback_plans(&all_preparation_jobs)
+                .into_iter()
+                .filter(SourceFallbackPlan::eligible)
+                .collect::<Vec<_>>()
+        };
         for fallback in &mut fallback_plans {
             fallback.end_ms = source_wav_duration_ms(&fallback.source_path)
                 .unwrap_or(fallback.end_ms)
@@ -1774,7 +1790,7 @@ async fn process_saved_source_audio_pipeline(
     };
     let transcriber = retain_cleanup_during_note_transcription(
         instrument_turn_transcriber(
-            note_turn_transcriber(repos.clone(), transcription_model.clone()),
+            note_turn_transcriber(repos.clone(), &transcription_model, route.clone()),
             timeline.clone(),
         ),
         Arc::clone(&turn_wav_dir_cleanup),
@@ -1789,7 +1805,7 @@ async fn process_saved_source_audio_pipeline(
         guarded_turn_preparer(Arc::clone(&turn_wav_dir_cleanup)),
         guarded_fallback_preparer(Arc::clone(&turn_wav_dir_cleanup)),
         transcriber,
-        note_pack_transcriber(transcription_model.clone()),
+        note_pack_transcriber(&transcription_model, route),
         Some(job_claimer),
         Some(result_sink),
         DEFAULT_TURN_TRANSCRIPTION_CONCURRENCY,
@@ -1943,8 +1959,12 @@ async fn process_saved_source_audio_pipeline(
         // Durable turn failures retain the canonical message, not the provider code.
         // Preserve Local's actionable code when aggregating those saved failures.
         if visible_failures.iter().any(|failure| {
-            failure.input.warning.as_deref()
-                == Some(crate::providers::local_transcriber::LOCAL_TRANSCRIBER_FAILED_MESSAGE)
+            failure.input.warning.as_deref().is_some_and(|warning| {
+                warning == crate::providers::local_transcriber::LOCAL_TRANSCRIBER_FAILED_MESSAGE
+                    || warning.ends_with(
+                        "failed to transcribe. Try again or reinstall it in Settings > Models.",
+                    )
+            })
         }) {
             error.code = "local_transcriber_failed".into();
         } else if visible_failures.iter().any(|failure| {
@@ -2551,11 +2571,6 @@ fn retain_cleanup_during_note_transcription(
     })
 }
 
-#[cfg(test)]
-fn default_turn_transcriber() -> TurnTranscriber {
-    Arc::new(|request| Box::pin(crate::providers::groq::transcribe_saved_audio(request)))
-}
-
 /// A note run stopped by a provider rate limit too long to wait out; its
 /// `details.resumeAtMs` says when the run continues.
 pub(crate) const TRANSCRIPTION_RATE_LIMITED_CODE: &str = "transcription_rate_limited";
@@ -2804,38 +2819,36 @@ pub(crate) fn groq_direct_pacer(fingerprint: &str) -> Arc<RequestPacer> {
 /// The saved Groq key and its account's pacer, resolved once per request.
 const TRANSCRIPTION_ENGINE_CHANGED_MESSAGE: &str = "The transcription engine changed during processing. Retry to transcribe with the current engine.";
 
+#[cfg(test)]
 fn note_route(model: String) -> Result<TranscriptionRoute, AppError> {
-    note_route_for_backend(model, crate::providers::transcription::current_backend()?)
+    note_route_for_backend_result(model, crate::providers::transcription::current_backend())
+}
+
+fn note_route_for_backend_result(
+    model: String,
+    backend: Result<TranscriptionBackend, AppError>,
+) -> Result<TranscriptionRoute, AppError> {
+    note_route_for_backend(model, backend?)
 }
 
 fn note_route_for_backend(
     model: String,
     backend: TranscriptionBackend,
 ) -> Result<TranscriptionRoute, AppError> {
+    if backend.model_id() != model
+        && !(matches!(backend, TranscriptionBackend::Groq { .. })
+            && crate::providers::KNOWN_TRANSCRIPTION_MODELS.contains(&model.as_str()))
+    {
+        return Err(AppError::new(
+            "transcription_engine_changed",
+            TRANSCRIPTION_ENGINE_CHANGED_MESSAGE,
+        ));
+    }
     match backend {
-        TranscriptionBackend::Groq { .. }
-            if model == crate::providers::transcription::LOCAL_MODEL =>
-        {
-            // A run admitted as Local never sends its remaining audio to Groq.
-            // Switching engines terminates that helper; an explicit retry uses the new choice.
-            Err(AppError::new(
-                "transcription_engine_changed",
-                TRANSCRIPTION_ENGINE_CHANGED_MESSAGE,
-            ))
-        }
         TranscriptionBackend::Groq { key, .. } => note_route_from(Ok(Some(key)), model),
-        TranscriptionBackend::Local { .. }
-            if model != crate::providers::transcription::LOCAL_MODEL =>
-        {
-            // Keep the admitted model/fingerprint consistent across every request.
-            Err(AppError::new(
-                "transcription_engine_changed",
-                TRANSCRIPTION_ENGINE_CHANGED_MESSAGE,
-            ))
-        }
-        backend @ TranscriptionBackend::Local { .. } => Ok(TranscriptionRoute {
+        backend => Ok(TranscriptionRoute {
             backend,
-            model: crate::providers::transcription::LOCAL_MODEL.into(),
+            model,
             pacer: None,
         }),
     }
@@ -2859,9 +2872,9 @@ fn note_route_from(
     })
 }
 
-/// Resolves a run's route for each of its requests, with the run's model.
-fn note_route_resolver(model: String) -> RouteResolver {
-    Arc::new(move || note_route(model.clone()))
+/// Every request from a saved-audio run holds the selection captured at admission.
+fn fixed_resolver(route: Result<TranscriptionRoute, AppError>) -> RouteResolver {
+    Arc::new(move || route.clone())
 }
 
 /// The durable key of one chunk request of a split saved-audio job: the
@@ -3011,9 +3024,24 @@ fn note_provider_call() -> RoutedCall<TranscriptionProviderResult> {
                     )
                     .await
                 }
-                TranscriptionBackend::Local { model_dir } => {
+                TranscriptionBackend::OpenRouter { key, model } => {
+                    if request.preview {
+                        crate::providers::openrouter::transcribe_audio(
+                            &key,
+                            &model,
+                            &request.audio_path,
+                            request.language.as_deref(),
+                            request.context.as_deref(),
+                        )
+                        .await
+                    } else {
+                        crate::providers::openrouter::transcribe_saved_audio(&key, &model, request)
+                            .await
+                    }
+                }
+                TranscriptionBackend::Local(model) => {
                     crate::providers::local_transcriber::transcribe(
-                        &model_dir,
+                        &model,
                         &request.audio_path,
                         request.language.as_deref(),
                     )
@@ -3040,15 +3068,20 @@ fn note_timed_call() -> RoutedCall<TimedTranscription> {
                     )
                     .await
                 }
-                TranscriptionBackend::Local { model_dir } => {
+                #[cfg(test)]
+                TranscriptionBackend::Local(model) => {
                     crate::providers::local_transcriber::transcribe(
-                        &model_dir,
+                        &model,
                         &request.audio_path,
                         request.language.as_deref(),
                     )
                     .await?
                     .timed()
                 }
+                _ => Err(AppError::new(
+                    "transcription_engine_changed",
+                    TRANSCRIPTION_ENGINE_CHANGED_MESSAGE,
+                )),
             }
         })
     })
@@ -3057,19 +3090,12 @@ fn note_timed_call() -> RoutedCall<TimedTranscription> {
 /// The route a live preview chunk of `duration_ms` takes, when it may go
 /// now (`audio/live_preview.rs`): it shares the pacer of that route, and the
 /// chunk is sent with this same route.
-pub(crate) fn live_preview_route(duration_ms: i64) -> Option<TranscriptionRoute> {
+pub(crate) fn live_preview_route(duration_ms: i64) -> Result<Option<TranscriptionRoute>, AppError> {
     // A preview chunk has no persisted run fingerprint. Capture its model and
     // backend together, so a concurrent settings change cannot mix selections.
-    let route = crate::providers::transcription::current_backend().and_then(|backend| {
-        let model = match &backend {
-            TranscriptionBackend::Groq { model, .. } => model.clone(),
-            TranscriptionBackend::Local { .. } => {
-                crate::providers::transcription::LOCAL_MODEL.into()
-            }
-        };
-        note_route_for_backend(model, backend)
-    });
-    live_preview_route_from(route, duration_ms)
+    let backend = crate::providers::transcription::current_backend()?;
+    let route = note_route_for_backend(backend.model_id().into(), backend);
+    Ok(live_preview_route_from(route, duration_ms))
 }
 
 fn live_preview_route_from(
@@ -3213,18 +3239,22 @@ fn rate_limit_paused_message(resume_at: &chrono::DateTime<chrono::Local>) -> Str
 
 /// The final-turn transcriber uses Groq with the user's key and the run's
 /// model. Each request keeps one resolved route for its chunks, pacer and call.
-fn note_turn_transcriber(repos: Repositories, model: String) -> TurnTranscriber {
+fn note_turn_transcriber(
+    repos: Repositories,
+    _model: &str,
+    route: Result<TranscriptionRoute, AppError>,
+) -> TurnTranscriber {
     #[cfg(test)]
     if let Ok((transcriber, pacer)) = TEST_NOTE_TRANSCRIPTION
         .try_with(|(transcriber, pacer)| (transcriber.clone(), pacer.clone()))
     {
         return note_chain(
             ignoring_route(transcriber),
-            fixed_route(&model, pacer),
+            fixed_route(_model, pacer),
             repos,
         );
     }
-    note_chain(note_provider_call(), note_route_resolver(model), repos)
+    note_chain(note_provider_call(), fixed_resolver(route), repos)
 }
 
 #[cfg(test)]
@@ -3238,11 +3268,14 @@ tokio::task_local! {
 /// Timed packs go straight to Groq with the user's key.
 /// Each pack request reads its route once, like a turn, so its pacer and
 /// its call use the same key.
-fn note_pack_transcriber(model: String) -> Option<PackTranscriber> {
+fn note_pack_transcriber(
+    model: &str,
+    route: Result<TranscriptionRoute, AppError>,
+) -> Option<PackTranscriber> {
     // Design risk mitigation: imprecise Local token ends can bridge a 500 ms
     // pack gap under the 400 ms pause rule. Keep each turn in its own request
     // rather than assigning merged text to the wrong turn by midpoint.
-    if model == crate::providers::transcription::LOCAL_MODEL {
+    if !crate::providers::KNOWN_TRANSCRIPTION_MODELS.contains(&model) {
         return None;
     }
     #[cfg(test)]
@@ -3250,7 +3283,7 @@ fn note_pack_transcriber(model: String) -> Option<PackTranscriber> {
         if let Ok(transcriber) = TEST_NOTE_PACKS.try_with(|(transcriber, pacer)| {
             routed(
                 paced(ignoring_route(transcriber.clone())),
-                fixed_route(&model, pacer.clone()),
+                fixed_route(model, pacer.clone()),
             )
         }) {
             return Some(transcriber);
@@ -3262,9 +3295,9 @@ fn note_pack_transcriber(model: String) -> Option<PackTranscriber> {
             return None;
         }
     }
-    note_route(model.clone())
-        .ok()
-        .map(|_| routed(paced(note_timed_call()), note_route_resolver(model)))
+    let route = route.ok()?;
+    matches!(route.backend, TranscriptionBackend::Groq { .. })
+        .then(|| routed(paced(note_timed_call()), fixed_resolver(Ok(route))))
 }
 
 /// Coalesces turns up to the final span, unless the session already has
@@ -12171,7 +12204,7 @@ mod tests {
         crate::providers::TEST_ORIGIN.scope(sentinel.origin.clone(),
             TEST_BACKEND.scope(local_test_route().backend,
                 TEST_LOCAL.scope(fake.clone(), async {
-                    assert!(note_pack_transcriber("parakeet-ultra".into()).is_none(),
+                    assert!(note_pack_transcriber("parakeet-ultra", Ok(local_test_route())).is_none(),
                         "the design's per-turn Local path must prevent attribution across pack boundaries");
                     let transcriber = routed(note_provider_call(), Arc::new(|| Ok(local_test_route())));
                     for index in 0..3 {
@@ -12210,7 +12243,8 @@ mod tests {
                 TEST_BACKEND.scope(
                     local_test_route().backend,
                     TEST_LOCAL.scope(fake.clone(), async {
-                        let transcriber = note_turn_transcriber(repos, "parakeet-ultra".into());
+                        let transcriber =
+                            note_turn_transcriber(repos, "parakeet-ultra", Ok(local_test_route()));
                         tokio::time::timeout(
                             Duration::from_secs(10),
                             transcribe_prepared_audio(
@@ -12231,9 +12265,13 @@ mod tests {
                         .expect("Local must not wait for Groq budgets")
                         .unwrap();
                         assert!(fake.calls.lock().unwrap().len() >= 4);
-                        assert!(note_pack_transcriber("parakeet-ultra".into()).is_none());
-                        let preview =
-                            live_preview_route(40 * 60 * 1000).expect("Local preview enabled");
+                        assert!(
+                            note_pack_transcriber("parakeet-ultra", Ok(local_test_route()))
+                                .is_none()
+                        );
+                        let preview = live_preview_route(40 * 60 * 1000)
+                            .expect("Local preview route")
+                            .expect("Local preview enabled");
                         transcribe_on_route(preview, test_transcription_request("preview"))
                             .await
                             .unwrap();
@@ -12246,9 +12284,12 @@ mod tests {
 
     fn local_test_route() -> TranscriptionRoute {
         TranscriptionRoute {
-            backend: TranscriptionBackend::Local {
-                model_dir: PathBuf::from("/fixture/model"),
-            },
+            backend: TranscriptionBackend::Local(
+                crate::providers::transcription::LocalSelection::fixture(
+                    "/fixture/model",
+                    crate::providers::transcription::LocalModelId::ParakeetUltra,
+                ),
+            ),
             model: "parakeet-ultra".into(),
             pacer: None,
         }
@@ -12257,7 +12298,7 @@ mod tests {
     #[tokio::test]
     async fn parakeet_review_groq_run_cannot_change_its_admitted_model_to_local() {
         crate::providers::transcription::TEST_BACKEND.scope(
-            TranscriptionBackend::Local { model_dir: "/fixture/model".into() },
+            TranscriptionBackend::Local(crate::providers::transcription::LocalSelection::fixture("/fixture/model", crate::providers::transcription::LocalModelId::ParakeetUltra)),
             async {
                 let error = note_route("whisper-large-v3".into()).unwrap_err();
                 assert_eq!(error.code, "transcription_engine_changed");
@@ -12317,9 +12358,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_failure_is_not_retried_and_keeps_actionable_note_message() {
-        use crate::providers::local_transcriber::{
-            FakeLocalTranscriber, LOCAL_TRANSCRIBER_FAILED_MESSAGE, TEST_LOCAL,
-        };
+        use crate::providers::local_transcriber::{FakeLocalTranscriber, TEST_LOCAL};
         let fake = Arc::new(FakeLocalTranscriber {
             fail: true,
             ..Default::default()
@@ -12342,16 +12381,90 @@ mod tests {
                         false,
                         "microphone"
                     ),
-                    LOCAL_TRANSCRIBER_FAILED_MESSAGE
+                    "Parakeet Ultra failed to transcribe. Try again or reinstall it in Settings > Models."
                 );
             })
             .await;
     }
 
     #[tokio::test]
+    async fn openrouter_failed_turns_never_reupload_the_full_source() {
+        use crate::providers::{
+            local_transcriber::NetworkSentinel, transcription::TEST_BACKEND,
+            GLOBAL_SETTINGS_TEST_LOCK, TEST_ORIGIN,
+        };
+        struct RestoreSettings(crate::providers::ProviderModelSettings);
+        impl Drop for RestoreSettings {
+            fn drop(&mut self) {
+                crate::providers::replace_current_settings_for_tests(self.0.clone());
+            }
+        }
+        let _lock = GLOBAL_SETTINGS_TEST_LOCK.lock().await;
+        let _restore = RestoreSettings(crate::providers::effective_current_settings());
+        let mut settings = crate::providers::default_settings_for_tests();
+        settings.transcription_provider = "openrouter".into();
+        settings.transcription_model = "openai/whisper-large-v3-turbo".into();
+        let model = settings.transcription_model.clone();
+        crate::providers::replace_current_settings_for_tests(settings);
+        let (repos, session_id) = test_source_processing_repositories().await;
+        let note_id: String =
+            sqlx::query_scalar::query_scalar("SELECT note_id FROM recording_sessions WHERE id = ?")
+                .bind(&session_id)
+                .fetch_one(&repos.pool)
+                .await
+                .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let microphone = directory.path().join("microphone.wav");
+        write_three_turn_microphone(&microphone);
+        let artifact = repos
+            .create_audio_artifact(
+                &note_id,
+                &session_id,
+                &microphone.to_string_lossy(),
+                22_000,
+                0,
+                "checksum",
+            )
+            .await
+            .unwrap();
+        let provider = NetworkSentinel::start().await;
+        let backend = TranscriptionBackend::OpenRouter {
+            key: "fixture".into(),
+            model: model.clone(),
+        };
+        let route = note_route_for_backend(model, backend.clone()).unwrap();
+        let call = note_provider_call();
+        let origin = provider.origin.clone();
+        let transcriber: TurnTranscriber = Arc::new(move |request| {
+            // The Turn scheduler spawns tasks. Scope the test origin in each
+            // request so no child can resolve the real provider.
+            Box::pin(TEST_ORIGIN.scope(origin.clone(), call(route.clone(), request)))
+        });
+        let result = TEST_BACKEND
+            .scope(
+                backend,
+                rate_limited_run(
+                    &repos,
+                    &note_id,
+                    &session_id,
+                    vec![(artifact.id, "microphone".into(), microphone.clone(), false)],
+                    transcriber,
+                ),
+            )
+            .await;
+        assert_eq!(
+            provider.requests.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "pipeline returned {result:?}"
+        );
+        assert!(result.is_err());
+        assert!(microphone.is_file());
+    }
+
+    #[tokio::test]
     async fn local_failure_persists_note_error_and_retains_audio_for_retry() {
         use crate::providers::local_transcriber::{
-            FakeLocalTranscriber, NetworkSentinel, LOCAL_TRANSCRIBER_FAILED_MESSAGE, TEST_LOCAL,
+            FakeLocalTranscriber, NetworkSentinel, TEST_LOCAL,
         };
         let _lock = crate::providers::GLOBAL_SETTINGS_TEST_LOCK.lock().await;
         let (repos, session_id) = test_source_processing_repositories().await;
@@ -12399,7 +12512,7 @@ mod tests {
                     assert_eq!(note.processing_status, ProcessingStatus::Failed);
                     assert_eq!(
                         note.last_error.as_deref(),
-                        Some(format!("Microphone: {LOCAL_TRANSCRIBER_FAILED_MESSAGE}").as_str())
+                        Some("Microphone: Parakeet Ultra failed to transcribe. Try again or reinstall it in Settings > Models.")
                     );
                     assert!(microphone.is_file(), "retry must retain the recording");
                     assert!(!fake.calls.lock().unwrap().is_empty());
@@ -12437,7 +12550,7 @@ mod tests {
         crate::providers::TEST_ORIGIN.scope(sentinel.origin.clone(), async {
             let transcriber = routed(note_provider_call(), Arc::new(|| note_route_for_backend(
                 "whisper-large-v3".into(),
-                TranscriptionBackend::Local { model_dir: "/fixture/model".into() },
+                TranscriptionBackend::Local(crate::providers::transcription::LocalSelection::fixture("/fixture/model", crate::providers::transcription::LocalModelId::ParakeetUltra)),
             )));
             let error = rate_limited_run(
                 &repos, &note_id, &session_id,

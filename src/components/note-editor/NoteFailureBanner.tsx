@@ -1,6 +1,7 @@
 import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
 import { useState } from "react";
 import { type MessageKey, t as translate, useT } from "../../i18n";
+import { messageForErrorCode } from "../../lib/errors";
 
 type Props = {
   errorMessage?: string;
@@ -35,6 +36,13 @@ const STORED_FAILURE_KEYS: MessageKey[] = [
   "notes.failure.generationBusy",
   "notes.failure.generationFailed",
   "notes.failure.groqKeyMissing",
+  "notes.failure.openrouterAudioKeyMissing",
+  "notes.failure.openrouterAudioKeyUnavailable",
+  "notes.failure.openrouterAudioKeyRejected",
+  "notes.failure.openrouterAudioTimeout",
+  "notes.failure.openrouterAudioNetwork",
+  "notes.failure.openrouterAudioFailed",
+  "notes.failure.openrouterAudioTooLarge",
   "notes.failure.audioTooLarge",
   "notes.failure.groqUsageLimit",
   "notes.failure.groqKeyUnavailable",
@@ -54,12 +62,31 @@ function storedFailureKey(body: string): MessageKey | undefined {
 function friendlyFailureSegment(message: string) {
   const source = message.match(/^(Microphone|System):\s*/i)?.[1];
   const body = source ? message.replace(/^(Microphone|System):\s*/i, "") : message;
+  if (!source) return friendlyFailureBody(body);
+  return translate("notes.failure.sourcePrefixed", {
+    source: failureSourceLabel(source),
+    message: body
+      .split(/(?<=[.!?]); /)
+      .map(friendlyFailureBody)
+      .join(" "),
+  });
+}
+
+function friendlyFailureBody(body: string) {
   const normalized = body.toLowerCase();
   let friendly = body;
   const storedKey = storedFailureKey(body);
   const pausedUntil = body.trim().match(RATE_LIMIT_PAUSED)?.[1];
   if (storedKey) {
     friendly = translate(storedKey);
+  } else if (
+    body.endsWith("failed to transcribe. Try again or reinstall it in Settings > Models.")
+  ) {
+    friendly = messageForErrorCode("local_transcriber_failed", body);
+  } else if (body.startsWith("Install ") && body.endsWith(" in Settings > Models.")) {
+    friendly = messageForErrorCode("local_model_not_installed", body);
+  } else if (/^.+ requires macOS \d+\.$/.test(body)) {
+    friendly = messageForErrorCode("local_model_requires_macos", body);
   } else if (pausedUntil) {
     friendly = translate("notes.failure.rateLimitPaused", { time: pausedUntil });
   } else if (normalized.includes("no_speech") || normalized.includes("no speech")) {
@@ -76,12 +103,7 @@ function friendlyFailureSegment(message: string) {
   } else if (normalized.includes("authorization_denied")) {
     friendly = translate("notes.failure.serviceBusy");
   }
-  return source
-    ? translate("notes.failure.sourcePrefixed", {
-        source: failureSourceLabel(source),
-        message: friendly,
-      })
-    : friendly;
+  return friendly;
 }
 
 /** The transcript source a backend failure names ("Microphone: ..."), shown in

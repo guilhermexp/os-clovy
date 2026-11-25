@@ -6271,35 +6271,30 @@ async fn transcribe_recording_ready_inner(
         );
     }
     let selection = &take.inner.transcription_settings;
-    let (provider, transcriber) = match dictation_transcription_provider(
-        selection.transcription_provider.clone(),
-    )
-    .and_then(|provider| {
-        crate::providers::transcription::effective_transcription_backend(
-            selection,
-            crate::providers::transcription::ready_directory(),
-            crate::providers::local_transcription_supported(),
-            || crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq),
-        )
-        .map(|backend| (provider, ServiceDictationTranscriber { backend }))
-    }) {
-        Ok(selected) => selected,
-        Err(error) => {
-            remove_windows_dictation_audio(&recording.audio_path);
-            if send_dictation_take_command(
-                app,
-                take,
-                serde_json::json!({ "type": "discard_recording" }),
+    let (provider, transcriber) =
+        match crate::providers::transcription::backend_for_settings(selection).map(|backend| {
+            (
+                backend.provider().to_string(),
+                ServiceDictationTranscriber::new(backend),
             )
-            .is_some()
-            {
-                update_shortcut_helper_finalizing(app, false);
-                emit_dictation_take_event(app, take, app_error_event(error));
+        }) {
+            Ok(selected) => selected,
+            Err(error) => {
+                remove_windows_dictation_audio(&recording.audio_path);
+                if send_dictation_take_command(
+                    app,
+                    take,
+                    serde_json::json!({ "type": "discard_recording" }),
+                )
+                .is_some()
+                {
+                    update_shortcut_helper_finalizing(app, false);
+                    emit_dictation_take_event(app, take, app_error_event(error));
+                }
+                let _ = std::fs::remove_file(&audio_path);
+                return;
             }
-            let _ = std::fs::remove_file(&audio_path);
-            return;
-        }
-    };
+        };
     let current_settings = current_dictation_settings(app).unwrap_or_default();
     let cleanup = DictationCleanupConfig::from_settings(&current_settings);
     let language = current_settings.language;
@@ -6712,15 +6707,19 @@ fn dictation_session_id() -> String {
         .clone()
 }
 
+#[cfg(test)]
 fn dictation_transcription_provider(provider: String) -> Result<String, AppError> {
     if provider == crate::providers::PROVIDER_LOCAL {
-        crate::providers::transcription::require_local_ready()?;
-        return Ok(provider);
-    }
-    if provider != PROVIDER_GROQ {
+        crate::providers::transcription::require_local_ready_for(
+            crate::providers::transcription::LocalModelId::ParakeetUltra,
+        )?;
+    } else if !matches!(
+        provider.as_str(),
+        PROVIDER_GROQ | crate::providers::PROVIDER_OPENROUTER
+    ) {
         return Err(AppError::new(
             "dictation_provider_not_configured",
-            "Dictation requires a Groq transcription model.",
+            "Select a transcription provider in Settings > Models.",
         ));
     }
     Ok(provider)
@@ -6819,7 +6818,15 @@ trait DictationCleaner {
 
 /// The production transcriber.
 struct ServiceDictationTranscriber {
-    backend: crate::providers::transcription::TranscriptionBackend,
+    backend: std::sync::Mutex<Option<crate::providers::transcription::TranscriptionBackend>>,
+}
+
+impl ServiceDictationTranscriber {
+    fn new(backend: crate::providers::transcription::TranscriptionBackend) -> Self {
+        Self {
+            backend: std::sync::Mutex::new(Some(backend)),
+        }
+    }
 }
 
 impl DictationTranscriber for ServiceDictationTranscriber {
@@ -6827,16 +6834,34 @@ impl DictationTranscriber for ServiceDictationTranscriber {
         &self,
         request: DictateTranscribeRequest,
     ) -> Result<TranscriptionProviderResult, AppError> {
-        match &self.backend {
+        let backend = self
+            .backend
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .ok_or_else(|| {
+                AppError::new(
+                    "transcription_already_running",
+                    "This take is already being transcribed.",
+                )
+            })?;
+        match backend {
             crate::providers::transcription::TranscriptionBackend::Groq { key, model } => {
-                dictate_transcribe_with(Some(key), model.clone(), request).await
+                dictate_transcribe_with(Some(&key), model, request).await
             }
-            crate::providers::transcription::TranscriptionBackend::Local { model_dir } => {
-                // Deselecting Local may have stopped its helper (D4). Keep this
-                // take's backend and propagate that local error to the HUD;
-                // never resolve the new provider and upload the captured audio.
+            crate::providers::transcription::TranscriptionBackend::OpenRouter { key, model } => {
+                crate::providers::openrouter::transcribe_audio(
+                    &key,
+                    &model,
+                    &request.audio_path,
+                    request.language.as_deref(),
+                    request.context.as_deref(),
+                )
+                .await
+            }
+            crate::providers::transcription::TranscriptionBackend::Local(model) => {
                 crate::providers::local_transcriber::transcribe(
-                    model_dir,
+                    &model,
                     &request.audio_path,
                     request.language.as_deref(),
                 )
@@ -8308,13 +8333,8 @@ fn admit_dictation_start(app: &AppHandle, take_id: Option<&str>) -> Result<(), A
         )
     })?;
     let settings = crate::providers::effective_current_settings();
-    crate::providers::transcription::effective_transcription_backend(
-        &settings,
-        crate::providers::transcription::ready_directory(),
-        crate::providers::local_transcription_supported(),
-        || crate::providers::provider_api_key(crate::providers::BuiltinProvider::Groq),
-    )
-    .inspect_err(|_| reset_shortcut_activation(app))?;
+    crate::providers::transcription::backend_for_settings(&settings)
+        .inspect_err(|_| reset_shortcut_activation(app))?;
     let id = take_id.unwrap_or(UNTAGGED_DICTATION_TAKE);
     crate::update_gate::UPDATE_GATE
         .begin_dictation_take(id)
@@ -14280,7 +14300,7 @@ mod tests {
             .unwrap();
             assert!(matches!(
                 backend,
-                crate::providers::transcription::TranscriptionBackend::Local { .. }
+                crate::providers::transcription::TranscriptionBackend::Local(_)
             ));
             assert!(state.admitted_settings.lock().unwrap().is_empty());
         }
@@ -14318,9 +14338,7 @@ mod tests {
 
     #[tokio::test]
     async fn parakeet_review_dictation_keeps_its_backend_across_an_await() {
-        use crate::providers::local_transcriber::{
-            NetworkSentinel, LOCAL_TRANSCRIBER_FAILED_MESSAGE,
-        };
+        use crate::providers::local_transcriber::NetworkSentinel;
         use crate::providers::{
             local_transcriber::{FakeLocalTranscriber, TEST_LOCAL},
             transcription::{TranscriptionBackend, TEST_BACKEND},
@@ -14335,14 +14353,16 @@ mod tests {
                 .scope(
                     sentinel.origin.clone(),
                     TEST_BACKEND.scope(
-                        TranscriptionBackend::Local {
-                            model_dir: "/fixture/model".into(),
-                        },
+                        TranscriptionBackend::Local(
+                            crate::providers::transcription::LocalSelection::fixture(
+                                "/fixture/model",
+                                crate::providers::transcription::LocalModelId::ParakeetUltra,
+                            ),
+                        ),
                         async {
-                            let transcriber = ServiceDictationTranscriber {
-                                backend: crate::providers::transcription::current_backend()
-                                    .unwrap(),
-                            };
+                            let transcriber = ServiceDictationTranscriber::new(
+                                crate::providers::transcription::current_backend().unwrap(),
+                            );
                             tokio::task::yield_now().await;
                             TEST_BACKEND
                                 .scope(
@@ -14381,7 +14401,7 @@ mod tests {
                                             );
                                             assert_eq!(
                                                 event["payload"]["message"],
-                                                LOCAL_TRANSCRIBER_FAILED_MESSAGE
+                                                "Parakeet Ultra failed to transcribe. Try again or reinstall it in Settings > Models."
                                             );
                                         } else {
                                             let transcript = result.expect(
@@ -14419,14 +14439,16 @@ mod tests {
                 .scope(
                     sentinel.origin.clone(),
                     TEST_BACKEND.scope(
-                        TranscriptionBackend::Local {
-                            model_dir: "/fixture/model".into(),
-                        },
+                        TranscriptionBackend::Local(
+                            crate::providers::transcription::LocalSelection::fixture(
+                                "/fixture/model",
+                                crate::providers::transcription::LocalModelId::ParakeetUltra,
+                            ),
+                        ),
                         TEST_LOCAL.scope(fake.clone(), async {
-                            let result = ServiceDictationTranscriber {
-                                backend: crate::providers::transcription::current_backend()
-                                    .unwrap(),
-                            }
+                            let result = ServiceDictationTranscriber::new(
+                                crate::providers::transcription::current_backend().unwrap(),
+                            )
                             .transcribe(DictateTranscribeRequest {
                                 audio_path: "/fixture/take.m4a".into(),
                                 language: Some("pt".into()),

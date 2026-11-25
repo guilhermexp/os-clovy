@@ -41,9 +41,47 @@ const ERROR_CODE_MESSAGES: Record<string, MessageKey | ErrorWording[]> = {
   ],
   // Desktop dictation pipeline (src-tauri/src/dictation.rs)
   no_speech: "hud.error.noSpeech",
-  local_transcriber_failed: "notes.failure.localTranscriberFailed",
+  local_transcriber_failed: [
+    {
+      key: "notes.failure.namedLocalTranscriberFailed",
+      match: /^(.+) failed to transcribe\. Try again or reinstall it in Settings > Models\.$/,
+      names: ["model"],
+    },
+    { key: "notes.failure.localTranscriberFailed" },
+  ],
   transcription_engine_changed: "notes.failure.transcriptionEngineChanged",
-  local_model_not_installed: "lib.errors.localModelNotInstalled",
+  local_model_not_installed: [
+    {
+      key: "lib.errors.localModelNotInstalled",
+      match: "Install the local model in Settings > Models.",
+    },
+    {
+      key: "notes.failure.namedLocalModelMissing",
+      match: /^Install (.+) in Settings > Models\.$/,
+      names: ["model"],
+    },
+    { key: "lib.errors.localModelNotInstalled" },
+  ],
+  local_model_requires_macos: [
+    {
+      key: "settings.localTranscription.modelRequiresMacos",
+      match: /^(.+) requires macOS (\d+)\.$/,
+      names: ["model", "version"],
+    },
+  ],
+  local_model_confirm_removal: "settings.localTranscription.removeActiveDescription",
+  local_model_remove_failed: "settings.localTranscription.removeFailed",
+  local_model_in_use: "settings.localTranscription.inUse",
+  local_model_busy: "settings.localTranscription.busy",
+  openrouter_audio_key_missing: "notes.failure.openrouterAudioKeyMissing",
+  openrouter_audio_key_unavailable: "notes.failure.openrouterAudioKeyUnavailable",
+  openrouter_audio_key_rejected: "notes.failure.openrouterAudioKeyRejected",
+  openrouter_audio_timeout: "notes.failure.openrouterAudioTimeout",
+  openrouter_audio_network: "notes.failure.openrouterAudioNetwork",
+  openrouter_audio_failed: "notes.failure.openrouterAudioFailed",
+  openrouter_audio_too_large: "notes.failure.openrouterAudioTooLarge",
+  openrouter_audio_response_invalid: "notes.failure.openrouterAudioFailed",
+  audio_too_large: "notes.failure.audioTooLarge",
   groq_api_key_missing: "notes.failure.groqKeyMissing",
   // A capture start refused while an update installs (src-tauri/src/update_gate.rs)
   update_installing: "hud.error.updateInstalling",

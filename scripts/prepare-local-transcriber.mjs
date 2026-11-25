@@ -1,7 +1,15 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { computerUseBundleIdentifier } from "./computer-use-dev.mjs";
@@ -28,12 +36,8 @@ const source = path.join(root, "src-tauri/native/mac-local-transcriber");
 const pin = JSON.parse(readFileSync(path.join(source, "pin.json"), "utf8"));
 // Package.resolved is versioned with Package.swift; fail closed if the pinned lockfile is missing.
 const hash = createHash("sha256");
-for (const file of [
-  "Package.swift",
-  "Package.resolved",
-  "Sources/main.swift",
-  "FluidAudio-LICENSE",
-]) {
+const notices = ["FluidAudio-LICENSE", "WhisperKit-LICENSE", "Model-Attribution.txt"];
+for (const file of ["Package.swift", "Package.resolved", "Sources/main.swift", ...notices]) {
   hash
     .update(file)
     .update("\0")
@@ -88,6 +92,8 @@ if (!reusable) {
       "--arch",
       "arm64",
       "--disable-automatic-resolution",
+      "--jobs",
+      "2",
     ],
     { env: swiftEnv },
   );
@@ -114,11 +120,21 @@ if (!reusable) {
 <key>LSUIElement</key><true/>
 </dict></plist>\n`,
   );
-  copyFileSync(
-    path.join(source, "FluidAudio-LICENSE"),
-    path.join(contents, "Resources/FluidAudio-LICENSE"),
-  );
   writeFileSync(stamp, `${fingerprint}\n${identifier}\n`);
+}
+// SwiftPM checkouts can supply read-only licenses. Keep bundled data resources
+// writable by their owner so the next Tauri build can refresh its own copies.
+let restoredNotice = false;
+for (const file of notices) {
+  const original = path.join(source, file);
+  const destination = path.join(contents, "Resources", file);
+  const exists = existsSync(destination);
+  if (exists) chmodSync(destination, 0o644);
+  if (!exists || !readFileSync(destination).equals(readFileSync(original))) {
+    copyFileSync(original, destination);
+    chmodSync(destination, 0o644);
+    restoredNotice = true;
+  }
 }
 // build.rs leaves this note for plain cargo runs; it must not ship in the signed
 // helper, built or reused. Removing it breaks a stale seal, which is re-signed below.
@@ -130,7 +146,7 @@ const signatureValid = identity
       encoding: "utf8",
     }).status === 0;
 // Refresh signed release output even when cached: older seals may lack notarization options.
-if (!reusable || !signatureValid || (release && identity)) {
+if (!reusable || restoredNotice || !signatureValid || (release && identity)) {
   run("/usr/bin/codesign", [
     "--force",
     "--deep",

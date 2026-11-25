@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   AgentArtifactDto,
   AgentInterruptionDto,
@@ -2064,26 +2064,39 @@ export type LocalTranscriptionModelState =
   | { state: "downloading"; received: number; total: number }
   | { state: "ready"; bytes: number }
   | { state: "failed"; reason: string };
+
+export type LocalTranscriptionModelStatus = {
+  modelId: string;
+  name: string;
+  minimumMacos: number;
+  compatible: boolean;
+  downloadBytes: number;
+  installedBytes: number;
+  status: LocalTranscriptionModelState;
+};
+
 export async function localTranscriptionModelState() {
-  return invoke<LocalTranscriptionModelState>("local_transcription_model_state");
+  return invoke<LocalTranscriptionModelStatus[]>("local_transcription_model_state");
 }
-export async function installLocalTranscriptionModel(
-  onProgress: (state: LocalTranscriptionModelState) => void,
-) {
-  const channel = new Channel<LocalTranscriptionModelState>();
-  channel.onmessage = onProgress;
-  return invoke<void>("install_local_transcription_model", { channel });
+export async function installLocalTranscriptionModel(modelId: string, activate: boolean) {
+  return invoke<{ settings?: ProviderModelSettingsDto | null }>(
+    "install_local_transcription_model",
+    { modelId, activate },
+  );
 }
-export async function cancelLocalTranscriptionModelInstall() {
-  return invoke<void>("cancel_local_transcription_model_install");
+export async function cancelLocalTranscriptionModelInstall(modelId: string) {
+  return invoke<void>("cancel_local_transcription_model_install", { modelId });
 }
-export async function removeLocalTranscriptionModel() {
-  return invoke<{ switched_to_groq: boolean }>("remove_local_transcription_model");
+export async function removeLocalTranscriptionModel(modelId: string, confirmActive: boolean) {
+  return invoke<{ switched_to_groq: boolean }>("remove_local_transcription_model", {
+    modelId,
+    confirmActive,
+  });
 }
 export async function onLocalTranscriptionModelState(
-  onState: (state: LocalTranscriptionModelState) => void,
+  onState: (state: LocalTranscriptionModelStatus) => void,
 ) {
-  return listen<LocalTranscriptionModelState>("local-transcription-model-state", ({ payload }) =>
+  return listen<LocalTranscriptionModelStatus>("local-transcription-model-state", ({ payload }) =>
     onState(payload),
   );
 }

@@ -8,6 +8,19 @@ import {
 import { applyInterfaceLocale } from "../i18n/locale";
 
 describe("userFacingFailureMessage", () => {
+  afterEach(() => applyInterfaceLocale("en"));
+
+  it("translates two OpenRouter warnings from the same source", () => {
+    applyInterfaceLocale("pt-BR");
+    expect(
+      userFacingFailureMessage(
+        "Microphone: OpenRouter transcription timed out. Try again.; OpenRouter could not transcribe the audio. Try again.",
+      ),
+    ).toBe(
+      "Microfone: A transcrição na OpenRouter excedeu o tempo limite. Tente de novo. A OpenRouter não conseguiu transcrever o áudio. Tente de novo.",
+    );
+  });
+
   it("turns no-speech provider codes into useful guidance", () => {
     expect(userFacingFailureMessage("Microphone: upstream_provider_failed; no_speech")).toBe(
       "Microphone: No speech detected. Try speaking louder or moving closer to the microphone.",

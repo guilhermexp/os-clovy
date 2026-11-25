@@ -4,6 +4,21 @@ export default defineMessages({
   en: {
     "notes.failure.transcriptionEngineChanged":
       "The transcription engine changed during processing. Retry to transcribe with the current engine.",
+    "notes.failure.namedLocalTranscriberFailed":
+      "{model} failed to transcribe. Try again or reinstall it in Settings > Models.",
+    "notes.failure.namedLocalModelMissing": "Install {model} in Settings > Models.",
+    "notes.failure.openrouterAudioKeyMissing":
+      "Add your OpenRouter API key in Settings > Models > More options > Provider API keys to transcribe recordings.",
+    "notes.failure.openrouterAudioKeyUnavailable":
+      "Clovy could not read your OpenRouter transcription key. Save it again in Settings > Models > More options > Provider API keys.",
+    "notes.failure.openrouterAudioKeyRejected":
+      "OpenRouter rejected the transcription API key. Update it in Settings > Models > More options > Provider API keys.",
+    "notes.failure.openrouterAudioTimeout": "OpenRouter transcription timed out. Try again.",
+    "notes.failure.openrouterAudioNetwork":
+      "Could not reach OpenRouter for transcription. Check your connection and try again.",
+    "notes.failure.openrouterAudioFailed": "OpenRouter could not transcribe the audio. Try again.",
+    "notes.failure.openrouterAudioTooLarge":
+      "This recording part is larger than the 25 MB OpenRouter accepts in one request.",
     "notes.failure.localTranscriberFailed":
       "The local transcription model failed. Try again or reinstall it in Settings > Models.",
     "notes.editor.video.record": "Record meeting video",
@@ -304,6 +319,23 @@ export default defineMessages({
   "pt-BR": {
     "notes.failure.transcriptionEngineChanged":
       "O motor de transcrição mudou durante o processamento. Tente de novo para transcrever com o motor atual.",
+    "notes.failure.namedLocalTranscriberFailed":
+      "{model} falhou ao transcrever. Tente de novo ou reinstale o modelo em Configurações > Modelos.",
+    "notes.failure.namedLocalModelMissing": "Instale {model} em Configurações > Modelos.",
+    "notes.failure.openrouterAudioKeyMissing":
+      "Adicione sua chave de API da OpenRouter em Configurações > Modelos > Mais opções > Chaves de API de provedores para transcrever gravações.",
+    "notes.failure.openrouterAudioKeyUnavailable":
+      "O Clovy não conseguiu ler a chave de transcrição da OpenRouter. Salve-a de novo em Configurações > Modelos > Mais opções > Chaves de API de provedores.",
+    "notes.failure.openrouterAudioKeyRejected":
+      "A OpenRouter rejeitou a chave de API para transcrição. Atualize-a em Configurações > Modelos > Mais opções > Chaves de API de provedores.",
+    "notes.failure.openrouterAudioTimeout":
+      "A transcrição na OpenRouter excedeu o tempo limite. Tente de novo.",
+    "notes.failure.openrouterAudioNetwork":
+      "Não foi possível acessar a OpenRouter para transcrever. Verifique a conexão e tente de novo.",
+    "notes.failure.openrouterAudioFailed":
+      "A OpenRouter não conseguiu transcrever o áudio. Tente de novo.",
+    "notes.failure.openrouterAudioTooLarge":
+      "Este trecho da gravação ultrapassa o limite de 25 MB por solicitação da OpenRouter.",
     "notes.failure.localTranscriberFailed":
       "O modelo local de transcrição falhou. Tente de novo ou reinstale-o em Configurações > Modelos.",
     "notes.editor.video.record": "Gravar vídeo da reunião",

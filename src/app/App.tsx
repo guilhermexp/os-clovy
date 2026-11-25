@@ -40,6 +40,7 @@ import {
 import {
   authoritativeTranscriptCoverageKey,
   clearTerminalLiveTranscriptEvents,
+  LIVE_TRANSCRIPT_KEY_EVENT,
   upsertLiveTranscriptEvent,
 } from "../lib/live-transcript-preview";
 import {
@@ -862,6 +863,26 @@ export function App() {
     return () => {
       aborted = true;
       unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let warnedSession: string | undefined;
+    let stop: (() => void) | undefined;
+    void listen<{ sessionId: string; error: unknown }>(LIVE_TRANSCRIPT_KEY_EVENT, ({ payload }) => {
+      if (disposed || warnedSession === payload.sessionId) return;
+      warnedSession = payload.sessionId;
+      toast.error(messageFromError(payload.error));
+    })
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else stop = unlisten;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      stop?.();
     };
   }, []);
 

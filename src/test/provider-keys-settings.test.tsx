@@ -103,21 +103,31 @@ describe("Provider API keys settings", () => {
         return Promise.resolve({ settings: globalSettings, effectiveSettings: globalSettings });
       }
       if (command === "local_transcription_model_state")
-        return Promise.resolve({ state: "ready", bytes: 632162964 });
+        return Promise.resolve([
+          {
+            modelId: "parakeet-ultra",
+            name: "Parakeet Ultra",
+            minimumMacos: 14,
+            compatible: true,
+            downloadBytes: 632162964,
+            installedBytes: 632162964,
+            status: { state: "ready", bytes: 632162964 },
+          },
+        ]);
       if (command === "remove_local_transcription_model") {
         removed = true;
-        return Promise.resolve({ switched_to_groq: true });
+        return Promise.resolve({ switched_to_groq: false });
       }
       return fallback?.(command, args);
     });
     renderAppSettings();
-    const rowButton = await screen.findByRole("button", { name: /change transcription model/i });
-    const originalRow = rowButton.closest(".settings-row");
-    expect(originalRow).not.toBeNull();
-    const originalText = originalRow?.textContent;
-    await userEvent.click(await screen.findByRole("button", { name: "Remove" }));
-    await screen.findByText(/switched to Groq/i);
-    expect(rowButton.closest(".settings-row")?.textContent).toBe(originalText);
+    const model = await screen.findByRole("combobox", { name: "Model" });
+    expect(model).toHaveValue("whisper-large-v3");
+    await userEvent.click(await screen.findByText("Manage local models"));
+    await userEvent.click(await screen.findByRole("button", { name: "Remove Parakeet Ultra" }));
+    await waitFor(() => expect(removed).toBe(true));
+    expect(model).toHaveValue("whisper-large-v3");
+    expect(screen.queryByText(/switched to Groq/i)).toBeNull();
   });
 
   it("saves a key with set_provider_api_key and shows configured state", async () => {

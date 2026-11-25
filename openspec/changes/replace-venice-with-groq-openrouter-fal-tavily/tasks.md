@@ -5,7 +5,6 @@ Main atualiza checkboxes somente após confrontar a prova. Gates/build/Cargo sã
 ## 1. Contratos compartilhados e backend áudio/texto
 
 - [ ] 1.1 Migrar domínio/config/headers/credenciais/funding para Groq, OpenRouter, fal e Tavily, retirando branches Venice e exemplos antigos; verificar isolamento de credencial e cobrança própria/serviço com regressões comportamentais e docs/config atualizados, sem ler valores reais.
-- [ ] 1.2 Substituir ASR por Groq/Whisper real nos handlers de ditado/notas, preservando idioma/contexto/bytes/preview e erros; verificar multipart/parser/modelo/no_speech/limites e a regressão de modelo disponível com configuração/BYOK, documentando receita e defaults.
 - [ ] 1.3 Implementar texto OpenRouter e catálogo/preços/capacidades reais para chat, ferramentas, geração de notas e cleanup; verificar JSON/SSE/uso/erros e seleção compatível, documentando política de privacidade sem claims Venice.
 - [ ] 1.4 Integrar services/HTTP/bootstrap/metering e novos adapters de mídia/web após os contratos compartilhados; verificar contrato dos endpoints existentes e ausência de rotas Venice, mantendo todas as capacidades do pedido.
 
@@ -31,8 +30,11 @@ Main atualiza checkboxes somente após confrontar a prova. Gates/build/Cargo sã
 
 ## 5. Prova externa completa e aceite
 
-- [ ] 5.1 Dono configurar credenciais localmente e executar ou autorizar a prova de áudio Groq: Fn com voz/transcrição/inserção e nota/preview em sandbox; observar os resultados reais sem segredo ou áudio privado na evidência.
 - [ ] 5.2 Executar com ação/autorização de custo do dono a prova real OpenRouter de chat/ferramentas, geração de nota e cleanup remoto; verificar outputs/estado/persistência e que CLI/endpoints preservados continuam funcionando.
 - [ ] 5.3 Executar com ação/autorização de custo do dono as quatro capacidades fal: gerar/editar imagem, gerar vídeo e animar imagem; observar assets finais utilizáveis, erros/transições e persistência em sandbox.
 - [ ] 5.4 Executar com ação/autorização de custo do dono search/extract Tavily e observar os retornos reais pelas ferramentas, sem mascarar ausências de chave/serviço por mocks.
 - [ ] 5.5 Concluir review de risco/privacidade/credenciais proporcional, eixos code/review/reality e verify --record por sessão independente; Main aceitar somente o pedido completo e critérios anteriores de captura/MCP/opt-outs, com destino dos recursos e publicação apenas autorizada.
+
+## Escopo de áudio substituído em 2026-11-25
+
+As tarefas de implementação e prova de áudio passaram para `selecionar-modelos-transcricao/tasks.md`, por confirmação do dono. As demais tarefas permanecem abertas; integração ou prova dessa nova change não aceita este plano inteiro.

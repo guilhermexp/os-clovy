@@ -9,7 +9,7 @@ import { IconExclamationCircle } from "central-icons/IconExclamationCircle";
 import { IconMoonStar } from "central-icons/IconMoonStar";
 import { IconSun } from "central-icons/IconSun";
 import { IconTelevision } from "central-icons/IconTelevision";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
 import {
   INTERFACE_LOCALE_OPTIONS,
@@ -376,6 +376,7 @@ export function AppSettings({
   const [effectiveProviderSettings, setEffectiveProviderSettings] =
     useState<ProviderModelSettingsDto>(DEFAULT_PROVIDER_MODELS);
   const providerSettingsProfileRef = useRef<string | null>(null);
+  const transcriptionRefresh = useRef(0);
   const currentDataPartitionLabel = useCurrentDataPartitionName();
   const showingPartitionModels = currentDataPartitionLabel !== DEFAULT_DATA_PARTITION;
   const [partitionGenerationModel, setPartitionGenerationModel] = useState<string>();
@@ -1005,6 +1006,59 @@ export function AppSettings({
     }
   }
 
+  function applyTranscriptionSelection({
+    transcriptionProvider,
+    transcriptionModel,
+  }: Pick<ProviderModelSettingsDto, "transcriptionProvider" | "transcriptionModel">) {
+    transcriptionRefresh.current += 1;
+    const update = (settings: ProviderModelSettingsDto) => ({
+      ...settings,
+      transcriptionProvider,
+      transcriptionModel,
+    });
+    setProviderSettings(update);
+    setEffectiveProviderSettings(update);
+    dispatchProviderModelSettingsChanged({ mode: "transcription", modelId: transcriptionModel });
+  }
+
+  const refreshTranscriptionSelection = useCallback(async () => {
+    const refresh = ++transcriptionRefresh.current;
+    try {
+      const snapshot = providerModelSettingsSnapshot(await providerModelSettings());
+      if (transcriptionRefresh.current !== refresh) return;
+      setProviderSettings((current) => ({
+        ...current,
+        transcriptionProvider: snapshot.settings.transcriptionProvider,
+        transcriptionModel: snapshot.settings.transcriptionModel,
+      }));
+      setEffectiveProviderSettings((current) => ({
+        ...current,
+        transcriptionProvider: snapshot.effectiveSettings.transcriptionProvider,
+        transcriptionModel: snapshot.effectiveSettings.transcriptionModel,
+      }));
+    } catch {
+      // A failed read can't undo an already committed selection or removal.
+    }
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void listen("transcription-selection-changed", () => {
+      if (!disposed) void refreshTranscriptionSelection();
+    })
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else stop = unlisten;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      transcriptionRefresh.current += 1;
+      stop?.();
+    };
+  }, [refreshTranscriptionSelection]);
+
   function closeModelPicker() {
     setPickerMode(undefined);
     setModelPickerFlyout(null);
@@ -1128,12 +1182,6 @@ export function AppSettings({
   const displayProviderSettings = showingPartitionModels
     ? effectiveProviderSettings
     : providerSettings;
-  const transcriptionOptions = modelOptions(
-    providerModels.transcription.filter(
-      (model) => model.provider === displayProviderSettings.transcriptionProvider,
-    ),
-    displayProviderSettings.transcriptionModel,
-  );
   const generationOptions = modelOptions(
     providerModels.generation,
     modelValueForMode("generation"),
@@ -1228,7 +1276,6 @@ export function AppSettings({
   }
 
   function modelOptionsForMode(mode: ProviderModelMode) {
-    if (mode === "transcription") return transcriptionOptions;
     if (mode === "image") return IMAGE_GENERATION_ENABLED ? imageOptions : [];
     if (mode === "video") return VIDEO_GENERATION_ENABLED ? videoOptions : [];
     return generationOptions;
@@ -1734,9 +1781,11 @@ export function AppSettings({
               aria-labelledby="voice-models-heading"
             >
               <h2 id="voice-models-heading" className="settings-group-heading">
-                {t("settings.models.voice")}
+                {t("settings.models.transcription")}
               </h2>
-              <p className="settings-group-description">{t("settings.models.voiceDescription")}</p>
+              <p className="settings-group-description">
+                {t("settings.models.transcriptionDescription")}
+              </p>
               {showingPartitionModels ? (
                 <p className="settings-models-profile-note">
                   Showing models for the current data set: {currentDataPartitionLabel}. Switch to
@@ -1745,81 +1794,39 @@ export function AppSettings({
               ) : null}
               <div className="settings-card settings-models-card">
                 <div className="settings-rows">
-                  <ModelRow
-                    mode="transcription"
-                    beforeDivider
-                    title={t("settings.models.transcription")}
-                    description={t("settings.models.transcriptionDescription")}
-                    value={modelValueForMode("transcription")}
-                    options={transcriptionOptions}
-                    open={pickerMode === "transcription"}
-                    summarySuppressed={pickerMode !== undefined}
-                    flyout={modelPickerFlyout}
-                    search={modelSearch}
-                    triggerRef={modelPickerTriggerRef}
-                    popoverRef={modelPickerPopoverRef}
-                    searchRef={modelPickerSearchRef}
-                    onToggle={() =>
-                      pickerMode === "transcription"
-                        ? closeModelPicker()
-                        : openModelPicker("transcription")
-                    }
-                    onFlyoutChange={setModelPickerFlyout}
-                    onSearchChange={setModelSearch}
-                    onSelect={(modelId) => selectModelFromPicker("transcription", modelId)}
-                    readOnly={
-                      showingPartitionModels ||
-                      displayProviderSettings.transcriptionProvider === "local"
-                    }
-                  />
                   <LocalTranscriptionSettings
                     supported={providerSettings.localTranscriptionSupported === true}
                     provider={displayProviderSettings.transcriptionProvider}
                     model={displayProviderSettings.transcriptionModel}
                     readOnly={showingPartitionModels}
+                    models={providerModels.transcription}
+                    openrouterKeyConfigured={providerSettings.providerApiKeysConfigured?.openrouter}
                     onSelect={async (modelId) => {
-                      closeModelPicker();
-                      await selectProviderModel("transcription", modelId);
+                      try {
+                        const next = await setProviderModel("transcription", modelId);
+                        applyTranscriptionSelection(next);
+                      } catch (cause) {
+                        await refreshTranscriptionSelection();
+                        throw cause;
+                      }
                     }}
-                    onRemoved={async (result) => {
+                    onActivated={applyTranscriptionSelection}
+                    onRemoved={async (removedId, result) => {
+                      if (result && !result.switched_to_groq) return;
                       if (result?.switched_to_groq) {
-                        // Removal already committed this choice; a failed read must not leave Local selected.
-                        setProviderSettings((settings) =>
-                          settings.transcriptionProvider === "local"
+                        const afterRemoval = (settings: ProviderModelSettingsDto) =>
+                          settings.transcriptionProvider === "local" &&
+                          settings.transcriptionModel === removedId
                             ? {
                                 ...settings,
                                 transcriptionProvider: "groq",
                                 transcriptionModel: "whisper-large-v3-turbo",
                               }
-                            : settings,
-                        );
-                        setEffectiveProviderSettings((settings) =>
-                          settings.transcriptionProvider === "local"
-                            ? {
-                                ...settings,
-                                transcriptionProvider: "groq",
-                                transcriptionModel: "whisper-large-v3-turbo",
-                              }
-                            : settings,
-                        );
-                        dispatchProviderModelSettingsChanged({
-                          mode: "transcription",
-                          modelId:
-                            providerSettings.transcriptionProvider === "local"
-                              ? "whisper-large-v3-turbo"
-                              : providerSettings.transcriptionModel,
-                        });
+                            : settings;
+                        setProviderSettings(afterRemoval);
+                        setEffectiveProviderSettings(afterRemoval);
                       }
-                      const snapshot = providerModelSettingsSnapshot(await providerModelSettings());
-                      setProviderSettings(snapshot.settings);
-                      setEffectiveProviderSettings(snapshot.effectiveSettings);
-                      if (!result?.switched_to_groq) {
-                        dispatchProviderModelSettingsChanged({
-                          mode: "transcription",
-                          modelId: snapshot.settings.transcriptionModel,
-                        });
-                      }
-                      await requestProviderModels("transcription");
+                      await refreshTranscriptionSelection();
                     }}
                   />
                   <div className="settings-row-divider" aria-hidden />

@@ -31,20 +31,23 @@ takes never deliver), and
    selects it again. Candidate app changes remain available for the next
    take, while this take's indicator and cleanup app remain fixed.
    No speech analysis runs before the upload.
-4. **Transcription** (`dictate_transcribe` in the Groq provider). With the user's own
-   Groq key it posts straight to `api.groq.com/openai/v1/audio/transcriptions`
-   (model, `response_format=verbose_json`, the short dictionary hint as `prompt`, and
-   `language`), carrying only that key. Without one it returns
-   `groq_api_key_missing` without a request. The HUD identifies the missing Groq key and its location in Settings,
-   in English or pt-BR.
+4. **Transcription.** The admitted take keeps its provider and model from
+   Settings > Models > Audio transcription. Groq sends the canonical audio
+   part with `response_format=verbose_json`, the short dictionary prompt and
+   the language hint. OpenRouter uses its audio transcription endpoint with
+   `response_format=json`, the dictionary hint and the language, and sends a
+   single request. Each remote route uses its own configured credential and
+   surfaces key and transport errors in the HUD. The selected Local model
+   receives the audio and language hint in the offline helper.
+   [Audio pipeline](audio-pipeline.md#audio-transcription-engines)
 5. **No speech.** A take under 0.5 s of audio (`audioDurationSeconds` in
    `recording_ready`) is not uploaded. On the direct Groq route the request
    asks for `verbose_json` and segments with `no_speech_prob` of 0.6 or more
    are dropped, since Whisper invents text over silence. A transcript with no
    letters or digits left (empty or only punctuation) ends the take with
    `no_speech` and nothing is pasted. The meter level is only logged.
-6. **Cleanup** (optional, off by default). Off, the pasted text is Whisper's
-   transcript only trimmed: no filler removal and no style. With **Clean up dictation text** on
+6. **Cleanup** (optional, off by default). Off, the pasted text is the
+   model's transcript only trimmed: no filler removal and no style. With **Clean up dictation text** on
    in Settings > Style, the transcript goes to the chosen OpenRouter model in
    one chat completion (`dictate_cleanup` in the OpenRouter provider): straight to
    `openrouter.ai` with the user's own key. A missing key returns

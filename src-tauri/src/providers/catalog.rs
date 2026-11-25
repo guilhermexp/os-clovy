@@ -234,16 +234,21 @@ pub(super) async fn models(mode: ModelMode) -> Result<Vec<ProviderModelDto>, App
             model_row(provider, id, name, mode.api_type())
         })
         .collect();
-    if mode == ModelMode::Transcription && super::local_transcription_supported() {
-        let mut local = model_row(
-            "local",
-            super::transcription::LOCAL_MODEL,
-            "Parakeet Ultra",
-            mode.api_type(),
+    if mode == ModelMode::Transcription {
+        use super::transcription::{openrouter_model_name, LocalModelId, OPENROUTER_MODELS};
+        rows.extend(
+            OPENROUTER_MODELS
+                .into_iter()
+                .map(|id| model_row("openrouter", id, openrouter_model_name(id), mode.api_type())),
         );
-        local.available = Some(super::transcription::ready_directory().is_some());
-        local.privacy = Some("local".into());
-        rows.push(local);
+        if super::local_transcription_supported() {
+            rows.extend(LocalModelId::ALL.into_iter().map(|id| {
+                let mut row = model_row("local", id.as_str(), id.name(), mode.api_type());
+                row.available = Some(super::transcription::require_local_ready_for(id).is_ok());
+                row.privacy = Some("local".into());
+                row
+            }));
+        }
     }
     Ok(rows)
 }
@@ -256,6 +261,25 @@ pub(super) fn invalidate() {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn openrouter_audio_catalog_contains_only_the_curated_whisper_choices() {
+        let choices: Vec<_> = models(ModelMode::Transcription)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|model| model.provider == "openrouter")
+            .map(|model| model.id)
+            .collect();
+        assert_eq!(
+            choices,
+            [
+                "openai/whisper-large-v3-turbo",
+                "openai/whisper-large-v3",
+                "openai/whisper-1",
+            ]
+        );
+    }
     use std::sync::{Arc, Mutex};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -450,11 +474,13 @@ mod tests {
 
     #[tokio::test]
     async fn curated_catalogs_are_local_and_have_no_service_availability() {
+        let transcription: Vec<_> = super::super::KNOWN_TRANSCRIPTION_MODELS
+            .iter()
+            .copied()
+            .chain(super::super::transcription::OPENROUTER_MODELS)
+            .collect();
         for (mode, expected) in [
-            (
-                ModelMode::Transcription,
-                super::super::KNOWN_TRANSCRIPTION_MODELS,
-            ),
+            (ModelMode::Transcription, transcription.as_slice()),
             (ModelMode::Image, super::super::KNOWN_IMAGE_MODELS),
             (ModelMode::Video, super::super::KNOWN_VIDEO_MODELS),
         ] {

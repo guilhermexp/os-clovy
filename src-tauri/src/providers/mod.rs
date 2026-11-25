@@ -203,6 +203,7 @@ impl ProviderApiKeysConfigured {
 pub struct ProviderSettingsState {
     path: PathBuf,
     settings: Mutex<ProviderModelSettings>,
+    transcription_intent: Mutex<TranscriptionIntent>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -675,8 +676,10 @@ fn set_profile_model_overrides_impl(
     let profile = validate_profile_override_name(profile)?.to_string();
     update_settings_result(state, |settings| {
         let overrides = ProfileModelOverrides::from(overrides);
-        if overrides.transcription_provider.as_deref() == Some(PROVIDER_LOCAL) {
-            transcription::require_local_ready()?;
+        if overrides.transcription_provider.is_some() || overrides.transcription_model.is_some() {
+            if let Some(id) = local_model_for_override(settings, &overrides) {
+                transcription::require_local_ready_for(id)?;
+            }
         }
         if profile_overrides_empty(&overrides) {
             settings.profile_overrides.remove(&profile);
@@ -709,16 +712,22 @@ fn delete_profile_model_overrides_impl(
 
 #[tauri::command]
 pub fn set_provider_model(
+    app: tauri::AppHandle,
     state: State<'_, ProviderSettingsState>,
     request: SetProviderModelRequest,
 ) -> Result<ProviderModelSettingsDto, AppError> {
-    set_provider_model_impl(&state, request)
+    use tauri::Emitter;
+    let transcription = request.mode == ModelMode::Transcription;
+    let settings = set_provider_model_impl(&state, request)?;
+    if transcription {
+        let _ = app.emit(TRANSCRIPTION_SELECTION_CHANGED, ());
+    }
+    Ok(settings)
 }
 
-/// The mode picks the provider: transcription is Groq, text is OpenRouter
-/// directly, image and video are fal. Transcription, image, and
-/// video ids must be curated; text ids come from
-/// the live OpenRouter catalog.
+pub(crate) const TRANSCRIPTION_SELECTION_CHANGED: &str = "transcription-selection-changed";
+
+/// Transcription model identities are unique across the three providers.
 fn set_provider_model_impl(
     state: &ProviderSettingsState,
     request: SetProviderModelRequest,
@@ -733,32 +742,31 @@ fn set_provider_model_impl(
     if model_id.is_empty() {
         return Err(AppError::new("provider_model_required", "Select a model."));
     }
-    let local = request.mode == ModelMode::Transcription && model_id == transcription::LOCAL_MODEL;
-    if local {
-        transcription::require_local_ready()?;
+    if request.mode == ModelMode::Transcription {
+        let mut intent = state
+            .transcription_intent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved =
+            save_transcription_selection(state, &model_id, transcription::require_local_ready_for)?;
+        intent.replace(None);
+        return Ok(saved);
     }
     let curated = match request.mode {
-        ModelMode::Transcription => Some(KNOWN_TRANSCRIPTION_MODELS),
+        ModelMode::Transcription => unreachable!(),
         ModelMode::Image => Some(KNOWN_IMAGE_MODELS),
         ModelMode::Video => Some(KNOWN_VIDEO_MODELS),
         ModelMode::Generation => None,
     };
-    if !local && curated.is_some_and(|known| !known.contains(&model_id.as_str())) {
+    if curated.is_some_and(|known| !known.contains(&model_id.as_str())) {
         return Err(AppError::new(
             "provider_model_unavailable",
             "This model is not available. Choose another model.",
         ));
     }
     update_settings_result(state, |settings| {
-        if local {
-            transcription::require_local_ready()?;
-        }
         match request.mode {
-            ModelMode::Transcription => {
-                settings.transcription_provider =
-                    if local { PROVIDER_LOCAL } else { PROVIDER_GROQ }.to_string();
-                settings.transcription_model = model_id;
-            }
+            ModelMode::Transcription => unreachable!(),
             ModelMode::Generation => {
                 // Text selection is independent from chat and note engine choices.
                 settings.generation_provider = PROVIDER_OPENROUTER.to_string();
@@ -772,30 +780,202 @@ fn set_provider_model_impl(
     })
 }
 
-/// Persist the explicit model-removal transition, including profile overrides.
 pub fn local_transcription_supported() -> bool {
-    cfg!(all(target_os = "macos", target_arch = "aarch64"))
+    transcription::LocalModelId::ParakeetUltra.compatible(transcription::macos_major())
 }
 
-pub(crate) fn remove_local_transcription_selection(
+fn save_transcription_selection(
     state: &ProviderSettingsState,
+    model_id: &str,
+    check_local: impl FnOnce(transcription::LocalModelId) -> Result<(), AppError>,
+) -> Result<ProviderModelSettingsDto, AppError> {
+    let local = transcription::LocalModelId::parse(model_id);
+    let provider = if local.is_some() {
+        PROVIDER_LOCAL
+    } else if transcription::OPENROUTER_MODELS.contains(&model_id) {
+        PROVIDER_OPENROUTER
+    } else if KNOWN_TRANSCRIPTION_MODELS.contains(&model_id) {
+        PROVIDER_GROQ
+    } else {
+        return Err(AppError::new(
+            "provider_model_unavailable",
+            "This model is not available. Choose another model.",
+        ));
+    };
+    update_settings_result(state, |settings| {
+        if let Some(local) = local {
+            check_local(local)?;
+        }
+        settings.transcription_provider = provider.into();
+        settings.transcription_model = model_id.into();
+        Ok(())
+    })
+}
+
+#[derive(Default)]
+struct TranscriptionIntent {
+    revision: u64,
+    pending: Option<transcription::LocalModelId>,
+}
+
+impl TranscriptionIntent {
+    fn replace(&mut self, model: Option<transcription::LocalModelId>) -> u64 {
+        self.revision = self.revision.wrapping_add(1);
+        self.pending = model;
+        self.revision
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn start_transcription_install(
+    state: &ProviderSettingsState,
+    model: transcription::LocalModelId,
+) -> u64 {
+    state
+        .transcription_intent
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .replace(Some(model))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn finish_transcription_install(
+    state: &ProviderSettingsState,
+    model: transcription::LocalModelId,
+    revision: u64,
+    ready: bool,
+) -> Result<Option<ProviderModelSettingsDto>, AppError> {
+    complete_transcription_install(
+        state,
+        model,
+        revision,
+        ready,
+        transcription::require_local_ready_for,
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn complete_transcription_install(
+    state: &ProviderSettingsState,
+    model: transcription::LocalModelId,
+    revision: u64,
+    ready: bool,
+    check_local: impl FnOnce(transcription::LocalModelId) -> Result<(), AppError>,
+) -> Result<Option<ProviderModelSettingsDto>, AppError> {
+    let mut intent = state
+        .transcription_intent
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if intent.revision != revision || intent.pending != Some(model) {
+        return Ok(None);
+    }
+    intent.replace(None);
+    if ready {
+        save_transcription_selection(state, model.as_str(), check_local).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn cancel_transcription_install(
+    state: &ProviderSettingsState,
+    model: transcription::LocalModelId,
+) {
+    let mut intent = state
+        .transcription_intent
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if intent.pending == Some(model) {
+        intent.replace(None);
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn prepare_local_model_removal<'a>(
+    state: &ProviderSettingsState,
+    model_id: transcription::LocalModelId,
+    model: &'a crate::transcription_model::TranscriptionModel,
+    confirm_active: bool,
+) -> Result<(crate::transcription_model::RemovalGuard<'a>, bool), AppError> {
+    let mut intent = state
+        .transcription_intent
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let active = settings_snapshot(state).is_ok_and(|settings| {
+        settings.transcription_provider == PROVIDER_LOCAL
+            && settings.transcription_model == model_id.as_str()
+    });
+    if active && !confirm_active {
+        return Err(AppError::new(
+            "local_model_confirm_removal",
+            "Confirm switching transcription to Groq before removing this model.",
+        ));
+    }
+    let removal = model.begin_removal()?;
+    let switched = remove_local_transcription_selection(state, model_id)?;
+    if intent.pending == Some(model_id) {
+        intent.replace(None);
+    }
+    Ok((removal, switched))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn remove_local_transcription_selection(
+    state: &ProviderSettingsState,
+    model: transcription::LocalModelId,
 ) -> Result<bool, AppError> {
-    let mut switched = false;
-    update_settings(state, |settings| {
-        if settings.transcription_provider == PROVIDER_LOCAL {
-            switched = true;
-            settings.transcription_provider = PROVIDER_GROQ.into();
-            settings.transcription_model = DEFAULT_TRANSCRIPTION_MODEL.into();
+    let is_selected = |settings: &ProviderModelSettings| {
+        settings.transcription_provider == PROVIDER_LOCAL
+            && settings.transcription_model == model.as_str()
+    };
+    let mut settings = state
+        .settings
+        .lock()
+        .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))?;
+    let switched = is_selected(&settings);
+    let mut candidate = settings.clone();
+    let mut cleared_override = false;
+    for overrides in candidate.profile_overrides.values_mut() {
+        if (overrides.transcription_provider.is_some() || overrides.transcription_model.is_some())
+            && local_model_for_override(&settings, overrides) == Some(model)
+        {
+            overrides.transcription_provider = Some(PROVIDER_GROQ.into());
+            overrides.transcription_model = Some(DEFAULT_TRANSCRIPTION_MODEL.into());
+            cleared_override = true;
         }
-        for overrides in settings.profile_overrides.values_mut() {
-            if overrides.transcription_provider.as_deref() == Some(PROVIDER_LOCAL) {
-                switched = true;
-                overrides.transcription_provider = Some(PROVIDER_GROQ.into());
-                overrides.transcription_model = Some(DEFAULT_TRANSCRIPTION_MODEL.into());
-            }
-        }
-    })?;
+    }
+    if switched {
+        candidate.transcription_provider = PROVIDER_GROQ.into();
+        candidate.transcription_model = DEFAULT_TRANSCRIPTION_MODEL.into();
+    }
+    if switched || cleared_override {
+        persist_settings_candidate(state, &mut settings, candidate)?;
+        drop(settings);
+        local_transcriber::selection_changed();
+    }
     Ok(switched)
+}
+
+fn local_model_for_override(
+    settings: &ProviderModelSettings,
+    overrides: &ProfileModelOverrides,
+) -> Option<transcription::LocalModelId> {
+    let provider = overrides
+        .transcription_provider
+        .as_deref()
+        .unwrap_or(&settings.transcription_provider);
+    if provider != PROVIDER_LOCAL {
+        return None;
+    }
+    let model = overrides
+        .transcription_model
+        .as_deref()
+        .unwrap_or(&settings.transcription_model);
+    Some(
+        transcription::LocalModelId::parse(model)
+            .unwrap_or(transcription::LocalModelId::ParakeetUltra),
+    )
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -1342,6 +1522,7 @@ pub fn setup(app: &mut tauri::App) {
     let (settings, migrated_now) = load_settings_from_disk(app.handle());
     replace_current_settings(settings.clone());
     let state = ProviderSettingsState {
+        transcription_intent: Default::default(),
         path,
         settings: Mutex::new(settings.clone()),
     };
@@ -1567,7 +1748,18 @@ fn settings_from_json(
 
 fn normalize_transcription(provider: &str, model: String) -> (String, String) {
     if provider == PROVIDER_LOCAL && local_transcription_supported() {
-        (PROVIDER_LOCAL.into(), transcription::LOCAL_MODEL.into())
+        let local = transcription::LocalModelId::parse(model.trim())
+            .unwrap_or(transcription::LocalModelId::ParakeetUltra);
+        (PROVIDER_LOCAL.into(), local.as_str().into())
+    } else if provider == PROVIDER_OPENROUTER {
+        (
+            PROVIDER_OPENROUTER.into(),
+            curated_or_default(
+                model,
+                &transcription::OPENROUTER_MODELS,
+                transcription::OPENROUTER_MODELS[0],
+            ),
+        )
     } else {
         (
             PROVIDER_GROQ.into(),
@@ -1677,22 +1869,27 @@ fn sanitize_profile_overrides(
         .into_iter()
         .filter_map(|(profile, overrides)| {
             let profile = validate_profile_override_name(&profile).ok()?.to_string();
+            let provider = normalize_optional_model_field(overrides.transcription_provider);
+            let model = normalize_optional_model_field(overrides.transcription_model);
+            let (transcription_provider, transcription_model) = match provider.as_deref() {
+                Some(provider) => {
+                    let has_model = model.is_some() || provider == PROVIDER_LOCAL;
+                    let (provider, model) =
+                        normalize_transcription(provider, model.unwrap_or_default());
+                    (Some(provider), has_model.then_some(model))
+                }
+                None => (
+                    None,
+                    model.filter(|id| {
+                        KNOWN_TRANSCRIPTION_MODELS.contains(&id.as_str())
+                            || transcription::OPENROUTER_MODELS.contains(&id.as_str())
+                            || transcription::LocalModelId::parse(id).is_some()
+                    }),
+                ),
+            };
             let overrides = ProfileModelOverrides {
-                transcription_provider: normalize_optional_model_field(
-                    overrides.transcription_provider.clone(),
-                )
-                .map(|provider| normalize_transcription(&provider, String::new()).0),
-                transcription_model: if overrides.transcription_provider.as_deref()
-                    == Some(PROVIDER_LOCAL)
-                {
-                    Some(normalize_transcription(PROVIDER_LOCAL, String::new()).1)
-                } else {
-                    curated_override(
-                        overrides.transcription_model,
-                        KNOWN_TRANSCRIPTION_MODELS,
-                        DEFAULT_TRANSCRIPTION_MODEL,
-                    )
-                },
+                transcription_provider,
+                transcription_model,
                 image_model: curated_override(
                     overrides.image_model,
                     KNOWN_IMAGE_MODELS,
@@ -1942,10 +2139,19 @@ pub(crate) fn update_llm_registry(
         .map_err(|_| AppError::new("provider_settings_unavailable", "Settings lock failed."))?;
     let mut candidate = settings.clone();
     update(&mut candidate)?;
+    persist_settings_candidate(state, &mut settings, candidate.clone())?;
+    Ok(candidate)
+}
+
+fn persist_settings_candidate(
+    state: &ProviderSettingsState,
+    settings: &mut ProviderModelSettings,
+    candidate: ProviderModelSettings,
+) -> Result<(), AppError> {
     save_settings(state, &candidate)?;
     *settings = candidate.clone();
-    replace_current_settings(candidate.clone());
-    Ok(candidate)
+    replace_current_settings(candidate);
+    Ok(())
 }
 
 pub(crate) fn settings_snapshot(
@@ -2496,6 +2702,7 @@ mod tests {
         let (settings, migrated) =
             settings_from_json(&fs::read_to_string(&path).unwrap(), &store).unwrap();
         let state = ProviderSettingsState {
+            transcription_intent: Default::default(),
             path: path.clone(),
             settings: Mutex::new(settings.clone()),
         };
@@ -2586,6 +2793,7 @@ mod tests {
         let previous = current_settings();
         let directory = tempfile::tempdir().unwrap();
         let state = ProviderSettingsState {
+            transcription_intent: Default::default(),
             path: directory.path().join("provider-settings.json"),
             settings: Mutex::new(default_settings()),
         };
@@ -2682,6 +2890,145 @@ mod tests {
         assert_eq!(profile.transcription_model, expected_model);
     }
 
+    #[test]
+    fn openrouter_transcription_selection_round_trips_without_changing_note_model() {
+        let _guard = GLOBAL_SETTINGS_TEST_LOCK.blocking_lock();
+        let _restore = RestoreGlobals;
+        let state = test_state();
+        let note_model = state.settings.lock().unwrap().generation_model.clone();
+        set_provider_model_impl(
+            &state,
+            SetProviderModelRequest {
+                mode: ModelMode::Transcription,
+                model_id: "openai/whisper-large-v3".into(),
+            },
+        )
+        .unwrap();
+        let persisted = fs::read_to_string(&state.path).unwrap();
+        let (reloaded, _) = settings_from_json(
+            &persisted,
+            &crate::llm::secrets::MemorySecretStore::default(),
+        )
+        .unwrap();
+        assert_eq!(reloaded.transcription_provider, "openrouter");
+        assert_eq!(reloaded.transcription_model, "openai/whisper-large-v3");
+        assert_eq!(reloaded.generation_model, note_model);
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn installed_local_model_identity_survives_preference_reload() {
+        let mut settings = default_settings();
+        settings.transcription_provider = "local".into();
+        settings.transcription_model = "phonon-2.5".into();
+        settings.profile_overrides.insert(
+            "work".into(),
+            ProfileModelOverrides {
+                transcription_provider: Some("local".into()),
+                transcription_model: Some("fluid-speech-pro".into()),
+                ..Default::default()
+            },
+        );
+        let settings = sanitize_settings(settings, &default_settings());
+        assert_eq!(settings.transcription_model, "phonon-2.5");
+        assert_eq!(
+            effective_settings_for_profile(&settings, "work").transcription_model,
+            "fluid-speech-pro"
+        );
+    }
+
+    #[test]
+    fn rejected_transcription_selection_does_not_cancel_the_pending_install() {
+        let _guard = GLOBAL_SETTINGS_TEST_LOCK.blocking_lock();
+        let _restore = RestoreGlobals;
+        let state = test_state();
+        let model = transcription::LocalModelId::Phonon25;
+        let revision = state
+            .transcription_intent
+            .lock()
+            .unwrap()
+            .replace(Some(model));
+        let rejected = set_provider_model_impl(
+            &state,
+            SetProviderModelRequest {
+                mode: ModelMode::Transcription,
+                model_id: "not-in-the-catalog".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(rejected.code, "provider_model_unavailable");
+        assert_eq!(
+            settings_snapshot(&state).unwrap().transcription_provider,
+            PROVIDER_GROQ
+        );
+        let activated = complete_transcription_install(&state, model, revision, true, |_| Ok(()))
+            .unwrap()
+            .expect("the pending install can still activate");
+        assert_eq!(activated.transcription_model, model.as_str());
+        let persisted: ProviderModelSettings =
+            serde_json::from_slice(&fs::read(&state.path).unwrap()).unwrap();
+        assert_eq!(persisted.transcription_provider, PROVIDER_LOCAL);
+        assert_eq!(persisted.transcription_model, model.as_str());
+    }
+
+    #[test]
+    fn late_download_cannot_overwrite_a_more_recent_openrouter_selection() {
+        let _guard = GLOBAL_SETTINGS_TEST_LOCK.blocking_lock();
+        let _restore = RestoreGlobals;
+        let state = test_state();
+        let model = transcription::LocalModelId::Phonon25;
+        let revision = state
+            .transcription_intent
+            .lock()
+            .unwrap()
+            .replace(Some(model));
+        set_provider_model_impl(
+            &state,
+            SetProviderModelRequest {
+                mode: ModelMode::Transcription,
+                model_id: "openai/whisper-1".into(),
+            },
+        )
+        .unwrap();
+        assert!(
+            complete_transcription_install(&state, model, revision, true, |_| {
+                panic!("A superseded download attempted activation")
+            })
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(
+            settings_snapshot(&state).unwrap().transcription_model,
+            "openai/whisper-1",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_install_with_failed_persistence_keeps_the_previous_model_on_disk_and_in_memory() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = GLOBAL_SETTINGS_TEST_LOCK.blocking_lock();
+        let _restore = RestoreGlobals;
+        let state = test_state();
+        let model = transcription::LocalModelId::Phonon25;
+        let snapshot = settings_snapshot(&state).unwrap();
+        save_settings(&state, &snapshot).unwrap();
+        let parent = state.path.parent().unwrap();
+        let previous = fs::read(&state.path).unwrap();
+        let permissions = fs::metadata(parent).unwrap().permissions();
+        let revision = state
+            .transcription_intent
+            .lock()
+            .unwrap()
+            .replace(Some(model));
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = complete_transcription_install(&state, model, revision, true, |_| Ok(()));
+        fs::set_permissions(parent, permissions).unwrap();
+        assert_eq!(result.unwrap_err().code, "provider_settings_save_failed");
+        assert_eq!(settings_snapshot(&state).unwrap(), snapshot);
+        assert_eq!(fs::read(&state.path).unwrap(), previous);
+    }
+
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[tokio::test]
     async fn local_profile_override_without_model_fails_before_groq_credentials_or_network() {
@@ -2729,7 +3076,11 @@ mod tests {
                 },
             );
         }
-        assert!(remove_local_transcription_selection(&state).unwrap());
+        assert!(remove_local_transcription_selection(
+            &state,
+            transcription::LocalModelId::ParakeetUltra
+        )
+        .unwrap());
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&state.path).unwrap()).unwrap();
         assert_eq!(saved["transcriptionProvider"], "groq");
@@ -2738,7 +3089,11 @@ mod tests {
             saved["profileOverrides"]["work"]["transcriptionProvider"],
             "groq"
         );
-        assert!(!remove_local_transcription_selection(&state).unwrap());
+        assert!(!remove_local_transcription_selection(
+            &state,
+            transcription::LocalModelId::ParakeetUltra
+        )
+        .unwrap());
     }
 
     #[test]
@@ -3160,6 +3515,7 @@ mod tests {
             NEXT_TEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         ProviderSettingsState {
+            transcription_intent: Default::default(),
             path: dir.join("provider-settings.json"),
             settings: Mutex::new(default_settings()),
         }

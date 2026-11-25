@@ -3,37 +3,32 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke,
   convertFileSrc: vi.fn(),
-  Channel: class {
-    onmessage = (_value: unknown) => {};
-  },
 }));
 import {
-  localTranscriptionModelState,
-  installLocalTranscriptionModel,
   cancelLocalTranscriptionModelInstall,
+  installLocalTranscriptionModel,
   removeLocalTranscriptionModel,
 } from "../lib/tauri";
+
 describe("local transcription bindings", () => {
-  it("reads native state and forwards byte progress through a Channel", async () => {
-    invoke.mockResolvedValueOnce({ state: "ready", bytes: 632162964 });
-    expect(await localTranscriptionModelState()).toEqual({ state: "ready", bytes: 632162964 });
-    const received = vi.fn();
-    invoke.mockImplementationOnce(async (_name, args) => {
-      args.channel.onmessage({ state: "downloading", received: 12, total: 100 });
+  it("qualifies each action by model and sends selection and removal consent separately", async () => {
+    invoke.mockResolvedValue(undefined);
+    await installLocalTranscriptionModel("phonon-2.5", true);
+    expect(invoke).toHaveBeenLastCalledWith("install_local_transcription_model", {
+      modelId: "phonon-2.5",
+      activate: true,
     });
-    await installLocalTranscriptionModel(received);
-    expect(invoke).toHaveBeenLastCalledWith(
-      "install_local_transcription_model",
-      expect.objectContaining({ channel: expect.anything() }),
-    );
-    expect(received).toHaveBeenCalledWith({ state: "downloading", received: 12, total: 100 });
-  });
-  it("cancels and returns the persisted removal transition", async () => {
-    invoke.mockResolvedValueOnce(undefined);
-    await cancelLocalTranscriptionModelInstall();
-    expect(invoke).toHaveBeenLastCalledWith("cancel_local_transcription_model_install");
+    await cancelLocalTranscriptionModelInstall("phonon-2.5");
+    expect(invoke).toHaveBeenLastCalledWith("cancel_local_transcription_model_install", {
+      modelId: "phonon-2.5",
+    });
     invoke.mockResolvedValueOnce({ switched_to_groq: true });
-    expect(await removeLocalTranscriptionModel()).toEqual({ switched_to_groq: true });
-    expect(invoke).toHaveBeenLastCalledWith("remove_local_transcription_model");
+    expect(await removeLocalTranscriptionModel("parakeet-ultra", true)).toEqual({
+      switched_to_groq: true,
+    });
+    expect(invoke).toHaveBeenLastCalledWith("remove_local_transcription_model", {
+      modelId: "parakeet-ultra",
+      confirmActive: true,
+    });
   });
 });
