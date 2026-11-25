@@ -7021,14 +7021,21 @@ async fn clean_dictation_transcript<C: DictationCleaner + Sync>(
         tracing::info!(chunk_count = chunks.len(), "dictation cleanup ran chunked");
         Ok(join_cleaned_dictation_chunks(&cleaned))
     };
-    tokio::time::timeout((config.timeout)(text.len()), work)
+    let cleaned = tokio::time::timeout((config.timeout)(text.len()), work)
         .await
         .unwrap_or_else(|_| {
             Err(AppError::new(
                 "dictation_cleanup_timeout",
                 "Dictation cleanup timed out.",
             ))
-        })
+        })?;
+    if is_blank_transcript(&cleaned) {
+        return Err(AppError::new(
+            "provider_response_invalid",
+            "Dictation cleanup response did not contain text output.",
+        ));
+    }
+    Ok(cleaned)
 }
 
 /// Trim a single-call cleanup result (the historical behavior).
@@ -7087,7 +7094,7 @@ async fn cleanup_dictation_call<C: DictationCleaner + Sync>(
         ))
     })?;
     let trimmed = cleaned.trim();
-    if is_blank_transcript(trimmed) {
+    if trimmed.is_empty() {
         return Err(AppError::new(
             "provider_response_invalid",
             "Dictation cleanup response did not contain text output.",
@@ -11005,6 +11012,59 @@ mod tests {
     async fn punctuation_only_cleanup_answer_pastes_raw_dictation_and_reports_invalid_response() {
         assert_cleanup_falls_back_to_raw(
             RAW_FALLBACK_TRANSCRIPT,
+            &FakeCleaner {
+                answer: Some("..."),
+                ..FakeCleaner::default()
+            },
+            &cleanup_config(true),
+            "provider_response_invalid",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_punctuation_chunk_is_valid_after_joining_with_text() {
+        struct PunctuationCleaner;
+        impl DictationCleaner for PunctuationCleaner {
+            async fn clean(&self, call: DictationCleanupCall) -> Result<String, AppError> {
+                Ok(if call.text == "reticências" {
+                    "..."
+                } else {
+                    "Relatório pronto"
+                }
+                .to_string())
+            }
+        }
+        let original = format!("{} reticências", "palavra".repeat(115));
+        assert_eq!(
+            split_dictation_cleanup_chunks(&original, DICTATION_CLEANUP_CHUNK_TARGET_BYTES)
+                .last()
+                .copied(),
+            Some("reticências")
+        );
+        let result = run_dictation_pipeline(
+            &FakeTranscriber::text(&original),
+            &PunctuationCleaner,
+            pipeline_request(),
+            &cleanup_config(true),
+            DictationCleanupContext::default(),
+            None,
+            None,
+        )
+        .await;
+        assert!(result.cleanup_skipped.is_none());
+        assert_eq!(pasted_text(&result), Some("Relatório pronto..."));
+    }
+
+    #[tokio::test]
+    async fn cleanup_punctuation_only_joined_result_falls_back_to_the_whole_original() {
+        let original = long_transcript(3, "relatorio");
+        assert!(
+            split_dictation_cleanup_chunks(&original, DICTATION_CLEANUP_CHUNK_TARGET_BYTES).len()
+                > 1
+        );
+        assert_cleanup_falls_back_to_raw(
+            &original,
             &FakeCleaner {
                 answer: Some("..."),
                 ..FakeCleaner::default()

@@ -57,7 +57,7 @@ takes never deliver), and
    the language hint supplied with the request. When the filter does not run,
    Clovy preserves the model's words and whitespace inside each chunk and
    trims the outside of the result.
-   A failure, timeout, missing key, or a cleanup response without letters or
+   A failure, timeout, missing key, or a complete cleanup result without letters or
    digits uses the whole original transcript with its outer whitespace
    trimmed. Clovy also falls back when it rejects a cleanup response,
    including when the existing instruction-response check finds a preamble
