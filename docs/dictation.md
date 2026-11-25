@@ -50,10 +50,15 @@ takes never deliver), and
    `openrouter.ai` with the user's own key. A missing key returns
    `openrouter_api_key_missing` without a request. Transcripts above 800 bytes are split at word
    boundaries and up to four chunks are cleaned at once, then rejoined in
-   order. Any failure or timeout pastes the whole raw transcript, and the HUD
-   says "Pasting into {app} without cleanup". Cleanup never runs on an agent
-   CLI or endpoint. The output style (standard, casual, formal) applies only
-   while cleanup is on.
+   order. After successful cleanup, the local filler filter runs only when
+   the transcriber reports English (`en`, `english`, or tags such as `en-US`).
+   For Portuguese, other languages, and unknown language, Clovy trims the
+   model output and preserves its words and internal whitespace.
+   A failure, timeout, missing key, or empty or rejected cleanup response
+   uses the whole original transcript with only its outer whitespace trimmed.
+   This also applies when one chunk fails. The HUD says
+   "Pasting into {app} without cleanup" and identifies a missing key when
+   applicable. The output style (standard, casual, formal) applies to cleanup.
 7. **Paste.** The helper writes the text to the clipboard and posts Cmd+V into
    the pinned target. On macOS it activates that app, raises the captured
    window and makes it main, then tries to focus the captured field. App
@@ -139,6 +144,9 @@ optional cleanup has no `cleanupMigrated`; on the first launch it is migrated
 once to cleanup off, whatever engine cleanup used before. The obsolete
 `dictationCleanup` engine slot is removed from provider settings; cleanup
 always uses OpenRouter.
+
+Preference updates are written to disk before they take effect in the app.
+A write error leaves the previous settings in memory and in the settings cache.
 
 The same file stores `hudPlacement`: `bottom` by default, including files
 without the field, or `top`. Settings > Dictation > Style exposes **Indicator
