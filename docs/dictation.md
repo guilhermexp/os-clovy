@@ -50,17 +50,25 @@ takes never deliver), and
    `openrouter.ai` with the user's own key. A missing key returns
    `openrouter_api_key_missing` without a request. Transcripts above 800 bytes are split at word
    boundaries and up to four chunks are cleaned at once, then rejoined in
-   order. After successful cleanup, the local filler filter runs only when
-   the transcriber reports English (`en`, `english`, or tags such as `en-US`).
-   For Portuguese, other languages, and unknown language, Clovy trims the
-   model output and preserves its words and internal whitespace.
-   A failure, timeout, missing key, or empty or rejected cleanup response
-   uses the whole original transcript with only its outer whitespace trimmed.
-   This also applies when one chunk fails. The HUD says
+   order. At chunk edges, Clovy trims spaces and tabs and preserves line
+   breaks when joining. After successful cleanup, the local filler filter
+   runs only when Groq reports English (`en`, `english`, or a simple region
+   tag such as `en-US`, `en-GB`, or `en-001`). Local transcription returns
+   the language hint supplied with the request. When the filter does not run,
+   Clovy preserves the model's words and whitespace inside each chunk and
+   trims the outside of the result.
+   A failure, timeout, missing key, or a cleanup response without letters or
+   digits uses the whole original transcript with its outer whitespace
+   trimmed. Clovy also falls back when it rejects a cleanup response,
+   including when the existing instruction-response check finds a preamble
+   in a normalized copy. If any chunk fails, fallback uses the whole original.
+   The raw transcript still goes through the existing validity and
+   low-speech quarantine checks. The HUD says
    "Pasting into {app} without cleanup" and identifies a missing key when
    applicable. The output style (standard, casual, formal) applies to cleanup.
 7. **Paste.** The helper writes the text to the clipboard and posts Cmd+V into
-   the pinned target. On macOS it activates that app, raises the captured
+   the pinned target. On macOS the helper appends one trailing space for
+   automatic paste. It activates the target app, raises the captured
    window and makes it main, then tries to focus the captured field. App
    activation still polls every 20 ms for up to 1 s with the existing 180 ms
    settle delay. Window restoration and verification use that same deadline,

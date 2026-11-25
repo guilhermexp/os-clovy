@@ -7087,13 +7087,19 @@ async fn cleanup_dictation_call<C: DictationCleaner + Sync>(
         ))
     })?;
     let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
+    if is_blank_transcript(trimmed) {
         return Err(AppError::new(
             "provider_response_invalid",
             "Dictation cleanup response did not contain text output.",
         ));
     }
-    if looks_like_instruction_response(trimmed) {
+    // Check for preambles exposed by the filler backstop without rewriting the output.
+    if looks_like_instruction_response(trimmed)
+        || looks_like_instruction_response(&clean_dictation_fillers(
+            trimmed,
+            DictationStyle::Standard,
+        ))
+    {
         return Err(AppError::new(
             "dictation_cleanup_invalid",
             "Dictation cleanup returned an instruction response.",
@@ -7566,7 +7572,10 @@ fn outcome_from_transcription_result(
         }
         Ok(mut transcript) => {
             let had_speech_before_cleaning = !transcript.text.trim().is_empty();
-            transcript.text = if is_english_transcript_language(transcript.language.as_deref()) {
+            // The local transcriber echoes the language hint. Groq reports the transcript language.
+            transcript.text = if transcript.provider == PROVIDER_GROQ
+                && is_english_transcript_language(transcript.language.as_deref())
+            {
                 clean_dictation_fillers(&transcript.text, style)
             } else {
                 transcript.text.trim().to_string()
@@ -7709,18 +7718,21 @@ fn outcome_from_clean_transcript(
 }
 
 fn is_english_transcript_language(language: Option<&str>) -> bool {
-    language.is_some_and(|language| {
-        let language = language.trim();
-        let mut subtags = language.split('-');
-        language.eq_ignore_ascii_case("english")
-            || (subtags
-                .next()
-                .is_some_and(|tag| tag.eq_ignore_ascii_case("en"))
-                && subtags.all(|tag| {
-                    (1..=8).contains(&tag.len())
-                        && tag.bytes().all(|byte| byte.is_ascii_alphanumeric())
-                }))
-    })
+    let Some(language) = language.map(str::trim) else {
+        return false;
+    };
+    if language.eq_ignore_ascii_case("en") || language.eq_ignore_ascii_case("english") {
+        return true;
+    }
+    let Some((primary, region)) = language.split_once('-') else {
+        return false;
+    };
+    primary.eq_ignore_ascii_case("en")
+        && match region.len() {
+            2 => region.bytes().all(|byte| byte.is_ascii_alphabetic()),
+            3 => region.bytes().all(|byte| byte.is_ascii_digit()),
+            _ => false,
+        }
 }
 
 fn clean_dictation_fillers(text: &str, style: DictationStyle) -> String {
@@ -10497,6 +10509,7 @@ mod tests {
     struct FakeTranscriber {
         result: Result<String, AppError>,
         language: Option<String>,
+        provider: &'static str,
         calls: std::sync::atomic::AtomicUsize,
     }
 
@@ -10505,6 +10518,7 @@ mod tests {
             Self {
                 result: Ok(text.to_string()),
                 language: None,
+                provider: PROVIDER_GROQ,
                 calls: Default::default(),
             }
         }
@@ -10524,7 +10538,7 @@ mod tests {
             self.result.clone().map(|text| TranscriptionProviderResult {
                 text,
                 language: self.language.clone(),
-                provider: "groq".to_string(),
+                provider: self.provider.to_string(),
             })
         }
     }
@@ -10712,6 +10726,12 @@ mod tests {
             Some("portuguese"),
             Some("de"),
             Some("en-"),
+            Some("en-x"),
+            Some("en-u"),
+            Some("en-x-foo"),
+            Some("en-US-u-ca-gregory"),
+            Some("en-Latn-US"),
+            Some("en-01"),
             None,
         ];
         let mut pasted = Vec::new();
@@ -10748,8 +10768,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn successful_cleanup_preserves_portuguese_with_english_hint_from_other_providers() {
+        let phrase = "Preciso de um relatório.";
+        let providers = ["local", "Groq", "other"];
+        let mut pasted = Vec::new();
+        for provider in providers {
+            let mut transcriber = FakeTranscriber::text(phrase).with_language(Some("en"));
+            transcriber.provider = provider;
+            let mut request = pipeline_request();
+            request.language = Some("en".into());
+            let result = run_dictation_pipeline(
+                &transcriber,
+                &FakeCleaner {
+                    answer: Some(phrase),
+                    ..FakeCleaner::default()
+                },
+                request,
+                &cleanup_config(true),
+                DictationCleanupContext::default(),
+                None,
+                None,
+            )
+            .await;
+            assert!(result.cleanup_skipped.is_none());
+            pasted.push((provider, pasted_text(&result).map(str::to_owned)));
+        }
+        assert_eq!(
+            pasted,
+            providers.map(|provider| (provider, Some(phrase.to_owned())))
+        );
+    }
+
+    #[tokio::test]
     async fn successful_cleanup_applies_the_filler_backstop_to_english_variants() {
-        for language in ["en", "english", "en-US", " EN-gb "] {
+        for language in ["en", "english", "en-US", " EN-gb ", "en-001"] {
             let transcriber =
                 FakeTranscriber::text("send the report").with_language(Some(language));
             let cleaner = FakeCleaner {
@@ -10898,6 +10950,67 @@ mod tests {
             },
             &cleanup_config(true),
             "dictation_cleanup_invalid",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn instruction_cleanup_answer_revealed_by_normalization_falls_back_to_raw() {
+        let answers = [
+            "Um, sure, I can help.",
+            "Here  is the transcript:\nPreciso de um relatório.",
+        ];
+        let mut observed = Vec::new();
+        let mut expected = Vec::new();
+        for language in [Some("pt"), None] {
+            for answer in answers {
+                let transcriber =
+                    FakeTranscriber::text(RAW_FALLBACK_TRANSCRIPT).with_language(language);
+                let result = run_dictation_pipeline(
+                    &transcriber,
+                    &FakeCleaner {
+                        answer: Some(answer),
+                        ..FakeCleaner::default()
+                    },
+                    pipeline_request(),
+                    &cleanup_config(true),
+                    DictationCleanupContext::default(),
+                    None,
+                    None,
+                )
+                .await;
+                observed.push((
+                    language,
+                    answer,
+                    result
+                        .cleanup_skipped
+                        .as_ref()
+                        .map(|error| error.code.clone()),
+                    pasted_text(&result).map(str::to_owned),
+                    result.outcome.transcript.map(|transcript| transcript.text),
+                ));
+                expected.push((
+                    language,
+                    answer,
+                    Some("dictation_cleanup_invalid".into()),
+                    Some(RAW_FALLBACK_TRANSCRIPT.trim().into()),
+                    Some(RAW_FALLBACK_TRANSCRIPT.trim().into()),
+                ));
+            }
+        }
+        assert_eq!(observed, expected);
+    }
+
+    #[tokio::test]
+    async fn punctuation_only_cleanup_answer_pastes_raw_dictation_and_reports_invalid_response() {
+        assert_cleanup_falls_back_to_raw(
+            RAW_FALLBACK_TRANSCRIPT,
+            &FakeCleaner {
+                answer: Some("..."),
+                ..FakeCleaner::default()
+            },
+            &cleanup_config(true),
+            "provider_response_invalid",
         )
         .await;
     }
@@ -11106,6 +11219,7 @@ mod tests {
             let transcriber = FakeTranscriber {
                 result: Err(AppError::new("clovy_request_failed", message)),
                 language: None,
+                provider: PROVIDER_GROQ,
                 calls: Default::default(),
             };
             let result = run_dictation_pipeline(
