@@ -362,28 +362,40 @@ private func writeDictationWAV(from source: URL, to destination: URL, trace: Dic
         trace?("production.convert", "begin framePosition=\(previousPosition) reachedEnd=\(reachedEnd)")
         let result = converter.convert(to: rendered, error: &conversionError) { requested, status in
             if !reachedEnd {
-                do {
-                    trace?("production.read", "begin requested=\(requested) reading=\(min(requested, capacity))"
-                        + " framePosition=\(input.framePosition)")
-                    try input.read(into: decoded, frameCount: min(requested, capacity))
-                    trace?("production.read", "read=\(decoded.frameLength) framePosition=\(input.framePosition)")
-                    if decoded.frameLength > 0 {
-                        status.pointee = .haveData
-                        if channels == 1 { return decoded }
+                let position = input.framePosition
+                let length = input.length
+                // A read at the declared end can throw while the converter still has output to flush.
+                if position < length {
+                    let frameCount = AVAudioFrameCount(min(
+                        length - position, AVAudioFramePosition(requested), AVAudioFramePosition(capacity)
+                    ))
+                    do {
+                        guard frameCount > 0 else { throw DictationAudioConversionError.incompleteAudio }
+                        trace?("production.read", "begin requested=\(requested) reading=\(frameCount)"
+                            + " framePosition=\(position) length=\(length)")
+                        try input.read(into: decoded, frameCount: frameCount)
+                        trace?("production.read", "read=\(decoded.frameLength) framePosition=\(input.framePosition)")
+                        if decoded.frameLength > 0 {
+                            status.pointee = .haveData
+                            if channels == 1 { return decoded }
 
-                        // Average the channels at unity for identical inputs.
-                        mixed.frameLength = decoded.frameLength
-                        for frame in 0..<Int(decoded.frameLength) {
-                            var sum: Float = 0
-                            for channel in 0..<channels {
-                                sum += inputSamples[channel][frame]
+                            // Average the channels at unity for identical inputs.
+                            mixed.frameLength = decoded.frameLength
+                            for frame in 0..<Int(decoded.frameLength) {
+                                var sum: Float = 0
+                                for channel in 0..<channels {
+                                    sum += inputSamples[channel][frame]
+                                }
+                                monoSamples[frame] = sum / Float(channels)
                             }
-                            monoSamples[frame] = sum / Float(channels)
+                            return mixed
                         }
-                        return mixed
+                        throw DictationAudioConversionError.incompleteAudio
+                    } catch {
+                        readError = error
                     }
-                } catch {
-                    readError = error
+                } else {
+                    trace?("production.read", "skip read at EOF framePosition=\(position) length=\(length)")
                 }
                 reachedEnd = true
             }
