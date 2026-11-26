@@ -792,16 +792,17 @@ export function App() {
     void openPrivacySettings("microphone");
   }
 
-  function handleEnableAccessibility() {
-    void dictationHelperCommand({
-      type: "request_accessibility_permission",
-    }).catch(async () => {
-      try {
-        await openPrivacySettings("accessibility");
-      } catch {
-        // The fallback is best-effort; there is no further recovery surface.
-      }
-    });
+  async function handleEnableAccessibility() {
+    try {
+      await dictationHelperCommand({ type: "request_accessibility_permission" });
+    } catch {
+      // The pane can still help if the helper is temporarily unavailable.
+    }
+    try {
+      await openPrivacySettings("accessibility");
+    } catch {
+      // The system may already have shown its permission prompt.
+    }
   }
 
   useRecordingTelemetry({

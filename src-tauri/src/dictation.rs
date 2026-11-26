@@ -1036,8 +1036,9 @@ where
     }
 }
 
+#[derive(Default)]
 pub struct LastDictationEvent {
-    event: Mutex<Option<String>>,
+    state: Mutex<DictationHudState>,
 }
 
 pub struct DictationSettingsState {
@@ -2317,9 +2318,7 @@ pub fn setup(app: &mut tauri::App) {
     // Keys, token, and the transcription connection are ready before the
     // first press (ditado-rapido D4).
     crate::providers::transcription::warm_dictation_route_if_idle();
-    app.manage(LastDictationEvent {
-        event: Mutex::new(None),
-    });
+    app.manage(LastDictationEvent::default());
     app.manage(ShortcutActivationState {
         controller: Mutex::new(ShortcutActivationController::default()),
     });
@@ -2551,15 +2550,22 @@ pub fn set_dictation_hud_placement(
 #[tauri::command]
 pub fn set_dictation_cleanup(
     state: State<'_, DictationSettingsState>,
-    enabled: bool,
+    enabled: Option<bool>,
     model: Option<String>,
 ) -> Result<DictationSettings, AppError> {
-    let model = model
-        .as_deref()
-        .map(validate_dictation_cleanup_model)
-        .transpose()?;
-    update_settings(&state, |settings| {
-        settings.cleanup_enabled = enabled;
+    update_dictation_cleanup(&state, enabled, model.as_deref())
+}
+
+fn update_dictation_cleanup(
+    state: &DictationSettingsState,
+    enabled: Option<bool>,
+    model: Option<&str>,
+) -> Result<DictationSettings, AppError> {
+    let model = model.map(validate_dictation_cleanup_model).transpose()?;
+    update_settings(state, |settings| {
+        if let Some(enabled) = enabled {
+            settings.cleanup_enabled = enabled;
+        }
         if let Some(model) = model {
             settings.cleanup_model = model;
         }
@@ -2882,7 +2888,7 @@ pub fn dictation_hotkey_status(state: State<'_, HotkeyStatus>) -> serde_json::Va
 
 #[tauri::command]
 pub fn latest_dictation_event(state: State<'_, LastDictationEvent>) -> Option<String> {
-    state.event.lock().ok().and_then(|event| event.clone())
+    state.state.lock().ok().and_then(|hud| hud.replay.clone())
 }
 
 /// Cursor position in logical points (top-left origin) read directly from
@@ -6082,8 +6088,7 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
     if let Some(event) = event {
         emit_dictation_event_value(app, event);
     } else {
-        update_latest_event(app, event_type, Some(line.clone()));
-        update_hud_window(app, event_type, None);
+        update_hud_window(app, event_type, None, &line);
         let _ = app.emit("dictation-event", line);
     }
 }
@@ -8199,8 +8204,7 @@ fn emit_dictation_event_value(app: &AppHandle, mut event: serde_json::Value) {
     sync_dictation_indicator(app, event_type);
     append_dictation_event_log(app, event_type, &event);
     let line = event.to_string();
-    update_latest_event(app, event_type, Some(line.clone()));
-    update_hud_window(app, event_type, Some(&event));
+    update_hud_window(app, event_type, Some(&event), &line);
     let _ = app.emit("dictation-event", line);
 }
 
@@ -8456,6 +8460,22 @@ fn append_dictation_event_log(
 
 fn dictation_event_log_entry(event_type: &str, event: &serde_json::Value) -> serde_json::Value {
     let payload = event.get("payload");
+    let code = payload
+        .and_then(|payload| payload.get("code"))
+        .and_then(serde_json::Value::as_str);
+    let accessibility_granted =
+        if event_type == "error" && code == Some("accessibility_permission_missing") {
+            Some(false)
+        } else {
+            match payload
+                .and_then(|payload| payload.get("accessibility"))
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("granted") => Some(true),
+                Some("missing") => Some(false),
+                _ => None,
+            }
+        };
     let text_chars = payload
         .and_then(|payload| payload.get("text"))
         .and_then(serde_json::Value::as_str)
@@ -8467,9 +8487,9 @@ fn dictation_event_log_entry(event_type: &str, event: &serde_json::Value) -> ser
     serde_json::json!({
         "timestamp": Utc::now().to_rfc3339(),
         "type": event_type,
-        "code": payload
-            .and_then(|payload| payload.get("code"))
-            .and_then(serde_json::Value::as_str),
+        "code": code,
+        "accessibilityGranted": accessibility_granted,
+        "takeId": dictation_take_id_from_event(event),
         "underlyingCode": payload
             .and_then(|payload| payload.get("underlyingCode"))
             .and_then(serde_json::Value::as_str),
@@ -8658,26 +8678,107 @@ fn annotate_silent_error(event: &mut serde_json::Value) {
     }
 }
 
-fn update_hud_window(app: &AppHandle, event_type: Option<&str>, event: Option<&serde_json::Value>) {
-    match dictation_event_visibility(event_type) {
-        // The webview owns showing for dictation events: hud.ts resizes the
-        // window to the measured pill, then invokes dictation_hud_show.
-        // Showing eagerly from here raced that resize — the window came up at
-        // a stale frame as a gray bar, then a clipped pill, until the next
-        // visible-state resize healed it.
-        DictationEventVisibility::Show => {}
-        DictationEventVisibility::Hide => {
-            schedule_hud_hide(app, hud_hide_delay_for_event(event_type, event))
-        }
-        DictationEventVisibility::Ignore => {}
+fn update_hud_window(
+    app: &AppHandle,
+    event_type: Option<&str>,
+    event: Option<&serde_json::Value>,
+    line: &str,
+) {
+    let Some(state) = app.try_state::<LastDictationEvent>() else {
+        return;
+    };
+    let request = state
+        .state
+        .lock()
+        .ok()
+        .and_then(|mut hud| hud.on_event(event_type, event, line, Instant::now()));
+    // The webview owns showing and sizing. Native scheduling only provides a
+    // fallback for terminal events.
+    if let Some(request) = request {
+        schedule_hud_hide(app, request);
     }
 }
 
-fn update_latest_event(app: &AppHandle, event_type: Option<&str>, line: Option<String>) {
-    if let Some(state) = app.try_state::<LastDictationEvent>() {
-        if let Ok(mut event) = state.event.lock() {
-            *event = latest_hud_snapshot(event.as_deref(), event_type, line.as_deref());
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HudHideRequest {
+    generation: u32,
+    deadline: Instant,
+}
+
+#[derive(Clone, Copy, Default)]
+enum HudHideState {
+    #[default]
+    Inactive,
+    Listening,
+    ErrorUntil(Instant),
+}
+
+#[derive(Default)]
+struct DictationHudState {
+    replay: Option<String>,
+    hide_generation: u32,
+    hide_state: HudHideState,
+}
+
+impl DictationHudState {
+    fn on_event(
+        &mut self,
+        event_type: Option<&str>,
+        event: Option<&serde_json::Value>,
+        line: &str,
+        now: Instant,
+    ) -> Option<HudHideRequest> {
+        self.replay = latest_hud_snapshot(self.replay.as_deref(), event_type, Some(line));
+        match dictation_event_visibility(event_type) {
+            DictationEventVisibility::Show => {
+                // Stray meter updates do not replace an error in the webview.
+                if event_type != Some("audio_level") {
+                    self.hide_generation = self.hide_generation.wrapping_add(1);
+                    self.hide_state = if event_type == Some("listening_started") {
+                        HudHideState::Listening
+                    } else {
+                        HudHideState::Inactive
+                    };
+                }
+                return None;
+            }
+            DictationEventVisibility::Ignore => return None,
+            DictationEventVisibility::Hide => {}
         }
+
+        let code = event.and_then(|event| event["payload"]["code"].as_str());
+        let visible_error = event_type == Some("error")
+            && !event.is_some_and(|event| event["payload"]["silent"].as_bool() == Some(true));
+
+        // hud.ts ignores a secondary stop while showing an actionable error.
+        // Keep its pending fallback, including its original deadline and generation.
+        if visible_error
+            && code == Some("not_listening")
+            && matches!(self.hide_state, HudHideState::ErrorUntil(deadline) if now < deadline)
+        {
+            return None;
+        }
+
+        let deadline = now + hud_hide_delay_for_event(event_type, event);
+        self.hide_state = match (visible_error, code) {
+            // In the listening pill this only shakes the HUD.
+            (true, Some("already_listening"))
+                if matches!(self.hide_state, HudHideState::Listening) =>
+            {
+                HudHideState::Listening
+            }
+            (true, code) if code != Some("not_listening") => HudHideState::ErrorUntil(deadline),
+            _ => HudHideState::Inactive,
+        };
+        self.hide_generation = self.hide_generation.wrapping_add(1);
+        Some(HudHideRequest {
+            generation: self.hide_generation,
+            deadline,
+        })
+    }
+
+    fn can_hide(&self, request: HudHideRequest) -> bool {
+        self.replay.is_none() && self.hide_generation == request.generation
     }
 }
 
@@ -8780,6 +8881,13 @@ fn hud_hide_delay_for_event(
         Some("error") if event.is_some_and(is_silent_transcription_error) => {
             Duration::from_millis(900)
         }
+        // The webview holds the Accessibility recovery for 6 s before fading.
+        Some("error")
+            if event.and_then(|event| event["payload"]["code"].as_str())
+                == Some("accessibility_permission_missing") =>
+        {
+            Duration::from_millis(6500)
+        }
         Some("error") => Duration::from_millis(2200),
         _ => Duration::from_millis(900),
     }
@@ -8843,25 +8951,21 @@ pub(crate) fn wake_hud_window(app: &AppHandle) {
     }
 }
 
-fn schedule_hud_hide(app: &AppHandle, delay: Duration) {
+fn schedule_hud_hide(app: &AppHandle, request: HudHideRequest) {
     let app = app.clone();
     thread::spawn(move || {
-        if !delay.is_zero() {
-            thread::sleep(delay);
+        let remaining = request.deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() {
+            thread::sleep(remaining);
         }
 
-        if let Some(state) = app.try_state::<LastDictationEvent>() {
-            if state
-                .event
-                .lock()
-                .ok()
-                .and_then(|event| event.clone())
-                .is_some()
-            {
-                return;
-            }
+        let Some(state) = app.try_state::<LastDictationEvent>() else {
+            return;
+        };
+        let can_hide = state.state.lock().is_ok_and(|hud| hud.can_hide(request));
+        if !can_hide {
+            return;
         }
-
         if let Some(hud) = app.get_webview_window("hud") {
             let _ = hud.hide();
         }
@@ -11523,6 +11627,60 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_preference_updates_preserve_unrelated_settings() {
+        for model_first in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let before = DictationSettings {
+                cleanup_enabled: true,
+                cleanup_model: "vendor/original".into(),
+                style: DictationStyle::Formal,
+                hud_placement: DictationHudPlacement::Top,
+                ..DictationSettings::default()
+            };
+            let state = DictationSettingsState {
+                path: directory.path().join("dictation-settings.json"),
+                settings: Mutex::new(before.clone()),
+            };
+            let invalid =
+                update_dictation_cleanup(&state, Some(false), Some("cli:claude")).unwrap_err();
+            assert_eq!(invalid.code, "dictation_cleanup_model_invalid");
+            assert!(!state.path.exists());
+            assert_eq!(*state.settings.lock().unwrap(), before);
+
+            // Both lock orders end with cleanup off and the new model.
+            if model_first {
+                let model =
+                    update_dictation_cleanup(&state, None, Some("vendor/selected")).unwrap();
+                assert!(model.cleanup_enabled);
+                update_dictation_cleanup(&state, Some(false), None).unwrap();
+            } else {
+                let off = update_dictation_cleanup(&state, Some(false), None).unwrap();
+                assert_eq!(off.cleanup_model, "vendor/original");
+                let model =
+                    update_dictation_cleanup(&state, None, Some(" vendor/selected ")).unwrap();
+                assert!(!model.cleanup_enabled);
+            }
+
+            let expected = DictationSettings {
+                cleanup_enabled: false,
+                cleanup_model: "vendor/selected".into(),
+                ..before
+            };
+            let reloaded: DictationSettings =
+                serde_json::from_slice(&fs::read(&state.path).unwrap()).unwrap();
+            assert_eq!(reloaded, expected);
+            assert_eq!(*state.settings.lock().unwrap(), expected);
+
+            // Make the settings path unwritable before trying a model-only update.
+            fs::remove_file(&state.path).unwrap();
+            fs::create_dir(&state.path).unwrap();
+            let error = update_dictation_cleanup(&state, None, Some("vendor/other")).unwrap_err();
+            assert_eq!(error.code, "dictation_settings_save_failed");
+            assert_eq!(*state.settings.lock().unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn deserializes_unsupported_modifier_only_shortcuts_to_defaults() {
         let settings: DictationSettings = serde_json::from_str(
             r#"{"pushToTalkShortcut":{"keyCode":59,"code":"ControlLeft","modifiers":{"command":false,"control":true,"option":true,"shift":false,"function":false},"label":"Ctrl+Opt","pressCount":1},"toggleShortcut":{"keyCode":58,"code":"OptionLeft","modifiers":{"command":false,"control":false,"option":true,"shift":false,"function":false},"label":"Opt","pressCount":1},"microphone":{"id":null,"name":null}}"#,
@@ -14022,6 +14180,241 @@ mod tests {
         assert!(!is_silent_transcription_error(&event));
         annotate_silent_error(&mut event);
         assert_eq!(event["payload"]["silent"], false);
+    }
+
+    fn feed_hud_event(
+        hud: &mut DictationHudState,
+        now: Instant,
+        event: serde_json::Value,
+    ) -> Option<HudHideRequest> {
+        hud.on_event(
+            event["type"].as_str(),
+            Some(&event),
+            &event.to_string(),
+            now,
+        )
+    }
+
+    fn hud_error(code: &str) -> serde_json::Value {
+        serde_json::json!({"type": "error", "payload": {"code": code, "silent": false}})
+    }
+
+    fn assert_secondary_not_listening_preserves_deadline(code: &str, timeout: Duration) {
+        let mut hud = DictationHudState::default();
+        let started = Instant::now();
+        let original = feed_hud_event(&mut hud, started, hud_error(code)).unwrap();
+        assert_eq!(original.deadline, started + timeout);
+        assert!(feed_hud_event(
+            &mut hud,
+            started + Duration::from_millis(50),
+            serde_json::json!({"type": "audio_level"}),
+        )
+        .is_none());
+
+        let secondary = feed_hud_event(
+            &mut hud,
+            started + Duration::from_millis(100),
+            hud_error("not_listening"),
+        );
+        assert_eq!(secondary, None, "{code} should keep the first fallback");
+        assert!(hud.can_hide(original));
+    }
+
+    #[test]
+    fn secondary_not_listening_preserves_the_accessibility_deadline() {
+        assert_secondary_not_listening_preserves_deadline(
+            "accessibility_permission_missing",
+            Duration::from_millis(6500),
+        );
+    }
+
+    #[test]
+    fn secondary_not_listening_also_preserves_the_ordinary_error_deadline() {
+        assert_secondary_not_listening_preserves_deadline(
+            "microphone_permission_missing",
+            Duration::from_millis(2200),
+        );
+    }
+
+    #[test]
+    fn a_new_error_or_take_supersedes_the_previous_hud_hide() {
+        let mut hud = DictationHudState::default();
+        let started = Instant::now();
+        let later = started + Duration::from_millis(100);
+        let ax = feed_hud_event(
+            &mut hud,
+            started,
+            hud_error("accessibility_permission_missing"),
+        )
+        .unwrap();
+        let replacement =
+            feed_hud_event(&mut hud, later, hud_error("paste_target_unavailable")).unwrap();
+        assert_eq!(replacement.deadline, later + Duration::from_millis(2200));
+        assert!(!hud.can_hide(ax));
+        assert!(hud.can_hide(replacement));
+
+        let next_take =
+            serde_json::json!({"type": "listening_started", "payload": {"takeId": "next"}});
+        assert_eq!(feed_hud_event(&mut hud, later, next_take), None);
+        assert!(!hud.can_hide(replacement));
+
+        let stopped = feed_hud_event(&mut hud, later, hud_error("not_listening")).unwrap();
+        assert_eq!(stopped.deadline, later + Duration::from_millis(2200));
+        assert!(hud.can_hide(stopped));
+    }
+
+    #[test]
+    fn idle_stop_and_stop_after_an_expired_notice_keep_the_ordinary_fallback() {
+        let mut hud = DictationHudState::default();
+        let started = Instant::now();
+        let idle = feed_hud_event(&mut hud, started, hud_error("not_listening")).unwrap();
+        assert_eq!(idle.deadline, started + Duration::from_millis(2200));
+        assert!(hud.can_hide(idle));
+        let previous = feed_hud_event(
+            &mut hud,
+            started,
+            hud_error("accessibility_permission_missing"),
+        )
+        .unwrap();
+        let later = previous.deadline + Duration::from_millis(10);
+        let stopped = feed_hud_event(&mut hud, later, hud_error("not_listening")).unwrap();
+        assert_eq!(stopped.deadline, later + Duration::from_millis(2200));
+        assert!(!hud.can_hide(previous));
+        assert!(hud.can_hide(stopped));
+    }
+
+    #[test]
+    fn silent_errors_and_shutdown_can_replace_an_actionable_error() {
+        let mut hud = DictationHudState::default();
+        let started = Instant::now();
+        let ax = feed_hud_event(
+            &mut hud,
+            started,
+            hud_error("accessibility_permission_missing"),
+        )
+        .unwrap();
+        let later = started + Duration::from_millis(100);
+        let silent = feed_hud_event(
+            &mut hud,
+            later,
+            serde_json::json!({"type": "error", "payload": {"code": "missing_recording", "silent": true}}),
+        )
+        .unwrap();
+        assert_eq!(silent.deadline, later + Duration::from_millis(900));
+        assert!(!hud.can_hide(ax));
+        assert!(hud.can_hide(silent));
+
+        let other =
+            feed_hud_event(&mut hud, later, hud_error("microphone_permission_missing")).unwrap();
+        let shutdown =
+            feed_hud_event(&mut hud, later, serde_json::json!({"type": "shutdown_ack"})).unwrap();
+        assert_eq!(shutdown.deadline, later);
+        assert!(!hud.can_hide(other));
+        assert!(hud.can_hide(shutdown));
+    }
+
+    #[test]
+    fn visible_notice_is_required_to_ignore_a_secondary_stop() {
+        let mut hud = DictationHudState::default();
+        let now = Instant::now();
+        feed_hud_event(
+            &mut hud,
+            now,
+            serde_json::json!({"type": "listening_started"}),
+        );
+        feed_hud_event(&mut hud, now, hud_error("already_listening")).unwrap();
+        // While listening, already_listening shakes the pill without an error notice.
+        assert!(feed_hud_event(&mut hud, now, hud_error("not_listening")).is_some());
+
+        let original = feed_hud_event(&mut hud, now, hud_error("already_listening")).unwrap();
+        // Outside listening, the same code renders an ordinary actionable error.
+        assert_eq!(
+            feed_hud_event(&mut hud, now, hud_error("not_listening")),
+            None
+        );
+        assert!(hud.can_hide(original));
+
+        let silent = serde_json::json!({
+            "type": "error",
+            "payload": {"code": "not_listening", "silent": true}
+        });
+        assert!(feed_hud_event(&mut hud, now, silent).is_some());
+        assert!(!hud.can_hide(original));
+    }
+
+    #[test]
+    fn only_accessibility_recovery_gets_the_longer_hud_timeout() {
+        let delay = |code| {
+            let event = serde_json::json!({ "type": "error", "payload": { "code": code } });
+            hud_hide_delay_for_event(Some("error"), Some(&event))
+        };
+        assert_eq!(
+            delay("accessibility_permission_missing"),
+            Duration::from_millis(6500)
+        );
+        assert_eq!(
+            delay("paste_target_unavailable"),
+            Duration::from_millis(2200)
+        );
+        assert_eq!(
+            delay("microphone_permission_missing"),
+            Duration::from_millis(2200)
+        );
+        assert_eq!(delay("empty_transcript"), Duration::from_millis(900));
+    }
+
+    #[test]
+    fn dictation_log_records_accessibility_and_bounded_take_ids() {
+        for (event_type, status, code, expected) in [
+            ("permission_status", "granted", "", Some(true)),
+            ("permission_status", "missing", "", Some(false)),
+            ("permission_status", "unexpected-sensitive-value", "", None),
+            (
+                "error",
+                "granted",
+                "accessibility_permission_missing",
+                Some(false),
+            ),
+            ("error", "", "paste_target_unavailable", None),
+        ] {
+            let event = serde_json::json!({
+                "type": event_type,
+                "payload": {
+                    "accessibility": status,
+                    "code": code,
+                    "takeId": " fixture-take ",
+                    "text": "fixture transcript",
+                    "prompt": "fixture prompt",
+                    "targetWindowTitle": "fixture window",
+                    "target": { "app": "fixture app", "path": "fixture path" },
+                    "credential": "fixture credential",
+                },
+            });
+            let entry = dictation_event_log_entry(event_type, &event);
+            assert_eq!(entry["accessibilityGranted"], serde_json::json!(expected));
+            assert_eq!(entry["takeId"], "fixture-take");
+            let serialized = entry.to_string();
+            for private in [
+                "unexpected-sensitive-value",
+                "fixture transcript",
+                "fixture prompt",
+                "fixture window",
+                "fixture app",
+                "fixture path",
+                "fixture credential",
+            ] {
+                assert!(!serialized.contains(private));
+            }
+        }
+        for take_id in [
+            serde_json::json!("   "),
+            serde_json::json!("x".repeat(129)),
+            serde_json::json!(12),
+            serde_json::Value::Null,
+        ] {
+            let event = serde_json::json!({ "payload": { "takeId": take_id } });
+            assert!(dictation_event_log_entry("paste_target", &event)["takeId"].is_null());
+        }
     }
 
     #[test]

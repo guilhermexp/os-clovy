@@ -1452,6 +1452,10 @@ export async function setDictationCleanup(enabled: boolean, model?: string) {
     model === undefined ? { enabled } : { enabled, model },
   );
 }
+export async function setDictationCleanupModel(model: string) {
+  return invoke<DictationSettingsDto>("set_dictation_cleanup", { model });
+}
+
 export async function setDictationHudPlacement(placement: DictationHudPlacement) {
   return invoke<DictationSettingsDto>("set_dictation_hud_placement", {
     placement,

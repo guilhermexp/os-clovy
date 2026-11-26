@@ -1434,7 +1434,7 @@ async function handleDictationEventPayload(payload: unknown) {
     playErrorReveal();
     triggerShake();
     // Hold long enough for the shake to finish and the message to read.
-    hideSoon(1800);
+    hideSoon(dictationEvent.payload?.code === "accessibility_permission_missing" ? 6000 : 1800);
   }
 }
 

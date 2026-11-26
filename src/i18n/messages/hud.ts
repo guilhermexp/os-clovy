@@ -32,8 +32,9 @@ export default defineMessages({
     "hud.error.emptyTranscript": "No transcript text was available to paste.",
     "hud.error.noSpeech": "No speech detected.",
     "hud.error.updateInstalling": "Clovy is installing an update and restarts in a moment.",
-    "hud.error.pasteManually":
-      "Clovy couldn't paste automatically. Your transcript is on the clipboard, so you can paste it with Cmd+V.",
+    "hud.error.pasteTargetUnavailable": "Text copied. Select a field and paste.",
+    "hud.error.accessibilityPaste": "Text copied. Allow Accessibility.",
+    "hud.error.accessibilityReinsertion": "Allow Accessibility to reinsert dictation.",
     "hud.error.clipboardWriteFailed": "Could not write transcript to the clipboard.",
     "hud.error.recoveryCopyFailed":
       "Could not save or copy this dictation. The recording was kept for recovery.",
@@ -119,8 +120,9 @@ export default defineMessages({
     "hud.error.noSpeech": "Nenhuma fala detectada.",
     "hud.error.updateInstalling":
       "O Clovy está instalando uma atualização e reinicia em instantes.",
-    "hud.error.pasteManually":
-      "O Clovy não conseguiu colar automaticamente. Sua transcrição está na área de transferência, então você pode colar com Cmd+V.",
+    "hud.error.pasteTargetUnavailable": "Texto copiado. Selecione um campo e cole.",
+    "hud.error.accessibilityPaste": "Texto copiado. Permita Acessibilidade.",
+    "hud.error.accessibilityReinsertion": "Permita Acessibilidade para reinserir o ditado.",
     "hud.error.clipboardWriteFailed":
       "Não foi possível copiar a transcrição para a área de transferência.",
     "hud.error.recoveryCopyFailed":

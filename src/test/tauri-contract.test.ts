@@ -13,6 +13,8 @@ import {
   startMeetingRecording,
   detectMeetingWindow,
   setClovyPersona,
+  setDictationCleanup,
+  setDictationCleanupModel,
   updateNote,
 } from "../lib/tauri";
 
@@ -28,6 +30,17 @@ describe("Tauri command contracts", () => {
   beforeEach(() => {
     mocks.invoke.mockReset();
     mocks.invoke.mockResolvedValue({});
+  });
+
+  it("keeps the cleanup boolean contract and omits enabled for a model-only write", async () => {
+    await setDictationCleanup(false);
+    await setDictationCleanup(true, "vendor/legacy");
+    await setDictationCleanupModel("vendor/selected");
+    expect(mocks.invoke.mock.calls).toEqual([
+      ["set_dictation_cleanup", { enabled: false }],
+      ["set_dictation_cleanup", { enabled: true, model: "vendor/legacy" }],
+      ["set_dictation_cleanup", { model: "vendor/selected" }],
+    ]);
   });
 
   it("wraps note retrieval and updates in request payloads", async () => {

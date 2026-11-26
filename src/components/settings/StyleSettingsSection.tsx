@@ -1,12 +1,11 @@
-import { useEffect, useState } from "react";
-import {
-  dictationSettings,
-  listProviderModels,
-  setDictationCleanup,
-  setDictationHudPlacement,
-  setDictationStyle,
+import { useEffect, useId, useState } from "react";
+import { listProviderModels } from "../../lib/tauri";
+import type {
+  DictationHudPlacement,
+  DictationSettingsDto,
+  DictationStyle,
+  ProviderModelDto,
 } from "../../lib/tauri";
-import type { DictationHudPlacement, DictationStyle, ProviderModelDto } from "../../lib/tauri";
 import {
   PROVIDER_MODEL_SETTINGS_CHANGED_EVENT,
   type ProviderModelSettingsChangedDetail,
@@ -43,8 +42,7 @@ const SAMPLES: Record<DictationStyle, { description: MessageKey; sample: Message
 
 type CleanupModelOption = { id: string; name: string };
 
-/** Dictation cleanup is one OpenRouter chat completion: only catalog ids of
- * the form `vendor/model` qualify, never Auto, a CLI, or an endpoint. */
+/** Dictation cleanup uses OpenRouter chat completions with catalog ids of the form `vendor/model`. */
 function cleanupModelOptions(models: ProviderModelDto[]): CleanupModelOption[] {
   return models
     .filter(
@@ -56,32 +54,82 @@ function cleanupModelOptions(models: ProviderModelDto[]): CleanupModelOption[] {
     .map((model) => ({ id: model.id, name: model.name.trim() || model.id }));
 }
 
-export function StyleSettingsSection() {
-  const t = useT();
-  const [style, setStyle] = useState<DictationStyle>("standard");
-  const [hudPlacement, setHudPlacement] = useState<DictationHudPlacement>("bottom");
-  const [cleanupEnabled, setCleanupEnabled] = useState(false);
-  const [cleanupModel, setCleanupModel] = useState("");
-  const [models, setModels] = useState<CleanupModelOption[]>([]);
-  const [error, setError] = useState<string>();
+type CleanupControl = {
+  enabled?: boolean;
+  readFailed: boolean;
+  saving: boolean;
+  error?: string;
+  onToggle: (enabled: boolean) => void;
+};
 
-  useEffect(() => {
-    let cancelled = false;
-    dictationSettings()
-      .then((response) => {
-        if (cancelled) return;
-        setStyle(response.settings.style);
-        setCleanupEnabled(response.settings.cleanupEnabled ?? false);
-        setCleanupModel(response.settings.cleanupModel ?? "");
-        setHudPlacement(response.settings.hudPlacement ?? "bottom");
-      })
-      .catch((caught: unknown) => {
-        if (!cancelled) setError(messageFromError(caught));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+export function DictationCleanupRow({
+  enabled,
+  readFailed,
+  saving,
+  error,
+  onToggle,
+}: CleanupControl) {
+  const t = useT();
+  const titleId = useId();
+  const descriptionId = useId();
+  const statusId = useId();
+
+  return (
+    <div className="settings-row">
+      <div className="settings-row-info">
+        <h3 id={titleId} className="settings-row-title">
+          {t("settings.style.cleanup")}
+        </h3>
+        <p id={descriptionId} className="settings-row-description">
+          {t("settings.style.cleanupDescription")}
+        </p>
+        {readFailed ? (
+          <p id={statusId} className="settings-row-error" role="status">
+            {t("settings.style.readFailed")}
+          </p>
+        ) : error ? (
+          <p id={statusId} className="settings-row-error" role="alert">
+            {t("settings.style.saveFailed")} {error}
+          </p>
+        ) : enabled === undefined || saving ? (
+          <p id={statusId} className="settings-row-description" role="status">
+            {t(enabled === undefined ? "settings.style.loading" : "settings.style.saving")}
+          </p>
+        ) : null}
+      </div>
+      {enabled !== undefined ? (
+        <div className="settings-row-control">
+          <Switch
+            checked={enabled}
+            disabled={saving}
+            onCheckedChange={onToggle}
+            aria-labelledby={titleId}
+            aria-describedby={saving || error ? `${descriptionId} ${statusId}` : descriptionId}
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+type StyleSettingsProps = {
+  cleanupControl: CleanupControl;
+  settings?: Pick<DictationSettingsDto, "style" | "cleanupModel" | "hudPlacement">;
+  onModelChange: (model: string) => void;
+  onStyleChange: (style: DictationStyle) => void;
+  onHudPlacementChange: (placement: DictationHudPlacement) => void;
+};
+
+export function StyleSettingsSection({
+  cleanupControl,
+  settings,
+  onModelChange,
+  onStyleChange,
+  onHudPlacementChange,
+}: StyleSettingsProps) {
+  const t = useT();
+  const { enabled: cleanupEnabled, saving } = cleanupControl;
+  const [models, setModels] = useState<CleanupModelOption[]>([]);
 
   useEffect(() => {
     if (!cleanupEnabled) return;
@@ -110,57 +158,8 @@ export function StyleSettingsSection() {
     };
   }, [cleanupEnabled]);
 
-  async function toggleCleanup(enabled: boolean) {
-    setCleanupEnabled(enabled);
-    try {
-      const next = await setDictationCleanup(enabled);
-      setCleanupEnabled(next.cleanupEnabled);
-      setCleanupModel(next.cleanupModel);
-      setError(undefined);
-    } catch (caught) {
-      setCleanupEnabled(!enabled);
-      setError(messageFromError(caught));
-    }
-  }
-
-  async function selectCleanupModel(model: string) {
-    const previous = cleanupModel;
-    setCleanupModel(model);
-    try {
-      const next = await setDictationCleanup(true, model);
-      setCleanupModel(next.cleanupModel);
-      setError(undefined);
-    } catch (caught) {
-      setCleanupModel(previous);
-      setError(messageFromError(caught));
-    }
-  }
-
-  async function selectHudPlacement(nextPlacement: DictationHudPlacement) {
-    const previous = hudPlacement;
-    setHudPlacement(nextPlacement);
-    try {
-      const next = await setDictationHudPlacement(nextPlacement);
-      setHudPlacement(next.hudPlacement ?? nextPlacement);
-      setError(undefined);
-    } catch (caught) {
-      setHudPlacement(previous);
-      setError(messageFromError(caught));
-    }
-  }
-
-  async function selectStyle(nextStyle: DictationStyle) {
-    setStyle(nextStyle);
-    try {
-      const next = await setDictationStyle(nextStyle);
-      setStyle(next.style);
-      setError(undefined);
-    } catch (caught) {
-      setError(messageFromError(caught));
-    }
-  }
-
-  const current = SAMPLES[style];
+  const current = settings ? SAMPLES[settings.style] : undefined;
+  const cleanupModel = settings?.cleanupModel;
   const modelOptions =
     cleanupModel && !models.some((model) => model.id === cleanupModel)
       ? [{ id: cleanupModel, name: cleanupModel }, ...models]
@@ -182,35 +181,23 @@ export function StyleSettingsSection() {
                 {t("settings.style.hudPlacementDescription")}
               </p>
             </div>
-            <div className="settings-row-control">
-              <SegmentedControl
-                value={hudPlacement}
-                onValueChange={(value) => void selectHudPlacement(value)}
-                options={HUD_PLACEMENT_OPTIONS.map((option) => ({
-                  value: option.value,
-                  label: t(option.labelKey),
-                }))}
-                aria-label={t("settings.style.hudPlacement")}
-              />
-            </div>
+            {settings ? (
+              <div className="settings-row-control">
+                <SegmentedControl
+                  value={settings.hudPlacement}
+                  onValueChange={onHudPlacementChange}
+                  disabled={saving}
+                  options={HUD_PLACEMENT_OPTIONS.map((option) => ({
+                    value: option.value,
+                    label: t(option.labelKey),
+                  }))}
+                  aria-label={t("settings.style.hudPlacement")}
+                />
+              </div>
+            ) : null}
           </div>
-          <div className="settings-row">
-            <div className="settings-row-info">
-              <h3 id="dictation-cleanup-title" className="settings-row-title">
-                {t("settings.style.cleanup")}
-              </h3>
-              <p className="settings-row-description">{t("settings.style.cleanupDescription")}</p>
-              {error ? <p className="settings-row-error">{error}</p> : null}
-            </div>
-            <div className="settings-row-control">
-              <Switch
-                checked={cleanupEnabled}
-                onCheckedChange={(enabled) => void toggleCleanup(enabled)}
-                aria-labelledby="dictation-cleanup-title"
-              />
-            </div>
-          </div>
-          {cleanupEnabled ? (
+          <DictationCleanupRow {...cleanupControl} />
+          {cleanupEnabled && settings && current ? (
             <>
               <div className="settings-row">
                 <div className="settings-row-info">
@@ -224,7 +211,8 @@ export function StyleSettingsSection() {
                     className="dialog-input"
                     aria-label={t("settings.style.cleanupModel")}
                     value={cleanupModel}
-                    onChange={(event) => void selectCleanupModel(event.target.value)}
+                    disabled={saving}
+                    onChange={(event) => onModelChange(event.target.value)}
                   >
                     {modelOptions.map((model) => (
                       <option key={model.id} value={model.id}>
@@ -241,8 +229,9 @@ export function StyleSettingsSection() {
                 </div>
                 <div className="settings-row-control">
                   <SegmentedControl
-                    value={style}
-                    onValueChange={(value) => void selectStyle(value)}
+                    value={settings.style}
+                    onValueChange={onStyleChange}
+                    disabled={saving}
                     options={STYLE_OPTIONS.map((option) => ({
                       value: option.value,
                       label: t(option.labelKey),
@@ -254,7 +243,7 @@ export function StyleSettingsSection() {
             </>
           ) : null}
         </div>
-        {cleanupEnabled ? (
+        {cleanupEnabled && current ? (
           <div className="style-preview" aria-live="polite">
             <p className="style-preview-text">{t(current.sample)}</p>
           </div>
@@ -262,11 +251,4 @@ export function StyleSettingsSection() {
       </div>
     </section>
   );
-}
-
-function messageFromError(caught: unknown) {
-  if (caught && typeof caught === "object" && "message" in caught) {
-    return String((caught as { message: unknown }).message);
-  }
-  return String(caught);
 }

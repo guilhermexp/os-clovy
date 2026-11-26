@@ -282,7 +282,8 @@ export default defineMessages({
       "Audio sources available for recording microphone audio.",
     "settings.permissions.microphoneDescription": "Record dictation and note audio.",
     "settings.permissions.accessibility": "Accessibility",
-    "settings.permissions.accessibilityDescription": "Paste dictated text into the active app.",
+    "settings.permissions.accessibilityDescription":
+      "Allow Clovy Dictation Helper to paste dictated text into other apps.",
     "settings.permissions.systemAudioRowDescription":
       "Record audio from other apps when system audio is enabled.",
     "settings.permissions.manage": "Manage",
@@ -307,9 +308,13 @@ export default defineMessages({
     "settings.style.cleanup": "Clean up dictation text",
     "settings.style.cleanupDescription":
       "Fixes punctuation and filler words with an OpenRouter model before pasting. Off pastes the transcript as is, which is faster.",
+    "settings.style.loading": "Loading dictation settings…",
+    "settings.style.readFailed": "Could not load dictation settings.",
+    "settings.style.saving": "Saving…",
+    "settings.style.saveFailed": "Could not save dictation settings.",
     "settings.style.cleanupModel": "Cleanup model",
     "settings.style.cleanupModelDescription":
-      "Runs as one request per dictation. Uses your OpenRouter key when you saved one.",
+      "Uses your OpenRouter key. Long dictations may take several requests.",
     "settings.style.outputStyle": "Output style",
     "settings.style.aria": "Dictation style",
     "settings.style.standard": "Standard",
@@ -631,7 +636,8 @@ export default defineMessages({
       "Fontes de áudio disponíveis para gravar o áudio do microfone.",
     "settings.permissions.microphoneDescription": "Grava o áudio do ditado e das notas.",
     "settings.permissions.accessibility": "Acessibilidade",
-    "settings.permissions.accessibilityDescription": "Cola o texto ditado no app ativo.",
+    "settings.permissions.accessibilityDescription":
+      "Permita que o Clovy Dictation Helper cole o texto ditado em outros apps.",
     "settings.permissions.systemAudioRowDescription":
       "Grava o áudio de outros apps quando o áudio do sistema está ativado.",
     "settings.permissions.manage": "Gerenciar",
@@ -653,12 +659,16 @@ export default defineMessages({
     "settings.style.hudPlacementDescription": "Onde a pílula do ditado aparece na tela.",
     "settings.style.hudPlacementBottom": "Embaixo",
     "settings.style.hudPlacementTop": "Em cima",
-    "settings.style.cleanup": "Limpar texto do ditado",
+    "settings.style.cleanup": "Aprimorar texto do ditado",
     "settings.style.cleanupDescription":
       "Corrige pontuação e vícios de fala com um modelo da OpenRouter antes de colar. Desligado, cola o transcrito como veio, mais rápido.",
-    "settings.style.cleanupModel": "Modelo da limpeza",
+    "settings.style.loading": "Carregando configurações de ditado…",
+    "settings.style.readFailed": "Não foi possível carregar as configurações de ditado.",
+    "settings.style.saving": "Salvando…",
+    "settings.style.saveFailed": "Não foi possível salvar as configurações de ditado.",
+    "settings.style.cleanupModel": "Modelo de aprimoramento",
     "settings.style.cleanupModelDescription":
-      "Roda numa requisição por ditado. Usa a sua chave da OpenRouter quando ela está salva.",
+      "Usa sua chave da OpenRouter. Ditados longos podem exigir várias requisições.",
     "settings.style.outputStyle": "Estilo de saída",
     "settings.style.aria": "Estilo do ditado",
     "settings.style.standard": "Padrão",

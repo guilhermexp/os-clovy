@@ -87,7 +87,17 @@ describe("shell i18n (pt-BR)", () => {
     act(() => applyInterfaceLocale("en"));
     render(<PermissionBanner onDismiss={vi.fn()} onEnableAccessibility={vi.fn()} />);
     expect(screen.getByRole("button", { name: "Grant access" })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Allow Clovy Dictation Helper in Accessibility to paste dictation into other apps.",
+      ),
+    ).toBeInTheDocument();
     act(() => applyInterfaceLocale("pt-BR"));
+    expect(
+      screen.getByText(
+        "Permita o Clovy Dictation Helper em Acessibilidade para colar ditados em outros apps.",
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Conceder acesso" })).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Dispensar lembrete de acessibilidade" }),

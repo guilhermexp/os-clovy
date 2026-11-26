@@ -163,7 +163,7 @@ describe("HUD windows in pt-BR", () => {
     });
     await flush();
     expect(document.querySelector("#hud-error-text")).toHaveTextContent(
-      "O Clovy não conseguiu colar automaticamente. Sua transcrição está na área de transferência, então você pode colar com Cmd+V.",
+      "Texto copiado. Permita Acessibilidade.",
     );
 
     await mocks.listeners.get("dictation-event")?.({
@@ -174,6 +174,60 @@ describe("HUD windows in pt-BR", () => {
     });
     await flush();
     expect(document.querySelector("#hud-error-text")).toHaveTextContent("Upstream said no.");
+  });
+
+  it.each([
+    ["en", "Text copied. Allow Accessibility.", "Text copied. Select a field and paste."],
+    [
+      "pt-BR",
+      "Texto copiado. Permita Acessibilidade.",
+      "Texto copiado. Selecione um campo e cole.",
+    ],
+  ] as const)("distinguishes recovery causes in %s and holds only the grant message", async (locale, ax, target) => {
+    loadPage("hud.html");
+    await import("../hud");
+    await flush();
+    await switchLocale(locale);
+    const delays = vi.spyOn(window, "setTimeout");
+    const sendError = (code: string) =>
+      mocks.listeners.get("dictation-event")?.({
+        payload: { type: "error", payload: { code, message: "native fallback" } },
+      });
+    try {
+      await sendError("accessibility_permission_missing");
+      expect(document.querySelector("#hud-error-text")).toHaveTextContent(ax);
+      expect(delays).toHaveBeenCalledWith(expect.any(Function), 6000);
+
+      delays.mockClear();
+      await sendError("not_listening");
+      expect(document.querySelector("#hud-error-text")).toHaveTextContent(ax);
+      expect(delays).not.toHaveBeenCalled();
+
+      await sendError("paste_target_unavailable");
+      expect(document.querySelector("#hud-error-text")).toHaveTextContent(target);
+      expect(delays).toHaveBeenCalledWith(expect.any(Function), 1800);
+      expect(delays).not.toHaveBeenCalledWith(expect.any(Function), 6000);
+    } finally {
+      delays.mockRestore();
+    }
+  });
+
+  it("does not claim a failed reinsertion copied text", async () => {
+    loadPage("hud.html");
+    await import("../hud");
+    await flush();
+    await mocks.listeners.get("dictation-event")?.({
+      payload: {
+        type: "error",
+        payload: {
+          code: "accessibility_permission_missing",
+          message: "Accessibility permission is required to reinsert dictation.",
+        },
+      },
+    });
+    expect(document.querySelector("#hud-error-text")).toHaveTextContent(
+      "Permita Acessibilidade para reinserir o ditado.",
+    );
   });
 
   it.each([

@@ -47,10 +47,11 @@ takes never deliver), and
    letters or digits left (empty or only punctuation) ends the take with
    `no_speech` and nothing is pasted. The meter level is only logged.
 6. **Cleanup** (optional, off by default). Off, the pasted text is the
-   model's transcript only trimmed: no filler removal and no style. With **Clean up dictation text** on
-   in Settings > Style, the transcript goes to the chosen OpenRouter model in
-   one chat completion (`dictate_cleanup` in the OpenRouter provider): straight to
-   `openrouter.ai` with the user's own key. A missing key returns
+   model's transcript with its outer whitespace trimmed. Clovy makes no
+   cleanup request and applies no output style. With **Clean up dictation text**
+   on in Settings > Models or Settings > Dictation > Style, Clovy sends the
+   transcript to the selected cleanup model in one or more OpenRouter chat
+   completions (`dictate_cleanup`) using the user's key. A missing key returns
    `openrouter_api_key_missing` without a request. Transcripts above 800 bytes are split at word
    boundaries and up to four chunks are cleaned at once, then rejoined in
    order. At chunk edges, Clovy trims spaces and tabs and preserves line
@@ -77,8 +78,14 @@ takes never deliver), and
    settle delay. Window restoration and verification use that same deadline,
    without a new activation budget. After preparing the key events, the
    helper checks the original AX window, frontmost app and deadline again.
-   A closed or unrestorable window means `paste_target_unavailable`, with
-   no Cmd+V and the text left on the clipboard. Field focus is best effort:
+   If the helper lacks macOS Accessibility, it leaves the transcript on the
+   clipboard and shows `accessibility_permission_missing`. Paste it manually
+   and use **Grant access** in Clovy or **Manage** in Settings > General. The
+   explicit action asks the helper to register with macOS and opens Privacy &
+   Security > Accessibility. Enable **Clovy Dictation Helper** there. The
+   activity capture permission belongs to the Clovy app.
+   A closed or unrestorable window shows `paste_target_unavailable`. Select
+   a field and paste the text from the clipboard. Field focus is best effort:
    if the original window is valid but its field refuses focus, paste stays
    in that window and `dictation_focus_restore` records the failure. Without
    a captured AX window, delivery keeps the start-time app-only fallback.
@@ -156,8 +163,17 @@ once to cleanup off, whatever engine cleanup used before. The obsolete
 `dictationCleanup` engine slot is removed from provider settings; cleanup
 always uses OpenRouter.
 
-Preference updates are written to disk before they take effect in the app.
-A write error leaves the previous settings in memory and in the settings cache.
+The switch below **Audio transcription** in **Settings > Models** and the
+switch in **Settings > Dictation > Style** show the same saved preference.
+Style also shows the selected cleanup model and output style when cleanup is
+on. Turning cleanup off retains both choices, and changing the model alone
+never turns cleanup on. The cleanup model is independent of the Text and
+Notes models.
+
+The controls show loading or read failure until the setting is known.
+During a save they keep the last confirmed values. Preference updates are
+written to disk before they take effect in the app. A write error leaves the
+previous settings in memory and in the settings cache.
 
 The same file stores `hudPlacement`: `bottom` by default, including files
 without the field, or `top`. Settings > Dictation > Style exposes **Indicator
@@ -237,4 +253,4 @@ From the `dictation-events.log` of the app being measured:
 - `cargo test dictation_hud_` - top/bottom origin, Dock/no Dock, 1x/2x,
   offset monitors, resize bounds, and settings save/reload compatibility.
 - `src/test/dictation-cleanup-settings.test.tsx` - the cleanup switch,
-  OpenRouter-only model picker, and indicator-position persistence errors.
+  shared tab state, OpenRouter-only model picker, and persistence errors.

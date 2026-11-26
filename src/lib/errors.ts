@@ -8,8 +8,8 @@ type ErrorWording = { key: MessageKey; match?: string | RegExp; names?: string[]
 /** Stable native error codes (Rust `AppError`, dictation helper events) whose
  * English message is replaced by interface-language copy. Rust and Swift keep
  * writing English; the code is the contract and the message is only the
- * fallback for codes without an entry. Each key's English text is the native
- * message, so English reads exactly as before. */
+ * fallback for codes without an entry. The interface can use shorter wording
+ * where it has less room than the native message. */
 const ERROR_CODE_MESSAGES: Record<string, MessageKey | ErrorWording[]> = {
   // Dictation helper (mac-dictation-helper/main.swift)
   recording_start_busy: "hud.error.recordingStartBusy",
@@ -19,8 +19,14 @@ const ERROR_CODE_MESSAGES: Record<string, MessageKey | ErrorWording[]> = {
   audio_start_failed: "hud.error.audioStartFailed",
   missing_recording: "hud.error.missingRecording",
   empty_transcript: "hud.error.emptyTranscript",
-  paste_target_unavailable: "hud.error.pasteManually",
-  accessibility_permission_missing: "hud.error.pasteManually",
+  paste_target_unavailable: "hud.error.pasteTargetUnavailable",
+  accessibility_permission_missing: [
+    {
+      key: "hud.error.accessibilityReinsertion",
+      match: "Accessibility permission is required to reinsert dictation.",
+    },
+    { key: "hud.error.accessibilityPaste" },
+  ],
   pasteboard_write_failed: "hud.error.clipboardWriteFailed",
   dictation_recovery_copy_failed: "hud.error.recoveryCopyFailed",
   dictation_recovery_clipboard: "hud.error.recoveryClipboard",

@@ -86,7 +86,7 @@ export default defineMessages({
     // Permissions
     "shell.permission.label": "Accessibility access needed",
     "shell.permission.body":
-      "Dictation can't paste into other apps until you grant accessibility access.",
+      "Allow Clovy Dictation Helper in Accessibility to paste dictation into other apps.",
     "shell.permission.grant": "Grant access",
     "shell.permission.dismiss": "Dismiss",
     "shell.permission.dismissLabel": "Dismiss accessibility reminder",
@@ -167,7 +167,7 @@ export default defineMessages({
     "shell.toast.close": "Fechar notificação",
     "shell.permission.label": "Acesso de acessibilidade necessário",
     "shell.permission.body":
-      "O ditado não consegue colar em outros apps até você conceder acesso de acessibilidade.",
+      "Permita o Clovy Dictation Helper em Acessibilidade para colar ditados em outros apps.",
     "shell.permission.grant": "Conceder acesso",
     "shell.permission.dismiss": "Dispensar",
     "shell.permission.dismissLabel": "Dispensar lembrete de acessibilidade",

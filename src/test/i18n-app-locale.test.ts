@@ -117,7 +117,7 @@ describe("native error codes", () => {
   it("words a known code in the interface language and falls back to the native message", () => {
     applyInterfaceLocale("pt-BR");
     expect(messageForErrorCode("accessibility_permission_missing", "English text")).toBe(
-      "O Clovy não conseguiu colar automaticamente. Sua transcrição está na área de transferência, então você pode colar com Cmd+V.",
+      "Texto copiado. Permita Acessibilidade.",
     );
     expect(
       messageForErrorCode("shortcut_register_failed", "Could not register the shortcut F5.", {
@@ -134,16 +134,17 @@ describe("native error codes", () => {
     ).toBe("O modelo escolhido para esta sessão é inválido. Escolha o modelo de novo.");
   });
 
-  it("keeps English byte-identical to the native wording", () => {
+  it("provides a short paste recovery message and preserves other native wording", () => {
     applyInterfaceLocale("en");
     expect(
       messageForErrorCode(
         "paste_target_unavailable",
         "Clovy couldn't paste automatically. Your transcript is on the clipboard, so you can paste it with Cmd+V.",
       ),
-    ).toBe(
-      "Clovy couldn't paste automatically. Your transcript is on the clipboard, so you can paste it with Cmd+V.",
-    );
+    ).toBe("Text copied. Select a field and paste.");
+    expect(
+      messageForErrorCode("microphone_permission_missing", "Microphone permission is required."),
+    ).toBe("Microphone permission is required.");
     expect(messageFromError({ code: "not_signed_in", message: "Sign in to use dictation." })).toBe(
       "Sign in to use dictation.",
     );

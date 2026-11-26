@@ -31,9 +31,13 @@ import {
   localAudioFileSrc,
   providerModelSettings,
   clearProviderApiKey,
+  setDictationCleanup,
+  setDictationCleanupModel,
+  setDictationHudPlacement,
   setDictationLanguage,
   setDictationMicrophone,
   setDictationShortcut,
+  setDictationStyle,
   setImageSafeMode,
   setLiveTranscription,
   setProviderApiKey,
@@ -116,7 +120,7 @@ import { ConnectorsSection } from "./ConnectorsSection";
 import { DictionarySettingsSection } from "./DictionarySettingsSection";
 import { MemorySettingsSection } from "./MemorySettingsSection";
 import { MicTestControl, type MicTestState } from "./MicTestControl";
-import { StyleSettingsSection } from "./StyleSettingsSection";
+import { DictationCleanupRow, StyleSettingsSection } from "./StyleSettingsSection";
 import { ActivitySettingsSection } from "./ActivitySettingsSection";
 import { activityStatus } from "../../lib/activity-capture";
 import { SETTINGS_TABS, settingsTabsForPlatform, type SettingsTab } from "./settings-config";
@@ -370,7 +374,14 @@ export function AppSettings({
   checkingForUpdates = false,
   activitySupported: activitySupportedProp,
 }: AppSettingsProps) {
-  const [settings, setSettings] = useState<DictationSettingsDto>(DEFAULT_SETTINGS);
+  const [confirmedSettings, setConfirmedSettings] = useState<Partial<DictationSettingsDto>>({});
+  const settings = { ...DEFAULT_SETTINGS, ...confirmedSettings };
+  const [dictationReadStatus, setDictationReadStatus] = useState<"loading" | "ready" | "error">(
+    "loading",
+  );
+  const dictationSettingsSession = useRef<{ saving: boolean }>();
+  const [savingDictationPreference, setSavingDictationPreference] = useState(false);
+  const [dictationPreferenceError, setDictationPreferenceError] = useState<string>();
   const [providerSettings, setProviderSettings] =
     useState<ProviderModelSettingsDto>(DEFAULT_PROVIDER_MODELS);
   const [effectiveProviderSettings, setEffectiveProviderSettings] =
@@ -536,11 +547,27 @@ export function AppSettings({
     let cancelled = false;
     let unlisten: (() => void) | undefined;
 
-    async function boot() {
+    const session = { saving: false };
+    dictationSettingsSession.current = session;
+
+    async function readDictationSettings() {
       try {
         const response = await dictationSettings();
         if (cancelled) return;
-        setSettings(response.settings);
+        if (typeof response.settings?.cleanupEnabled !== "boolean") {
+          setDictationReadStatus("error");
+          return;
+        }
+        // An unrelated preference can finish saving while the initial read is in flight.
+        setConfirmedSettings((current) => ({ ...response.settings, ...current }));
+        setDictationReadStatus("ready");
+      } catch {
+        if (!cancelled) setDictationReadStatus("error");
+      }
+    }
+
+    async function boot() {
+      try {
         const hotkeyStatus = await dictationHotkeyStatus();
         if (cancelled) return;
         handleHelperEvent(hotkeyStatus);
@@ -573,10 +600,12 @@ export function AppSettings({
       if (cancelled) cleanup();
       else unlisten = cleanup;
     });
+    void readDictationSettings();
     void boot();
 
     return () => {
       cancelled = true;
+      dictationSettingsSession.current = undefined;
       unlisten?.();
     };
   }, []);
@@ -879,13 +908,39 @@ export function AppSettings({
     }
   }
 
+  async function saveDictationPreference<
+    Field extends "cleanupEnabled" | "cleanupModel" | "style" | "hudPlacement",
+  >(field: Field, save: () => Promise<Pick<DictationSettingsDto, Field>>) {
+    const session = dictationSettingsSession.current;
+    if (!session || session.saving || dictationReadStatus !== "ready") return;
+    session.saving = true;
+    setSavingDictationPreference(true);
+    setDictationPreferenceError(undefined);
+
+    try {
+      const next = await save();
+      if (dictationSettingsSession.current !== session) return;
+      setConfirmedSettings((current) => ({ ...current, [field]: next[field] }));
+    } catch (error) {
+      if (dictationSettingsSession.current === session) {
+        setDictationPreferenceError(messageFromError(error));
+      }
+    } finally {
+      session.saving = false;
+      if (dictationSettingsSession.current === session) setSavingDictationPreference(false);
+    }
+  }
+
   async function selectMicrophone(id?: string, name?: string) {
+    const session = dictationSettingsSession.current;
+    if (!session) return;
     try {
       if (micTestState !== "idle") {
         await resetMicTestState(true);
       }
       const next = await setDictationMicrophone(id, name);
-      setSettings(next);
+      if (dictationSettingsSession.current !== session) return;
+      setConfirmedSettings((current) => ({ ...current, microphone: next.microphone }));
       setMicOpen(false);
       setStatus(
         name
@@ -893,7 +948,7 @@ export function AppSettings({
           : translate("settings.audio.microphoneAuto"),
       );
     } catch (error) {
-      setStatus(messageFromError(error));
+      if (dictationSettingsSession.current === session) setStatus(messageFromError(error));
     }
   }
 
@@ -901,9 +956,13 @@ export function AppSettings({
     kind: DictationShortcutKind,
     shortcut: Pick<DictationShortcutSetting, "code" | "modifiers" | "label" | "pressCount">,
   ) {
+    const session = dictationSettingsSession.current;
+    if (!session) return;
     try {
       const next = await setDictationShortcut(kind, shortcut);
-      setSettings(next);
+      if (dictationSettingsSession.current !== session) return;
+      const field = kind === "toggle" ? "toggleShortcut" : "pushToTalkShortcut";
+      setConfirmedSettings((current) => ({ ...current, [field]: next[field] }));
       setCapturingShortcut(undefined);
       setShortcutError(undefined);
       setShortcutErrorKind(undefined);
@@ -914,6 +973,7 @@ export function AppSettings({
         }),
       );
     } catch (error) {
+      if (dictationSettingsSession.current !== session) return;
       setShortcutError(messageFromError(error));
       setShortcutErrorKind(kind);
       setStatus(messageFromError(error));
@@ -1147,9 +1207,12 @@ export function AppSettings({
   }
 
   async function selectLanguage(language: string) {
+    const session = dictationSettingsSession.current;
+    if (!session) return;
     try {
       const next = await setDictationLanguage(language || undefined);
-      setSettings(next);
+      if (dictationSettingsSession.current !== session) return;
+      setConfirmedSettings((current) => ({ ...current, language: next.language }));
       setLanguageOpen(false);
       setStatus(
         language
@@ -1157,9 +1220,18 @@ export function AppSettings({
           : translate("settings.dictation.languageAuto"),
       );
     } catch (error) {
-      setStatus(messageFromError(error));
+      if (dictationSettingsSession.current === session) setStatus(messageFromError(error));
     }
   }
+
+  const dictationCleanupControl = {
+    enabled: dictationReadStatus === "ready" ? settings.cleanupEnabled : undefined,
+    readFailed: dictationReadStatus === "error",
+    saving: savingDictationPreference,
+    error: dictationPreferenceError,
+    onToggle: (enabled: boolean) =>
+      void saveDictationPreference("cleanupEnabled", () => setDictationCleanup(enabled)),
+  };
 
   const microphoneName = settings.microphone.name ?? t("settings.audio.autoDetect");
   const microphoneDescription = settings.microphone.id
@@ -1641,7 +1713,21 @@ export function AppSettings({
               </div>
             </section>
 
-            <StyleSettingsSection />
+            <StyleSettingsSection
+              cleanupControl={dictationCleanupControl}
+              settings={dictationReadStatus === "ready" ? settings : undefined}
+              onModelChange={(model) =>
+                void saveDictationPreference("cleanupModel", () => setDictationCleanupModel(model))
+              }
+              onStyleChange={(style) =>
+                void saveDictationPreference("style", () => setDictationStyle(style))
+              }
+              onHudPlacementChange={(placement) =>
+                void saveDictationPreference("hudPlacement", () =>
+                  setDictationHudPlacement(placement),
+                )
+              }
+            />
 
             <DictionarySettingsSection />
           </>
@@ -1829,6 +1915,7 @@ export function AppSettings({
                       await refreshTranscriptionSelection();
                     }}
                   />
+                  <DictationCleanupRow {...dictationCleanupControl} />
                   <div className="settings-row-divider" aria-hidden />
                   <button
                     type="button"

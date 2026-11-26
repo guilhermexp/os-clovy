@@ -591,7 +591,7 @@ describe("App shortcuts", () => {
     ).toBeInTheDocument();
   });
 
-  it("refreshes Accessibility after requesting access without opening settings over the native prompt", async () => {
+  it("opens the Accessibility pane after an accepted helper request and keeps refreshing", async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -612,7 +612,7 @@ describe("App shortcuts", () => {
 
     expect(
       await screen.findByText(
-        "Dictation can't paste into other apps until you grant accessibility access.",
+        "Allow Clovy Dictation Helper in Accessibility to paste dictation into other apps.",
       ),
     ).toBeInTheDocument();
 
@@ -626,7 +626,13 @@ describe("App shortcuts", () => {
         type: "get_permission_status",
       }),
     );
-    expect(mocks.openPrivacySettings).not.toHaveBeenCalledWith("accessibility");
+    await waitFor(() => expect(mocks.openPrivacySettings).toHaveBeenCalledWith("accessibility"));
+    const request = mocks.dictationHelperCommand.mock.calls.findIndex(
+      ([command]) => command.type === "request_accessibility_permission",
+    );
+    expect(mocks.dictationHelperCommand.mock.invocationCallOrder[request]).toBeLessThan(
+      mocks.openPrivacySettings.mock.invocationCallOrder[0],
+    );
   });
 
   it("opens Accessibility settings when the dictation helper is unavailable", async () => {
@@ -677,7 +683,7 @@ describe("App shortcuts", () => {
 
     expect(
       await screen.findByText(
-        "Dictation can't paste into other apps until you grant accessibility access.",
+        "Allow Clovy Dictation Helper in Accessibility to paste dictation into other apps.",
       ),
     ).toBeInTheDocument();
     await waitFor(() =>
@@ -698,7 +704,7 @@ describe("App shortcuts", () => {
     await waitFor(() =>
       expect(
         screen.queryByText(
-          "Dictation can't paste into other apps until you grant accessibility access.",
+          "Allow Clovy Dictation Helper in Accessibility to paste dictation into other apps.",
         ),
       ).not.toBeInTheDocument(),
     );
@@ -720,7 +726,8 @@ describe("App shortcuts", () => {
       });
     });
 
-    const message = "Dictation can't paste into other apps until you grant accessibility access.";
+    const message =
+      "Allow Clovy Dictation Helper in Accessibility to paste dictation into other apps.";
     expect(await screen.findByText(message)).toBeInTheDocument();
 
     await user.click(
