@@ -30,6 +30,49 @@ function code(text: string): string {
     .join("\n");
 }
 
+describe("dictation helper: audio conversion diagnostics", () => {
+  it("announces each fixture before opening it and flushes the stage log", () => {
+    const selfTest = code(body("private func runAudioConversionSelfTest("));
+    const label = selfTest.indexOf('trace.record("case.begin", label)');
+    expect(label).toBeGreaterThan(-1);
+    expect(label).toBeLessThan(selfTest.indexOf("try writeAudioFixture("));
+    expect(
+      code(body("func record(_ stage:", source.indexOf("class AudioConversionSelfTestTrace"))),
+    ).toContain("fflush(stdout)");
+    const fixture = code(body("private func writeAudioFixture("));
+    expect(fixture).toContain('trace("fixture.openWrite"');
+    expect(fixture).toContain('trace("fixture.write"');
+    expect(selfTest).toContain('trace.record("fixture.snapshotBytes"');
+    expect(selfTest).toContain('trace.record("result.readRIFF"');
+  });
+
+  it("opts in to converter tracing in the seam and reports read failures at the read stage", () => {
+    const prepare = source.slice(source.indexOf("func prepareDictationAudio("));
+    expect(prepare.slice(0, prepare.indexOf("{"))).toContain("trace: DictationAudioTrace? = nil");
+    const convert = code(body("private func writeDictationWAV("));
+    for (const stage of ["openRead", "openWrite", "read", "convert", "output.write"]) {
+      expect(convert).toContain(`trace?("production.${stage}"`);
+    }
+    expect(convert).toMatch(
+      /if let readError \{\s*trace\?\("production\.read"[^\n]*\)\s*throw readError/,
+    );
+    const finish = code(body("private func finishDictationRecording("));
+    expect(finish).toContain("prepareDictationAudio(at: recordingURL, in: directory)");
+  });
+
+  it("reports the Swift type and NSError chain without printing localized error details", () => {
+    const report = code(body("func report(_ error: Error, outcome:"));
+    expect(report).toContain("String(reflecting: type(of: error))");
+    expect(report).toContain("NSUnderlyingErrorKey");
+    expect(report).toContain("details.domain");
+    expect(report).toContain("details.code");
+    expect(report).not.toContain("localizedDescription");
+    const seam = code(body('if CommandLine.arguments.contains("--self-test-audio-conversion")'));
+    expect(seam).toContain('trace.report(error, outcome: "failed")');
+    expect(seam).toContain("exit(1)");
+  });
+});
+
 describe("dictation helper: capture starts on the press (D3)", () => {
   it("asks for microphone access only when it is not already granted", () => {
     const start = code(body("func start(takeID: String? = nil)"));

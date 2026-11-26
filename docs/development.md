@@ -206,6 +206,22 @@ Useful validation docs:
 - [specs/002-system-audio-source-mode/quickstart.md](../specs/002-system-audio-source-mode/quickstart.md)
 - [specs/003-conversation-turns/quickstart.md](../specs/003-conversation-turns/quickstart.md)
 
+### macOS dictation audio diagnosis
+
+To locate a native conversion failure, set `candidate_branch` to the published
+candidate branch and manually dispatch `desktop.yml` with `dictation_audio_only`
+enabled.
+
+```sh
+gh workflow run desktop.yml --ref "$candidate_branch" -f dictation_audio_only=true
+```
+
+The job checks out the event SHA and builds the universal dictation helper on
+macOS. It runs the synthetic audio self-test with a two-minute limit and logs
+the last stage, format metadata and error codes. The default dispatch runs
+the full workflow. Run the full workflow after correcting the failure to
+verify the desktop and its integrations.
+
 ## Dictation destination HUD verification
 
 The native path is `src-tauri/native/mac-dictation-helper/main.swift`

@@ -280,12 +280,34 @@ private enum DictationAudioConversionError: Error {
     case incompleteAudio
 }
 
+typealias DictationAudioTrace = (_ stage: String, _ details: String) -> Void
+
+private func dictationAudioFormatDetails(_ format: AVAudioFormat) -> String {
+    let stream = format.streamDescription.pointee
+    return "rate=\(format.sampleRate) channels=\(format.channelCount) commonFormat=\(format.commonFormat.rawValue)"
+        + " interleaved=\(format.isInterleaved) formatID=0x\(String(stream.mFormatID, radix: 16))"
+        + " flags=0x\(String(stream.mFormatFlags, radix: 16))"
+}
+
+private func dictationAudioFileDetails(_ file: AVAudioFile) -> String {
+    "fileFormat={\(dictationAudioFormatDetails(file.fileFormat))}"
+        + " processingFormat={\(dictationAudioFormatDetails(file.processingFormat))}"
+        + " framePosition=\(file.framePosition)"
+}
+
+private func dictationAudioBufferDetails(_ buffer: AVAudioPCMBuffer) -> String {
+    "buffer={\(dictationAudioFormatDetails(buffer.format))"
+        + " frameCapacity=\(buffer.frameCapacity) frameLength=\(buffer.frameLength)}"
+}
+
 /// The caller owns `directory`. Removing it cancels publication even if the
 /// decoder still has an open file. The original is never modified here.
-func prepareDictationAudio(at source: URL, in directory: URL) -> Result<URL, Error> {
+func prepareDictationAudio(
+    at source: URL, in directory: URL, trace: DictationAudioTrace? = nil
+) -> Result<URL, Error> {
     let wav = directory.appendingPathComponent("audio.wav")
     do {
-        try writeDictationWAV(from: source, to: wav)
+        try writeDictationWAV(from: source, to: wav, trace: trace)
         return .success(wav)
     } catch {
         try? FileManager.default.removeItem(at: wav)
@@ -293,11 +315,15 @@ func prepareDictationAudio(at source: URL, in directory: URL) -> Result<URL, Err
     }
 }
 
-private func writeDictationWAV(from source: URL, to destination: URL) throws {
+private func writeDictationWAV(from source: URL, to destination: URL, trace: DictationAudioTrace?) throws {
+    trace?("production.openRead", "begin")
     let input = try AVAudioFile(forReading: source)
+    trace?("production.inspectInput", "read format and file length")
+    trace?("production.inspectInput", "\(dictationAudioFileDetails(input)) length=\(input.length)")
     let format = input.processingFormat
     let channels = Int(format.channelCount)
     let capacity: AVAudioFrameCount = 4096
+    trace?("production.configure", "configure formats, converter and buffers")
     guard
         channels > 0,
         format.sampleRate.isFinite,
@@ -314,9 +340,15 @@ private func writeDictationWAV(from source: URL, to destination: URL) throws {
         throw DictationAudioConversionError.unsupportedFormat
     }
     converter.dither = false
+    trace?("production.configure", "decoded \(dictationAudioBufferDetails(decoded))")
+    trace?("production.configure", "mixed \(dictationAudioBufferDetails(mixed))")
+    trace?("production.configure", "rendered \(dictationAudioBufferDetails(rendered))")
+    trace?("production.openWrite", "begin requestedFormat={\(dictationAudioFormatDetails(pcm))}")
     let output = try AVAudioFile(
         forWriting: destination, settings: pcm.settings, commonFormat: .pcmFormatInt16, interleaved: true
     )
+    trace?("production.inspectOutput", "read file and processing formats")
+    trace?("production.inspectOutput", dictationAudioFileDetails(output))
     var readError: Error?
     var reachedEnd = false
     var framesWritten: AVAudioFramePosition = 0
@@ -327,10 +359,14 @@ private func writeDictationWAV(from source: URL, to destination: URL) throws {
         let wasAtEnd = reachedEnd
         rendered.frameLength = 0
         var conversionError: NSError?
+        trace?("production.convert", "begin framePosition=\(previousPosition) reachedEnd=\(reachedEnd)")
         let result = converter.convert(to: rendered, error: &conversionError) { requested, status in
             if !reachedEnd {
                 do {
+                    trace?("production.read", "begin requested=\(requested) reading=\(min(requested, capacity))"
+                        + " framePosition=\(input.framePosition)")
                     try input.read(into: decoded, frameCount: min(requested, capacity))
+                    trace?("production.read", "read=\(decoded.frameLength) framePosition=\(input.framePosition)")
                     if decoded.frameLength > 0 {
                         status.pointee = .haveData
                         if channels == 1 { return decoded }
@@ -352,14 +388,23 @@ private func writeDictationWAV(from source: URL, to destination: URL) throws {
                 reachedEnd = true
             }
             status.pointee = .endOfStream
+            trace?("production.read", "inputStatus=endOfStream requested=\(requested) readError=\(readError != nil)")
             return nil
         }
-        if let readError { throw readError }
+        trace?("production.convert", "status=\(result.rawValue) rendered=\(rendered.frameLength)"
+            + " reachedEnd=\(reachedEnd) endOfStream=\(result == .endOfStream) converterError=\(conversionError != nil)")
+        if let readError {
+            trace?("production.read", "propagating the input read error")
+            throw readError
+        }
         if let conversionError { throw conversionError }
         if result == .error { throw DictationAudioConversionError.incompleteAudio }
         if rendered.frameLength > 0 {
+            trace?("production.output.write", "begin frames=\(rendered.frameLength) written=\(framesWritten)"
+                + " framePosition=\(output.framePosition)")
             try output.write(from: rendered)
             framesWritten += AVAudioFramePosition(rendered.frameLength)
+            trace?("production.output.write", "written=\(framesWritten)")
         }
         if result == .endOfStream {
             guard reachedEnd, framesWritten > 0 else { throw DictationAudioConversionError.incompleteAudio }
@@ -3446,13 +3491,41 @@ private struct AudioFixtureMarker {
     let amplitude: Double
 }
 
+private final class AudioConversionSelfTestTrace {
+    private var stage = "selfTest.start"
+
+    func record(_ stage: String, _ details: String) {
+        self.stage = stage
+        print("Dictation audio self-test stage=\(stage) \(details)")
+        fflush(stdout)
+    }
+
+    func report(_ error: Error, outcome: String) {
+        let details = error as NSError
+        var underlying = details.userInfo[NSUnderlyingErrorKey] as? NSError
+        var seen: Set<ObjectIdentifier> = [ObjectIdentifier(details)]
+        var chain: [String] = []
+        while let cause = underlying, seen.insert(ObjectIdentifier(cause)).inserted {
+            chain.append("domain=\(cause.domain) code=\(cause.code)")
+            underlying = cause.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        let errorType = String(reflecting: type(of: error))
+        let causes = chain.joined(separator: ", ")
+        fputs("Dictation audio self-test \(outcome) stage=\(stage) swiftType=\(errorType)"
+            + " domain=\(details.domain) code=\(details.code) underlying=[\(causes)]\n", stderr)
+        fflush(stderr)
+    }
+}
+
 private func writeAudioFixture(
     at url: URL,
     sampleRate: Double,
     channels: AVAudioChannelCount,
     duration: Double = 0.7,
-    markers: [AudioFixtureMarker]
+    markers: [AudioFixtureMarker],
+    trace: DictationAudioTrace
 ) throws {
+    trace("fixture.prepareBuffer", "rate=\(sampleRate) channels=\(channels) duration=\(duration)")
     guard
         let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: channels),
         let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(duration * sampleRate)),
@@ -3483,8 +3556,13 @@ private func writeAudioFixture(
         AVNumberOfChannelsKey: channels,
         AVLinearPCMBitDepthKey: 16,
     ]
+    trace("fixture.openWrite", "begin \(dictationAudioBufferDetails(buffer))")
     let file = try AVAudioFile(forWriting: url, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+    trace("fixture.inspectOutput", "read file and processing formats")
+    trace("fixture.inspectOutput", dictationAudioFileDetails(file))
+    trace("fixture.write", "begin frames=\(buffer.frameLength)")
     try file.write(from: buffer)
+    trace("fixture.write", "written=\(buffer.frameLength)")
 }
 
 /// Check the published byte format independently of the decoder/writer.
@@ -3534,8 +3612,9 @@ private func verifyAudioFixture(_ samples: [Double], marker: AudioFixtureMarker,
                              "Marker at \(marker.span.lowerBound)s has incorrect frequency (\(frequency) Hz).")
 }
 
-private func runAudioConversionSelfTest() throws {
+private func runAudioConversionSelfTest(trace: AudioConversionSelfTestTrace) throws {
     let fm = FileManager.default
+    trace.record("fixture.setup", "create fixture and conversion directories")
     let directory = fm.temporaryDirectory.appendingPathComponent("clovy-audio-self-test-\(UUID().uuidString)")
     try fm.createDirectory(at: directory, withIntermediateDirectories: false)
     defer { try? fm.removeItem(at: directory) }
@@ -3551,42 +3630,60 @@ private func runAudioConversionSelfTest() throws {
         for rate: Double in [44_100, 48_000] {
             for channels: AVAudioChannelCount in [1, 2] {
                 let label = "\(Int(rate)) Hz, \(channels) channel(s), \(ext)"
+                trace.record("case.begin", label)
                 let input = directory.appendingPathComponent("fixture-\(Int(rate))-\(channels).\(ext)")
-                try writeAudioFixture(at: input, sampleRate: rate, channels: channels, markers: markers)
+                try writeAudioFixture(at: input, sampleRate: rate, channels: channels, markers: markers, trace: trace.record)
+                trace.record("fixture.snapshotBytes", "read original before conversion")
                 let original = try Data(contentsOf: input)
-                let wav = try prepareDictationAudio(at: input, in: output).get()
+                let wav = try prepareDictationAudio(at: input, in: output, trace: trace.record).get()
+                trace.record("result.readRIFF", "inspect converted header and payload")
                 let samples = try readFixtureWAV(wav)
+                trace.record("result.validate", "check frame count and markers, frames=\(samples.count)")
                 // An AAC encoder/decoder can differ by up to one 1024-frame packet.
                 let tolerance = ext == "m4a" ? 400 : 2
                 try checkAudioConversion(abs(samples.count - 11_200) <= tolerance, "Wrong 700 ms fixture length for \(label): \(samples.count) frames.")
                 for marker in markers {
                     try verifyAudioFixture(samples, marker: marker, tolerance: ext == "m4a" ? 0.045 : 0.008)
                 }
+                trace.record("fixture.snapshotBytes", "compare original after conversion")
                 let decodedSource = try Data(contentsOf: input)
                 try checkAudioConversion(decodedSource == original, "Conversion modified \(label) source.")
+                trace.record("result.cleanup", "remove converted fixture")
                 try fm.removeItem(at: wav)
                 print("Passed \(label): \(samples.count) PCM16 frames and all three markers.")
             }
         }
     }
 
+    trace.record("case.begin", "48000 Hz, 1 channel, wav, silence")
     let quiet = directory.appendingPathComponent("silence.wav")
-    try writeAudioFixture(at: quiet, sampleRate: 48_000, channels: 1, duration: 0.5, markers: [])
-    let silence = try prepareDictationAudio(at: quiet, in: output).get()
+    try writeAudioFixture(at: quiet, sampleRate: 48_000, channels: 1, duration: 0.5, markers: [], trace: trace.record)
+    let silence = try prepareDictationAudio(at: quiet, in: output, trace: trace.record).get()
+    trace.record("result.readRIFF", "inspect converted silence")
     let silentSamples = try readFixtureWAV(silence)
+    trace.record("result.validate", "check silence and frame count, frames=\(silentSamples.count)")
     try checkAudioConversion(silentSamples.count == 8_000 && silentSamples.allSatisfy { $0 == 0 },
                              "500 ms of digital silence must stay intact.")
+    trace.record("result.cleanup", "remove converted silence")
     try fm.removeItem(at: silence)
 
+    trace.record("fixture.setup", "write invalid input")
     let invalid = directory.appendingPathComponent("invalid.m4a")
     let invalidBytes = Data("invalid input".utf8)
     try invalidBytes.write(to: invalid)
     let missingDirectory = directory.appendingPathComponent("unavailable")
     for (input, destination) in [(invalid, output), (quiet, missingDirectory)] {
+        trace.record("case.begin", input == invalid ? "invalid m4a" : "48000 Hz, 1 channel, wav, unavailable output")
+        trace.record("fixture.snapshotBytes", "read original before expected failure")
         let original = try Data(contentsOf: input)
-        if case .success = prepareDictationAudio(at: input, in: destination) {
+        switch prepareDictationAudio(at: input, in: destination, trace: trace.record) {
+        case .success:
+            trace.record("result.validate", "unexpected conversion success")
             throw AudioConversionSelfTestFailure(message: "Invalid input or unavailable output unexpectedly converted.")
+        case .failure(let error):
+            trace.report(error, outcome: "expected failure")
         }
+        trace.record("fixture.snapshotBytes", "compare original after expected failure")
         let unchanged = try Data(contentsOf: input)
         try checkAudioConversion(unchanged == original && !fm.fileExists(atPath: destination.appendingPathComponent("audio.wav").path),
                                  "Conversion failure must leave the original and no partial WAV.")
@@ -3595,11 +3692,12 @@ private func runAudioConversionSelfTest() throws {
 }
 
 if CommandLine.arguments.contains("--self-test-audio-conversion") {
+    let trace = AudioConversionSelfTestTrace()
     do {
-        try runAudioConversionSelfTest()
+        try runAudioConversionSelfTest(trace: trace)
         exit(0)
     } catch {
-        fputs("Dictation audio conversion self-test failed: \(error.localizedDescription)\n", stderr)
+        trace.report(error, outcome: "failed")
         exit(1)
     }
 }

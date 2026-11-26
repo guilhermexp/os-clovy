@@ -2,6 +2,11 @@ name: desktop
 
 on:
   workflow_dispatch:
+    inputs:
+      dictation_audio_only:
+        description: Run only the macOS dictation audio self-test
+        type: boolean
+        default: false
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
@@ -136,8 +141,16 @@ jobs:
         id: diff
         env:
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          DICTATION_AUDIO_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.dictation_audio_only == true }}
         run: |
           set -euo pipefail
+          if [[ "${DICTATION_AUDIO_ONLY:-}" == "true" ]]; then
+            echo "frontend=false" >> "$GITHUB_OUTPUT"
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+            echo "companion=false" >> "$GITHUB_OUTPUT"
+            echo "desktop_bundle=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [[ -z "$BASE" || "$BASE" == "0000000000000000000000000000000000000000" ]] \
             || ! git cat-file -e "$BASE" 2>/dev/null; then
             echo "frontend=true" >> "$GITHUB_OUTPUT"
@@ -362,6 +375,50 @@ jobs:
 
       - name: Cargo test
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  dictation-audio-diagnosis:
+    name: macOS dictation audio diagnosis
+    if: github.event_name == 'workflow_dispatch' && inputs.dictation_audio_only == true
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Build the universal dictation helper
+        run: |
+          set -euo pipefail
+          if [[ "$(uname -m)" != "arm64" ]]; then
+            echo "::error::Dictation audio diagnosis requires a macOS ARM64 runner."
+            exit 1
+          fi
+          sha="$(git rev-parse HEAD)"
+          printf 'Checkout SHA %s\n' "$sha"
+          if [[ "$sha" != "$GITHUB_SHA" ]]; then
+            echo "::error::The checkout does not match the workflow SHA."
+            exit 1
+          fi
+          source="src-tauri/native/mac-dictation-helper/main.swift"
+          shasum -a 256 "$source"
+          swiftc --version
+          xcodebuild -version
+          mkdir -p "$RUNNER_TEMP/dictation-swift-cache"
+          for arch in arm64 x86_64; do
+            swiftc -target "$arch-apple-macosx14.0" \
+              -module-cache-path "$RUNNER_TEMP/dictation-swift-cache" \
+              -framework Foundation -framework AppKit -framework AVFoundation \
+              -framework Carbon -framework CoreMedia -framework CoreGraphics \
+              "$source" -o "$RUNNER_TEMP/dictation-$arch"
+          done
+          lipo -create "$RUNNER_TEMP/dictation-arm64" "$RUNNER_TEMP/dictation-x86_64" \
+            -output "$RUNNER_TEMP/dictation-universal"
+          lipo "$RUNNER_TEMP/dictation-universal" -verify_arch arm64 x86_64
+
+      - name: Run the dictation audio self-test
+        timeout-minutes: 2
+        run: '"$RUNNER_TEMP/dictation-universal" --self-test-audio-conversion'
 
   windows-rust:
     name: Tauri Windows build
