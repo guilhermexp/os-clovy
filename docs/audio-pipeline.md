@@ -390,6 +390,12 @@ Retry resumes only jobs whose fingerprint has not already succeeded.
 
 ## Audio transcription engines
 
+On macOS, the dictation helper prepares the full finalized AAC capture as
+mono 16 kHz PCM16 WAV for the selected engine. The helper hands over the
+original M4A if that conversion fails. WAV uses more bytes than compressed
+AAC, and each provider's upload limit still applies. See [Recording cues and
+file preparation](dictation.md#recording-cues-and-file-preparation).
+
 Settings > Models > Audio transcription selects Local, Groq or OpenRouter for
 dictation, saved notes and live preview. An operation captures its provider and
 model together. Groq keeps its timed Turn packs, pacing and quota handling.
@@ -400,6 +406,10 @@ overlap. Saved audio and completed chunks remain available for an explicit retry
 On macOS, [dictation can temporarily lower media output](dictation.md#system-output-volume-during-dictation-on-macos)
 during capture. The host starts restoring the output when capture ends, ahead
 of the transcription request.
+
+Fresh or missing Groq model selections use `whisper-large-v3` for dictation,
+saved notes and live preview. Both this model and `whisper-large-v3-turbo`
+remain valid saved choices, including in data partition overrides.
 
 ### Local model installation
 

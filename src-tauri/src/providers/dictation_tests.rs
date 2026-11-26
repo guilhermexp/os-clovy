@@ -253,6 +253,7 @@ async fn dictation_with_a_groq_key_goes_straight_to_groq_with_only_that_key() {
         ("language", "pt"),
         ("prompt", "Samir"),
         ("response_format", "verbose_json"),
+        ("temperature", "0"),
     ] {
         assert!(body.contains(&format!("name=\"{name}\"\r\n\r\n{value}\r\n")));
     }
@@ -261,6 +262,67 @@ async fn dictation_with_a_groq_key_goes_straight_to_groq_with_only_that_key() {
     ));
     assert!(heads(&hosts.clovy).is_empty());
     assert!(heads(&hosts.openrouter).is_empty());
+}
+
+#[tokio::test]
+async fn dictation_sends_the_complete_wav_with_auto_or_explicit_language() {
+    let hosts = Hosts::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let mut request = take_request(&directory);
+    request.audio_path = directory.path().join("complete-take.wav");
+    let mut wav = hound::WavWriter::create(
+        &request.audio_path,
+        hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        },
+    )
+    .unwrap();
+    for frame in 0..11_200 {
+        let sample: i16 = match frame {
+            800..4_000 => 0x1111,
+            5_200..7_200 => 0x2222,
+            9_600..11_040 => 0x3333,
+            _ => 0,
+        };
+        wav.write_sample(sample).unwrap();
+    }
+    wav.finalize().unwrap();
+    let bytes = std::fs::read(&request.audio_path).unwrap();
+
+    for language in [None, Some("en")] {
+        request.language = language.map(str::to_string);
+        dictate_transcribe_via(
+            &hosts.transport(),
+            Some("gsk-user"),
+            "whisper-large-v3".to_string(),
+            request.clone(),
+        )
+        .await
+        .unwrap();
+    }
+
+    let bodies = hosts.groq.raw_bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    for (body, language) in bodies.iter().zip([None, Some("en")]) {
+        assert!(body.contains("name=\"model\"\r\n\r\nwhisper-large-v3\r\n"));
+        assert!(body.contains("name=\"temperature\"\r\n\r\n0\r\n"));
+        assert!(body.contains("name=\"response_format\"\r\n\r\nverbose_json\r\n"));
+        assert!(body.contains("name=\"prompt\"\r\n\r\nSamir\r\n"));
+        assert!(body.contains(&format!(
+            "name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n{}\r\n",
+            String::from_utf8_lossy(&bytes)
+        )));
+        if let Some(language) = language {
+            assert!(body.contains(&format!("name=\"language\"\r\n\r\n{language}\r\n")));
+        } else {
+            assert!(!body.contains("name=\"language\""));
+        }
+    }
+    assert!(heads(&hosts.openrouter).is_empty());
+    assert!(heads(&hosts.clovy).is_empty());
 }
 
 #[tokio::test]

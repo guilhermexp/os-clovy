@@ -57,7 +57,7 @@ function Harness({ supported = true, initial = "parakeet-ultra" } = {}) {
       onSelect={async (id) => setModel(id)}
       onActivated={(selection) => setModel(selection.transcriptionModel)}
       onRemoved={async (_modelId, result) => {
-        if (result?.switched_to_groq) setModel("whisper-large-v3-turbo");
+        if (result?.switched_to_groq) setModel("whisper-large-v3");
       }}
     />
   );
@@ -88,6 +88,23 @@ it("offers OpenRouter transcription even when Local is unavailable", async () =>
   );
   expect(screen.getByText(/adicione sua chave da OpenRouter/i)).toBeVisible();
   expect(screen.queryByRole("option", { name: "Local" })).toBeNull();
+});
+
+it("chooses Whisper large v3 when Groq has no prior selection", async () => {
+  const user = userEvent.setup();
+  render(<Harness supported={false} initial="openai/whisper-large-v3-turbo" />);
+  await user.selectOptions(await screen.findByRole("combobox", { name: "Provedor" }), "groq");
+  expect(screen.getByRole("combobox", { name: "Modelo" })).toHaveValue("whisper-large-v3");
+});
+
+it("preserves the saved Groq Turbo selection when returning to Groq", async () => {
+  const user = userEvent.setup();
+  render(<Harness supported={false} initial="whisper-large-v3-turbo" />);
+  const provider = await screen.findByRole("combobox", { name: "Provedor" });
+  expect(screen.getByRole("combobox", { name: "Modelo" })).toHaveValue("whisper-large-v3-turbo");
+  await user.selectOptions(provider, "openrouter");
+  await user.selectOptions(provider, "groq");
+  expect(screen.getByRole("combobox", { name: "Modelo" })).toHaveValue("whisper-large-v3-turbo");
 });
 
 it("focus moves from provider to model and management in keyboard order", async () => {

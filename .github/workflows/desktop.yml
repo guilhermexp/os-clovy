@@ -348,6 +348,18 @@ jobs:
       - name: Clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
+      - name: Self-test dictation audio conversion with AVFoundation
+        timeout-minutes: 2
+        run: |
+          helper="./.tauri-helper/Clovy Dictation Helper.app/Contents/MacOS/clovy-dictation-helper"
+          source="src-tauri/native/mac-dictation-helper/main.swift"
+          if [[ ! -f "$source" || ! -x "$helper" || ! "$helper" -nt "$source" ]]; then
+            echo "::error::The dictation helper must be executable and newer than its Swift source."
+            exit 1
+          fi
+          lipo -verify_arch arm64 x86_64 "$helper"
+          "$helper" --self-test-audio-conversion
+
       - name: Cargo test
         run: cargo test --manifest-path src-tauri/Cargo.toml
 

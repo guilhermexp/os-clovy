@@ -8,8 +8,8 @@ import { describe, expect, it } from "vitest";
 const source = readFileSync("src-tauri/native/mac-dictation-helper/main.swift", "utf8");
 
 /** The body of the first Swift declaration starting with `signature`. */
-function body(signature: string): string {
-  const start = source.indexOf(signature);
+function body(signature: string, from = 0): string {
+  const start = source.indexOf(signature, from);
   if (start < 0) throw new Error(`missing ${signature}`);
   const open = source.indexOf("{", start);
   let depth = 0;
@@ -50,15 +50,40 @@ describe("dictation helper: capture starts on the press (D3)", () => {
     expect(source).not.toContain("RecordingCuePlayer.play(.start, completion:");
   });
 
-  it("cuts the cue's span from the take before handing it to Rust", () => {
+  it("prepares the complete file after capture stops", () => {
     const stop = code(body("private func stopActiveRecording()"));
-    expect(stop).toContain("finishDictationRecording(recordingInstanceID: recordingInstanceID)");
+    expect(stop).toMatch(
+      /selectedDeviceRecorder\.stop \{[\s\S]*?RecordingCuePlayer\.play\(\.stop\)[\s\S]*?finishDictationRecording\(/,
+    );
+    expect(stop).toMatch(
+      /audioRecorder\?\.stop\(\)\s*RecordingCuePlayer\.play\(\.stop\)\s*finishDictationRecording\(/,
+    );
     const finish = code(body("private func finishDictationRecording("));
-    expect(finish).toContain("trimLeadingAudio(");
+    expect(finish).toContain("prepareDictationAudio(at: recordingURL");
     expect(finish).toContain("emitRecordingReady(recordingInstanceID: recordingInstanceID)");
-    const trim = code(body("func trimLeadingAudio("));
-    // Passthrough: no re-encoding on the release path.
-    expect(trim).toContain("AVAssetExportPresetPassthrough");
+    expect(source).not.toMatch(/trimLeadingAudio|startCueTrim|settleSelectedDeviceCueTrim/);
+  });
+
+  it("only publishes converted audio while its take owns finalization", () => {
+    const finish = code(body("private func finishDictationRecording("));
+    expect(finish.indexOf("recordingPurpose == .dictation")).toBeLessThan(
+      finish.indexOf("prepareDictationAudio("),
+    );
+    const publish = finish.indexOf("moveItem(at: temporaryWAV");
+    expect(publish).toBeGreaterThan(-1);
+    for (const guard of [
+      "self.recordingInstanceID == recordingInstanceID",
+      "self.activeTakeID == takeID",
+      "self.isFinalizing",
+      "self.recordingURL == recordingURL",
+    ]) {
+      expect(finish.slice(0, publish)).toContain(guard);
+    }
+    const selfTest = source.indexOf(
+      'CommandLine.arguments.contains("--self-test-audio-conversion")',
+    );
+    expect(selfTest).toBeGreaterThan(-1);
+    expect(selfTest).toBeLessThan(source.indexOf("let app = NSApplication.shared"));
   });
 });
 
@@ -127,26 +152,36 @@ describe("dictation helper: reports the take's length (R7)", () => {
   });
 });
 
-describe("dictation helper: the cue cut uses the file's own clock (R1)", () => {
-  it("measures the default recorder's cue offset with currentTime", () => {
-    const begin = code(body("private func beginDictationCapture()"));
-    expect(begin).toMatch(/audioRecorder\??\.currentTime/);
-    // recordingStartedAt is set before the recorder exists: not the file clock.
-    expect(begin).not.toContain("recordingStartedAt");
+describe("dictation helper: normal stop uses captured audio", () => {
+  it("checks the recorder clock and invalidates the deferred stop on reset", () => {
+    const stop = code(body("func stop(takeID: String? = nil)"));
+    expect(stop).toContain("completeNormalStop(");
+    const complete = code(body("private func completeNormalStop("));
+    expect(complete).toContain("audioRecorder?.currentTime");
+    expect(complete).toContain("selectedDeviceRecorder?.capturedDuration");
+    expect(complete).toContain("recordingInstanceID");
+    const reset = code(body("private func resetRecordingState("));
+    expect(reset).toContain("pendingStop = nil");
   });
 
-  it("measures a pinned microphone's cue against its first sample", () => {
+  it("publishes appended audio to a snapshot that main can read without joining capture", () => {
+    const getter = code(body("var capturedDuration: TimeInterval"));
+    expect(getter).toContain("durationSnapshot.seconds");
+    expect(getter).not.toContain("queue.sync");
     const capture = code(body("func captureOutput("));
-    expect(capture).toMatch(/firstSamplePresentationTime = /);
-    const begin = code(body("private func beginDictationCapture()"));
-    expect(begin).toContain("clockTime()");
-    const settle = code(body("private func settleSelectedDeviceCueTrim("));
-    expect(settle).toContain("CMTimeSubtract(cueEnd, firstSampleTime)");
-    // A cue that ended before the first sample leaves nothing to cut.
-    expect(settle).toMatch(/remaining > 0 \? remaining \+ startCueTrimMarginSeconds : 0/);
-    const stop = code(body("private func stopActiveRecording()"));
-    expect(stop.indexOf("settleSelectedDeviceCueTrim(")).toBeLessThan(
-      stop.indexOf("self.finishDictationRecording("),
+    const append = capture.indexOf("writerInput.append(sampleBuffer)");
+    expect(append).toBeGreaterThan(-1);
+    expect(capture.indexOf("durationSnapshot.add(")).toBeGreaterThan(append);
+  });
+
+  it("queues pinned recorder teardown on reset without waiting on main", () => {
+    const recorder = source.indexOf("final class SelectedDeviceRecorder:");
+    const cancel = code(body("func cancel(", recorder));
+    expect(cancel).toContain("queue.async");
+    expect(cancel).not.toContain("queue.sync");
+    const reset = code(body("private func resetRecordingState("));
+    expect(reset.indexOf("recordingInstanceID = nil")).toBeLessThan(
+      reset.indexOf("selectedDeviceRecorder?.cancel("),
     );
   });
 });

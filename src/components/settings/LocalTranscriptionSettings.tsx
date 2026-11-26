@@ -20,8 +20,10 @@ type TranscriptionSelection = Pick<
   "transcriptionProvider" | "transcriptionModel"
 >;
 
+export const DEFAULT_GROQ_TRANSCRIPTION_MODEL = "whisper-large-v3";
+
 const remoteDefaults = {
-  groq: "whisper-large-v3-turbo",
+  groq: DEFAULT_GROQ_TRANSCRIPTION_MODEL,
   openrouter: "openai/whisper-large-v3-turbo",
 };
 

@@ -22,23 +22,28 @@ takes never deliver), and
    with at most 20 ms per message, and otherwise keeps the app alone.
 2. **Capture.** The helper starts recording at once: microphone permission is
    only requested when it is not already granted, and the recorder for the
-   next take is prepared after each take and at launch. The start cue plays in
-   parallel and is cut from the recording before it is handed over (see
-   [Start cue](#start-cue)). `listening_started` follows the key-down.
-3. **Stop.** On release the helper stops the recorder and emits
-   `recording_ready` with the `.m4a` path and peak meter level. macOS retains
-   the start-time target throughout capture and finalization; stop never
-   selects it again. Candidate app changes remain available for the next
-   take, while this take's indicator and cleanup app remain fixed.
-   No speech analysis runs before the upload.
+   next take is prepared after each take and at launch. On macOS the start
+   cue plays after capture starts, and all captured audio is kept.
+   `listening_started` follows the key-down.
+3. **Stop.** A normal macOS stop waits only as needed for the recorder to
+   capture 500 ms of audio. It then closes capture and plays the stop cue.
+   The helper prepares the complete finalized file and emits
+   `recording_ready` with the file path, duration and peak meter level.
+   Cancellation discards the take immediately, including during the wait
+   or conversion. The start-time target remains pinned through finalization.
+   Candidate app changes remain available for the next take. See [Recording
+   cues and file preparation](#recording-cues-and-file-preparation).
 4. **Transcription.** The admitted take keeps its provider and model from
    Settings > Models > Audio transcription. Groq sends the canonical audio
-   part with `response_format=verbose_json`, the short dictionary prompt and
-   the language hint. OpenRouter uses its audio transcription endpoint with
-   `response_format=json`, the dictionary hint and the language, and sends a
-   single request. Each remote route uses its own configured credential and
-   surfaces key and transport errors in the HUD. The selected Local model
-   receives the audio and language hint in the offline helper.
+   part with `temperature=0`, `response_format=verbose_json`, the short
+   dictionary prompt and the optional transcription language hint.
+   Groq defaults to `whisper-large-v3` for fresh or missing selections.
+   Saved `whisper-large-v3` and `whisper-large-v3-turbo` selections remain
+   valid globally and in data partition overrides. OpenRouter uses its audio
+   transcription endpoint with `response_format=json`, the dictionary hint
+   and the language, and sends a single request. Each remote route uses its
+   own configured credential and surfaces key and transport errors in the HUD.
+   The selected Local model receives the audio and language hint in the offline helper.
    [Audio pipeline](audio-pipeline.md#audio-transcription-engines)
 5. **No speech.** A take under 0.5 s of audio (`audioDurationSeconds` in
    `recording_ready`) is not uploaded. On the direct Groq route the request
@@ -246,18 +251,22 @@ on Groq with the user's key. Without a Groq key no warm-up request is made. The 
 and prepares the next recorder after every take. No audio is recorded outside
 a take.
 
-## Start cue
+## Recording cues and file preparation
 
-The start cue used to play before recording began, which kept Clovy's sound
-out of the transcript but delayed capture by the cue's length (336 ms). Now
-recording starts on the key-down and the cue plays at the same time. The
-cue's span is measured on the file's own clock: the default recorder's
-`currentTime` when the cue starts, or, for a pinned microphone (whose file
-starts at its first sample), what is left of the cue after that sample. When
-the recording stops, the helper cuts that span from the start of the file
-with a passthrough export (no re-encoding) before `recording_ready`. If the
-export fails, the uncut file is used. See the design of `ditado-rapido` (D3)
-for why this technique was chosen.
+The start cue plays asynchronously after capture starts, so the microphone
+can pick up the cue along with speech. The helper preserves the audio from
+the first recorded sample. The normal stop uses `AVAudioRecorder.currentTime`
+for Auto-detect and the duration of appended audio buffers for a pinned
+microphone. A stalled input that cannot reach 500 ms within two seconds
+of the stop request ends the take with a recording error.
+
+Once the recorder closes the AAC file, the helper uses AVFoundation to
+decode and resample the complete file to mono 16 kHz PCM16 WAV. The conversion
+applies no gain normalization, silence removal or voice activity detection.
+If preparation fails, the helper logs the error and hands over the original
+M4A. The duration in `recording_ready` comes from the file being handed over.
+Mic tests keep their native recordings for playback. Conversion preserves
+decoded audio. It cannot recover samples lost during capture or AAC encoding.
 
 ## Latency targets
 

@@ -229,31 +229,8 @@ enum RecordingCueSound: String {
     case stop = "record-end"
 }
 
-private final class RecordingCueCompletion: NSObject, NSSoundDelegate {
-    private var completion: (() -> Void)?
-
-    init(completion: @escaping () -> Void) {
-        self.completion = completion
-    }
-
-    func sound(_ sound: NSSound, didFinishPlaying flag: Bool) {
-        finish()
-    }
-
-    func finish() {
-        let completion = completion
-        self.completion = nil
-        completion?()
-    }
-
-    func cancel() {
-        completion = nil
-    }
-}
-
 enum RecordingCuePlayer {
     private static var sounds: [RecordingCueSound: NSSound] = [:]
-    private static var completions: [RecordingCueSound: RecordingCueCompletion] = [:]
 
     /// Loads every cue up front so the first press does not decode an mp3.
     static func preload() {
@@ -262,61 +239,18 @@ enum RecordingCuePlayer {
         }
     }
 
-    /// Plays `cue` and returns its length in seconds, or nil if it did not play.
-    @discardableResult
-    static func play(_ cue: RecordingCueSound) -> TimeInterval? {
+    static func play(_ cue: RecordingCueSound) {
         let sound = sounds[cue] ?? load(cue)
         guard let sound else {
-            return nil
+            return
         }
         sound.stop()
         sound.currentTime = 0
-        return sound.play() ? sound.duration : nil
+        _ = sound.play()
     }
 
-    static func play(_ cue: RecordingCueSound, completion: @escaping () -> Void) {
-        let sound = sounds[cue] ?? load(cue)
-        guard let sound else {
-            completion()
-            return
-        }
-
-        cancel(cue)
-        let delegate = RecordingCueCompletion {
-            sound.delegate = nil
-            completions.removeValue(forKey: cue)
-            completion()
-        }
-        completions[cue] = delegate
-        sound.delegate = delegate
-        sound.currentTime = 0
-        guard sound.play() else {
-            delegate.finish()
-            return
-        }
-
-        // NSSound normally calls its delegate when playback finishes. Keep a
-        // bounded fallback so a broken output route cannot wedge dictation in
-        // the pending state forever.
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(1, sound.duration + 0.5)) {
-            guard completions[cue] === delegate else {
-                return
-            }
-            sound.delegate = nil
-            sound.stop()
-            delegate.finish()
-        }
-    }
-
-    @discardableResult
-    static func cancel(_ cue: RecordingCueSound) -> Bool {
-        let wasWaitingForCompletion = completions.removeValue(forKey: cue) != nil
-        guard let sound = sounds[cue] else {
-            return wasWaitingForCompletion
-        }
-        sound.delegate = nil
-        sound.stop()
-        return wasWaitingForCompletion
+    static func cancel(_ cue: RecordingCueSound) {
+        sounds[cue]?.stop()
     }
 
     private static func load(_ cue: RecordingCueSound) -> NSSound? {
@@ -341,6 +275,107 @@ func audioDurationSeconds(at url: URL) -> Double? {
     return Double(file.length) / file.fileFormat.sampleRate
 }
 
+private enum DictationAudioConversionError: Error {
+    case unsupportedFormat
+    case incompleteAudio
+}
+
+/// The caller owns `directory`. Removing it cancels publication even if the
+/// decoder still has an open file. The original is never modified here.
+func prepareDictationAudio(at source: URL, in directory: URL) -> Result<URL, Error> {
+    let wav = directory.appendingPathComponent("audio.wav")
+    do {
+        try writeDictationWAV(from: source, to: wav)
+        return .success(wav)
+    } catch {
+        try? FileManager.default.removeItem(at: wav)
+        return .failure(error)
+    }
+}
+
+private func writeDictationWAV(from source: URL, to destination: URL) throws {
+    let input = try AVAudioFile(forReading: source)
+    let format = input.processingFormat
+    let channels = Int(format.channelCount)
+    let capacity: AVAudioFrameCount = 4096
+    guard
+        channels > 0,
+        format.sampleRate.isFinite,
+        format.sampleRate > 0,
+        let mono = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: 1),
+        let pcm = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true),
+        let converter = AVAudioConverter(from: mono, to: pcm),
+        let decoded = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity),
+        let mixed = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: capacity),
+        let rendered = AVAudioPCMBuffer(pcmFormat: pcm, frameCapacity: capacity),
+        let inputSamples = decoded.floatChannelData,
+        let monoSamples = mixed.floatChannelData?[0]
+    else {
+        throw DictationAudioConversionError.unsupportedFormat
+    }
+    converter.dither = false
+    let output = try AVAudioFile(
+        forWriting: destination, settings: pcm.settings, commonFormat: .pcmFormatInt16, interleaved: true
+    )
+    var readError: Error?
+    var reachedEnd = false
+    var framesWritten: AVAudioFramePosition = 0
+
+    // Read every frame from the beginning and flush the resampler at EOF.
+    while true {
+        let previousPosition = input.framePosition
+        let wasAtEnd = reachedEnd
+        rendered.frameLength = 0
+        var conversionError: NSError?
+        let result = converter.convert(to: rendered, error: &conversionError) { requested, status in
+            if !reachedEnd {
+                do {
+                    try input.read(into: decoded, frameCount: min(requested, capacity))
+                    if decoded.frameLength > 0 {
+                        status.pointee = .haveData
+                        if channels == 1 { return decoded }
+
+                        // Average the channels at unity for identical inputs.
+                        mixed.frameLength = decoded.frameLength
+                        for frame in 0..<Int(decoded.frameLength) {
+                            var sum: Float = 0
+                            for channel in 0..<channels {
+                                sum += inputSamples[channel][frame]
+                            }
+                            monoSamples[frame] = sum / Float(channels)
+                        }
+                        return mixed
+                    }
+                } catch {
+                    readError = error
+                }
+                reachedEnd = true
+            }
+            status.pointee = .endOfStream
+            return nil
+        }
+        if let readError { throw readError }
+        if let conversionError { throw conversionError }
+        if result == .error { throw DictationAudioConversionError.incompleteAudio }
+        if rendered.frameLength > 0 {
+            try output.write(from: rendered)
+            framesWritten += AVAudioFramePosition(rendered.frameLength)
+        }
+        if result == .endOfStream {
+            guard reachedEnd, framesWritten > 0 else { throw DictationAudioConversionError.incompleteAudio }
+            return
+        }
+        guard rendered.frameLength > 0 || input.framePosition > previousPosition || (!wasAtEnd && reachedEnd) else {
+            throw DictationAudioConversionError.incompleteAudio
+        }
+    }
+}
+
+private func logDictationAudioFallback(_ error: Error) {
+    let details = error as NSError
+    fputs("Dictation audio conversion failed (\(details.domain) \(details.code)). Using the original recording.\n", stderr)
+}
+
 /// AAC 44.1 kHz mono, the default-input dictation format.
 let dictationRecorderSettings: [String: Any] = [
     AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
@@ -349,41 +384,38 @@ let dictationRecorderSettings: [String: Any] = [
     AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
 ]
 
-/// Covers the gap between `record()` returning and the cue reaching the
-/// microphone, so the cue's tail is cut too.
-let startCueTrimMarginSeconds: TimeInterval = 0.03
+private final class CapturedAudioDuration {
+    private let lock = NSLock()
+    private var writtenSeconds: TimeInterval = 0
 
-/// Writes `url` without its first `seconds` to a sibling file and calls back
-/// on main with that file, or nil when nothing should be cut (the take is
-/// barely longer than the cut) or the cut failed. Passthrough keeps the AAC
-/// packets as they are, so the release path pays no re-encoding.
-func trimLeadingAudio(at url: URL, seconds: TimeInterval, completion: @escaping (URL?) -> Void) {
-    let asset = AVURLAsset(url: url)
-    let duration = asset.duration
-    let cut = CMTime(seconds: seconds, preferredTimescale: 44_100)
-    guard
-        duration.isNumeric,
-        CMTimeGetSeconds(duration) > seconds + 0.1,
-        let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough)
-    else {
-        completion(nil)
-        return
+    var seconds: TimeInterval {
+        lock.withLock { writtenSeconds }
     }
-    let outputURL = url.deletingPathExtension()
-        .appendingPathExtension("trimmed")
-        .appendingPathExtension("m4a")
-    try? FileManager.default.removeItem(at: outputURL)
-    export.outputURL = outputURL
-    export.outputFileType = .m4a
-    export.timeRange = CMTimeRange(start: cut, end: duration)
-    export.exportAsynchronously {
-        let completed = export.status == .completed
-        if !completed {
-            try? FileManager.default.removeItem(at: outputURL)
-        }
-        runOnMain {
-            completion(completed ? outputURL : nil)
-        }
+
+    func add(_ seconds: TimeInterval) {
+        lock.withLock { writtenSeconds += seconds }
+    }
+}
+
+struct NormalDictationStop {
+    let recordingInstanceID: UUID
+    let requestedAt: TimeInterval
+
+    enum Action: Equatable {
+        case ignore
+        case wait(TimeInterval)
+        case finish
+        case missingAudio
+    }
+
+    func action(activeInstanceID: UUID?, captured: TimeInterval, now: TimeInterval) -> Action {
+        guard activeInstanceID == recordingInstanceID else { return .ignore }
+        let remainingAudio = 0.5 - (captured.isFinite ? max(0, captured) : 0)
+        if remainingAudio <= 0 { return .finish }
+        // A stalled input must release the take even if it never delivers a buffer.
+        let remainingWait = requestedAt + 2 - now
+        guard remainingWait > 0 else { return .missingAudio }
+        return .wait(min(remainingWait, max(0.02, remainingAudio)))
     }
 }
 
@@ -1602,10 +1634,10 @@ final class SelectedDeviceRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
     private let writer: AVAssetWriter
     private let writerInput: AVAssetWriterInput
     private var didStartWriting = false
-    /// The first written sample's time: the file's time zero. Set on `queue`.
-    private var firstSamplePresentationTime: CMTime?
+    /// Actual appended audio, excluding startup latency and gaps between buffers.
+    /// Main can read this even while the capture queue is inside AVFoundation.
+    private let durationSnapshot = CapturedAudioDuration()
     private var isStopping = false
-    private var finishHandler: ((Error?) -> Void)?
     private let failureHandler: (Error) -> Void
     private let levelHandler: (Float) -> Void
     // Coalesce per-buffer levels to ~25Hz before emitting, matching the
@@ -1664,14 +1696,8 @@ final class SelectedDeviceRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
         session.startRunning()
     }
 
-    /// Now, on the clock that stamps this session's samples.
-    func clockTime() -> CMTime {
-        CMClockGetTime(session.synchronizationClock ?? CMClockGetHostTimeClock())
-    }
-
-    /// When the file starts, on `clockTime()`'s clock; nil before any sample.
-    var firstSampleTime: CMTime? {
-        queue.sync { firstSamplePresentationTime }
+    var capturedDuration: TimeInterval {
+        durationSnapshot.seconds
     }
 
     func stop(_ completion: @escaping (Error?) -> Void) {
@@ -1685,7 +1711,6 @@ final class SelectedDeviceRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
                 return
             }
             isStopping = true
-            finishHandler = completion
             session.stopRunning()
             flushPendingLevel()
             output.setSampleBufferDelegate(nil, queue: nil)
@@ -1702,19 +1727,25 @@ final class SelectedDeviceRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
                     completion(nil)
                     return
                 }
-                let error = writer.status == .failed ? writer.error : nil
-                finishHandler = nil
+                let error = writer.status == .completed
+                    ? nil : (writer.error ?? SelectedDeviceRecorderError.cannotAppendAudio)
                 completion(error)
             }
         }
     }
 
-    func cancel() {
-        queue.sync {
+    func cancel(removingRecording: Bool) {
+        // The controller has already retired this instance. Keep teardown on
+        // its own queue so timeout, discard and shutdown can finish on main.
+        queue.async { [self] in
             isStopping = true
             session.stopRunning()
             output.setSampleBufferDelegate(nil, queue: nil)
             writer.cancelWriting()
+            if removingRecording {
+                // A queued append can open the file after the controller's unlink.
+                try? FileManager.default.removeItem(at: writer.outputURL)
+            }
         }
     }
 
@@ -1733,7 +1764,6 @@ final class SelectedDeviceRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
             }
             let firstSample = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             writer.startSession(atSourceTime: firstSample)
-            firstSamplePresentationTime = firstSample
             didStartWriting = true
         }
 
@@ -1741,6 +1771,11 @@ final class SelectedDeviceRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
         guard writerInput.isReadyForMoreMediaData, writerInput.append(sampleBuffer) else {
             fail(writer.error ?? SelectedDeviceRecorderError.cannotAppendAudio)
             return
+        }
+        if let format = CMSampleBufferGetFormatDescription(sampleBuffer),
+           let sampleRate = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee.mSampleRate,
+           sampleRate > 0 {
+            durationSnapshot.add(Double(CMSampleBufferGetNumSamples(sampleBuffer)) / sampleRate)
         }
     }
 
@@ -1778,7 +1813,6 @@ final class SelectedDeviceRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
         session.stopRunning()
         output.setSampleBufferDelegate(nil, queue: nil)
         writer.cancelWriting()
-        finishHandler = nil
         failureHandler(error)
     }
 }
@@ -2099,8 +2133,10 @@ final class DictationController {
     private var selectedDeviceRecorder: SelectedDeviceRecorder?
     private var autoDetectInputMeter: AutoDetectInputMeter?
     private var recordingURL: URL?
+    private var conversionDirectory: URL?
     private var micTestSampleURL: URL?
     private var micTestStopWorkItem: DispatchWorkItem?
+    private var pendingStop: NormalDictationStop?
     private var recordingPurpose: RecordingPurpose = .dictation
     private var recordingStartedAt: TimeInterval = 0
     private var meteringTimer: DispatchSourceTimer?
@@ -2110,11 +2146,6 @@ final class DictationController {
     private var isFinalizing = false
     private var startPending = false
     private var maxObservedAudioLevel: Float = 0
-    /// Seconds at the start of the current take's file covered by the start
-    /// cue; cut before `recording_ready`. Zero when no cue played.
-    private var startCueTrimSeconds: TimeInterval = 0
-    /// When the start cue ends, on a pinned microphone's sample clock.
-    private var startCueEndClockTime: CMTime?
     private var activeTakeID: String?
     private var cancelledTakeIDs = Set<String>()
     /// Identifies the recorder whose asynchronous callbacks may mutate the
@@ -2231,50 +2262,15 @@ final class DictationController {
         }
     }
 
-    /// Starts capture at once and plays the start cue alongside it. Capture
-    /// no longer waits for the cue (it cost the cue's whole length on every
-    /// press); instead the cue's span is cut from the file when the take
-    /// stops (`finishDictationRecording`), so Clovy's own sound never
-    /// reaches the transcript.
+    /// Starts capture at once and plays the start cue alongside it. The first
+    /// samples may contain speech and must all reach transcription.
     private func beginDictationCapture() {
         startPending = false
         startRecording(purpose: .dictation, durationSeconds: nil)
         guard isListening, recordingPurpose == .dictation else {
             return
         }
-        // Measured on the file's own clock, read just before the cue plays.
-        let fileTime = audioRecorder?.currentTime
-        let clockTime = selectedDeviceRecorder?.clockTime()
-        guard let cueLength = RecordingCuePlayer.play(.start) else {
-            return
-        }
-        if let fileTime {
-            // AVAudioRecorder's file starts at record(): currentTime is how
-            // far into the file the cue begins.
-            startCueTrimSeconds = fileTime + cueLength + startCueTrimMarginSeconds
-        } else if let clockTime {
-            // A pinned microphone's file starts at its first sample, which
-            // may come after the cue started; settled when the take stops.
-            startCueEndClockTime = CMTimeAdd(
-                clockTime,
-                CMTime(seconds: cueLength, preferredTimescale: 44_100)
-            )
-        }
-    }
-
-    /// The pinned-microphone file starts at its first sample: cut only what
-    /// is left of the cue after it, nothing when the cue ended first.
-    private func settleSelectedDeviceCueTrim(firstSampleTime: CMTime?) {
-        guard
-            let cueEnd = startCueEndClockTime,
-            let firstSampleTime,
-            firstSampleTime.isNumeric
-        else {
-            startCueTrimSeconds = 0
-            return
-        }
-        let remaining = CMTimeGetSeconds(CMTimeSubtract(cueEnd, firstSampleTime))
-        startCueTrimSeconds = remaining > 0 ? remaining + startCueTrimMarginSeconds : 0
+        RecordingCuePlayer.play(.start)
     }
 
     func stop(takeID: String? = nil) {
@@ -2303,7 +2299,41 @@ final class DictationController {
             return
         }
 
-        stopActiveRecording()
+        guard pendingStop == nil else { return }
+        guard let recordingInstanceID else {
+            fail(DictationError.missingRecording)
+            return
+        }
+        let stop = NormalDictationStop(
+            recordingInstanceID: recordingInstanceID,
+            requestedAt: ProcessInfo.processInfo.systemUptime
+        )
+        pendingStop = stop
+        completeNormalStop(stop)
+    }
+
+    private func completeNormalStop(_ stop: NormalDictationStop) {
+        let activeInstanceID = pendingStop?.recordingInstanceID == recordingInstanceID && isListening
+            ? recordingInstanceID : nil
+        let captured = activeInstanceID == stop.recordingInstanceID
+            ? (audioRecorder?.currentTime ?? selectedDeviceRecorder?.capturedDuration ?? 0)
+            : 0
+        let action = stop.action(
+            activeInstanceID: activeInstanceID, captured: captured, now: ProcessInfo.processInfo.systemUptime
+        )
+        switch action {
+        case .ignore:
+            return
+        case .wait(let delay):
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.completeNormalStop(stop)
+            }
+        case .finish:
+            pendingStop = nil
+            stopActiveRecording()
+        case .missingAudio:
+            fail(DictationError.missingRecording)
+        }
     }
 
     func toggle(shortcut: String, takeID: String? = nil) {
@@ -2655,7 +2685,7 @@ final class DictationController {
         // Rust ends a take under half a second as no speech without an
         // upload: Whisper invents text for near-empty audio (design D5).
         if let duration = audioDurationSeconds(at: recordingURL) {
-            basePayload["audioDurationSeconds"] = String(format: "%.3f", duration)
+            basePayload["audioDurationSeconds"] = String(duration)
         }
         // No speech classifier before the upload (ditado-rapido D5). The peak
         // level travels along for diagnosis only.
@@ -2730,9 +2760,6 @@ final class DictationController {
                     else {
                         return
                     }
-                    self.settleSelectedDeviceCueTrim(
-                        firstSampleTime: selectedDeviceRecorder.firstSampleTime
-                    )
                     self.selectedDeviceRecorder = nil
                     RecordingCuePlayer.play(.stop)
                     if let error {
@@ -2750,38 +2777,52 @@ final class DictationController {
         finishDictationRecording(recordingInstanceID: recordingInstanceID)
     }
 
-    /// Cuts the start cue's span from a dictation take, then hands the file
-    /// to Rust. A failed cut keeps the whole file: a cue in the audio beats
-    /// losing the take. Mic tests keep their cue (they are played back, not
-    /// transcribed).
+    /// Prepares the whole finalized dictation file off main. Mic tests use
+    /// their original recording for playback.
     private func finishDictationRecording(recordingInstanceID: UUID) {
-        let trimSeconds = startCueTrimSeconds
         guard
             recordingPurpose == .dictation,
-            trimSeconds > 0,
             let recordingURL
         else {
             emitRecordingReady(recordingInstanceID: recordingInstanceID)
             return
         }
-        trimLeadingAudio(at: recordingURL, seconds: trimSeconds) { [weak self] trimmedURL in
-            guard
-                let self,
-                self.recordingInstanceID == recordingInstanceID,
-                self.isFinalizing,
-                self.recordingURL == recordingURL
-            else {
-                // Discarded while cutting: the original went with the take.
-                if let trimmedURL {
-                    try? FileManager.default.removeItem(at: trimmedURL)
+        let takeID = activeTakeID
+        let directory = recordingURL.deletingPathExtension().appendingPathExtension("conversion")
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        } catch {
+            logDictationAudioFallback(error)
+            emitRecordingReady(recordingInstanceID: recordingInstanceID)
+            return
+        }
+        conversionDirectory = directory
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let prepared = prepareDictationAudio(at: recordingURL, in: directory)
+            DispatchQueue.main.async { [weak self] in
+                defer { try? FileManager.default.removeItem(at: directory) }
+                guard
+                    let self,
+                    self.recordingInstanceID == recordingInstanceID,
+                    self.activeTakeID == takeID,
+                    self.isFinalizing,
+                    self.recordingURL == recordingURL,
+                    self.conversionDirectory == directory
+                else {
+                    return
                 }
-                return
+                self.conversionDirectory = nil
+                do {
+                    let temporaryWAV = try prepared.get()
+                    let wav = recordingURL.deletingPathExtension().appendingPathExtension("wav")
+                    try FileManager.default.moveItem(at: temporaryWAV, to: wav)
+                    self.recordingURL = wav
+                    try? FileManager.default.removeItem(at: recordingURL)
+                } catch {
+                    logDictationAudioFallback(error)
+                }
+                self.emitRecordingReady(recordingInstanceID: recordingInstanceID)
             }
-            if let trimmedURL {
-                try? FileManager.default.removeItem(at: recordingURL)
-                self.recordingURL = trimmedURL
-            }
-            self.emitRecordingReady(recordingInstanceID: recordingInstanceID)
         }
     }
 
@@ -2936,16 +2977,9 @@ final class DictationController {
         self.micTestSampleURL = nil
     }
 
-    @discardableResult
-    private func cancelAndResetRecording() -> Bool {
+    private func cancelAndResetRecording() {
         dictationStartGeneration += 1
-        let interruptedStartCue = RecordingCuePlayer.cancel(.start)
-        let wasListening = isListening
         resetRecordingState()
-        if interruptedStartCue {
-            RecordingCuePlayer.play(.stop)
-        }
-        return wasListening
     }
 
     private func resetRecordingState(
@@ -2961,16 +2995,19 @@ final class DictationController {
         recordingInstanceID = nil
         DictationEscapeCancelMonitor.shared.stop()
         maxObservedAudioLevel = 0
-        startCueTrimSeconds = 0
-        startCueEndClockTime = nil
+        pendingStop = nil
         recordingStartedAt = 0
         micTestStopWorkItem?.cancel()
         micTestStopWorkItem = nil
         stopMetering()
         audioRecorder?.stop()
         audioRecorder = nil
-        selectedDeviceRecorder?.cancel()
+        selectedDeviceRecorder?.cancel(removingRecording: !keepRecordingFile)
         selectedDeviceRecorder = nil
+        if let conversionDirectory {
+            try? FileManager.default.removeItem(at: conversionDirectory)
+            self.conversionDirectory = nil
+        }
         if !keepRecordingFile {
             cleanupRecordingFile()
         }
@@ -3392,6 +3429,179 @@ func runLastDictationSelfTests() {
             && !(0xDC00...0xDFFF).contains($0.first!) }, "surrogate boundaries")
     }
     print("Last dictation self-tests: \(count) passed")
+}
+
+private struct AudioConversionSelfTestFailure: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+private func checkAudioConversion(_ condition: Bool, _ message: String) throws {
+    if !condition { throw AudioConversionSelfTestFailure(message: message) }
+}
+
+private struct AudioFixtureMarker {
+    let span: Range<Double>
+    let frequency: Double
+    let amplitude: Double
+}
+
+private func writeAudioFixture(
+    at url: URL,
+    sampleRate: Double,
+    channels: AVAudioChannelCount,
+    duration: Double = 0.7,
+    markers: [AudioFixtureMarker]
+) throws {
+    guard
+        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: channels),
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(duration * sampleRate)),
+        let planes = buffer.floatChannelData
+    else {
+        throw AudioConversionSelfTestFailure(message: "Could not allocate fixture.")
+    }
+    buffer.frameLength = buffer.frameCapacity
+    for frame in 0..<Int(buffer.frameLength) {
+        let time = Double(frame) / sampleRate
+        let value = markers.first { $0.span.contains(time) }.map { marker in
+            marker.amplitude * sin(2 * .pi * marker.frequency * time)
+        } ?? 0
+        for channel in 0..<Int(channels) {
+            // Distinct stereo levels catch a remap that keeps only one channel.
+            let scale = channels == 1 ? 1 : (channel == 0 ? 1.4 : 0.6)
+            planes[channel][frame] = Float(value * scale)
+        }
+    }
+    let settings: [String: Any] = url.pathExtension == "m4a" ? [
+        AVFormatIDKey: kAudioFormatMPEG4AAC,
+        AVSampleRateKey: sampleRate,
+        AVNumberOfChannelsKey: channels,
+        AVEncoderBitRateKey: 128_000,
+    ] : [
+        AVFormatIDKey: kAudioFormatLinearPCM,
+        AVSampleRateKey: sampleRate,
+        AVNumberOfChannelsKey: channels,
+        AVLinearPCMBitDepthKey: 16,
+    ]
+    let file = try AVAudioFile(forWriting: url, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+    try file.write(from: buffer)
+}
+
+/// Check the published byte format independently of the decoder/writer.
+private func readFixtureWAV(_ url: URL) throws -> [Double] {
+    let bytes = [UInt8](try Data(contentsOf: url))
+    func u16(_ i: Int) -> Int { Int(bytes[i]) | Int(bytes[i + 1]) << 8 }
+    func u32(_ i: Int) -> Int { u16(i) | u16(i + 2) << 16 }
+    func tag(_ i: Int) -> String { String(decoding: bytes[i..<(i + 4)], as: UTF8.self) }
+    try checkAudioConversion(bytes.count >= 12, "Incomplete RIFF header.")
+    try checkAudioConversion(tag(0) == "RIFF" && tag(8) == "WAVE" && u32(4) == bytes.count - 8, "Invalid RIFF/WAVE header.")
+    var offset = 12
+    var hasFormat = false
+    var samples: [Double]?
+    while offset + 8 <= bytes.count {
+        let size = u32(offset + 4)
+        let start = offset + 8
+        try checkAudioConversion(size <= bytes.count - start, "Truncated WAV chunk.")
+        switch tag(offset) {
+        case "fmt ":
+            try checkAudioConversion(size >= 16, "Missing WAV format fields.")
+            hasFormat = u16(start) == 1 && u16(start + 2) == 1 && u32(start + 4) == 16_000
+                && u32(start + 8) == 32_000 && u16(start + 12) == 2 && u16(start + 14) == 16
+        case "data":
+            try checkAudioConversion(size > 0 && size.isMultiple(of: 2), "Invalid PCM16 payload size.")
+            samples = stride(from: start, to: start + size, by: 2).map {
+                Double(Int16(bitPattern: UInt16(u16($0)))) / 32768
+            }
+        default:
+            break
+        }
+        offset = start + size + (size % 2)
+    }
+    try checkAudioConversion(hasFormat && samples != nil, "Expected mono 16 kHz PCM16.")
+    return samples ?? []
+}
+
+private func verifyAudioFixture(_ samples: [Double], marker: AudioFixtureMarker, tolerance: Double) throws {
+    let first = Int((marker.span.lowerBound + 0.02) * 16_000)
+    let end = Int((marker.span.upperBound - 0.02) * 16_000)
+    let window = samples[first..<end]
+    let rms = sqrt(window.reduce(0) { $0 + $1 * $1 } / Double(window.count))
+    let crossings = zip(window, window.dropFirst()).filter { pair in pair.0 <= 0 && pair.1 > 0 }.count
+    let frequency = Double(crossings) * 16_000 / Double(window.count)
+    try checkAudioConversion(abs(rms * sqrt(2) - marker.amplitude) < tolerance,
+                             "Marker at \(marker.span.lowerBound)s has incorrect amplitude (RMS \(rms)).")
+    try checkAudioConversion(abs(frequency - marker.frequency) < 25,
+                             "Marker at \(marker.span.lowerBound)s has incorrect frequency (\(frequency) Hz).")
+}
+
+private func runAudioConversionSelfTest() throws {
+    let fm = FileManager.default
+    let directory = fm.temporaryDirectory.appendingPathComponent("clovy-audio-self-test-\(UUID().uuidString)")
+    try fm.createDirectory(at: directory, withIntermediateDirectories: false)
+    defer { try? fm.removeItem(at: directory) }
+    let output = directory.appendingPathComponent("conversion")
+    try fm.createDirectory(at: output, withIntermediateDirectories: false)
+    let markers = [
+        AudioFixtureMarker(span: 0.05..<0.25, frequency: 620, amplitude: 0.22),
+        AudioFixtureMarker(span: 0.31..<0.45, frequency: 1030, amplitude: 0.32),
+        AudioFixtureMarker(span: 0.55..<0.69, frequency: 740, amplitude: 0.26),
+    ]
+
+    for ext in ["wav", "m4a"] {
+        for rate: Double in [44_100, 48_000] {
+            for channels: AVAudioChannelCount in [1, 2] {
+                let label = "\(Int(rate)) Hz, \(channels) channel(s), \(ext)"
+                let input = directory.appendingPathComponent("fixture-\(Int(rate))-\(channels).\(ext)")
+                try writeAudioFixture(at: input, sampleRate: rate, channels: channels, markers: markers)
+                let original = try Data(contentsOf: input)
+                let wav = try prepareDictationAudio(at: input, in: output).get()
+                let samples = try readFixtureWAV(wav)
+                // An AAC encoder/decoder can differ by up to one 1024-frame packet.
+                let tolerance = ext == "m4a" ? 400 : 2
+                try checkAudioConversion(abs(samples.count - 11_200) <= tolerance, "Wrong 700 ms fixture length for \(label): \(samples.count) frames.")
+                for marker in markers {
+                    try verifyAudioFixture(samples, marker: marker, tolerance: ext == "m4a" ? 0.045 : 0.008)
+                }
+                let decodedSource = try Data(contentsOf: input)
+                try checkAudioConversion(decodedSource == original, "Conversion modified \(label) source.")
+                try fm.removeItem(at: wav)
+                print("Passed \(label): \(samples.count) PCM16 frames and all three markers.")
+            }
+        }
+    }
+
+    let quiet = directory.appendingPathComponent("silence.wav")
+    try writeAudioFixture(at: quiet, sampleRate: 48_000, channels: 1, duration: 0.5, markers: [])
+    let silence = try prepareDictationAudio(at: quiet, in: output).get()
+    let silentSamples = try readFixtureWAV(silence)
+    try checkAudioConversion(silentSamples.count == 8_000 && silentSamples.allSatisfy { $0 == 0 },
+                             "500 ms of digital silence must stay intact.")
+    try fm.removeItem(at: silence)
+
+    let invalid = directory.appendingPathComponent("invalid.m4a")
+    let invalidBytes = Data("invalid input".utf8)
+    try invalidBytes.write(to: invalid)
+    let missingDirectory = directory.appendingPathComponent("unavailable")
+    for (input, destination) in [(invalid, output), (quiet, missingDirectory)] {
+        let original = try Data(contentsOf: input)
+        if case .success = prepareDictationAudio(at: input, in: destination) {
+            throw AudioConversionSelfTestFailure(message: "Invalid input or unavailable output unexpectedly converted.")
+        }
+        let unchanged = try Data(contentsOf: input)
+        try checkAudioConversion(unchanged == original && !fm.fileExists(atPath: destination.appendingPathComponent("audio.wav").path),
+                                 "Conversion failure must leave the original and no partial WAV.")
+    }
+    print("Passed 500 ms of silence and both original-file fallback cases.")
+}
+
+if CommandLine.arguments.contains("--self-test-audio-conversion") {
+    do {
+        try runAudioConversionSelfTest()
+        exit(0)
+    } catch {
+        fputs("Dictation audio conversion self-test failed: \(error.localizedDescription)\n", stderr)
+        exit(1)
+    }
 }
 
 if CommandLine.arguments.contains("--self-test-last-dictation") {

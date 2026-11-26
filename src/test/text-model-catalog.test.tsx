@@ -142,6 +142,17 @@ it("refreshes the persisted audio selection after Settings was reopened during i
   });
   await waitFor(() => expect(provider()).toHaveValue("local"));
 });
+
+it("hydrates the saved Turbo choice each time Settings opens without saving the fresh default", async () => {
+  const model = () => screen.getByRole("combobox", { name: "Model" });
+  const first = renderSettings();
+  await waitFor(() => expect(model()).toHaveValue("whisper-large-v3-turbo"));
+  first.unmount();
+  renderSettings();
+  await waitFor(() => expect(model()).toHaveValue("whisper-large-v3-turbo"));
+  expect(mocks.invoke.mock.calls.some(([command]) => command === "set_provider_model")).toBe(false);
+});
+
 afterEach(() => {
   cleanup();
   setCurrentDataPartitionName("default");

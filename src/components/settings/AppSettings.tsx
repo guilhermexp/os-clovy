@@ -1,4 +1,7 @@
-import { LocalTranscriptionSettings } from "./LocalTranscriptionSettings";
+import {
+  DEFAULT_GROQ_TRANSCRIPTION_MODEL,
+  LocalTranscriptionSettings,
+} from "./LocalTranscriptionSettings";
 import { listen } from "@tauri-apps/api/event";
 import { IconCheckmark2Small } from "central-icons/IconCheckmark2Small";
 import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
@@ -256,7 +259,7 @@ const WINDOWS_DEFAULT_SHORTCUTS: Record<DictationShortcutKind, DictationShortcut
 const DEFAULT_PROVIDER_MODELS: ProviderModelSettingsDto = {
   transcriptionProvider: "groq",
   generationProvider: "openrouter",
-  transcriptionModel: "whisper-large-v3-turbo",
+  transcriptionModel: DEFAULT_GROQ_TRANSCRIPTION_MODEL,
   // The factory default text model: DEFAULT_GENERATION_MODEL in the Rust
   // providers module, mirrored by the leading Suggested pick.
   generationModel: DEFAULT_GENERATION_SUGGESTION_ID,
@@ -1897,7 +1900,7 @@ export function AppSettings({
                             ? {
                                 ...settings,
                                 transcriptionProvider: "groq",
-                                transcriptionModel: "whisper-large-v3-turbo",
+                                transcriptionModel: DEFAULT_GROQ_TRANSCRIPTION_MODEL,
                               }
                             : settings;
                         setProviderSettings(afterRemoval);

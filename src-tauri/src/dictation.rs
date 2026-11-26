@@ -11531,6 +11531,7 @@ mod tests {
             (Some(0.2), false),
             (Some(0.49), false),
             (Some(0.5), true),
+            (Some(0.7), true),
             (Some(3.0), true),
             (None, true),
         ] {

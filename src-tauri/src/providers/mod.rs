@@ -37,13 +37,13 @@ use tauri::{AppHandle, Manager, State};
 pub const PROVIDER_GROQ: &str = "groq";
 pub const PROVIDER_OPENROUTER: &str = "openrouter";
 pub const PROVIDER_LOCAL: &str = "local";
-/// Groq Whisper default: multilingual and the lowest price per audio hour.
-pub const DEFAULT_TRANSCRIPTION_MODEL: &str = "whisper-large-v3-turbo";
+/// Whisper model for a fresh or missing Groq transcription selection.
+pub const DEFAULT_TRANSCRIPTION_MODEL: &str = "whisper-large-v3";
 /// The Groq Whisper models Clovy offers for dictation and notes (Groq
 /// speech-to-text docs). A persisted transcription model outside this set,
 /// such as an id saved before the Groq cutover, loads as the default so the
 /// next recording always uses a supported transcription model.
-pub const KNOWN_TRANSCRIPTION_MODELS: &[&str] = &[DEFAULT_TRANSCRIPTION_MODEL, "whisper-large-v3"];
+pub const KNOWN_TRANSCRIPTION_MODELS: &[&str] = &["whisper-large-v3-turbo", "whisper-large-v3"];
 pub const DEFAULT_GENERATION_MODEL: &str = "z-ai/glm-5.2";
 pub const LEGACY_AUTO_GENERATION_MODEL: &str = "open-software/auto";
 /// Text ids saved before the OpenRouter cutover with matching OpenRouter ids. Settings migrate through this table once (see
@@ -1883,6 +1883,48 @@ mod tests {
             provider_settings_path_from_config_dir(isolated_config_dir),
             PathBuf::from("/tmp/dev.guilhermexp.clovy-dev/provider-settings.json")
         );
+    }
+
+    #[test]
+    fn groq_settings_default_to_large_v3_for_fresh_and_missing_model() {
+        assert_eq!(default_settings().transcription_model, "whisper-large-v3");
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let (loaded, _, _) = settings_from_json(r#"{"transcriptionProvider":"groq"}"#, &store)
+            .expect("load settings without a model");
+        assert_eq!(loaded.transcription_model, "whisper-large-v3");
+    }
+
+    #[test]
+    fn saved_groq_models_survive_global_and_profile_round_trips() {
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        for model in ["whisper-large-v3", "whisper-large-v3-turbo"] {
+            let raw = serde_json::json!({
+                "transcriptionProvider": "groq",
+                "transcriptionModel": model,
+                "profileOverrides": {
+                    "explicit": { "transcriptionProvider": "groq", "transcriptionModel": model },
+                    "inherited": { "transcriptionModel": model },
+                },
+            })
+            .to_string();
+            let (loaded, _, _) = settings_from_json(&raw, &store).expect("load saved settings");
+            let saved = serde_json::to_string(&loaded).expect("serialize loaded settings");
+            let (reloaded, _, _) =
+                settings_from_json(&saved, &store).expect("reload saved settings");
+            assert_eq!(reloaded.transcription_model, model);
+            for profile in ["explicit", "inherited"] {
+                assert_eq!(
+                    reloaded.profile_overrides[profile]
+                        .transcription_model
+                        .as_deref(),
+                    Some(model)
+                );
+                assert_eq!(
+                    effective_settings_for_profile(&reloaded, profile).transcription_model,
+                    model
+                );
+            }
+        }
     }
 
     #[test]

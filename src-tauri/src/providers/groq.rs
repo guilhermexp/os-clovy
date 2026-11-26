@@ -422,6 +422,7 @@ pub(crate) async fn dictate_transcribe_via(
     // Verbose segments let dictation discard Whisper's no-speech guesses.
     let mut form = Form::new()
         .text("model", model)
+        .text("temperature", "0")
         .text("response_format", "verbose_json")
         .part("file", audio);
     if let Some(context) = context {

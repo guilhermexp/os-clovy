@@ -96,3 +96,10 @@ The missing-key server fallback and shared-server prompt source are superseded f
 on CLI engines and Clovy tools remain local through MCP. The server is removed,
 not replaced or deployed with a breaking contract. Earlier decisions above
 remain as historical records; current behavior follows ADR-0073 and ADR-0072.
+
+## Addendum (2026-11-26): dictation request temperature and Groq default
+
+Dictation sends `temperature=0` explicitly alongside `verbose_json`. The
+Groq default for fresh or missing transcription model selections is
+`whisper-large-v3`. Existing valid selections, including
+`whisper-large-v3-turbo`, retain their saved model. See [Dictation](../dictation.md).
