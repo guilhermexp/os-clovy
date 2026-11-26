@@ -151,3 +151,12 @@ The missing-key server fallback, server prompt source and Auto exception are sup
 on CLI engines and Clovy tools remain local through MCP. The server is removed,
 not replaced or deployed with a breaking contract. Earlier decisions above
 remain as historical records; current behavior follows ADR-0073 and ADR-0072.
+
+## Addendum - 2026-11-26: preserve historical model identities
+
+The v1 model-free fingerprint remains permanently associated with
+`whisper-large-v3-turbo`, the historical default.
+`LEGACY_NOTE_TRANSCRIPTION_FINGERPRINT_MODEL` preserves those job identities
+independently of the current factory default. `whisper-large-v3` keeps its
+model-qualified identity; changing defaults must neither reuse another
+model's certified transcript nor invalidate completed Turbo jobs.

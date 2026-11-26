@@ -190,6 +190,9 @@ build scripts in `pnpm-workspace.yaml` — live in
   and do not "fix" the tests.
 - **Rust tests:** `pnpm test:rust` (src-tauri).
 - macOS CI builds the ARM64 Local transcription helper in release mode and smoke-tests its JSON protocol without models before the Rust checks.
+- For a focused dictation audio failure, use `desktop.yml` with
+  `dictation_audio_only=true`; see [macOS dictation audio diagnosis](docs/development.md#macos-dictation-audio-diagnosis).
+  This diagnostic run does not replace the full macOS checks.
 - **Windows native activity tests:** clipboard fixtures must run in a child
   process with a private window station/desktop, never the console clipboard.
   The installed-package icon test is ignored by default and requires Calculator
