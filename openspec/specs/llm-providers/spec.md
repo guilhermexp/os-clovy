@@ -60,7 +60,7 @@ O sistema SHALL oferecer, para cada provedor, um teste de conexão que executa u
 - Test: unit — validação de seleção por nível de capacidade
 
 ### Requirement: Seleção de provedor por uso
-O sistema SHALL permitir escolher o provedor separadamente para: chat/agente, geração de notas, limpeza de ditado, transcrição de áudio e recursos de atividade (relatórios, resumo do dia, resumo de sessões de agentes). O chat MUST aceitar só motores CLI. As notas MUST aceitar CLI, endpoint cadastrado ou OpenRouter com a chave do usuário. A limpeza de ditado usa a OpenRouter. A transcrição MUST aceitar Groq ou OpenRouter (com a chave do próprio provedor), ou Local (um dos quatro modelos instalados e compatíveis na máquina); o padrão é Groq. Nenhum uso MUST passar pelo Clovy API. Para recursos de atividade, o padrão MUST ser "nenhum", e sem provedor escolhido esses recursos ficam desligados.
+O Clovy SHALL separar provedores de rotinas, notas, ditado, áudio e Atividade. Rotinas usam CLI; notas aceitam CLI, endpoint ou OpenRouter; cleanup usa OpenRouter; áudio aceita Groq (padrão), OpenRouter ou Local (quatro modelos instalados compatíveis). APIs usam chave própria e MUST NOT passar pelo Clovy API. Atividade começa sem provedor e mantém IA desligada sem seleção. Chat interno e seu seletor não existem.
 
 #### Scenario: Atividade sem provedor
 - **WHEN** nenhum provedor de atividade foi escolhido e chega a hora de gerar o resumo do dia
