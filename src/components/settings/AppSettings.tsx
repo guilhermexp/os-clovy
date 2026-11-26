@@ -36,6 +36,7 @@ import {
   setDictationHudPlacement,
   setDictationLanguage,
   setDictationMicrophone,
+  setDictationReduceSystemVolume,
   setDictationShortcut,
   setDictationStyle,
   setLiveTranscription,
@@ -116,7 +117,11 @@ import { ConnectorsSection } from "./ConnectorsSection";
 import { DictionarySettingsSection } from "./DictionarySettingsSection";
 import { MemorySettingsSection } from "./MemorySettingsSection";
 import { MicTestControl, type MicTestState } from "./MicTestControl";
-import { DictationCleanupRow, StyleSettingsSection } from "./StyleSettingsSection";
+import {
+  DictationCleanupRow,
+  DictationPreferenceRow,
+  StyleSettingsSection,
+} from "./StyleSettingsSection";
 import { ActivitySettingsSection } from "./ActivitySettingsSection";
 import { activityStatus } from "../../lib/activity-capture";
 import {
@@ -227,6 +232,7 @@ const DEFAULT_SETTINGS: DictationSettingsDto = {
   style: "standard",
   language: undefined,
   cleanupEnabled: false,
+  reduceSystemVolume: false,
   cleanupModel: "nvidia/nemotron-3-nano-30b-a3b",
   hudPlacement: "bottom",
 };
@@ -380,7 +386,10 @@ export function AppSettings({
   );
   const dictationSettingsSession = useRef<{ saving: boolean }>();
   const [savingDictationPreference, setSavingDictationPreference] = useState(false);
-  const [dictationPreferenceError, setDictationPreferenceError] = useState<string>();
+  const [dictationPreferenceError, setDictationPreferenceError] = useState<{
+    field: keyof DictationSettingsDto;
+    message: string;
+  }>();
   const [providerSettings, setProviderSettings] =
     useState<ProviderModelSettingsDto>(DEFAULT_PROVIDER_MODELS);
   const [effectiveProviderSettings, setEffectiveProviderSettings] =
@@ -898,7 +907,12 @@ export function AppSettings({
   }
 
   async function saveDictationPreference<
-    Field extends "cleanupEnabled" | "cleanupModel" | "style" | "hudPlacement",
+    Field extends
+      | "cleanupEnabled"
+      | "cleanupModel"
+      | "style"
+      | "hudPlacement"
+      | "reduceSystemVolume",
   >(field: Field, save: () => Promise<Pick<DictationSettingsDto, Field>>) {
     const session = dictationSettingsSession.current;
     if (!session || session.saving || dictationReadStatus !== "ready") return;
@@ -912,7 +926,7 @@ export function AppSettings({
       setConfirmedSettings((current) => ({ ...current, [field]: next[field] }));
     } catch (error) {
       if (dictationSettingsSession.current === session) {
-        setDictationPreferenceError(messageFromError(error));
+        setDictationPreferenceError({ field, message: messageFromError(error) });
       }
     } finally {
       session.saving = false;
@@ -1201,7 +1215,10 @@ export function AppSettings({
     enabled: dictationReadStatus === "ready" ? settings.cleanupEnabled : undefined,
     readFailed: dictationReadStatus === "error",
     saving: savingDictationPreference,
-    error: dictationPreferenceError,
+    error:
+      dictationPreferenceError?.field === "reduceSystemVolume"
+        ? undefined
+        : dictationPreferenceError?.message,
     onToggle: (enabled: boolean) =>
       void saveDictationPreference("cleanupEnabled", () => setDictationCleanup(enabled)),
   };
@@ -1673,6 +1690,35 @@ export function AppSettings({
                 )
               }
             />
+
+            {capabilities.platform === "macos" && dictationReadStatus === "ready" ? (
+              <section className="settings-group" aria-labelledby="dictation-microphone-heading">
+                <h2 id="dictation-microphone-heading" className="settings-group-heading">
+                  {t("settings.audio.microphone")}
+                </h2>
+                <div className="settings-card">
+                  <div className="settings-rows">
+                    <DictationPreferenceRow
+                      titleKey="settings.dictation.reduceSystemVolume"
+                      descriptionKey="settings.dictation.reduceSystemVolumeDescription"
+                      enabled={settings.reduceSystemVolume}
+                      readFailed={false}
+                      saving={savingDictationPreference}
+                      error={
+                        dictationPreferenceError?.field === "reduceSystemVolume"
+                          ? dictationPreferenceError.message
+                          : undefined
+                      }
+                      onToggle={(enabled) =>
+                        void saveDictationPreference("reduceSystemVolume", () =>
+                          setDictationReduceSystemVolume(enabled),
+                        )
+                      }
+                    />
+                  </div>
+                </div>
+              </section>
+            ) : null}
 
             <DictionarySettingsSection />
           </>

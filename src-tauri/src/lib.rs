@@ -35,6 +35,8 @@ mod credentials;
 pub mod day_intelligence;
 pub mod db;
 pub mod dictation;
+#[cfg(any(target_os = "macos", test))]
+mod dictation_output_duck;
 pub mod domain;
 pub mod experimental_settings;
 pub mod feature_flags;
@@ -323,6 +325,7 @@ pub fn run() {
             dictation::set_dictation_style,
             dictation::set_dictation_language,
             dictation::set_dictation_cleanup,
+            dictation::set_dictation_reduce_system_volume,
             dictation::set_dictation_hud_placement,
             dictation::dictation_hud_start_drag,
             dictation::dictation_helper_command,

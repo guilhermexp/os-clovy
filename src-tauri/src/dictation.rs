@@ -1,5 +1,7 @@
 #[cfg(target_os = "windows")]
 use crate::audio::turns::normalize_wav_for_transcription;
+#[cfg(target_os = "macos")]
+use crate::dictation_output_duck::{self, Executor as DictationOutputDuck};
 use crate::domain::{
     processing::{build_transcription_dictionary, TranscriptionDictionary},
     types::{AppError, ListDictationHistoryResponse},
@@ -19,7 +21,7 @@ use std::{
     path::PathBuf,
     process::{Child, ChildStdin, Stdio},
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
         Arc, Mutex, OnceLock,
     },
     thread,
@@ -137,6 +139,7 @@ static SETTINGS_CACHE: OnceLock<Mutex<DictationSettings>> = OnceLock::new();
 static DICTATION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub struct HelperProcess {
+    generation: u64,
     child: Child,
     stdin: ChildStdin,
 }
@@ -150,6 +153,7 @@ pub struct HelperState {
     agent_take: Mutex<Option<AgentDictationTake>>,
     agent_changed: tokio::sync::Notify,
     process: Mutex<Option<HelperProcess>>,
+    next_generation: AtomicU64,
     /// One composer request registered while the main-window editor owns
     /// focus. A matching helper-confirmed recording start consumes it.
     composer_registration: Mutex<Option<ComposerDeliveryRegistration>>,
@@ -167,6 +171,7 @@ impl Default for HelperState {
             agent_take: Mutex::new(None),
             agent_changed: tokio::sync::Notify::new(),
             process: Mutex::new(None),
+            next_generation: AtomicU64::new(0),
             composer_registration: Mutex::new(None),
             shutting_down: AtomicBool::new(false),
             respawn_failures: AtomicU32::new(0),
@@ -1210,6 +1215,7 @@ pub struct DictationSettings {
     pub language: Option<String>,
     /// Off by default: the Whisper transcript is pasted with no LLM call.
     pub cleanup_enabled: bool,
+    pub reduce_system_volume: bool,
     /// OpenRouter model id for the cleanup chat completion.
     pub cleanup_model: String,
     /// Records the one-time move to optional cleanup (ditado-rapido D1):
@@ -1235,6 +1241,7 @@ impl DictationSettings {
             hud_placement: DictationHudPlacement::default(),
             language: None,
             cleanup_enabled: false,
+            reduce_system_volume: false,
             cleanup_model: DEFAULT_DICTATION_CLEANUP_MODEL.to_string(),
             cleanup_migrated: true,
         }
@@ -1294,6 +1301,8 @@ impl<'de> Deserialize<'de> for DictationSettings {
             hud_placement: Option<DictationHudPlacement>,
             language: Option<String>,
             cleanup_enabled: Option<bool>,
+            #[serde(default)]
+            reduce_system_volume: bool,
             cleanup_model: Option<String>,
             cleanup_migrated: Option<bool>,
         }
@@ -1308,6 +1317,10 @@ impl<'de> Deserialize<'de> for DictationSettings {
         if value.get("shortcut").is_some() || value.get("activationMode").is_some() {
             return Ok(Self {
                 microphone,
+                reduce_system_volume: value
+                    .get("reduceSystemVolume")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or_default(),
                 ..Self::default()
             });
         }
@@ -1334,6 +1347,7 @@ impl<'de> Deserialize<'de> for DictationSettings {
             hud_placement: settings.hud_placement.unwrap_or_default(),
             language: normalize_language(settings.language),
             cleanup_enabled: settings.cleanup_enabled.unwrap_or(false),
+            reduce_system_volume: settings.reduce_system_volume,
             cleanup_model: settings
                 .cleanup_model
                 .and_then(|model| validate_dictation_cleanup_model(&model).ok())
@@ -2573,6 +2587,70 @@ fn update_dictation_cleanup(
 }
 
 #[tauri::command]
+pub fn set_dictation_reduce_system_volume(
+    _app: AppHandle,
+    state: State<'_, DictationSettingsState>,
+    enabled: bool,
+) -> Result<DictationSettings, AppError> {
+    update_dictation_reduce_system_volume(&state, enabled, |_enabled| {
+        #[cfg(target_os = "macos")]
+        if let Some(output) = _app.try_state::<DictationOutputDuck>() {
+            output.set_enabled(_enabled);
+        }
+    })
+}
+
+fn update_dictation_reduce_system_volume(
+    state: &DictationSettingsState,
+    enabled: bool,
+    publish: impl FnOnce(bool),
+) -> Result<DictationSettings, AppError> {
+    update_settings_with_publish(
+        state,
+        |settings| settings.reduce_system_volume = enabled,
+        save_dictation_reduce_system_volume,
+        |settings| publish(settings.reduce_system_volume),
+    )
+}
+
+fn save_dictation_reduce_system_volume(
+    state: &DictationSettingsState,
+    settings: &DictationSettings,
+) -> Result<(), AppError> {
+    fn save_error(error: impl std::fmt::Display) -> AppError {
+        AppError::new("dictation_settings_save_failed", error.to_string())
+    }
+
+    // Update only this preference, including when the file contains fields
+    // from a newer build. A failed write leaves the original file intact.
+    let mut snapshot: serde_json::Value = match fs::read(&state.path) {
+        Ok(content) => serde_json::from_slice(&content).map_err(save_error)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::to_value(settings).map_err(save_error)?
+        }
+        Err(error) => return Err(save_error(error)),
+    };
+    let fields = snapshot
+        .as_object_mut()
+        .ok_or_else(|| save_error("Dictation settings must be a JSON object."))?;
+    fields.insert(
+        "reduceSystemVolume".into(),
+        settings.reduce_system_volume.into(),
+    );
+
+    let parent = state
+        .path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    fs::create_dir_all(parent).map_err(save_error)?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(save_error)?;
+    serde_json::to_writer_pretty(staged.as_file_mut(), &snapshot).map_err(save_error)?;
+    staged.persist(&state.path).map_err(save_error)?;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn set_dictation_language(
     state: State<'_, DictationSettingsState>,
     language: Option<String>,
@@ -3660,6 +3738,10 @@ fn spawn_hud_hover_thread(app: AppHandle) {
 }
 
 pub fn stop_helper(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let output_restore = app
+        .try_state::<DictationOutputDuck>()
+        .map(|output| output.shutdown());
     cancel_current_dictation_take(app);
     let state = app.state::<HelperState>();
     // Mark the teardown as intentional before killing so the supervisor thread
@@ -3694,6 +3776,10 @@ pub fn stop_helper(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     if !reap_current_owned_helper_without_process_lock(app) {
         tracing::warn!("dictation helper shutdown fallback could not confirm the helper exited");
+    }
+    #[cfg(target_os = "macos")]
+    if output_restore.is_some_and(|restore| !restore.wait(dictation_output_duck::RESTORE_TIMEOUT)) {
+        tracing::warn!("dictation shutdown could not confirm restored output volume");
     }
 }
 
@@ -4496,6 +4582,13 @@ fn manage_settings(app: &AppHandle) {
     let path = settings_path(app).unwrap_or_else(|| PathBuf::from("dictation-settings.json"));
     let mut settings = load_settings(app);
     let migrated = migrate_dictation_cleanup(&mut settings);
+    #[cfg(target_os = "macos")]
+    match dictation_output_duck::start(settings.reduce_system_volume) {
+        Ok(output) => {
+            app.manage(output);
+        }
+        Err(error) => tracing::warn!(%error, "could not start dictation output volume executor"),
+    }
     replace_current_settings(settings.clone());
     let state = DictationSettingsState {
         path,
@@ -4545,15 +4638,27 @@ fn update_settings(
     state: &DictationSettingsState,
     update: impl FnOnce(&mut DictationSettings),
 ) -> Result<DictationSettings, AppError> {
+    update_settings_with_publish(state, update, save_settings, |_| {})
+}
+
+fn update_settings_with_publish(
+    state: &DictationSettingsState,
+    update: impl FnOnce(&mut DictationSettings),
+    save: impl FnOnce(&DictationSettingsState, &DictationSettings) -> Result<(), AppError>,
+    publish: impl FnOnce(&DictationSettings),
+) -> Result<DictationSettings, AppError> {
     let mut settings = state
         .settings
         .lock()
         .map_err(|_| AppError::new("dictation_settings_unavailable", "Settings lock failed."))?;
     let mut candidate = settings.clone();
     update(&mut candidate);
-    save_settings(state, &candidate)?;
+    save(state, &candidate)?;
     *settings = candidate.clone();
     replace_current_settings(candidate.clone());
+    // Order runtime intent with concurrent writes without doing any HAL work
+    // under the settings lock.
+    publish(&candidate);
     Ok(candidate)
 }
 
@@ -5430,18 +5535,27 @@ fn spawn_helper(app: &AppHandle) -> Result<HelperProcess, AppError> {
     // Recorded before handing stdout to the reader so the supervisor can tell a
     // healthy helper (ran a while, then died) from a crash loop.
     let spawn_instant = Instant::now();
+    let generation = app
+        .state::<HelperState>()
+        .next_generation
+        .fetch_add(1, Ordering::Relaxed)
+        + 1;
+    #[cfg(target_os = "macos")]
+    if let Some(output) = app.try_state::<DictationOutputDuck>() {
+        output.helper_started(generation);
+    }
 
     let output_app = app.clone();
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(Result::ok) {
-            handle_helper_event_line(&output_app, line);
+            handle_helper_event_line(&output_app, generation, line);
         }
         // The helper's event stream lives for the whole process lifetime, so
         // stdout closing means the helper exited (crash, SIGKILL after an
         // update swaps the bundle, or an intentional stop). Hand off to the
         // supervisor to reap it and decide whether to respawn.
-        supervise_helper_exit(&output_app, spawn_instant);
+        supervise_helper_exit(&output_app, generation, spawn_instant);
     });
 
     let error_app = app.clone();
@@ -5452,7 +5566,11 @@ fn spawn_helper(app: &AppHandle) -> Result<HelperProcess, AppError> {
         }
     });
 
-    Ok(HelperProcess { child, stdin })
+    Ok(HelperProcess {
+        generation,
+        child,
+        stdin,
+    })
 }
 
 /// How many consecutive rapid respawns we attempt before giving up and showing
@@ -5561,7 +5679,12 @@ fn supervise_initial_helper_start(app: &AppHandle) {
 /// exit was an intentional shutdown or the retry cap is exhausted. A successful
 /// respawn re-applies settings and re-arms the hotkey, and its own reader thread
 /// takes over supervision, so this thread simply returns.
-fn supervise_helper_exit(app: &AppHandle, spawn_instant: Instant) {
+fn supervise_helper_exit(app: &AppHandle, generation: u64, spawn_instant: Instant) {
+    #[cfg(target_os = "macos")]
+    if let Some(output) = app.try_state::<DictationOutputDuck>() {
+        output.helper_exited(generation);
+    }
+
     // A helper that dies mid-listening emits no terminal event, so restore
     // any ducked meeting mic here — the crash path must not swallow the rest
     // of the meeting's mic track.
@@ -5574,7 +5697,7 @@ fn supervise_helper_exit(app: &AppHandle, spawn_instant: Instant) {
     // Reap the exited child so it does not linger as a zombie, and clear the
     // stale handle so commands correctly see the helper as unavailable while
     // it is down.
-    if !reap_exited_helper(&state) {
+    if !reap_exited_helper(&state, generation) {
         return;
     }
     reset_shortcut_activation(app);
@@ -5677,8 +5800,11 @@ fn decide_and_record_respawn(
     }
 }
 
-fn reap_exited_helper(state: &HelperState) -> bool {
+fn reap_exited_helper(state: &HelperState, generation: u64) -> bool {
     if let Ok(mut guard) = state.process.lock() {
+        if guard.as_ref().map(|process| process.generation) != Some(generation) {
+            return false;
+        }
         if let Some(process) = guard.take() {
             let _ = crate::shutdown::terminate_child(
                 process.child,
@@ -5733,7 +5859,7 @@ const HELPER_SHUTDOWN_MUTEX_TIMEOUT: Duration = Duration::from_millis(250);
 /// deadline may still cut off a wedged finalize; that trades the incomplete
 /// current artifact for a relaunch that cannot be held hostage by the helper.
 fn abandon_helper(helper: HelperProcess) {
-    let HelperProcess { child, stdin } = helper;
+    let HelperProcess { child, stdin, .. } = helper;
     let helper_pid = child.id();
     send_helper_shutdown_nonblocking(stdin);
     let outcome =
@@ -5813,7 +5939,7 @@ fn emit_helper_unavailable(app: &AppHandle, reason: &str, message: &str) {
     emit_dictation_event_value(app, event);
 }
 
-fn handle_helper_event_line(app: &AppHandle, line: String) {
+fn handle_helper_event_line(app: &AppHandle, _generation: u64, line: String) {
     let mut event = serde_json::from_str::<serde_json::Value>(&line).ok();
     let event_type = event
         .as_ref()
@@ -5945,6 +6071,19 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
         return;
     }
 
+    #[cfg(target_os = "macos")]
+    let output = app.try_state::<DictationOutputDuck>();
+    #[cfg(target_os = "macos")]
+    if let (Some(output), Some(kind), Some(id)) = (
+        output.as_ref(),
+        event_type,
+        event.as_ref().and_then(dictation_take_id_from_event),
+    ) {
+        // The bundled helper tags every capture event. An untagged or
+        // EmitOnly outcome has no authority over the system output.
+        output.event(_generation, kind, id);
+    }
+
     if matches!(
         event_type,
         Some("hotkey_trigger_ready" | "hotkey_trigger_unavailable")
@@ -6022,8 +6161,23 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
                         .unwrap_or(DictationFinalizedTake::Stale);
                     match finalized_take {
                         DictationFinalizedTake::Start(take) => {
+                            #[cfg(target_os = "macos")]
+                            let output_restore =
+                                output.as_ref().map(|output| output.wait_until_reconciled());
                             let app = app.clone();
                             tauri::async_runtime::spawn(async move {
+                                #[cfg(target_os = "macos")]
+                                if let Some(restore) = output_restore {
+                                    let restored =
+                                        tauri::async_runtime::spawn_blocking(move || {
+                                            restore.wait(dictation_output_duck::RESTORE_TIMEOUT)
+                                        })
+                                        .await
+                                        .unwrap_or(false);
+                                    if !restored {
+                                        tracing::warn!("dictation could not confirm restored output volume before transcription");
+                                    }
+                                }
                                 transcribe_recording_ready(app, info, take).await;
                             });
                         }
@@ -11624,6 +11778,76 @@ mod tests {
             mutated_on_failure.is_empty(),
             "managed settings changed after a failed write: {mutated_on_failure:?}"
         );
+    }
+
+    #[test]
+    fn output_volume_preference_defaults_off_and_round_trips() {
+        let legacy: DictationSettings =
+            serde_json::from_str(r#"{"language":"pt","cleanupEnabled":true}"#).unwrap();
+        assert!(!DictationSettings::default().reduce_system_volume);
+        assert!(!legacy.reduce_system_volume);
+        let updated = DictationSettings {
+            reduce_system_volume: true,
+            ..legacy
+        };
+        let snapshot = serde_json::to_value(&updated).unwrap();
+        assert_eq!(snapshot["reduceSystemVolume"], true);
+        assert_eq!(
+            serde_json::from_value::<DictationSettings>(snapshot).unwrap(),
+            updated
+        );
+    }
+
+    #[test]
+    fn output_volume_preference_publishes_only_after_saving_and_preserves_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let before = DictationSettings {
+            reduce_system_volume: true,
+            cleanup_enabled: true,
+            cleanup_model: "vendor/selected".into(),
+            language: Some("pt".into()),
+            style: DictationStyle::Formal,
+            microphone: DictationMicrophoneSetting {
+                id: Some("studio".into()),
+                name: Some("Studio microphone".into()),
+            },
+            ..DictationSettings::default()
+        };
+        let state = DictationSettingsState {
+            path: directory.path().join("dictation-settings.json"),
+            settings: Mutex::new(before.clone()),
+        };
+        fs::create_dir(&state.path).unwrap();
+        let error = update_dictation_reduce_system_volume(&state, false, |_| {
+            panic!("a failed save must not publish the new preference")
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "dictation_settings_save_failed");
+        assert_eq!(*state.settings.lock().unwrap(), before);
+        fs::remove_dir(&state.path).unwrap();
+        let mut fields = serde_json::to_value(&before).unwrap();
+        fields["futurePreference"] = serde_json::json!({ "nested": [1, 2] });
+        fs::write(&state.path, serde_json::to_vec(&fields).unwrap()).unwrap();
+
+        let saved = update_dictation_reduce_system_volume(&state, false, |enabled| {
+            assert!(!enabled);
+            let persisted: DictationSettings =
+                serde_json::from_slice(&fs::read(&state.path).unwrap()).unwrap();
+            assert!(!persisted.reduce_system_volume);
+            let mut persisted_fields: serde_json::Value =
+                serde_json::from_slice(&fs::read(&state.path).unwrap()).unwrap();
+            persisted_fields["reduceSystemVolume"] = true.into();
+            assert_eq!(persisted_fields, fields);
+        })
+        .unwrap();
+        assert_eq!(
+            saved,
+            DictationSettings {
+                reduce_system_volume: false,
+                ..before
+            }
+        );
+        assert_eq!(*state.settings.lock().unwrap(), saved);
     }
 
     #[test]

@@ -305,6 +305,7 @@ export type DictationSettingsDto = {
   language?: string;
   /** Off by default: the transcript is pasted with no LLM call. */
   cleanupEnabled: boolean;
+  reduceSystemVolume: boolean;
   /** OpenRouter model id used when cleanup is on. */
   cleanupModel: string;
   hudPlacement: DictationHudPlacement;
@@ -1333,6 +1334,10 @@ export async function setDictationCleanup(enabled: boolean, model?: string) {
     model === undefined ? { enabled } : { enabled, model },
   );
 }
+export async function setDictationReduceSystemVolume(enabled: boolean) {
+  return invoke<DictationSettingsDto>("set_dictation_reduce_system_volume", { enabled });
+}
+
 export async function setDictationCleanupModel(model: string) {
   return invoke<DictationSettingsDto>("set_dictation_cleanup", { model });
 }

@@ -397,6 +397,10 @@ OpenRouter and Local transcribe each Turn separately and use its saved bounds
 for attribution. Long audio keeps the existing 600-second chunks and 10-second
 overlap. Saved audio and completed chunks remain available for an explicit retry.
 
+On macOS, [dictation can temporarily lower media output](dictation.md#system-output-volume-during-dictation-on-macos)
+during capture. The host starts restoring the output when capture ends, ahead
+of the transcription request.
+
 ### Local model installation
 
 Local runs on Apple Silicon. Settings shows the download size, installation

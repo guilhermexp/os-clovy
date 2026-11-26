@@ -141,6 +141,9 @@ export default defineMessages({
     "settings.audio.blurb": "Control how Clovy captures meeting and system audio.",
     "settings.audio.microphone": "Microphone",
     "settings.audio.autoDetect": "Auto-detect",
+    "settings.dictation.reduceSystemVolume": "Reduce system volume during dictation",
+    "settings.dictation.reduceSystemVolumeDescription":
+      "Lowers system output to 20% of its current volume while you dictate and restores it when you stop.",
     "settings.audio.microphoneDescription": "Input device used for dictation.",
     "settings.audio.autoDetectUses": "Auto-detect uses {name}.",
     "settings.audio.autoDetectSystem": "Auto-detect uses the current system input.",
@@ -465,6 +468,9 @@ export default defineMessages({
     "settings.audio.blurb": "Controle como o Clovy capta o áudio de reuniões e do sistema.",
     "settings.audio.microphone": "Microfone",
     "settings.audio.autoDetect": "Detecção automática",
+    "settings.dictation.reduceSystemVolume": "Reduzir volume do sistema durante o ditado",
+    "settings.dictation.reduceSystemVolumeDescription":
+      "Reduz a saída do sistema para 20% do volume atual durante o ditado e restaura o volume quando você para.",
     "settings.audio.microphoneDescription": "Dispositivo de entrada usado para o ditado.",
     "settings.audio.autoDetectUses": "A detecção automática usa {name}.",
     "settings.audio.autoDetectSystem": "A detecção automática usa a entrada atual do sistema.",

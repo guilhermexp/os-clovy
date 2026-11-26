@@ -54,7 +54,7 @@ function cleanupModelOptions(models: ProviderModelDto[]): CleanupModelOption[] {
     .map((model) => ({ id: model.id, name: model.name.trim() || model.id }));
 }
 
-type CleanupControl = {
+type DictationPreferenceControl = {
   enabled?: boolean;
   readFailed: boolean;
   saving: boolean;
@@ -62,13 +62,25 @@ type CleanupControl = {
   onToggle: (enabled: boolean) => void;
 };
 
-export function DictationCleanupRow({
+export function DictationCleanupRow(control: DictationPreferenceControl) {
+  return (
+    <DictationPreferenceRow
+      {...control}
+      titleKey="settings.style.cleanup"
+      descriptionKey="settings.style.cleanupDescription"
+    />
+  );
+}
+
+export function DictationPreferenceRow({
+  titleKey,
+  descriptionKey,
   enabled,
   readFailed,
   saving,
   error,
   onToggle,
-}: CleanupControl) {
+}: DictationPreferenceControl & { titleKey: MessageKey; descriptionKey: MessageKey }) {
   const t = useT();
   const titleId = useId();
   const descriptionId = useId();
@@ -78,10 +90,10 @@ export function DictationCleanupRow({
     <div className="settings-row">
       <div className="settings-row-info">
         <h3 id={titleId} className="settings-row-title">
-          {t("settings.style.cleanup")}
+          {t(titleKey)}
         </h3>
         <p id={descriptionId} className="settings-row-description">
-          {t("settings.style.cleanupDescription")}
+          {t(descriptionKey)}
         </p>
         {readFailed ? (
           <p id={statusId} className="settings-row-error" role="status">
@@ -113,7 +125,7 @@ export function DictationCleanupRow({
 }
 
 type StyleSettingsProps = {
-  cleanupControl: CleanupControl;
+  cleanupControl: DictationPreferenceControl;
   settings?: Pick<DictationSettingsDto, "style" | "cleanupModel" | "hudPlacement">;
   onModelChange: (model: string) => void;
   onStyleChange: (style: DictationStyle) => void;

@@ -73,6 +73,7 @@ function settings(
     microphone: {},
     style: "standard",
     cleanupEnabled,
+    reduceSystemVolume: false,
     cleanupModel: "nvidia/nemotron-3-nano-30b-a3b",
     hudPlacement,
   };

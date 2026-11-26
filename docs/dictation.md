@@ -105,6 +105,32 @@ History displays the installed app icon when available and the microphone
 otherwise. Dictation excerpts can also be sent to the activity provider as
 bounded, fenced context; see [day intelligence](day-intelligence.md#gating-and-privacy).
 
+## System output volume during dictation on macOS
+
+**Settings > Dictation > Microphone > Reduce system volume during dictation**
+starts off. When enabled, Clovy requests 20% of the current media output
+volume during capture. For example, with a supported output, 50% becomes 10%.
+Clovy uses the output's master control or scales its writable channels
+together to preserve balance. The microphone test leaves output volume alone.
+
+Clovy begins restoring at capture stop or cancellation, before transcription.
+Switching the preference off restores the current take's output. Switching it
+on takes effect on the next take. When the default media output changes
+during capture, Clovy restores the previous device if it still owns the change
+and takes a fresh snapshot of the new device.
+
+Restoration checks the device UID, volume readback and mute state. Manual
+volume or mute changes take precedence. Clovy confirms the change only when
+the volume readback matches the requested value within float precision.
+CoreAudio can apply a write later or round it to a different value. A
+divergent readback during an unconfirmed write leaves the device at its
+observed volume and records that restoration could not be confirmed.
+
+Some devices, such as fixed-volume HDMI outputs, have no writable volume
+control. A disconnected device or a driver error can leave restoration
+pending. Clovy limits the wait before transcription and during normal shutdown.
+If the host is forcibly killed, it cannot run restoration.
+
 ## Reinsert the last dictation on macOS
 
 **Control+V** reinserts the last eligible dictation into the currently focused
