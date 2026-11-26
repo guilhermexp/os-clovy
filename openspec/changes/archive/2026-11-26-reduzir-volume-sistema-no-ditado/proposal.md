@@ -7,7 +7,7 @@ O som reproduzido pelo computador pode competir com a voz durante o ditado. A co
 ## What Changes
 
 - Adicionar em Ditado um controle macOS para reduzir temporariamente a saída do sistema a 20% do volume atual durante a captura, desligado por padrão.
-- Restaurar o estado sob posse do Clovy ao parar/cancelar, sem aguardar transcrição ou aprimoramento; respeitar mudanças manuais e dispositivos sem controle de volume.
+- Iniciar a restauração ao parar/cancelar sem aguardar transcrição ou aprimoramento; restaurar somente o estado ainda sob posse confirmada do Clovy, respeitando mudanças manuais e dispositivos sem controle. Confirmação ambígua ou expirada é falha explícita, não sucesso presumido.
 - Cobrir eventos duplicados/atrasados, falhas e encerramento normal sem interferir no microfone de reunião ou na transcrição.
 - Registrar separadamente a comparação da transcrição crua; não trocar modelo, formato, idioma nem filtros de ASR nesta mudança.
 

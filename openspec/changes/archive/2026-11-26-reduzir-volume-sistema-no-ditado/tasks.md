@@ -12,11 +12,15 @@
 
 ## 3. Integração da entrega
 
-- [ ] 3.1 Na box, executar `pnpm check`, `pnpm typecheck`, `pnpm test`, `pnpm build`, Rustfmt e harness portável da fonte real; conferir a árvore/diff/novos arquivos, SHA-256, Gitleaks integral dos arquivos alterados e gate `review-pair.sh --gate` ou contingência manual comprovada. Recibo previsto `.tmp/verify/output-ducking-20261126/manual-review/1/summary.md` no checkout durável; sem rotular mocks como prova de áudio real.
-- [ ] 3.2 Após revisão, publicar candidato em branch de teste sem force e conferir CI `desktop.yml` no SHA exato, incluindo compilação, Clippy e suíte Cargo macOS; separar status de cada job e assinatura Windows ausente de falhas de fonte. Testes físicos de saída/AX/colagem não estão autorizados por este item.
+- [x] 3.1 Na box, executar `pnpm check`, `pnpm typecheck`, `pnpm test`, `pnpm build`, Rustfmt e harness portável da fonte real; conferir a árvore/diff/novos arquivos, SHA-256, Gitleaks integral dos arquivos alterados e gate `review-pair.sh --gate` ou contingência manual comprovada. Recibo previsto `.tmp/verify/output-ducking-20261126/manual-review/1/summary.md` no checkout durável; sem rotular mocks como prova de áudio real.
+- [x] 3.2 Após revisão, publicar candidato em branch de teste sem force e conferir CI `desktop.yml` no SHA exato, incluindo compilação, Clippy e suíte Cargo macOS; separar status de cada job e assinatura Windows ausente de falhas de fonte. Testes físicos de saída/AX/colagem não estão autorizados por este item.
 
 ## Workflow follow-up
 
 - Integrar código aceito à main sem force, preservar WIP externo do checkout principal; sem tag/release.
 - Arquivar apenas com critérios satisfeitos, sincronizar instruções/specs/memória e limpar recursos próprios, preservando recibos e dados do usuário.
 - Informar comparação Liv/Clovy e limites de validação separadamente do recurso implementado; não mudar pipeline ASR por comparação sem teste controlado.
+
+## Prova final da candidata
+
+CI `45876566162`, SHA `caafb127ddb1dd220aaa4451db2ebee27d1b432e`: macOS ARM64 Swift, protocolo, Clippy e Cargo integral aprovados (2678 testes, zero falhas,16ignorados); Ubuntu frontend1643/5pulados, Biome, formato e Companion aprovados. Workflow geral falhou só na assinatura Windows, sem validar testes/pacote Windows. Revisão manual de contingência nos recibos duráveis `.tmp/verify/combined-dictation-20261126/manual-review/1/summary.md` e `.tmp/verify/output-ducking-20261126/manual-review/1/summary.md`. Sem prova física de volume/AX/colagem, inferência paga ou release. Decisão de captura/cue pertence ao escopo separado e segue pendente.

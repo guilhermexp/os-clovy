@@ -564,3 +564,4 @@ no API key, $0).
 ## Contexto por área
 
 - [src-tauri/src/activity/windows/AGENTS.md](src-tauri/src/activity/windows/AGENTS.md): Windows capture adapter.
+- [src-tauri/src/dictation_output_duck/AGENTS.md](src-tauri/src/dictation_output_duck/AGENTS.md): Optional macOS system-output attenuation, ownership and restoration.

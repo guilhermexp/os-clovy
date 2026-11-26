@@ -18,11 +18,15 @@ No macOS, Configurações de Ditado SHALL oferecer redução da saída do sistem
 - **THEN** a interface mantém a preferência confirmada anterior e apresenta o erro, sem sobrescrever idioma, modelo, estilo ou microfone
 
 ### Requirement: Restauração do volume sob posse da tomada
-O Clovy SHALL restaurar o volume anterior da saída que alterou ao encerrar a captura, cancelar, falhar, desabilitar a opção, perder o helper ou encerrar normalmente. A restauração MUST respeitar intervenção manual, saída previamente muda, identidade de dispositivo e eventos atrasados/duplicados. Somente a tomada que detém a alteração SHALL liberá-la.
+O Clovy SHALL iniciar a restauração ao encerrar a captura, cancelar, falhar, desabilitar a opção, perder o helper ou encerrar normalmente. Somente alterações com posse confirmada e estado ainda compatível SHALL ser restauradas, respeitando intervenção manual, mute, identidade do dispositivo e eventos de outras tomadas. Readback divergente ou prazo expirado SHALL gerar aviso e resultado não confirmado, sem sobrescrever um valor ambíguo.
 
 #### Scenario: Parada antes da transcrição
 - **WHEN** a captura acaba e a transcrição ou o aprimoramento ainda estão em andamento
-- **THEN** a redução é encerrada imediatamente, sem aguardar o provedor
+- **THEN** a restauração é enfileirada sem aguardar o provedor, com espera limitada por confirmação
+
+#### Scenario: Confirmação da restauração indisponível
+- **WHEN** uma escrita aceita retorna readback divergente ou a restauração não é confirmada até o prazo
+- **THEN** o resultado permanece não confirmado com aviso, sem elevar o volume por palpite
 
 #### Scenario: Mudança manual
 - **WHEN** o usuário muda volume ou mute durante a redução
@@ -34,7 +38,7 @@ O Clovy SHALL restaurar o volume anterior da saída que alterou ao encerrar a ca
 
 #### Scenario: Eventos antigos e encerramento
 - **WHEN** chegam eventos repetidos ou de outra tomada, ou o helper termina inesperadamente
-- **THEN** eventos antigos não desfazem a redução de uma tomada nova e a perda real do helper libera as alterações que ainda pertencem ao Clovy
+- **THEN** eventos antigos não desfazem a redução de uma tomada nova e a perda real do helper inicia a liberação das alterações que ainda pertencem ao Clovy, com falha de confirmação explícita
 
 ### Requirement: Falha do controle de saída não impede o ditado
 Falhas ou ausência de controle de volume do dispositivo SHALL preservar a captura, a transcrição, a colagem e o áudio de reunião. O Clovy MUST NOT mudar de dispositivo, aumentar volume, desmutar uma saída ou iniciar rede para contornar esse limite. Encerramento forçado do processo principal sem execução de cleanup não SHALL ser apresentado como restauração garantida.
