@@ -15,13 +15,14 @@ pub(super) struct Hosts {
 
 impl Hosts {
     pub(super) async fn start() -> Self {
-        let groq = test_server::start(Arc::new(|_: &serde_json::Value| {
-            (
-                200,
-                serde_json::json!({ "text": "send it to samir", "language": "en" }),
-            )
-        }))
-        .await;
+        Self::with_groq_response(
+            serde_json::json!({ "text": "send it to samir", "language": "en" }),
+        )
+        .await
+    }
+
+    async fn with_groq_response(body: serde_json::Value) -> Self {
+        let groq = groq_answering(body).await;
         let openrouter = test_server::start(Arc::new(|_: &serde_json::Value| {
             (
                 200,
@@ -214,7 +215,14 @@ async fn a_forbidden_groq_key_never_falls_back_to_the_retired_server() {
 
 #[tokio::test]
 async fn dictation_with_a_groq_key_goes_straight_to_groq_with_only_that_key() {
-    let hosts = Hosts::start().await;
+    let hosts = Hosts::with_groq_response(serde_json::json!({
+        "text": "  Obrigado pela atenção!  ",
+        "language": "pt",
+        "segments": [
+            { "text": " Obrigado pela atenção!", "no_speech_prob": 0.8, "avg_logprob": -0.1 }
+        ],
+    }))
+    .await;
     let directory = tempfile::tempdir().unwrap();
 
     let result = dictate_transcribe_via(
@@ -226,7 +234,8 @@ async fn dictation_with_a_groq_key_goes_straight_to_groq_with_only_that_key() {
     .await
     .unwrap();
 
-    assert_eq!(result.text, "send it to samir");
+    assert_eq!(result.text, "Obrigado pela atenção!");
+    assert_eq!(result.language.as_deref(), Some("pt"));
     assert_eq!(result.provider, "groq");
     let groq = heads(&hosts.groq);
     assert_eq!(groq.len(), 1);
@@ -238,6 +247,18 @@ async fn dictation_with_a_groq_key_goes_straight_to_groq_with_only_that_key() {
     assert_eq!(header(&groq[0], "authorization"), Some("Bearer gsk-user"));
     assert_no_forwarded_keys(&groq[0]);
     assert_eq!(header(&groq[0], "x-clovy-app-version"), None);
+    let body = &hosts.groq.raw_bodies.lock().unwrap()[0];
+    for (name, value) in [
+        ("model", "whisper-large-v3-turbo"),
+        ("language", "pt"),
+        ("prompt", "Samir"),
+        ("response_format", "verbose_json"),
+    ] {
+        assert!(body.contains(&format!("name=\"{name}\"\r\n\r\n{value}\r\n")));
+    }
+    assert!(body.contains(
+        "name=\"file\"; filename=\"audio.m4a\"\r\nContent-Type: audio/mp4\r\n\r\nfake aac bytes\r\n"
+    ));
     assert!(heads(&hosts.clovy).is_empty());
     assert!(heads(&hosts.openrouter).is_empty());
 }
@@ -450,13 +471,13 @@ async fn groq_answering(body: serde_json::Value) -> FakeServer {
 #[tokio::test]
 async fn direct_groq_drops_segments_whisper_marks_as_no_speech() {
     // R7b: Whisper's classic silence hallucination ("Thank you.") comes back
-    // as a segment with a high no_speech_prob; it never reaches the paste.
+    // with a high no_speech_prob and a low avg_logprob.
     let groq = groq_answering(serde_json::json!({
         "text": " Send it to Samir. Thank you.",
         "language": "en",
         "segments": [
             { "text": " Send it to Samir.", "no_speech_prob": 0.05 },
-            { "text": " Thank you.", "no_speech_prob": 0.6 },
+            { "text": " Thank you.", "no_speech_prob": 0.9, "avg_logprob": -1.3 },
         ],
     }))
     .await;
@@ -489,7 +510,11 @@ async fn direct_groq_drops_segments_whisper_marks_as_no_speech() {
 async fn direct_groq_with_only_no_speech_segments_is_empty() {
     let groq = groq_answering(serde_json::json!({
         "text": " Thank you.",
-        "segments": [{ "text": " Thank you.", "no_speech_prob": 0.97 }],
+        "segments": [
+            { "text": "\n\n" },
+            { "text": " Thank you.", "no_speech_prob": 0.97, "avg_logprob": -1.3 },
+            { "text": " \t" },
+        ],
     }))
     .await;
     let hosts = Hosts::start().await;
@@ -510,4 +535,304 @@ async fn direct_groq_with_only_no_speech_segments_is_empty() {
 
     // The pipeline turns an empty transcript into "No speech detected."
     assert_eq!(result.text, "");
+}
+
+async fn groq_response_from_fixture(
+    body: serde_json::Value,
+) -> Result<TranscriptionProviderResult, AppError> {
+    let hosts = Hosts::with_groq_response(body).await;
+    let directory = tempfile::tempdir().unwrap();
+    dictate_transcribe_via(
+        &hosts.transport(),
+        Some("gsk-user"),
+        MODEL_FOR_DIRECT_ONLY.to_string(),
+        take_request(&directory),
+    )
+    .await
+}
+
+async fn groq_text_from_fixture(body: serde_json::Value) -> String {
+    groq_response_from_fixture(body).await.unwrap().text
+}
+
+#[tokio::test]
+async fn direct_groq_rejects_success_without_text_or_segments() {
+    let mut outcomes = Vec::new();
+    for body in [
+        serde_json::json!({}),
+        serde_json::json!({ "language": "pt" }),
+        serde_json::json!({ "error": { "message": "synthetic provider error" } }),
+        serde_json::json!({ "text": null, "segments": null }),
+    ] {
+        outcomes.push(
+            groq_response_from_fixture(body)
+                .await
+                .map(|result| result.text)
+                .map_err(|error| error.code),
+        );
+    }
+    assert_eq!(
+        outcomes,
+        vec![Err("provider_response_invalid".to_string()); 4]
+    );
+}
+
+#[tokio::test]
+async fn direct_groq_accepts_explicitly_empty_transcription_fields() {
+    for body in [
+        serde_json::json!({ "text": "" }),
+        serde_json::json!({ "segments": [] }),
+    ] {
+        assert_eq!(groq_text_from_fixture(body).await, "");
+    }
+}
+
+#[tokio::test]
+async fn direct_groq_keeps_a_confident_middle_segment_and_the_complete_text() {
+    let text = "Olá, tudo bem? 👋\n\nVamos começar.";
+    let result = groq_text_from_fixture(serde_json::json!({
+        "text": format!("  {text}\n"),
+        "language": "pt",
+        "segments": [
+            { "text": " Olá", "no_speech_prob": 0.05 },
+            { "text": ", tudo bem? 👋", "no_speech_prob": 0.8, "avg_logprob": -0.1 },
+            { "text": " Vamos começar.", "no_speech_prob": 0.05 },
+        ],
+    }))
+    .await;
+    assert_eq!(result, text);
+}
+
+#[tokio::test]
+async fn direct_groq_preserves_full_text_when_segments_need_no_filtering() {
+    let result = groq_text_from_fixture(serde_json::json!({
+        "text": "  Olá, tudo bem? 👋\n\nVamos começar.  ",
+        "segments": [
+            { "text": " Olá", "no_speech_prob": 0.05 },
+            { "text": ", tudo bem? 👋", "no_speech_prob": 0.05 },
+            { "text": " Vamos começar.", "no_speech_prob": 0.05 },
+        ],
+    }))
+    .await;
+    assert_eq!(result, "Olá, tudo bem? 👋\n\nVamos começar.");
+}
+
+#[tokio::test]
+async fn direct_groq_preserves_text_without_logprob() {
+    let result = groq_text_from_fixture(serde_json::json!({
+        "text": "Obrigado.",
+        "segments": [{ "text": "Obrigado.", "no_speech_prob": 0.8 }],
+    }))
+    .await;
+    assert_eq!(result, "Obrigado.");
+}
+
+#[tokio::test]
+async fn direct_groq_preserves_text_without_no_speech_probability() {
+    let result = groq_text_from_fixture(serde_json::json!({
+        "text": "Obrigado.",
+        "segments": [{ "text": "Obrigado.", "avg_logprob": -1.3 }],
+    }))
+    .await;
+    assert_eq!(result, "Obrigado.");
+}
+
+#[tokio::test]
+async fn direct_groq_uses_the_whisper_silence_boundaries() {
+    let result = groq_text_from_fixture(serde_json::json!({
+        "text": " Um instante. Obrigado.",
+        "segments": [
+            { "text": " Um instante.", "no_speech_prob": 0.6, "avg_logprob": -1.0 },
+            { "text": " Obrigado.", "no_speech_prob": 0.61, "avg_logprob": -1.0 },
+        ],
+    }))
+    .await;
+    assert_eq!(result, "Um instante.");
+}
+
+#[tokio::test]
+async fn direct_groq_preserves_text_when_metrics_are_invalid() {
+    for (probability, logprob) in [
+        (serde_json::json!(1.1), serde_json::json!(-1.3)),
+        (serde_json::json!(-0.1), serde_json::json!(-1.3)),
+        (serde_json::json!(0.9), serde_json::json!(0.1)),
+        (serde_json::json!(0.9), serde_json::json!("-1.3")),
+        (serde_json::json!("0.9"), serde_json::json!(-1.3)),
+    ] {
+        let result = groq_text_from_fixture(serde_json::json!({
+            "text": "Obrigado.",
+            "segments": [{
+                "text": "Obrigado.",
+                "no_speech_prob": probability,
+                "avg_logprob": logprob,
+            }],
+        }))
+        .await;
+        assert_eq!(result, "Obrigado.", "{probability}, {logprob}");
+    }
+}
+
+#[tokio::test]
+async fn direct_groq_falls_back_to_full_text_without_useful_segments() {
+    for response in [
+        serde_json::json!({ "text": "  Ação necessária.\n" }),
+        serde_json::json!({ "text": "  Ação necessária.\n", "segments": [] }),
+        serde_json::json!({
+            "text": "  Ação necessária.\n",
+            "segments": [{ "text": " \n", "no_speech_prob": 0.9, "avg_logprob": -1.3 }],
+        }),
+    ] {
+        assert_eq!(groq_text_from_fixture(response).await, "Ação necessária.");
+    }
+}
+
+#[tokio::test]
+async fn direct_groq_rebuilds_text_from_survivors_at_segment_boundaries() {
+    let result = groq_text_from_fixture(serde_json::json!({
+        "text": " Olá, tudo bem? Legendas.\n\nVamos começar agora.",
+        "segments": [
+            { "text": " Olá" },
+            { "text": ", tudo bem?" },
+            { "text": " Legendas.", "no_speech_prob": 0.9, "avg_logprob": -1.3 },
+            { "text": "\n\nVamos começar" },
+            { "text": "agora." },
+        ],
+    }))
+    .await;
+    assert_eq!(result, "Olá, tudo bem?\n\nVamos começar agora.");
+}
+
+#[tokio::test]
+async fn direct_groq_preserves_a_paragraph_separator_when_dropping_silence() {
+    let result = groq_text_from_fixture(serde_json::json!({
+        "text": "Um.\n\nObrigado. Legendas.",
+        "segments": [
+            { "text": "Um." },
+            { "text": "\n\n" },
+            { "text": "Obrigado." },
+            { "text": " Legendas.", "no_speech_prob": 0.9, "avg_logprob": -1.3 },
+        ],
+    }))
+    .await;
+    assert_eq!(result, "Um.\n\nObrigado.");
+}
+
+#[tokio::test]
+async fn direct_groq_keeps_apostrophes_and_hyphens_inside_words_when_rebuilding() {
+    let result = groq_text_from_fixture(serde_json::json!({
+        "text": "D'Ávila guardou o guarda-chuva na segunda-feira. Legendas.",
+        "segments": [
+            { "text": "D" },
+            { "text": "'Ávila guardou o guarda" },
+            { "text": "-chuva na segunda-" },
+            { "text": "feira." },
+            { "text": " Legendas.", "no_speech_prob": 0.9, "avg_logprob": -1.3 },
+        ],
+    }))
+    .await;
+    assert_eq!(result, "D'Ávila guardou o guarda-chuva na segunda-feira.");
+}
+
+#[tokio::test]
+async fn direct_groq_joins_an_apostrophe_split_when_all_fragments_match() {
+    let result = groq_text_from_fixture(serde_json::json!({
+        "text": "  D'Ávila. Legendas.\n",
+        "segments": [
+            { "text": "D'" },
+            { "text": "Ávila." },
+            { "text": " Legendas.", "no_speech_prob": 0.9, "avg_logprob": -1.3 },
+        ],
+    }))
+    .await;
+    assert_eq!(result, "D'Ávila.");
+}
+
+#[tokio::test]
+async fn direct_groq_keeps_new_boundaries_after_discarding_silence() {
+    for (text, segments, expected) in [
+        (
+            "Pode Legendas. enviar.",
+            vec![("Pode", false), (" Legendas. ", true), ("enviar.", false)],
+            "Pode enviar.",
+        ),
+        (
+            "Legendas. Pode enviar.",
+            vec![("Legendas. ", true), ("Pode ", false), ("enviar.", false)],
+            "Pode enviar.",
+        ),
+        (
+            "D'Ávila. Legendas.",
+            vec![("D'", false), ("Ávila.", false), (" Legendas.", true)],
+            "D'Ávila.",
+        ),
+        (
+            "Pode Legendas. Créditos. enviar.",
+            vec![
+                ("Pode", false),
+                (" Legendas. ", true),
+                ("Créditos. ", true),
+                ("enviar.", false),
+            ],
+            "Pode enviar.",
+        ),
+    ] {
+        let segments = segments
+            .into_iter()
+            .map(|(text, silence)| {
+                if silence {
+                    serde_json::json!({"text": text, "no_speech_prob": 0.9, "avg_logprob": -1.3})
+                } else {
+                    serde_json::json!({"text": text})
+                }
+            })
+            .collect::<Vec<_>>();
+        let result =
+            groq_text_from_fixture(serde_json::json!({"text": text, "segments": segments})).await;
+        assert_eq!(result, expected, "{text}");
+    }
+}
+
+#[tokio::test]
+async fn direct_groq_keeps_space_after_a_closing_quote_when_rebuilding() {
+    for next_fragment in [" antes.", "antes."] {
+        let result = groq_text_from_fixture(serde_json::json!({
+            "text": "Disse 'sim' antes. Legendas.",
+            "segments": [
+                { "text": "Disse 'sim'" },
+                { "text": next_fragment },
+                { "text": " Legendas.", "no_speech_prob": 0.9, "avg_logprob": -1.3 },
+            ],
+        }))
+        .await;
+        assert_eq!(result, "Disse 'sim' antes.", "{next_fragment:?}");
+    }
+}
+
+#[tokio::test]
+async fn direct_groq_uses_spacing_fallback_when_discarded_text_does_not_match() {
+    let result = groq_text_from_fixture(serde_json::json!({
+        "text": "D'Ávila. Créditos.",
+        "segments": [
+            { "text": "D'" },
+            { "text": "Ávila." },
+            { "text": " Legendas.", "no_speech_prob": 0.9, "avg_logprob": -1.3 },
+        ],
+    }))
+    .await;
+    assert_eq!(result, "D' Ávila.");
+}
+
+#[tokio::test]
+async fn direct_groq_uses_segment_text_when_complete_text_is_blank_or_missing() {
+    for body in [
+        serde_json::json!({
+            "text": " \n ",
+            "segments": [{ "text": "Pode enviar" }, { "text": "agora" }, { "text": "?" }],
+        }),
+        serde_json::json!({
+            "segments": [{ "text": "Pode enviar" }, { "text": "agora" }, { "text": "?" }],
+        }),
+    ] {
+        assert_eq!(groq_text_from_fixture(body).await, "Pode enviar agora?");
+    }
 }

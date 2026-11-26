@@ -10812,6 +10812,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dictation_with_cleanup_off_preserves_portuguese_text_and_paragraphs() {
+        let transcriber = FakeTranscriber::text("  Um instante, por favor. 👋\n\nObrigado!  ")
+            .with_language(Some("pt"));
+        let cleaner = FakeCleaner::default();
+        let result = run_dictation_pipeline(
+            &transcriber,
+            &cleaner,
+            pipeline_request(),
+            &cleanup_config(false),
+            DictationCleanupContext::default(),
+            Some(0.3),
+            None,
+        )
+        .await;
+        assert_eq!(transcriber.calls.load(Ordering::SeqCst), 1);
+        assert!(cleaner.calls.lock().unwrap().is_empty());
+        assert!(result.cleanup_skipped.is_none());
+        assert_eq!(
+            pasted_text(&result),
+            Some("Um instante, por favor. 👋\n\nObrigado!")
+        );
+    }
+
+    #[tokio::test]
     async fn dictation_with_cleanup_on_pastes_the_cleaned_text_from_the_chosen_model() {
         let transcriber = FakeTranscriber::text("send it to samir").with_language(Some("en"));
         let cleaner = FakeCleaner::default();
