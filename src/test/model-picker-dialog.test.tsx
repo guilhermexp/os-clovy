@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { VIDEO_MODELS } from "../lib/video-models";
 import { ModelPickerDialog, modelOptions } from "../components/settings/ModelPickerDialog";
 
 describe("ModelPickerDialog", () => {
@@ -16,24 +16,32 @@ describe("ModelPickerDialog", () => {
     expect(modelOptions([automatic], automatic.id)).toEqual([]);
   });
 
-  it("shows curated video descriptions", () => {
+  it("shows and selects a text model that does not call tools", async () => {
+    const option = {
+      provider: "openrouter",
+      id: "notes/text-only",
+      name: "Text only",
+      modelType: "text",
+      traits: [],
+      capabilities: [],
+    };
+    const choose = vi.fn();
     render(
       <ModelPickerDialog
         open
-        mode="video"
-        value="wan-2.2-a14b-text-to-video"
-        options={VIDEO_MODELS}
+        mode="generation"
+        value=""
+        options={[option]}
         search=""
         onSearchChange={vi.fn()}
         onClose={vi.fn()}
-        onSelect={vi.fn()}
+        onSelect={choose}
       />,
     );
 
-    expect(screen.getByRole("dialog", { name: "Video model" })).toBeInTheDocument();
-    expect(
-      screen.getByText("Default text-to-video model for fast 5 second 720p clips."),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("Model details unavailable")).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Text model" })).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("option", { name: /text only/i }));
+    expect(choose).toHaveBeenCalledWith(option.id);
   });
 });

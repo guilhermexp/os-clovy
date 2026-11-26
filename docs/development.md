@@ -33,9 +33,9 @@ Replay first-run onboarding without wiping app data:
 pnpm tauri:dev --replay-onboarding
 ```
 
-The app has no sign-in or local bearer token. Chat uses installed CLI engines,
-with Claude Code as default and Codex as the existing local fallback. Save
-Groq, OpenRouter, and fal keys through Settings, never in the desktop `.env`.
+The app has no sign-in or local bearer token. Routines use installed CLI
+engines. Save Groq and OpenRouter keys through Settings. The desktop `.env`
+holds build and connector configuration.
 Missing keys fail clearly without contacting another service. See
 [configuration.md](configuration.md) for catalogs and note-engine selection.
 

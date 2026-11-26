@@ -39,16 +39,6 @@ const MODE_LABEL_KEYS = {
     suggested: "settingsPanels.picker.suggestedTranscription",
     all: "settingsPanels.picker.allTranscription",
   },
-  image: {
-    choose: "settingsPanels.picker.chooseImage",
-    suggested: "settingsPanels.picker.suggestedImage",
-    all: "settingsPanels.picker.allImage",
-  },
-  video: {
-    choose: "settingsPanels.picker.chooseVideo",
-    suggested: "settingsPanels.picker.suggestedVideo",
-    all: "settingsPanels.picker.allVideo",
-  },
 } as const satisfies Record<
   ProviderModelMode,
   { choose: MessageKey; suggested: MessageKey; all: MessageKey }
@@ -75,7 +65,6 @@ export function ModelPickerPopover({
   ariaLabel: ariaLabelProp,
   suggestedListLabel: suggestedListLabelProp,
   allModelsLabel: allModelsLabelProp,
-  suggestedModelIds,
   rootSearchRef,
   rootSearch,
   onRootSearchChange,
@@ -95,8 +84,6 @@ export function ModelPickerPopover({
   ariaLabel?: string;
   suggestedListLabel?: string;
   allModelsLabel?: string;
-  /** Optional suggestion order for the curated media lists. */
-  suggestedModelIds?: readonly string[];
   /** Enables the root-layer search (the /model + composer trigger surface):
    * a field above the pinned controls whose query searches across BOTH
    * layers, suggested picks and the full catalog, as one flat result list.
@@ -302,20 +289,7 @@ export function ModelPickerPopover({
     () => options.filter((option) => modelAvailableForMode(mode, option)),
     [mode, options],
   );
-  const suggested = useMemo(() => {
-    if (!suggestedModelIds) return suggestedModelsForMode(mode, selectable);
-    return suggestedModelIds.flatMap((id, index) => {
-      const option = selectable.find((candidate) => candidate.id === id);
-      if (!option) return [];
-      return [
-        {
-          key: `${id}:host:${index}`,
-          model: option,
-          reason: option.description ?? t("settingsPanels.picker.suggestedForSurface"),
-        },
-      ];
-    });
-  }, [mode, selectable, suggestedModelIds, t]);
+  const suggested = useMemo(() => suggestedModelsForMode(mode, selectable), [mode, selectable]);
   const privacyFiltered = privateOnly ? selectable.filter(modelIsPrivate) : selectable;
   const filteredOptions = query
     ? privacyFiltered.filter((option) => modelMatchesQuery(option, query))

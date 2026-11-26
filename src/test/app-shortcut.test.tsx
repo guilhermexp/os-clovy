@@ -103,13 +103,10 @@ const mocks = vi.hoisted(() => ({
   listSessionFolders: vi.fn(),
   listSessionPartitions: vi.fn(),
   listProviderModels: vi.fn(),
-  localVideoFileSrc: vi.fn((path: string) => `asset://${path}`),
   playRecordingSound: vi.fn(),
   preloadRecordingSounds: vi.fn(),
   preloadAgentSounds: vi.fn(),
   providerModelSettings: vi.fn(),
-  videoGenerate: vi.fn(),
-  videoStatus: vi.fn(),
   gatewayRequest: vi.fn(),
   gatewayEventHandlers: new Set<(event: Record<string, unknown>) => void>(),
 }));
@@ -179,7 +176,6 @@ vi.mock("../lib/tauri", () => ({
       systemAudio: true,
     },
   }),
-  primeGeneratedVideoDir: vi.fn().mockResolvedValue(undefined),
   computerUseBeginRun: vi.fn().mockResolvedValue(undefined),
   computerUseEndRun: vi.fn().mockResolvedValue(undefined),
   computerUseStop: vi.fn().mockResolvedValue(undefined),
@@ -241,9 +237,6 @@ vi.mock("../lib/tauri", () => ({
   listAgentTasks: mocks.listAgentTasks,
   providerModelSettings: mocks.providerModelSettings,
   listProviderModels: mocks.listProviderModels,
-  localVideoFileSrc: mocks.localVideoFileSrc,
-  videoGenerate: mocks.videoGenerate,
-  videoStatus: mocks.videoStatus,
 }));
 
 const now = "2026-05-19T10:00:00Z";
@@ -440,7 +433,7 @@ describe("App shortcuts", () => {
     mocks.providerModelSettings.mockResolvedValue({
       settings: {
         generationModel: "",
-        providerApiKeysConfigured: { groq: false, openrouter: false, fal: false, tavily: false },
+        providerApiKeysConfigured: { groq: false, openrouter: false, tavily: false },
       },
     });
     mocks.gatewayEventHandlers.clear();

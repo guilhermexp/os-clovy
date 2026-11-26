@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentSettingsSection } from "../components/settings/AgentSettingsSection";
+import { SkillsSettingsSection } from "../components/settings/SkillsSettingsSection";
 import type { AgentSkillDto } from "../lib/agent-runtime-contract";
 
 const mocks = vi.hoisted(() => ({
@@ -25,7 +25,7 @@ vi.mock("../lib/tauri", () => ({
   updateAgentSkill: mocks.updateAgentSkill,
 }));
 
-describe("AgentSettingsSection", () => {
+describe("SkillsSettingsSection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.listen.mockResolvedValue(() => {});
@@ -43,7 +43,7 @@ describe("AgentSettingsSection", () => {
       if (name === "clovy-data-changed") changed = callback;
       return () => {};
     });
-    render(<AgentSettingsSection />);
+    render(<SkillsSettingsSection />);
     act(() => changed?.({ payload: { profile: "default", kind: "skills" } }));
     expect(await screen.findByRole("switch", { name: "Enable Research" })).not.toBeChecked();
     await act(async () => oldLoad.resolve([skillFixture]));
@@ -63,7 +63,7 @@ describe("AgentSettingsSection", () => {
       return () => {};
     });
     const user = userEvent.setup();
-    render(<AgentSettingsSection />);
+    render(<SkillsSettingsSection />);
     await screen.findByRole("switch", { name: "Disable Research" });
     const staleCatalog = deferred<(typeof skillFixture)[]>();
     mocks.listAgentSkills.mockReturnValueOnce(staleCatalog.promise);
@@ -95,7 +95,7 @@ describe("AgentSettingsSection", () => {
       return () => {};
     });
     const user = userEvent.setup();
-    render(<AgentSettingsSection />);
+    render(<SkillsSettingsSection />);
     expect(await screen.findByText(unavailable.description)).toBeInTheDocument();
     const toggle = screen.getByRole("switch", { name: "Disable Research" });
     expect(toggle).toBeChecked();
@@ -144,7 +144,7 @@ describe("AgentSettingsSection", () => {
       return () => {};
     });
     const user = userEvent.setup();
-    render(<AgentSettingsSection />);
+    render(<SkillsSettingsSection />);
     await screen.findByRole("switch", { name: "Disable Research" });
     const draft = "x".repeat(512 * 1024 + 1);
     if (operation === "save") {
@@ -212,7 +212,7 @@ describe("AgentSettingsSection", () => {
       throw new Error("Expected normal oversized-content refusal");
     });
     const user = userEvent.setup();
-    render(<AgentSettingsSection />);
+    render(<SkillsSettingsSection />);
     await screen.findByRole("switch", { name: "Disable Research" });
     await user.click(screen.getByRole("button", { name: "Edit" }));
     const editor = await screen.findByRole("textbox", { name: "Skill instructions" });
@@ -277,7 +277,7 @@ describe("AgentSettingsSection", () => {
     let readResponse = oldRead.promise;
     mocks.readAgentSkill.mockImplementation(() => readResponse);
     const user = userEvent.setup();
-    render(<AgentSettingsSection />);
+    render(<SkillsSettingsSection />);
     const edit = await screen.findByRole("button", { name: "Edit" });
     await user.click(edit);
     readResponse = latestRead.promise;
@@ -316,12 +316,9 @@ describe("AgentSettingsSection", () => {
     }
   });
 
-  it("keeps routine sounds and skills in Agent settings", async () => {
-    render(<AgentSettingsSection />);
-    await screen.findByText("No skills found.");
-    expect(screen.getByRole("switch", { name: "Play agent sounds" })).toBeVisible();
-    expect(screen.queryByRole("switch", { name: "Show sessions HUD" })).toBeNull();
-    expect(screen.queryByRole("heading", { name: "Personality" })).toBeNull();
+  it("shows the empty state when there are no installed skills", async () => {
+    render(<SkillsSettingsSection />);
+    expect(await screen.findByText("No skills found.")).toBeVisible();
   });
 });
 

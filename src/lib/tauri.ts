@@ -373,13 +373,12 @@ export type DictationHelperEvent = {
   };
 };
 
-export type ProviderModelMode = "transcription" | "generation" | "image" | "video";
-export type BuiltinProvider = "groq" | "openrouter" | "fal" | "tavily";
+export type ProviderModelMode = "transcription" | "generation";
+export type BuiltinProvider = "groq" | "openrouter" | "tavily";
 
 export type ProviderApiKeysConfigured = {
   groq: boolean;
   openrouter: boolean;
-  fal: boolean;
   tavily: boolean;
 };
 
@@ -390,16 +389,8 @@ export type ProviderModelSettingsDto = {
   transcriptionModel: string;
   generationModel: string;
   remoteGenerationModel: string;
-  imageModel: string;
-  videoModel: string;
   providerApiKeysConfigured: ProviderApiKeysConfigured;
   localGeneration: LocalGenerationSettingsDto;
-  /** Safe mode for image generation/editing: asks the image provider to filter
-   * adult content. On by default; the user opts out via Settings or the consent
-   * dialog. Turning it off is a request the provider may not honor. */
-  imageSafeMode: boolean;
-  /** Whether the user chose "don't ask again" on the safe-mode consent dialog. */
-  imageSafeModePromptDismissed: boolean;
   /** Live transcript preview using the selected transcription engine. */
   liveTranscription: boolean;
 };
@@ -407,46 +398,11 @@ export type ProviderModelSettingsDto = {
 export type ProfileModelOverridesDto = {
   transcriptionProvider?: string;
   transcriptionModel?: string;
-  imageModel?: string;
-  videoModel?: string;
 };
 
 export type LocalGenerationSettingsDto = {
   baseUrl: string;
   modelId: string;
-};
-
-export type GeneratedImageDto = {
-  imageBase64: string;
-  mimeType: string;
-  model: string;
-  provider: string;
-};
-
-export type VideoJobDto = {
-  jobId: string;
-};
-
-export type VideoStatusDto =
-  | {
-      status: "processing";
-      averageExecutionMs: number;
-      executionMs: number;
-    }
-  | {
-      status: "completed";
-      path: string;
-      mimeType: string;
-      sizeBytes: number;
-      model: string;
-    }
-  | {
-      status: "failed";
-      reason: string;
-    };
-
-export type ImagePromptScreenResponse = {
-  mayBeExplicit: boolean;
 };
 
 export type ProviderModelSettingsResponse = {
@@ -1329,86 +1285,11 @@ export async function clearProviderApiKey(provider: BuiltinProvider) {
   });
 }
 
-// Toggles safe mode for image generation/editing. On by default; when
-// on, the provider blurs adult content.
-export async function setImageSafeMode(enabled: boolean) {
-  return invoke<ProviderModelSettingsDto>("set_image_safe_mode", {
-    request: { enabled },
-  });
-}
-
 // Toggles the live transcript preview while recording. On by default; billed
 // as extra usage when on, no preview audio leaves the device when off.
 export async function setLiveTranscription(enabled: boolean) {
   return invoke<ProviderModelSettingsDto>("set_live_transcription", {
     request: { enabled },
-  });
-}
-
-export async function setImageSafeModePromptDismissed(dismissed: boolean) {
-  return invoke<ProviderModelSettingsDto>("set_image_safe_mode_prompt_dismissed", {
-    request: { dismissed },
-  });
-}
-
-/** Screens an image prompt for the safe-mode consent dialog. */
-export async function imagePromptMayBeExplicit(prompt: string): Promise<boolean> {
-  const response = await invoke<ImagePromptScreenResponse>("image_prompt_may_be_explicit", {
-    request: { prompt },
-  });
-  return response.mayBeExplicit;
-}
-
-// Generates an image from a prompt directly through fal. `model` is optional; the
-// backend falls back to the saved default image model when it is omitted.
-// `safeMode` pins the safe-mode value a retry must replay; omitted uses the
-// live saved setting.
-export async function generateImage(
-  prompt: string,
-  model?: string,
-  requestId?: string,
-  safeMode?: boolean,
-) {
-  return invoke<GeneratedImageDto>("generate_image", {
-    request: { prompt, model, requestId, safeMode },
-  });
-}
-
-export async function editImage(input: {
-  imageBase64: string;
-  prompt: string;
-  mimeType?: string;
-  model?: string;
-  requestId?: string;
-}) {
-  return invoke<GeneratedImageDto>("edit_image", {
-    request: {
-      image: input.imageBase64,
-      prompt: input.prompt,
-      mimeType: input.mimeType,
-      model: input.model,
-      requestId: input.requestId,
-    },
-  });
-}
-
-export async function videoGenerate(input: {
-  prompt: string;
-  model?: string;
-  requestId?: string;
-  duration?: string;
-  resolution?: string;
-  aspectRatio?: string;
-  audio?: boolean;
-}) {
-  return invoke<VideoJobDto>("video_generate", {
-    request: input,
-  });
-}
-
-export async function videoStatus(jobId: string) {
-  return invoke<VideoStatusDto>("video_status", {
-    request: { jobId },
   });
 }
 
@@ -1478,34 +1359,6 @@ export async function dictationHelperCommand(command: Record<string, unknown>) {
 
 export function localAudioFileSrc(path: string) {
   return convertFileSrc(path);
-}
-
-let generatedVideoDirCache: string | undefined;
-
-/** Preload the generated-videos directory so localVideoFileSrc can resolve a
- * bare `generated-video-*.mp4` filename — the agent frequently refers to a
- * finished video by filename only — to an absolute, asset-scoped path the
- * webview can load. Best-effort; call once on mount. */
-export async function primeGeneratedVideoDir(): Promise<void> {
-  try {
-    generatedVideoDirCache = await invoke<string>("generated_video_dir");
-  } catch {
-    // Non-fatal: absolute MEDIA paths still resolve without the cache.
-  }
-}
-
-function isAbsoluteVideoPath(path: string) {
-  return path.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(path);
-}
-
-export function localVideoFileSrc(path: string) {
-  // A bare generated-video filename resolves against the cached videos dir; an
-  // absolute path (fast-path result, or an absolute MEDIA ref) is used as-is.
-  const resolved =
-    isAbsoluteVideoPath(path) || !generatedVideoDirCache
-      ? path
-      : `${generatedVideoDirCache}/${path}`;
-  return convertFileSrc(resolved);
 }
 
 export async function dictationHotkeyStatus() {

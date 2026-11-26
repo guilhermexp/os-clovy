@@ -29,9 +29,6 @@ mod gateway_tests;
 mod interaction;
 #[cfg(test)]
 mod interaction_tests;
-pub(crate) mod media;
-#[cfg(test)]
-mod media_tests;
 mod memory;
 #[cfg(test)]
 mod memory_tests;
@@ -339,7 +336,6 @@ pub fn groups() -> Vec<&'static dyn ToolGroup> {
     groups.push(&gateway::GATEWAY);
     groups.push(&browser::BROWSER);
     groups.push(&computer_use::COMPUTER_USE);
-    groups.push(&media::MediaTools);
     groups.push(&recorder::RecorderTools);
     groups.push(&interaction::InteractionTools);
     #[cfg(all(test, any(unix, windows)))]

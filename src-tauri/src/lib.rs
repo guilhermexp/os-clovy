@@ -43,7 +43,6 @@ pub(crate) mod hide_console;
 mod http_client;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub mod identity_migration;
-pub mod image_safety;
 pub mod interface_locale;
 pub mod llm;
 mod local_env;
@@ -69,7 +68,6 @@ pub mod theme_icon;
 pub mod transcription_model;
 pub mod update_gate;
 pub mod updates;
-pub mod video_download_url;
 
 use serde::Deserialize;
 #[cfg(target_os = "macos")]
@@ -370,15 +368,7 @@ pub fn run() {
             commands::remove_local_transcription_model,
             providers::set_provider_api_key,
             providers::clear_provider_api_key,
-            providers::set_image_safe_mode,
             providers::set_live_transcription,
-            providers::set_image_safe_mode_prompt_dismissed,
-            image_safety::image_prompt_may_be_explicit,
-            providers::generate_image,
-            providers::edit_image,
-            providers::video_generate,
-            providers::video_status,
-            providers::generated_video_dir,
             providers::probe_local_generation_endpoint,
             llm::commands::llm_providers,
             llm::commands::llm_detect_clis,
@@ -481,7 +471,6 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             transcription_model::setup(app)?;
             providers::local_transcriber::setup(app);
-            setup_video_asset_scope(app);
             setup_computer_use_asset_scope(app);
             updates::setup(app);
             dictation::setup(app);
@@ -516,28 +505,6 @@ pub fn run() {
             }
             _ => {}
         });
-}
-
-/// Registers the generated-video directory in the asset-protocol scope so the
-/// inline `<video>` player can load it. Registering the resolved directory
-/// matches the real write path in both development and production.
-fn setup_video_asset_scope(app: &mut tauri::App) {
-    let videos_dir = match crate::app_paths::app_data_dir(app.handle()) {
-        Ok(data_dir) => data_dir
-            .join("agent-workspaces")
-            .join("generated-media")
-            .join("videos"),
-        Err(error) => {
-            tracing::warn!(%error, "video asset scope: could not resolve app data dir");
-            return;
-        }
-    };
-    if let Err(error) = app
-        .asset_protocol_scope()
-        .allow_directory(&videos_dir, false)
-    {
-        tracing::warn!(%error, path = %videos_dir.display(), "video asset scope: allow_directory failed");
-    }
 }
 
 fn setup_computer_use_asset_scope(app: &mut tauri::App) {

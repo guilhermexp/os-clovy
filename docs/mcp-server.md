@@ -9,8 +9,7 @@ also get the applicable tools described in [Aprovações externas](#aprovações
 Internal CLI consumers use a **turn binding** and get turn-bound tools in their
 saved policy. Bound domain mutations
 use the in-app **approval broker** and revalidate the host binding after waits.
-Media generation keeps its direct-provider charging policy without an extra
-broker card; Browser use input follows the same broker and its own browser guards.
+Browser use input follows the same broker and its own browser guards.
 Requirements: the `clovy-mcp-server` specs of the OpenSpec changes
 `add-activity-intelligence` and `default-capture-and-session-mcp`, and the
 `clovy-mcp-server` delta of `cli-substitui-agente-nativo` (which owns the
@@ -54,7 +53,7 @@ the host binding; every bound dispatch and post-approval mutation checks it.
 | `src-tauri/src/mcp_server/turns.rs` | Turn registry: issue, bind, revoke turn tokens (`turn_required`, `turn_expired`) |
 | `src-tauri/src/mcp_server/tools/mod.rs` | `ToolGroup`, `ToolCtx`, the group registry, `tools/list` and `tools/call` dispatch |
 | `src-tauri/src/mcp_server/tools/read.rs` | The read tools every client gets, and their limits |
-| `src-tauri/src/mcp_server/tools/` | One file per turn-bound group (`notes`, `memory`, `media`, `recorder`, `browser`, `computer_use`, `vault_skills`, `routines`, `connectors`, `gateway`, `interaction`), each with its `*_tests.rs` |
+| `src-tauri/src/mcp_server/tools/` | One file per turn-bound group (`notes`, `memory`, `recorder`, `browser`, `computer_use`, `vault_skills`, `routines`, `connectors`, `gateway`, `interaction`), with tests alongside them |
 | `src-tauri/src/approval_broker/` | Aprovações de turno e fila externa com prazo, decisão única, cancelamento e invalidação |
 | `src-tauri/src/chat_engine/policy.rs` | The flags each CLI turn gets (safety mode, attended, tool timeout) |
 | `src-tauri/src/bin/clovy_mcp.rs` | Binary entry point |
@@ -282,7 +281,6 @@ nota.
 | Rotinas | Criação, edição, pausa, retomada, exclusão e execução usam a rotina salva. A execução usa a política desassistida. Alterações externas que habilitariam execução irrestrita são recusadas. |
 | Skills | Leitura explícita, edição e ativação usam a raiz gerenciada, com revalidação do arquivo e das configurações depois da aprovação. |
 | Conectores e gateway | Contas com escopo suficiente do Gmail, Google Calendar e GitHub, além das ferramentas anunciadas pelo Notion e pelo Linear conectados. O gateway também descobre servidores HTTP habilitados para uso no modo restrito. Cada chamada exige aprovação e usa a credencial vigente. Renovação, login e solicitações interativas acontecem no cliente ou na configuração apropriada. |
-| Mídia | `generate_image`, `edit_image` e `generate_video` usam o fal configurado e pedem aprovação para cada operação com custo. O `sourcePath` externo identifica uma imagem gerada pela mesma conexão. A retomada de vídeo usa o identificador de trabalho da conexão e consulta o trabalho existente. |
 | Browser use | Ferramentas do navegador gerenciado usam uma sessão anônima reservada à conexão. O navegador precisa estar habilitado. Cada operação exige aprovação e entrada sensível continua sujeita à política do navegador. A desconexão ou troca de perfil encerra a sessão. |
 | Computer use | O controlador existente exige autorização local, driver e permissões do sistema. `list_apps` informa as janelas. Captura e foco exigem app e janela explícitos. Ações de entrada dependem de uma captura atual da mesma conexão. Cada ação exige aprovação. Outra tarefa ativa mantém o controle até concluir ou ser interrompida pelo usuário. |
 | Gravação | O status e os artefatos usam a partição ativa. A janela principal conduz as operações aprovadas de início, pausa, retomada, encerramento, recuperação e nova tentativa de processamento, com fonte e alvo fixados pelo host. |
@@ -460,9 +458,6 @@ unattended turn every `yes` and `clarification` answers
 | `switch_tab` | browser | attended or routine turns | no | `session_id`, integer `tab_id` |
 | `close_tab` | browser | attended or routine turns | no | `session_id`, integer `tab_id` |
 | `computer_use` | computer use | attended turns | conditional | `action` (`capture`, `list_apps`, `wait`, `open_app`, `focus_app`, `click`, `double_click`, `right_click`, `drag`, `scroll`, `type`, `key`, `set_value`) and its arguments: the turn's effective approval policy applies; the turn binding opens the run's lease; the capture comes back as an `image` block |
-| `generate_image` | media | every turn | no | `prompt`: calls fal directly with the user's key; the file goes to `artifacts/` of the bound session's workspace and `agent_artifacts`, and comes back as an `image` block while under 3 MiB |
-| `edit_image` | media | every turn | no | `sourcePath` (relative to the session workspace or absolute), `instruction`: sandboxed turns require the canonical source to remain inside the workspace; same storage |
-| `generate_video` | media | every turn | no | `prompt`, `duration`, `aspectRatio`, `audio`, `jobId` (resumes a job): polls within the CLI's tool timeout; same storage |
 | `start_recording` | recorder | every turn | yes | `sourceMode` (`microphoneOnly`, `microphonePlusSystem`): the frontend starts the visible recording (ADR-0013) after approval |
 | `stop_recording` | recorder | every turn | yes | none: stops the visible recording |
 | `recording_status` | recorder | every turn | no | none: whether Clovy is recording, with its metadata |
@@ -698,10 +693,9 @@ unknown codes and free-form descriptions are sanitized.
 
 ### Content blocks
 
-A tool result is one `text` block with the result as JSON, except
-`computer_use`, `screenshot`, and the image tools, which return MCP content
-blocks (`protocol::content_value`): images as `image` blocks (up to 3 MiB in
-base64; a larger one stays in Clovy) and the rest as `text`.
+A tool result is normally one `text` block with the result as JSON.
+`computer_use` and `screenshot` can return captures as MCP `image` blocks
+through `protocol::content_value`.
 
 ### Times and resources
 

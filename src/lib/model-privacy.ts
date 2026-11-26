@@ -78,7 +78,6 @@ export function modelAvailableForMode(
 export const BUILTIN_PROVIDER_NAME_KEYS: Record<BuiltinProvider, MessageKey> = {
   groq: "settings.providerKeys.groq.name",
   openrouter: "settings.providerKeys.openrouter.name",
-  fal: "settings.providerKeys.fal.name",
   tavily: "settings.providerKeys.tavily.name",
 };
 

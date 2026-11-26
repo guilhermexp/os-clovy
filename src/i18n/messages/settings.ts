@@ -73,13 +73,16 @@ export default defineMessages({
     "settings.tabs.dictation": "Dictation",
     "settings.tabs.audio": "Audio",
     "settings.tabs.models": "Models",
-    "settings.tabs.agent": "Agent",
     "settings.tabs.memory": "Memory",
     "settings.tabs.connectors": "Plugins",
     "settings.tabs.about": "About",
     "settings.page.description": "Manage audio, dictation, AI models, and agent capabilities.",
     "settings.page.navAria": "Settings sections",
     "settings.general.blurb": "Everyday Clovy preferences.",
+    "settings.routineSounds.title": "Routine sounds",
+    "settings.routineSounds.description":
+      "Play a sound when a routine finishes or needs attention.",
+    "settings.routineSounds.aria": "Play routine sounds",
     "settings.updates.title": "Updates",
     "settings.updates.description":
       "Clovy looks for a new version each time it opens and asks before installing it.",
@@ -163,7 +166,7 @@ export default defineMessages({
     "settings.micTest.playbackUnavailable":
       "Microphone test recorded, but playback is unavailable.",
 
-    "settings.models.blurb": "Choose the models Clovy uses for voice, text, image, and video.",
+    "settings.models.blurb": "Configure audio transcription, text models, and CLI providers.",
     "settings.models.partitionNote":
       "Showing models for the current data set: {name}. Switch to the default data set to edit global models.",
     "settings.models.transcription": "Audio transcription",
@@ -180,26 +183,10 @@ export default defineMessages({
     "settings.models.retryCatalog": "Retry model list",
     "settings.models.moreTextAria": "More options for text",
     "settings.models.moreTextDescription": "Advanced text settings",
-    "settings.models.imageAndVideo": "Image and video",
-    "settings.models.mediaDescription":
-      "Choose the models Clovy uses when you ask it to generate an image or video.",
-    "settings.models.image": "Image",
-    "settings.models.imageDescription": "Used by the image generation tool.",
-    "settings.models.video": "Video",
-    "settings.models.videoDescription": "Used by the video generation tool.",
-    "settings.models.moreMediaAria": "More options for image and video",
-    "settings.models.moreMediaDescription": "Advanced image and video settings",
     "settings.models.updated.transcription": "Transcription model updated.",
-    "settings.models.updated.image": "Image model updated.",
-    "settings.models.updated.video": "Video model updated.",
     "settings.models.updated.generation": "Text model updated.",
     "settings.models.modelLabel.transcription": "transcription model",
     "settings.models.modelLabel.generation": "text model",
-    "settings.models.modelLabel.image": "image model",
-    "settings.models.modelLabel.video": "video model",
-    "settings.models.popoverTitle.transcription": "Transcription model",
-    "settings.models.popoverTitle.image": "Image model",
-    "settings.models.popoverTitle.video": "Video model",
     "settings.models.changeAria": "Change {model}",
     "settings.models.chooseAria": "Choose {model}",
 
@@ -211,16 +198,6 @@ export default defineMessages({
       "Live transcription on: the transcript streams while you record.",
     "settings.liveTranscription.off":
       "Live transcription off: the transcript appears after the recording ends.",
-
-    "settings.safeMode.title": "Safe mode",
-    "settings.safeMode.descriptionWithVideo":
-      "Ask the image provider to filter adult content in generated and edited images, and hold back video prompts that request it. On by default. Turning it off lifts the filter only where the provider allows it.",
-    "settings.safeMode.description":
-      "Ask the image provider to filter adult content in generated and edited images. On by default. Turning it off lifts the filter only where the provider allows it.",
-    "settings.safeMode.aria": "Filter adult content in images",
-    "settings.safeMode.on": "Safe mode on: adult content is filtered.",
-    "settings.safeMode.off":
-      "Safe mode off: the filter is lifted only where the provider allows it.",
 
     "settings.providerKeys.title": "Provider API keys",
     "settings.providerKeys.description":
@@ -236,8 +213,6 @@ export default defineMessages({
     "settings.providerKeys.groq.description": "Transcription for dictation and notes",
     "settings.providerKeys.openrouter.name": "OpenRouter",
     "settings.providerKeys.openrouter.description": "Text models for notes and transcript cleanup.",
-    "settings.providerKeys.fal.name": "fal",
-    "settings.providerKeys.fal.description": "Images and video",
     "settings.providerKeys.tavily.name": "Tavily",
     "settings.providerKeys.tavily.description": "Web search",
 
@@ -419,13 +394,16 @@ export default defineMessages({
     "settings.tabs.dictation": "Ditado",
     "settings.tabs.audio": "Áudio",
     "settings.tabs.models": "Modelos",
-    "settings.tabs.agent": "Agente",
     "settings.tabs.memory": "Memória",
     "settings.tabs.connectors": "Plugins",
     "settings.tabs.about": "Sobre",
     "settings.page.description": "Gerencie áudio, ditado, modelos de IA e recursos do agente.",
     "settings.page.navAria": "Seções das configurações",
     "settings.general.blurb": "As preferências do dia a dia do Clovy.",
+    "settings.routineSounds.title": "Sons das rotinas",
+    "settings.routineSounds.description":
+      "Toca um som quando uma rotina termina ou precisa de atenção.",
+    "settings.routineSounds.aria": "Reproduzir sons das rotinas",
     "settings.updates.title": "Atualizações",
     "settings.updates.description":
       "O Clovy procura uma versão nova sempre que abre e pergunta antes de instalar.",
@@ -512,7 +490,8 @@ export default defineMessages({
     "settings.micTest.playbackUnavailable":
       "O teste do microfone foi gravado, mas a reprodução não está disponível.",
 
-    "settings.models.blurb": "Escolha os modelos que o Clovy usa para voz, texto, imagem e vídeo.",
+    "settings.models.blurb":
+      "Configure a transcrição de áudio, os modelos de texto e os provedores CLI.",
     "settings.models.partitionNote":
       "Mostrando os modelos do conjunto de dados atual: {name}. Mude para o conjunto de dados padrão para editar os modelos globais.",
     "settings.models.transcription": "Transcrição de áudio",
@@ -531,26 +510,10 @@ export default defineMessages({
     "settings.models.retryCatalog": "Tentar carregar a lista novamente",
     "settings.models.moreTextAria": "Mais opções de texto",
     "settings.models.moreTextDescription": "Configurações avançadas de texto",
-    "settings.models.imageAndVideo": "Imagem e vídeo",
-    "settings.models.mediaDescription":
-      "Escolha os modelos que o Clovy usa quando você pede para gerar uma imagem ou um vídeo.",
-    "settings.models.image": "Imagem",
-    "settings.models.imageDescription": "Usado quando você gera uma imagem pela conversa.",
-    "settings.models.video": "Vídeo",
-    "settings.models.videoDescription": "Usado quando você gera um vídeo pela conversa.",
-    "settings.models.moreMediaAria": "Mais opções de imagem e vídeo",
-    "settings.models.moreMediaDescription": "Configurações avançadas de imagem e vídeo",
     "settings.models.updated.transcription": "Modelo de transcrição atualizado.",
-    "settings.models.updated.image": "Modelo de imagem atualizado.",
-    "settings.models.updated.video": "Modelo de vídeo atualizado.",
     "settings.models.updated.generation": "Modelo de texto atualizado.",
     "settings.models.modelLabel.transcription": "modelo de transcrição",
     "settings.models.modelLabel.generation": "modelo de texto",
-    "settings.models.modelLabel.image": "modelo de imagem",
-    "settings.models.modelLabel.video": "modelo de vídeo",
-    "settings.models.popoverTitle.transcription": "Modelo de transcrição",
-    "settings.models.popoverTitle.image": "Modelo de imagem",
-    "settings.models.popoverTitle.video": "Modelo de vídeo",
     "settings.models.changeAria": "Alterar {model}",
     "settings.models.chooseAria": "Escolher {model}",
 
@@ -562,16 +525,6 @@ export default defineMessages({
       "Transcrição ao vivo ativada: a transcrição aparece enquanto você grava.",
     "settings.liveTranscription.off":
       "Transcrição ao vivo desativada: a transcrição aparece depois que a gravação termina.",
-
-    "settings.safeMode.title": "Modo seguro",
-    "settings.safeMode.descriptionWithVideo":
-      "Pede ao provedor de imagens que filtre conteúdo adulto em imagens geradas e editadas e retém prompts de vídeo que peçam esse conteúdo. Ativado por padrão. Ao desativar, o filtro só é removido onde o provedor permite.",
-    "settings.safeMode.description":
-      "Pede ao provedor de imagens que filtre conteúdo adulto em imagens geradas e editadas. Ativado por padrão. Ao desativar, o filtro só é removido onde o provedor permite.",
-    "settings.safeMode.aria": "Filtrar conteúdo adulto em imagens",
-    "settings.safeMode.on": "Modo seguro ativado: conteúdo adulto é filtrado.",
-    "settings.safeMode.off":
-      "Modo seguro desativado: o filtro só é removido onde o provedor permite.",
 
     "settings.providerKeys.title": "Chaves de API de provedores",
     "settings.providerKeys.description":
@@ -588,8 +541,6 @@ export default defineMessages({
     "settings.providerKeys.openrouter.name": "OpenRouter",
     "settings.providerKeys.openrouter.description":
       "Modelos de texto para notas e limpeza de transcrições.",
-    "settings.providerKeys.fal.name": "fal",
-    "settings.providerKeys.fal.description": "Imagens e vídeo",
     "settings.providerKeys.tavily.name": "Tavily",
     "settings.providerKeys.tavily.description": "Busca na web",
 

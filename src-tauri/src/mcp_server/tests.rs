@@ -180,12 +180,9 @@ fn capture_on() -> ActivitySettings {
 }
 
 async fn request(data: &McpData, method: &str, params: Value) -> Value {
-    protocol::handle(
-        data,
-        &json!({ "jsonrpc": "2.0", "id": 7, "method": method, "params": params }),
-    )
-    .await
-    .expect("a request is answered")
+    protocol::handle(data, &rpc_request(method, params))
+        .await
+        .expect("a request is answered")
 }
 
 /// A `tools/call` result's JSON payload, or the error text.
@@ -212,6 +209,144 @@ fn tool_names(response: &Value) -> Vec<String> {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_string())
         .collect()
+}
+
+const RETIRED_MEDIA_TOOLS: [&str; 3] = ["generate_image", "edit_image", "generate_video"];
+
+fn rpc_request(method: &str, params: Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": 7, "method": method, "params": params})
+}
+
+fn assert_retired_media_unavailable(response: Value, name: &str) {
+    assert_eq!(response["id"], 7);
+    assert_eq!(response["error"]["code"], protocol::INVALID_PARAMS);
+    assert_eq!(
+        response["error"]["message"],
+        format!("Unknown tool: {name}")
+    );
+    assert!(response.get("result").is_none());
+}
+
+#[tokio::test]
+async fn bound_mcp_catalog_and_dispatch_exclude_retired_media() {
+    let broker = crate::approval_broker::testing::TestBroker::new([]).await;
+    let binding = broker.turn(crate::llm::cli::CliKind::Codex, true).await;
+    let fixture = tempfile::tempdir().unwrap();
+    let path = fixture.path().join("old-result.mp4");
+    let contents = b"synthetic historical artifact";
+    std::fs::write(&path, contents).unwrap();
+    query("INSERT INTO agent_artifacts (id, session_id, run_id, provenance, action, path, display_name, mime_type, available, created_at) VALUES ('old-video', ?, ?, 'tool', 'created', ?, 'Old result', 'video/mp4', 1, '2026-01-01')")
+        .bind(&binding.session_id)
+        .bind(&binding.run_id)
+        .bind(path.to_str().unwrap())
+        .execute(broker.pool())
+        .await
+        .unwrap();
+    let data = data(broker.pool().clone(), ActivityAccess::Off);
+    let ctx = tools::ToolCtx {
+        data: &data,
+        app: None,
+        binding: Some(&binding),
+        broker: Some(broker.broker()),
+    };
+    let listing = protocol::handle_in(&ctx, &rpc_request("tools/list", json!({})))
+        .await
+        .unwrap();
+    let listed = tool_names(&listing);
+    assert!(listed.iter().any(|name| name == "search_notes"));
+    assert!(listed
+        .iter()
+        .any(|name| name == "list_conversation_artifacts"));
+    for name in RETIRED_MEDIA_TOOLS {
+        assert!(
+            !listed.iter().any(|listed_name| listed_name == name),
+            "{name}"
+        );
+        // The invalid argument type cannot trigger a provider request if a
+        // regression ever brings back dispatch independently of discovery.
+        let request = rpc_request(
+            "tools/call",
+            json!({"name": name, "arguments": {"prompt": false, "instruction": false}}),
+        );
+        let answer = protocol::handle_in(&ctx, &request).await.unwrap();
+        assert_retired_media_unavailable(answer, name);
+    }
+    let history = protocol::handle_in(
+        &ctx,
+        &rpc_request(
+            "tools/call",
+            json!({"name": "list_conversation_artifacts", "arguments": {"conversationId": binding.session_id}}),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(history["result"]["isError"], false, "{history}");
+    let payload: Value =
+        serde_json::from_str(history["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let artifacts = payload["items"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0]["id"], "old-video");
+    assert_eq!(artifacts[0]["mimeType"], "video/mp4");
+    assert_eq!(artifacts[0]["available"], true);
+    assert_eq!(std::fs::read(path).unwrap(), contents);
+    assert!(broker.requests().is_empty());
+}
+
+#[tokio::test]
+async fn external_mcp_catalog_and_dispatch_exclude_retired_media() {
+    use crate::approval_broker::external::ExternalApprovalBroker;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let data = data(notes_pool().await, ActivityAccess::Off);
+    let ctx = tools::ToolCtx::unbound(&data);
+    let root = tempfile::tempdir().unwrap();
+    let (peer, _closed, _cancelled) = channel::ExternalConnection::test_connection();
+    let notifications = Arc::new(AtomicUsize::new(0));
+    let notified = notifications.clone();
+    let broker = ExternalApprovalBroker::new(
+        || Some("default".to_owned()),
+        move || {
+            notified.fetch_add(1, Ordering::Relaxed);
+        },
+        StdDuration::from_secs(5),
+    );
+    let listing = protocol::handle_external(
+        &ctx,
+        &peer,
+        &broker,
+        None,
+        Some(root.path()),
+        &rpc_request("tools/list", json!({})),
+    )
+    .await
+    .unwrap();
+    let listed = tool_names(&listing);
+    // This is the external catalog, which includes protected note writes
+    // even without an app handle, rather than the public read-only fallback.
+    assert!(listed.iter().any(|name| name == "create_note"));
+    assert!(listed.iter().any(|name| name == "list_routines"));
+    for (name, arguments) in [
+        ("generate_image", json!({"prompt": "Synthetic image"})),
+        (
+            "edit_image",
+            json!({"sourcePath": "old.png", "instruction": "Synthetic edit"}),
+        ),
+        ("generate_video", json!({"jobId": "old-job"})),
+    ] {
+        assert!(
+            !listed.iter().any(|listed_name| listed_name == name),
+            "{name}"
+        );
+        let request = rpc_request("tools/call", json!({"name": name, "arguments": arguments}));
+        let answer =
+            protocol::handle_external(&ctx, &peer, &broker, None, Some(root.path()), &request)
+                .await
+                .unwrap();
+        assert_retired_media_unavailable(answer, name);
+    }
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    assert_eq!(notifications.load(Ordering::Relaxed), 0);
+    assert!(broker.pending().is_empty());
 }
 
 #[tokio::test]

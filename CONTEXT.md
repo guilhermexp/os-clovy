@@ -1,11 +1,11 @@
 # Clovy
 
-Clovy is a Tauri desktop app that records meetings/dictation, transcribes
-the audio, turns the transcript into structured notes, and hosts an AI agent
-you can chat with over those notes. It calls the user-configured providers
-directly, with no sign-in, billing service, local bearer token, telemetry or
-companion app. Chat runs on installed **CLI chat engines**, with
-Clovy tools exposed through the **Clovy MCP server** and local approval broker.
+Clovy is a Tauri desktop app for activity, meeting notes, dictation and
+routines. It opens in Today. Installed **agent CLIs** power routines and can
+process notes and activity. External agents access Clovy through the
+**Clovy MCP server** and its local approval controls. Clovy calls configured
+providers directly, with no sign-in, billing service, local bearer token,
+telemetry or companion app.
 
 This document is a glossary, not a spec. Terms are canonical; the `_Avoid_`
 lines are binding. Implementation, endpoints, and code shape live under
@@ -31,7 +31,7 @@ _Avoid_: move, rename (the old profile stays), upgrade.
 
 **Direct provider**:
 An external service called directly by the desktop with the user's key:
-**Groq** for audio, **OpenRouter** for audio or remote text, and **fal** for media.
+**Groq** for audio and **OpenRouter** for audio or remote text.
 There is no Clovy inference server or service-managed credential fallback.
 _Avoid_: proxy, shared service key, automatic fallback.
 
@@ -56,22 +56,22 @@ _Avoid_: service key, credit balance.
 **Own provider**:
 An installed **agent CLI**, using its own login, or a named
 **OpenAI-compatible endpoint** (base URL, model, optional credential-store
-key). Notes and activity use these through `llm::generate`; chat accepts only
-CLI engines. They never transcribe audio. See
+key). Notes and activity use these through `llm::generate`. Routines use
+installed CLI engines. These providers never transcribe audio. See
 [docs/llm-providers.md](docs/llm-providers.md).
 _Avoid_: local model (unless the endpoint actually runs on this machine).
 
 **Provider use (usage selection)**:
-The engine assigned to **chat**, **notes**, or **activity**. Chat uses a CLI;
-notes use OpenRouter, CLI or endpoint. Activity defaults to **none** and
-requires measured `json_schema` output support. Dictation cleanup is fixed to
-OpenRouter and has no engine selection.
+The engine assigned to **notes** or **activity**. Notes use OpenRouter, CLI or
+endpoint. Activity defaults to **none** and requires measured `json_schema`
+output support. The internal `llmUsage.chat` entry remains a CLI selection
+for compatibility with existing settings. Dictation cleanup uses OpenRouter.
 _Avoid_: default model, active provider (unqualified).
 
 **Text model catalog**:
 OpenRouter's models with text output, including models without tools. The
-picker selection changes the remote note model, never the chat or Notes
-engine. Its description names the active Notes engine.
+picker selects the model for remote note generation. Its description names
+the separately selected Notes engine.
 _Avoid_: chat model picker, tool-capable models (as a text-mode requirement).
 
 **Dictation cleanup**:
@@ -89,19 +89,17 @@ Clovy's own calls. Distinct from an **agent run**.
 _Avoid_: completion (unqualified), query.
 
 **Chat engine**:
-The installed **agent CLI** that answers a chat session, one process per message,
-resuming its own conversation. Clovy tools reach a bound turn through the
-**Clovy MCP server** and the local approval broker. The session stores
-`__clovy_cli_engine__:<cli>` as its engine id. Registered endpoints and the
-text model used for notes are separate from chat. See
+The installed **agent CLI** represented by `__clovy_cli_engine__:<cli>` in
+persisted session and run records. The CLI execution machinery also runs
+routines, with tool access through the **Clovy MCP server** and the local
+approval broker. See
 [docs/llm-providers.md](docs/llm-providers.md#cli-chat-engine).
 _Avoid_: backend, model (an engine is not a model), provider (unqualified).
 
 **Default chat engine**:
-Claude Code when installed, otherwise the existing Codex fallback. Without
-an eligible installed CLI, chat asks for installation or connection; it never
-starts a bundled agent or an endpoint. Routines use the CLI default as an
-**unattended turn** with their existing tool policy. See
+The default CLI selection retained by the historical chat engine. Routines
+resolve the CLI from their saved configuration and run as an **unattended
+turn** with their existing tool policy. See
 [ADR-0072](docs/adr/0072-cli-chat-replaces-the-native-agent.md).
 _Avoid_: native agent, legacy engine (neither is a current chat engine).
 
@@ -448,7 +446,8 @@ _Avoid_: response (only the visible text), turn (ambiguous with transcript and
 conversation turns).
 
 **Composer**:
-The ProseMirror chat input with slash commands and attachment chips.
+The ProseMirror input used by the former desktop chat. The name also appears
+in internal dictation delivery types for those input targets.
 _Avoid_: textbox.
 
 **Interrupted tool call**:
@@ -463,14 +462,6 @@ The in-app bug / feedback report dialog and its remote submission were
 removed from the desktop; see
 [ADR-0012](docs/adr/0012-direct-issue-report-submission.md). Don't reintroduce
 the term for new work.
-
-**Slash command**:
-A `/name arg` handled client-side before submit — builtin `/model`, `/file`,
-`/image`, and `/video`, plus skill slash commands. `/image <prompt>` starts
-Clovy's image generation fast path without invoking the model (kill switch:
-`IMAGE_GENERATION_ENABLED`); `/video <prompt>` starts the video generation fast
-path (kill switch: `VIDEO_GENERATION_ENABLED`).
-_Avoid_: gateway command.
 
 **Steer**:
 A user instruction delivered into a still-running agent session without
@@ -672,39 +663,6 @@ neither translates user content or model output. See
 _Avoid_: "language" alone when the context does not make clear which one;
 "locale" for the transcription hint.
 
-**Image generation**:
-Producing a new image from a text **prompt** through fal, using an explicit
-`/image` action or an assistant tool call. It is distinct from **image
-editing**; see [ADR 0008](docs/adr/0008-image-generation-and-editing-tools.md).
-_Avoid_: rendering, drawing (say **image generation**).
-
-**Image editing**:
-Transforming an existing image plus an instruction through fal's editing
-model, preserving its oriented aspect ratio. It is distinct from **image
-generation**, which starts from a text prompt.
-_Avoid_: image-to-image jargon, regenerate (that's a fresh **image generation**).
-
-**Video generation**:
-Producing a new video from a text **prompt** through fal's asynchronous
-job flow, using `/video` or an assistant tool call. It is distinct from
-**image-to-video**; see [ADR 0015](docs/adr/0015-video-generation-tools.md).
-_Avoid_: txt2vid jargon, rendering (say **video generation**).
-
-**Image-to-video**:
-Producing a video by animating an existing image plus a prompt through fal.
-It is the video counterpart of **image editing**, distinct from text-only
-**video generation**.
-_Avoid_: img2vid jargon, animate (unqualified — say **image-to-video**).
-
-**Safe mode**:
-The shared per-device image/video preference requesting the upstream
-model's supported content safeguards. Turning it off is a request, not a
-promise of unfiltered output or permission to bypass the provider's
-account restrictions; see [ADR 0008](docs/adr/0008-image-generation-and-editing-tools.md)
-and [ADR 0015](docs/adr/0015-video-generation-tools.md).
-_Avoid_: NSFW filter/toggle (say **safe mode**), censorship, "video safe
-mode" (there is only one safe mode).
-
 **Provider price**:
 The provider's listed price for its model or operation, expressed in dollars
 and its stated unit. A catalog estimate is not proof of an account's charge.
@@ -737,8 +695,8 @@ _Avoid_: "GitHub release" (unqualified).
 **Provider settings / Model mode**:
 The persisted model selection for each remote action, separate from
 **provider use** choices for CLI and endpoint engines. Current upstreams
-are Groq for audio, OpenRouter for audio or remote text, and fal for media. Web search
-belongs to the CLI engine.
+are Groq for audio and OpenRouter for audio or remote text. Web search belongs
+to the CLI engine.
 _Avoid_: model config (unqualified).
 
 **Account snapshot** / **Avatar** / **AccountGate** / **FundingGate** (removed):
@@ -982,7 +940,7 @@ _Avoid_: do not disturb (that is the macOS Focus feature).
 
 ## Example dialogue
 
-> **Dev:** "Does picking a text model switch chat away from Claude Code?"
+> **Dev:** "Can I choose an OpenRouter model while using Claude Code for notes?"
 >
-> **PM:** "No. It changes the remote model used when Notes selects OpenRouter.
-> The picker names the Notes engine, and chat keeps its CLI engine."
+> **PM:** "Yes. The picker saves the model for use whenever Notes selects
+> OpenRouter. Claude Code stays selected as the Notes engine."

@@ -24,20 +24,15 @@ const baseSettings: ProviderModelSettingsDto = {
   transcriptionModel: "whisper-large-v3-turbo",
   generationModel: "z-ai/glm-5.2",
   remoteGenerationModel: "z-ai/glm-5.2",
-  imageModel: "fal-ai/flux/dev",
-  videoModel: "fal-ai/wan/v2.2-a14b/text-to-video",
   providerApiKeysConfigured: {
     groq: false,
     openrouter: false,
-    fal: false,
     tavily: false,
   },
   localGeneration: {
     baseUrl: "",
     modelId: "",
   },
-  imageSafeMode: true,
-  imageSafeModePromptDismissed: false,
   liveTranscription: true,
 };
 

@@ -9,9 +9,8 @@ integration shape. June-managed `june_*` MCP servers are retired; they are
 historical architecture, not the namespace or template for a new internal
 tool surface.
 
-Good: `start_recording`, `stop_recording`, `generate_image`, `edit_image`,
-`search_threads`, `read_thread`, `get_meeting_note`, `start_session`,
-`accept_shared_tab`, `list_tabs`.
+Good examples include `start_recording`, `stop_recording`, `get_note`,
+`list_routines`, `start_session`, and `list_tabs`.
 
 Not: `session_start`, `tab_accept_shared`, `recording_start`,
 `june_browser_navigate`, `june_gmail_search_threads`.
@@ -54,10 +53,10 @@ defect to fix first.
 The note tools (`search_june`, `get_note`, `get_dictation`) are named in
 [docs/agent-note-tools.md](../docs/agent-note-tools.md).
 
-Clovy's tools for CLI chat turns are served by the Clovy MCP server. Its read
+Clovy's tools for bound CLI turns are served by the Clovy MCP server. Its read
 tools are named in the `clovy-mcp-server` specs of the OpenSpec changes
 `add-activity-intelligence` and `default-capture-and-session-mcp`; its
-turn-bound tools (memory, media, recorder, Browser use, Computer use, vault
+turn-bound tools (memory, recorder, Browser use, Computer use, vault
 and skills, routines, connectors, interaction) are named in the
 `clovy-mcp-server` delta of the OpenSpec change `cli-substitui-agente-nativo`
 ([ADR-0063](../docs/adr/0063-cli-turns-get-write-tools-through-an-approval-broker.md)),

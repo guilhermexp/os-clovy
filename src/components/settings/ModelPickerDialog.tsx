@@ -40,20 +40,7 @@ export function ModelMeta({ model }: { model: ProviderModelDto }) {
   const items: ReactNode[] = [];
   if (price) items.push(<span className="model-meta-price">{price}</span>);
   if (context) items.push(<span>{context}</span>);
-  if ((model.modelType === "image" || model.modelType === "video") && model.description) {
-    items.push(<span>{model.description}</span>);
-  }
-  if (privacyBadge) {
-    const imagePrivacyLabel =
-      model.modelType === "image"
-        ? privacyBadge.mode === "private"
-          ? t("settingsPanels.models.private")
-          : privacyBadge.mode === "anonymous"
-            ? t("settingsPanels.models.anonymized")
-            : undefined
-        : undefined;
-    items.push(<ModelPrivacyChip badge={privacyBadge} label={imagePrivacyLabel} />);
-  }
+  if (privacyBadge) items.push(<ModelPrivacyChip badge={privacyBadge} />);
   if (flags.uncensored) {
     items.push(
       <span className="model-trait-icon" title={t("settingsPanels.models.uncensored")}>
@@ -143,11 +130,7 @@ export function ModelPickerDialog({
   const title =
     mode === "transcription"
       ? t("settingsPanels.models.transcriptionModel")
-      : mode === "image"
-        ? t("settingsPanels.models.imageModel")
-        : mode === "video"
-          ? t("settingsPanels.models.videoModel")
-          : t("settingsPanels.models.textModel");
+      : t("settingsPanels.models.textModel");
 
   return (
     <Dialog

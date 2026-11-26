@@ -1,5 +1,4 @@
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
-import { IconRobot2 } from "central-icons/IconRobot2";
 import { IconChevronLeftSmall } from "central-icons/IconChevronLeftSmall";
 import { IconAudio } from "central-icons/IconAudio";
 import { IconBrain2 } from "central-icons/IconBrain2";
@@ -130,7 +129,6 @@ const SETTINGS_SIDEBAR_GROUPS: {
     title: "shell.settingsNav.group.ai",
     items: [
       { id: "models", label: "shell.settingsNav.models", icon: <IconBrain2 size={16} /> },
-      { id: "agent", label: "shell.settingsNav.agent", icon: <IconRobot2 size={16} /> },
       {
         id: "memory",
         label: "shell.settingsNav.memory",

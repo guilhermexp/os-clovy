@@ -32,22 +32,6 @@ export const SUGGESTED_MODELS: Record<ProviderModelMode, SuggestedModel[]> = {
     suggestion("whisper-large-v3-turbo", "lib.suggested.whisperTurbo"),
     suggestion("whisper-large-v3", "lib.suggested.whisper"),
   ],
-  // Image models come from the curated local list in lib/image-models.ts, not
-  // a fetched catalog; these picks are the shortlist the picker surfaces above
-  // "All models". The default (DEFAULT_IMAGE_MODEL, fal-ai/flux/dev) stays
-  // first so it is always visible without expanding.
-  image: [
-    suggestion("fal-ai/flux/dev", "lib.suggested.fluxDev"),
-    suggestion("fal-ai/flux/schnell", "lib.suggested.fluxSchnell"),
-    suggestion("fal-ai/qwen-image", "lib.suggested.qwenImage"),
-  ],
-  // Video is a small curated local list (lib/video-models.ts); both models are
-  // suggested so they show without expanding "All models". The default
-  // (DEFAULT_VIDEO_MODEL, Wan 2.2 A14B) stays first.
-  video: [
-    suggestion("fal-ai/wan/v2.2-a14b/text-to-video", "lib.suggested.wan22"),
-    suggestion("alibaba/wan-3.0/text-to-video", "lib.suggested.wan30"),
-  ],
 };
 
 function suggestion(id: string, reasonKey: MessageKey): SuggestedModel {

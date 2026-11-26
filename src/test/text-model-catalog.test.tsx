@@ -66,12 +66,10 @@ beforeEach(() => {
     transcriptionProvider: "groq",
     generationProvider: "openrouter",
     transcriptionModel: "whisper-large-v3-turbo",
-    imageModel: "fal-ai/flux/dev",
-    videoModel: "fal-ai/wan/v2.2-a14b/text-to-video",
     remoteGenerationModel: "vendor/saved",
     localGeneration: { baseUrl: "", modelId: "" },
     generationModel: "vendor/saved",
-    providerApiKeysConfigured: { groq: false, openrouter: false, fal: false, tavily: false },
+    providerApiKeysConfigured: { groq: false, openrouter: false, tavily: false },
   };
   providers = {
     endpoints: [],
@@ -107,7 +105,6 @@ beforeEach(() => {
         providerApiKeysConfigured: {
           groq: false,
           openrouter: command === "set_provider_api_key",
-          fal: false,
           tavily: false,
         },
       };
@@ -174,19 +171,16 @@ describe("OpenRouter text model catalog", () => {
   it.each([
     "save",
     "remove",
-  ] as const)("preserves partition model overrides when a global key is %s", async (operation) => {
+  ] as const)("preserves the audio partition model override when a global key is %s", async (operation) => {
     setCurrentDataPartitionName("Research");
     settings.providerApiKeysConfigured = {
       groq: false,
       openrouter: operation === "remove",
-      fal: false,
       tavily: false,
     };
     effectiveSettings = {
       ...settings,
       transcriptionModel: "research-transcription",
-      imageModel: "research-image",
-      videoModel: "research-video",
     };
     const user = userEvent.setup();
     renderSettings();
@@ -206,12 +200,6 @@ describe("OpenRouter text model catalog", () => {
       ).toBeVisible(),
     );
     expect(transcription).toHaveValue("research-transcription");
-    expect(screen.getByRole("button", { name: "Change image model" })).toHaveTextContent(
-      "research-image",
-    );
-    expect(screen.getByRole("button", { name: "Change video model" })).toHaveTextContent(
-      "research-video",
-    );
   });
 
   it.each([

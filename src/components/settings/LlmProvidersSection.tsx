@@ -33,7 +33,6 @@ import { InlineNotice } from "../ui/InlineNotice";
 import { RuntimeLogo } from "../brand/RuntimeLogo";
 
 export type LlmProvidersSectionProps = {
-  onChatProviderChanged?: () => void;
   onProvidersChanged?: (providers: LlmProvidersDto) => void;
 };
 
@@ -71,10 +70,9 @@ function formatLevel(level: StructuredOutputLevel | undefined, t: TFunction): st
   }
 }
 
-export function LlmProvidersSection({
-  onChatProviderChanged,
-  onProvidersChanged,
-}: LlmProvidersSectionProps) {
+type ConfigurableLlmUsage = Exclude<LlmUsage, "chat">;
+
+export function LlmProvidersSection({ onProvidersChanged }: LlmProvidersSectionProps) {
   const t = useT();
 
   const [loading, setLoading] = useState(true);
@@ -87,8 +85,8 @@ export function LlmProvidersSection({
   const [clisDetecting, setClisDetecting] = useState(false);
 
   // Per-usage errors (e.g. rejection when structured output is insufficient)
-  const [usageErrors, setUsageErrors] = useState<Partial<Record<LlmUsage, string>>>({});
-  const [busyUsage, setBusyUsage] = useState<Partial<Record<LlmUsage, boolean>>>({});
+  const [usageErrors, setUsageErrors] = useState<Partial<Record<ConfigurableLlmUsage, string>>>({});
+  const [busyUsage, setBusyUsage] = useState<Partial<Record<ConfigurableLlmUsage, boolean>>>({});
 
   // Testing feedback
   const [cliTestResults, setCliTestResults] = useState<Record<string, string>>({});
@@ -129,7 +127,6 @@ export function LlmProvidersSection({
   }, [loadAll]);
 
   // Re-read note provider preferences when model settings change elsewhere.
-  // Text-model selection never changes the chat engine.
   useEffect(() => {
     const refresh = () => {
       void llmProviders()
@@ -152,7 +149,7 @@ export function LlmProvidersSection({
     }
   };
 
-  const handleUsageChange = async (usage: LlmUsage, rawKey: string) => {
+  const handleUsageChange = async (usage: ConfigurableLlmUsage, rawKey: string) => {
     const providerRef = parseProviderRefKey(rawKey);
     setUsageErrors((prev) => ({ ...prev, [usage]: undefined }));
     setBusyUsage((prev) => ({ ...prev, [usage]: true }));
@@ -210,9 +207,6 @@ export function LlmProvidersSection({
       }
       const updated = await llmSetUsage(usage, providerRef);
       setData(updated);
-      if (usage === "chat") {
-        onChatProviderChanged?.();
-      }
     } catch (err) {
       setUsageErrors((prev) => ({ ...prev, [usage]: messageFromError(err) }));
     } finally {
@@ -351,14 +345,6 @@ export function LlmProvidersSection({
       });
       setData(updated);
       setDialogOpen(false);
-      // If chat uses this endpoint, notify
-      if (
-        editingEndpoint &&
-        updated.usage.chat.kind === "endpoint" &&
-        updated.usage.chat.id === editingEndpoint.id
-      ) {
-        onChatProviderChanged?.();
-      }
     } catch (err) {
       setDialogError(messageFromError(err));
     } finally {
@@ -371,9 +357,6 @@ export function LlmProvidersSection({
     try {
       const updated = await llmDeleteEndpoint(deletingEndpoint.id);
       setData(updated);
-      if (data?.usage.chat.kind === "endpoint" && data.usage.chat.id === deletingEndpoint.id) {
-        onChatProviderChanged?.();
-      }
     } catch (err) {
       setLoadError(messageFromError(err));
     } finally {
@@ -397,23 +380,22 @@ export function LlmProvidersSection({
   }
 
   const endpoints = data?.endpoints ?? [];
-  const usage = data?.usage ?? {
-    chat: { kind: "cli", id: "claude" },
+  const usage: Pick<LlmProvidersDto["usage"], ConfigurableLlmUsage> = data?.usage ?? {
     notes: { kind: "openrouter" },
     activity: { kind: "none" },
   };
 
   // Provider options generator
-  const getOptionsForUsage = (forUsage: LlmUsage) => {
+  const getOptionsForUsage = (forUsage: ConfigurableLlmUsage) => {
     const options: { value: string; label: string; disabled?: boolean }[] = [];
 
     if (forUsage === "activity") {
       options.push({ value: "none", label: t("settingsPanels.llm.providerNone") });
-    } else if (forUsage !== "chat") {
+    } else {
       options.push({ value: "openrouter", label: t("settingsPanels.llm.providerOpenRouter") });
     }
 
-    for (const ep of forUsage === "chat" ? [] : endpoints) {
+    for (const ep of endpoints) {
       options.push({ value: providerRefKey({ kind: "endpoint", id: ep.id }), label: ep.name });
     }
 
@@ -421,7 +403,7 @@ export function LlmProvidersSection({
       // Notes and activity send content to the CLI, so only CLIs that run
       // one-shot calls with every tool off or in their least-privileged mode
       // (codex, agy) can take them.
-      const toolsOn = forUsage !== "chat" && !cli.oneShot;
+      const toolsOn = !cli.oneShot;
       const disabled = !cli.installed || toolsOn;
       const suffix = !cli.installed
         ? t("settingsPanels.llm.notInstalledSuffix")
@@ -465,34 +447,6 @@ export function LlmProvidersSection({
       <p className="settings-group-description">{t("settingsPanels.llm.usageDescription")}</p>
       <div className="settings-card">
         <div className="settings-rows">
-          {/* Chat row */}
-          <div className="settings-row">
-            <div className="settings-row-info">
-              <h4 className="settings-row-title">{t("settingsPanels.llm.usageChat")}</h4>
-              {usageErrors.chat ? (
-                <p className="settings-row-error" role="alert">
-                  {usageErrors.chat}
-                </p>
-              ) : null}
-            </div>
-            <div className="settings-row-control">
-              <UsageProviderMark provider={usage.chat} endpoints={endpoints} />
-              <select
-                className="dialog-input"
-                aria-label={t("settingsPanels.llm.usageChat")}
-                value={providerRefKey(usage.chat)}
-                disabled={busyUsage.chat}
-                onChange={(e) => void handleUsageChange("chat", e.target.value)}
-              >
-                {getOptionsForUsage("chat").map((opt) => (
-                  <option key={opt.value} value={opt.value} disabled={opt.disabled}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-
           {/* Notes row */}
           <div className="settings-row">
             <div className="settings-row-info">

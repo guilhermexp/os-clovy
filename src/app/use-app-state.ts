@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { NotesListHandle } from "../components/notes-list/NotesList";
-import type { SettingsTab } from "../components/settings/AppSettings";
+import { normalizeSettingsTab, type SettingsTab } from "../components/settings/settings-config";
 import type { SidebarView } from "../components/sidebar/Sidebar";
 import { defaultNav, makeTabId, type Tab, type TabNav } from "./tabs/tabs";
 import type { LiveTranscriptEventDto } from "../lib/tauri";
@@ -56,7 +56,7 @@ export function useAppState() {
       setSettingsReturnView(returnView);
     }
     setMemoryFolderFilter(undefined);
-    if (tab) setSettingsTab(tab);
+    if (tab !== undefined) setSettingsTab(normalizeSettingsTab(tab));
     setActiveView("settings");
   }, []);
   // Deep-link into Settings > Memory filtered to a project (from the project
@@ -74,7 +74,7 @@ export function useAppState() {
   // from the settings nav shows all memories, not a stale project scope.
   const changeSettingsTab = useCallback((tab: SettingsTab) => {
     setMemoryFolderFilter(undefined);
-    setSettingsTab(tab);
+    setSettingsTab(normalizeSettingsTab(tab));
   }, []);
   const [originFolderId, setOriginFolderId] = useState<string | undefined>();
   // Tracks that the open note was drilled into from the All notes view, so the

@@ -6121,10 +6121,6 @@ input:focus-visible,
   background: var(--border-subtle);
 }
 
-.settings-row-before-divider {
-  border-bottom: 0;
-}
-
 .settings-more-options-panel {
   display: flex;
   flex-direction: column;
@@ -14808,22 +14804,6 @@ button.memory-project:hover {
   display: flex;
   justify-content: flex-end;
   gap: var(--sp-3);
-}
-
-.image-safe-mode-consent-checkbox {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  color: var(--foreground);
-  font-size: var(--fs-md);
-  cursor: pointer;
-}
-
-.image-safe-mode-consent-checkbox input {
-  width: var(--sp-4);
-  height: var(--sp-4);
-  margin: 0;
-  accent-color: var(--primary);
 }
 
 @keyframes dialog-backdrop-in {

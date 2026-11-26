@@ -329,6 +329,8 @@ describe("Sidebar primary navigation", () => {
     expect(screen.getByRole("navigation", { name: "Personal settings" })).toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "Audio settings" })).toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "AI settings" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Agent" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Plugins" })).toBeInTheDocument();
 
     const appearanceButton = screen.getByRole("button", { name: "Appearance" });
     expect(appearanceButton).toHaveAttribute("data-active", "true");

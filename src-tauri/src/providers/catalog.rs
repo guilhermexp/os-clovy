@@ -209,46 +209,34 @@ fn model_row(provider: &str, id: &str, name: &str, model_type: &str) -> Provider
 }
 
 pub(super) async fn models(mode: ModelMode) -> Result<Vec<ProviderModelDto>, AppError> {
-    let (provider, ids) = match mode {
-        ModelMode::Generation => {
-            let key = super::provider_api_key(BuiltinProvider::OpenRouter)?;
-            return TEXT_CATALOG.load(key.as_deref()).await;
-        }
-        ModelMode::Transcription => ("groq", super::KNOWN_TRANSCRIPTION_MODELS),
-        ModelMode::Image => ("fal", super::KNOWN_IMAGE_MODELS),
-        ModelMode::Video => ("fal", super::KNOWN_VIDEO_MODELS),
-    };
-    let mut rows: Vec<_> = ids
+    if mode == ModelMode::Generation {
+        let key = super::provider_api_key(BuiltinProvider::OpenRouter)?;
+        return TEXT_CATALOG.load(key.as_deref()).await;
+    }
+    let mut rows: Vec<_> = super::KNOWN_TRANSCRIPTION_MODELS
         .iter()
         .map(|id| {
             let name = match *id {
                 "whisper-large-v3-turbo" => "Whisper large v3 turbo",
                 "whisper-large-v3" => "Whisper large v3",
-                "fal-ai/flux/dev" => "FLUX.1 [dev]",
-                "fal-ai/flux/schnell" => "FLUX.1 [schnell]",
-                "fal-ai/qwen-image" => "Qwen Image",
-                "fal-ai/wan/v2.2-a14b/text-to-video" => "Wan 2.2 A14B",
-                "alibaba/wan-3.0/text-to-video" => "Wan 3.0",
                 value => value,
             };
-            model_row(provider, id, name, mode.api_type())
+            model_row("groq", id, name, mode.api_type())
         })
         .collect();
-    if mode == ModelMode::Transcription {
-        use super::transcription::{openrouter_model_name, LocalModelId, OPENROUTER_MODELS};
-        rows.extend(
-            OPENROUTER_MODELS
-                .into_iter()
-                .map(|id| model_row("openrouter", id, openrouter_model_name(id), mode.api_type())),
-        );
-        if super::local_transcription_supported() {
-            rows.extend(LocalModelId::ALL.into_iter().map(|id| {
-                let mut row = model_row("local", id.as_str(), id.name(), mode.api_type());
-                row.available = Some(super::transcription::require_local_ready_for(id).is_ok());
-                row.privacy = Some("local".into());
-                row
-            }));
-        }
+    use super::transcription::{openrouter_model_name, LocalModelId, OPENROUTER_MODELS};
+    rows.extend(
+        OPENROUTER_MODELS
+            .into_iter()
+            .map(|id| model_row("openrouter", id, openrouter_model_name(id), mode.api_type())),
+    );
+    if super::local_transcription_supported() {
+        rows.extend(LocalModelId::ALL.into_iter().map(|id| {
+            let mut row = model_row("local", id.as_str(), id.name(), mode.api_type());
+            row.available = Some(super::transcription::require_local_ready_for(id).is_ok());
+            row.privacy = Some("local".into());
+            row
+        }));
     }
     Ok(rows)
 }
@@ -473,35 +461,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn curated_catalogs_are_local_and_have_no_service_availability() {
+    async fn curated_transcription_catalog_is_local_and_has_no_service_availability() {
         let transcription: Vec<_> = super::super::KNOWN_TRANSCRIPTION_MODELS
             .iter()
             .copied()
             .chain(super::super::transcription::OPENROUTER_MODELS)
             .collect();
-        for (mode, expected) in [
-            (ModelMode::Transcription, transcription.as_slice()),
-            (ModelMode::Image, super::super::KNOWN_IMAGE_MODELS),
-            (ModelMode::Video, super::super::KNOWN_VIDEO_MODELS),
-        ] {
-            let models: Vec<_> = models(mode)
-                .await
-                .unwrap()
-                .into_iter()
-                .filter(|row| row.provider != "local")
-                .collect();
-            assert_eq!(
-                models
-                    .iter()
-                    .map(|model| model.id.as_str())
-                    .collect::<Vec<_>>(),
-                expected
-            );
-            assert!(models.iter().all(|model| {
-                let value = serde_json::to_value(model).unwrap();
-                value.get("serviceAvailable").is_none()
-                    && value.get("inputCreditsPerMillionTokens").is_none()
-            }));
-        }
+        let models: Vec<_> = models(ModelMode::Transcription)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.provider != "local")
+            .collect();
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            transcription
+        );
+        assert!(models.iter().all(|model| {
+            let value = serde_json::to_value(model).unwrap();
+            value.get("serviceAvailable").is_none()
+                && value.get("inputCreditsPerMillionTokens").is_none()
+        }));
     }
 }

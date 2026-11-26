@@ -17,7 +17,7 @@ Settings > MCP. The frontend is **React** (`src/`), and the native shell is
 **Rust** (`src-tauri/`). Installed CLI engines power routines, note generation
 and activity processing. The app owns persisted history and the common tool
 gateway; execution failure never silently switches engines. The desktop calls
-**Groq**, **OpenRouter**, and **fal** directly with
+**Groq** and **OpenRouter** directly with
 the user's own keys; transcription may instead use the user-installed local
 model (Whisper large-v3-turbo, Parakeet Ultra, Fluid Speech Pro or Phonon-2.5; macOS Apple Silicon only, ADR-0074). CLI and endpoint note routes remain separate. There is
 no Clovy inference server, native agent sidecar, local bearer token, sign-in,
@@ -39,7 +39,7 @@ os-clovy/
 ├── src-tauri/               # Rust native shell (Cargo package `clovy`)
 │   ├── src/audio/           # recording, source separation, turn detection, live preview
 │   ├── src/agent_sessions/  # engine-neutral sessions, events, persistence, and migration
-│   ├── src/providers/       # model settings, direct Groq/OpenRouter/fal clients and catalogs; `transcription.rs` resolves Groq, OpenRouter or Local, `local_transcriber.rs` drives the helper (docs/audio-pipeline.md)
+│   ├── src/providers/       # model settings, direct Groq/OpenRouter clients and catalogs; `transcription.rs` resolves Groq, OpenRouter or Local, `local_transcriber.rs` drives the helper (docs/audio-pipeline.md)
 │   ├── src/llm/             # own providers: agent CLIs (resolved from the login-shell PATH on macOS; the app's `Path` + `PATHEXT` + installer dirs on Windows, `shell_env.rs`), OpenAI-compatible endpoints, per-use selection (docs/llm-providers.md; tests: `cargo test llm`)
 │   ├── src/activity/        # text-only capture: macOS AX/Vision, windows/ UIA/WGC/OCR; encrypted activity.sqlite3, exclusions, retention (docs/activity-capture.md, ADR-0057); timeline/ = ETL, gaps, categories, FTS search, agent tools (docs/activity-timeline.md); tests: `cargo test activity`
 │   ├── src/coding_agents/   # read-only ingest of local coding-agent transcripts, blocks, tool-free summaries (docs/coding-agent-sessions.md; tests: `cargo test coding_agents`)
@@ -237,16 +237,16 @@ build scripts in `pnpm-workspace.yaml` — live in
   empty profile) and of one-way reads; never write a June-era
   name again ([ADR-0068](docs/adr/0068-clovy-takes-its-own-identity-with-a-one-time-migration.md),
   superseding ADR-0055).
-- **The app never calls a Clovy inference server.** Groq transcription,
-  OpenRouter transcription/text, and fal media use the user's own provider key directly.
+- **The app never calls a Clovy inference server.** Groq transcription and
+  OpenRouter transcription and text use the user's own provider key directly.
   Transcription has one user-chosen engine for dictation, notes and live
   preview: Groq, OpenRouter, or a compatible Local model installed from Settings; with
   Local chosen no audio leaves the machine and a missing model is an error,
   never a switch to Groq. Missing or unreadable keys fail clearly before a
   request; never substitute a service key, another provider, a local bearer
   token, or a retired route.
-  Keys remain in the credential store and go only to their own provider;
-  media downloads carry none. Routines use installed CLI engines. Notes may use a CLI,
+  Keys remain in the credential store and go only to their own provider.
+  Routines use installed CLI engines. Notes may use a CLI,
   an explicitly configured endpoint, or OpenRouter. Keep `llm::generate`
   and the CLI/endpoint note routes intact. See
   [ADR-0073](docs/adr/0073-desktop-calls-user-providers-without-a-clovy-server.md).
@@ -465,9 +465,7 @@ and the configured routine engine. A fake listener on `127.0.0.1:8080`, bound on
 when free, must receive zero requests. Automated tests may inject an ephemeral
 retired origin. Check migration without changing endpoints/history; never copy
 or launch the owner's production profile. Only one native proof runs at once.
-Media proof includes valid final assets, oriented/non-square/extreme-ratio
-edits, and resuming a recoverable video job without resubmission. Paid media,
-OpenRouter inference, and Codex turns require explicit owner authorization;
+OpenRouter inference and Codex turns require explicit owner authorization;
 anything not run remains unproven. Public catalog reads and local contract
 tests do not prove live inference or an account's price.
 

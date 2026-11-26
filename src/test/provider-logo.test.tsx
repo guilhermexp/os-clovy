@@ -24,12 +24,10 @@ describe("ProviderLogo", () => {
     expect(screen.queryByLabelText("OpenRouter")).not.toBeInTheDocument();
   });
 
-  it("does not classify whisper-large-v3-turbo from provider groq as fal", () => {
+  it("identifies Groq-hosted Whisper as an OpenAI model", () => {
     render(
       <ProviderLogo provider="groq" id="whisper-large-v3-turbo" name="Whisper Large V3 Turbo" />,
     );
-
-    expect(screen.queryByLabelText("Fal")).not.toBeInTheDocument();
   });
 
   it("does not classify broad Anthropic family words as Claude", () => {

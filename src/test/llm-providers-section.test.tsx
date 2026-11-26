@@ -188,11 +188,11 @@ describe("LlmProvidersSection", () => {
     // Non-installed CLI reasons
     expect(screen.getAllByText("Not found on your PATH.").length).toBeGreaterThan(0);
     // Usage select checks
-    const chatSelect = screen.getByRole("combobox", { name: "Default agent CLI" });
-    const installedOption = chatSelect.querySelector(
+    const notesSelect = screen.getByRole("combobox", { name: "Notes" });
+    const installedOption = notesSelect.querySelector(
       'option[value="cli:claude"]',
     ) as HTMLOptionElement;
-    const notInstalledOption = chatSelect.querySelector(
+    const notInstalledOption = notesSelect.querySelector(
       'option[value="cli:codex"]',
     ) as HTMLOptionElement;
 
@@ -221,7 +221,7 @@ describe("LlmProvidersSection", () => {
         .getByRole("combobox", { name })
         .querySelector(`option[value="cli:${id}"]`) as HTMLOptionElement;
     for (const id of ["codex", "agy"]) {
-      for (const name of ["Default agent CLI", "Notes", "Activity"]) {
+      for (const name of ["Notes", "Activity"]) {
         expect(option(name, id).disabled, `${id} ${name}`).toBe(false);
       }
     }
@@ -230,7 +230,7 @@ describe("LlmProvidersSection", () => {
     expect(screen.getAllByRole("button", { name: "Test" })).toHaveLength(3);
   });
 
-  it("offers a CLI whose tools stay on for the default agent, but not for notes or activity, and does not test it", async () => {
+  it("detects a CLI whose tools stay on without offering it for notes or activity", async () => {
     mocks.llmDetectClis.mockResolvedValue(
       sampleClis.map((cli) =>
         cli.id === "cursor-agent"
@@ -245,7 +245,6 @@ describe("LlmProvidersSection", () => {
       screen
         .getByRole("combobox", { name })
         .querySelector('option[value="cli:cursor-agent"]') as HTMLOptionElement;
-    expect(option("Default agent CLI").disabled).toBe(false);
     // Dictation cleanup never runs on a CLI or endpoint, so it has no row.
     expect(screen.queryByRole("combobox", { name: "Dictation cleanup" })).toBeNull();
     for (const name of ["Notes", "Activity"]) {
@@ -468,78 +467,31 @@ describe("LlmProvidersSection", () => {
     ).toBeInTheDocument();
   });
 
-  it("chat set to a CLI updates the selection without the later-update note", async () => {
-    const user = userEvent.setup();
+  it("keeps OpenRouter, CLI and endpoint choices for notes", async () => {
     render(<LlmProvidersSection />);
-    expect(await screen.findByRole("heading", { name: "Local Ollama" })).toBeInTheDocument();
-
-    const chatSelect = screen.getByRole("combobox", { name: "Default agent CLI" });
-    await user.selectOptions(chatSelect, "cli:claude");
-
-    expect(
-      screen.queryByText(
-        "Chat with agent CLIs arrives in a later update. Chat keeps using Clovy until then.",
-      ),
-    ).not.toBeInTheDocument();
-  });
-
-  it("lists only agent CLIs for chat while preserving note providers", async () => {
-    render(<LlmProvidersSection />);
-    expect(await screen.findByRole("heading", { name: "Local Ollama" })).toBeInTheDocument();
-
-    const chatSelect = screen.getByRole("combobox", {
-      name: "Default agent CLI",
-    }) as HTMLSelectElement;
-    const values = Array.from(chatSelect.options).map((option) => option.value);
-    expect(values).toEqual([
-      "cli:claude",
-      "cli:codex",
-      "cli:pi",
-      "cli:agy",
-      "cli:cursor-agent",
-      "cli:copilot",
-    ]);
-    expect(values.some((value) => value.startsWith("endpoint:") || value === "clovy")).toBe(false);
-    const notesSelect = screen.getByRole("combobox", { name: "Notes" }) as HTMLSelectElement;
+    const notesSelect = (await screen.findByRole("combobox", {
+      name: "Notes",
+    })) as HTMLSelectElement;
     expect(notesSelect.options[0]).toHaveValue("openrouter");
     expect(notesSelect.options[0]).toHaveTextContent(/^OpenRouter$/);
+    expect(notesSelect.querySelector('option[value="cli:claude"]')).toBeEnabled();
+    expect(notesSelect.querySelector('option[value="endpoint:ep-1"]')).toBeEnabled();
   });
 
-  it("does not offer the native fallback when no default CLI is installed", async () => {
-    mocks.llmProviders.mockResolvedValue(sampleProviders);
-    mocks.llmDetectClis.mockResolvedValue(sampleClis.map((cli) => ({ ...cli, installed: false })));
-    render(<LlmProvidersSection />);
-    const chatSelect = await screen.findByRole("combobox", { name: "Default agent CLI" });
-    expect(chatSelect).toHaveValue("cli:claude");
-    expect(screen.queryByText(/legacy Clovy agent/)).not.toBeInTheDocument();
-  });
-
-  it("says nothing about the legacy agent once chat is on the default CLI", async () => {
-    mocks.llmProviders.mockResolvedValue({
-      ...sampleProviders,
-      usage: { ...sampleProviders.usage, chat: { kind: "cli", id: "claude" } },
-    });
-    render(<LlmProvidersSection />);
-    expect(await screen.findByRole("heading", { name: "Local Ollama" })).toBeInTheDocument();
-    expect(screen.queryByText(/legacy Clovy agent/)).not.toBeInTheDocument();
-  });
-
-  it("keeps chat on Claude Code when the text model changes elsewhere", async () => {
+  it("refreshes the saved Notes engine when the text model changes without saving a usage", async () => {
     mocks.llmProviders.mockResolvedValueOnce({
       ...sampleProviders,
-      usage: { ...sampleProviders.usage, chat: { kind: "cli", id: "claude" } },
+      usage: { ...sampleProviders.usage, notes: { kind: "cli", id: "claude" } },
     });
     render(<LlmProvidersSection />);
-    const chatSelect = (await screen.findByRole("combobox", {
-      name: "Default agent CLI",
-    })) as HTMLSelectElement;
-    await waitFor(() => expect(chatSelect.value).toBe("cli:claude"));
+    const notesSelect = await screen.findByRole("combobox", { name: "Notes" });
+    expect(notesSelect).toHaveValue("cli:claude");
 
-    // Text models belong to notes; a new model must not move the chat engine.
     dispatchProviderModelSettingsChanged({ mode: "generation", modelId: "zai-org-glm-5-2" });
 
-    await waitFor(() => expect(mocks.llmProviders).toHaveBeenCalledTimes(2));
-    expect(chatSelect.value).toBe("cli:claude");
+    await waitFor(() => expect(notesSelect).toHaveValue("openrouter"));
+    expect(mocks.llmProviders).toHaveBeenCalledTimes(2);
+    expect(mocks.llmSetUsage).not.toHaveBeenCalled();
   });
 
   it("loads models of a saved endpoint with its stored key when no key is typed", async () => {

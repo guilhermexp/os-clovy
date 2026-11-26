@@ -265,7 +265,6 @@ const ERROR_CODE_MESSAGES: Record<string, MessageKey | ErrorWording[]> = {
 const PROVIDER_NAMES: Record<string, string> = {
   groq: "Groq",
   openrouter: "OpenRouter",
-  fal: "fal",
   tavily: "Tavily",
 };
 const PROVIDER_REASONS: Record<string, MessageKey> = {
@@ -282,7 +281,7 @@ const PROVIDER_REASONS: Record<string, MessageKey> = {
 };
 
 function providerWording(code: string): string | undefined {
-  const match = code.match(/^(groq|openrouter|fal|tavily)_(.+)$/);
+  const match = code.match(/^(groq|openrouter|tavily)_(.+)$/);
   const key = match ? PROVIDER_REASONS[match[2]] : undefined;
   return match && key ? t(key, { name: PROVIDER_NAMES[match[1]] }) : undefined;
 }

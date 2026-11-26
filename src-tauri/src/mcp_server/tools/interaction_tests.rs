@@ -278,7 +278,7 @@ async fn interaction_claude_permission_prompt_through_the_socket_and_relay() {
     for name in [
         "approve_action",
         "request_clarification",
-        "generate_image",
+        "create_note",
         "start_recording",
     ] {
         assert!(listed.iter().any(|tool| tool == name), "{name}: {listed:?}");

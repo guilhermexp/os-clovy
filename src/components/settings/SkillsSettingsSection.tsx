@@ -6,34 +6,13 @@ import {
   readAgentSkill,
   setAgentSkillEnabled,
   updateAgentSkill,
-  type FolderDto,
 } from "../../lib/tauri";
-import {
-  AGENT_SOUNDS_CHANGED_EVENT,
-  getAgentSoundsEnabled,
-  setAgentSoundsEnabled,
-  type AgentSoundsChangedDetail,
-} from "../../lib/agent-sound-settings";
 import { t as translate, useT } from "../../i18n";
 import { Dialog } from "../ui/Dialog";
 import { Switch } from "../ui/Switch";
-import { SettingsPageHeader } from "./AppSettings";
 
-/** Settings owned by Clovy's local agent harness. Messaging compatibility,
- * raw runtime diagnostics, and the legacy filesystem browser are
- * intentionally absent. */
-export function AgentSettingsSection({
-  folders: _folders = [],
-  onFoldersImported: _onFoldersImported,
-}: {
-  selectedPlatformId?: string;
-  onSelectPlatform?: (platformId: string) => void;
-  onBackFromPlatform?: () => void;
-  folders?: FolderDto[];
-  onFoldersImported?: (folders: FolderDto[]) => void;
-} = {}) {
+export function SkillsSettingsSection() {
   const t = useT();
-  const [soundsEnabled, setSoundsEnabledState] = useState(getAgentSoundsEnabled);
   const [skills, setSkills] = useState<AgentSkillDto[]>();
   const [savingSkillId, setSavingSkillId] = useState<string>();
   const [editingSkill, setEditingSkill] = useState<AgentSkillDto>();
@@ -91,17 +70,6 @@ export function AgentSettingsSection({
     void refreshSkills();
   }
 
-  useEffect(() => {
-    const handleSounds = (event: Event) => {
-      const detail = (event as CustomEvent<AgentSoundsChangedDetail>).detail;
-      if (detail) setSoundsEnabledState(detail.enabled);
-    };
-    window.addEventListener(AGENT_SOUNDS_CHANGED_EVENT, handleSounds);
-    return () => {
-      window.removeEventListener(AGENT_SOUNDS_CHANGED_EVENT, handleSounds);
-    };
-  }, []);
-
   async function changeSkill(skill: AgentSkillDto, enabled: boolean) {
     setSavingSkillId(skill.id);
     const isCurrent = beginSkillMutation();
@@ -152,50 +120,11 @@ export function AgentSettingsSection({
 
   return (
     <>
-      <section className="settings-group" aria-labelledby="agent-heading">
-        <SettingsPageHeader
-          id="agent-heading"
-          title={t("settingsPanels.agent.title")}
-          blurb={t("settingsPanels.agent.blurb")}
-        />
-      </section>
-
-      <section className="settings-group" aria-labelledby="agent-experience-heading">
-        <h2 id="agent-experience-heading" className="settings-group-heading">
-          {t("settingsPanels.agent.experience")}
+      <section className="settings-group" aria-labelledby="skills-settings-heading">
+        <h2 id="skills-settings-heading" className="settings-group-heading">
+          {t("settingsPanels.skills.title")}
         </h2>
-        <p className="settings-group-description">
-          {t("settingsPanels.agent.experienceDescription")}
-        </p>
-        <div className="settings-card">
-          <div className="settings-rows">
-            <div className="settings-row">
-              <div className="settings-row-info">
-                <h3 className="settings-row-title">{t("settingsPanels.agent.sounds")}</h3>
-                <p className="settings-row-description">
-                  {t("settingsPanels.agent.soundsDescription")}
-                </p>
-              </div>
-              <div className="settings-row-control">
-                <Switch
-                  checked={soundsEnabled}
-                  onCheckedChange={(enabled) => {
-                    setSoundsEnabledState(enabled);
-                    setAgentSoundsEnabled(enabled);
-                  }}
-                  aria-label={t("settingsPanels.agent.soundsAria")}
-                />
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section className="settings-group" aria-labelledby="agent-skills-heading">
-        <h2 id="agent-skills-heading" className="settings-group-heading">
-          {t("settingsPanels.agent.skills")}
-        </h2>
-        <p className="settings-group-description">{t("settingsPanels.agent.skillsDescription")}</p>
+        <p className="settings-group-description">{t("settingsPanels.skills.description")}</p>
         <div className="settings-card">
           <div className="settings-rows">
             {skills?.map((skill) => (
@@ -220,15 +149,15 @@ export function AgentSettingsSection({
                     onCheckedChange={(enabled) => void changeSkill(skill, enabled)}
                     aria-label={
                       skill.configuredEnabled
-                        ? t("settingsPanels.agent.disableSkill", { name: skill.name })
-                        : t("settingsPanels.agent.enableSkill", { name: skill.name })
+                        ? t("settingsPanels.skills.disableSkill", { name: skill.name })
+                        : t("settingsPanels.skills.enableSkill", { name: skill.name })
                     }
                   />
                 </div>
               </div>
             ))}
             {skills?.length === 0 ? (
-              <p className="settings-empty">{t("settingsPanels.agent.noSkills")}</p>
+              <p className="settings-empty">{t("settingsPanels.skills.noSkills")}</p>
             ) : null}
           </div>
         </div>
@@ -243,10 +172,10 @@ export function AgentSettingsSection({
         onClose={() => setEditingSkill(undefined)}
         title={
           editingSkill
-            ? t("settingsPanels.agent.editSkillName", { name: editingSkill.name })
-            : t("settingsPanels.agent.editSkill")
+            ? t("settingsPanels.skills.editSkillName", { name: editingSkill.name })
+            : t("settingsPanels.skills.editSkill")
         }
-        description={t("settingsPanels.agent.editSkillDescription")}
+        description={t("settingsPanels.skills.editSkillDescription")}
         footer={
           <>
             <button
@@ -262,14 +191,14 @@ export function AgentSettingsSection({
               disabled={skillSaving}
               onClick={() => void saveSkill()}
             >
-              {skillSaving ? t("common.saving") : t("settingsPanels.agent.saveSkill")}
+              {skillSaving ? t("common.saving") : t("settingsPanels.skills.saveSkill")}
             </button>
           </>
         }
       >
         <textarea
           className="settings-skill-editor"
-          aria-label={t("settingsPanels.agent.skillInstructions")}
+          aria-label={t("settingsPanels.skills.skillInstructions")}
           value={skillDraft}
           onChange={(event) => setSkillDraft(event.currentTarget.value)}
           rows={18}
@@ -286,5 +215,5 @@ function messageFromError(error: unknown) {
     ? error.message
     : typeof error === "string"
       ? error
-      : translate("settingsPanels.agent.updateError");
+      : translate("settingsPanels.skills.updateError");
 }

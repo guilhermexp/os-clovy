@@ -139,7 +139,7 @@ describe("dictation cleanup settings", () => {
     mocks.dictationSettings.mockResolvedValue({ settings: settings(true) });
     renderSettings();
     await screen.findByRole("option", { name: "GPT-5 mini" });
-    await waitFor(() => expect(mocks.listProviderModels).toHaveBeenCalledWith("video"));
+    await waitFor(() => expect(mocks.listProviderModels).toHaveBeenCalledWith("transcription"));
     const callsBeforeRefresh = mocks.listProviderModels.mock.calls.length;
     mocks.listProviderModels.mockResolvedValue({
       models: [model("vendor/new", "New catalog model")],

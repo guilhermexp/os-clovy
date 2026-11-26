@@ -142,12 +142,6 @@ export default defineMessages({
     "lib.errors.fileDropTooLarge": "Dropped files must be 50 MB or smaller.",
     "lib.errors.fileDropFolder": 'Could not read "{name}". Folders can\'t be attached.',
     "lib.errors.fileDropThisItem": "this item",
-    "lib.errors.imagePromptRequired": "Enter a prompt to generate an image.",
-    "lib.errors.imageUndisplayable": "Clovy returned an image it can't display.",
-    "lib.errors.imageEditInstructionRequired": "Enter an edit instruction.",
-    "lib.errors.imageSourceUnreadable": "Clovy couldn't read the source image.",
-    "lib.errors.videoPromptRequired": "Enter a prompt to generate a video.",
-    "lib.errors.videoStillRunning": "Video generation is still running. Try again later.",
     "lib.errors.slashFileParse": "Could not parse /file paths. Close the quote and try again.",
 
     // Skill slash command errors.
@@ -157,10 +151,6 @@ export default defineMessages({
     "lib.slash.model.description": "Change the text model.",
     "lib.slash.file.label": "File",
     "lib.slash.file.description": "Attach files to this message.",
-    "lib.slash.image.label": "Image",
-    "lib.slash.image.description": "Generate an image from a prompt.",
-    "lib.slash.video.label": "Video",
-    "lib.slash.video.description": "Generate a video from a prompt.",
 
     // Agent tool activity labels.
 
@@ -355,19 +345,6 @@ export default defineMessages({
       "Default pick: fast multilingual Whisper on Groq, at the lowest price per audio hour.",
     "lib.suggested.whisper":
       "Highest Whisper accuracy on Groq for error-sensitive multilingual audio, at a higher price.",
-    "lib.suggested.fluxDev": "Default pick: FLUX.1 [dev], balanced quality for everyday images.",
-    "lib.suggested.fluxSchnell": "Fastest pick: quick, low-cost FLUX generations.",
-    "lib.suggested.qwenImage":
-      "Quality pick: strong text rendering and prompt adherence for detailed images.",
-    "lib.suggested.wan22": "Default pick: fast 5 second 720p clips, the lower-cost option.",
-    "lib.suggested.wan30": "Quality pick: clips up to 1080p and 30 seconds, with audio.",
-
-    // Image and video model descriptions.
-    "lib.imageModels.fluxDev": "Balanced FLUX model for everyday images.",
-    "lib.imageModels.fluxSchnell": "Fastest, lowest-cost FLUX model.",
-    "lib.imageModels.qwenImage": "Strong text rendering and prompt adherence.",
-    "lib.videoModels.wan22": "Default text-to-video model for fast 5 second 720p clips.",
-    "lib.videoModels.wan30": "Text-to-video up to 1080p and 30 seconds, with audio.",
 
     // Home.
 
@@ -511,13 +488,6 @@ export default defineMessages({
     "lib.errors.fileDropTooLarge": "Os arquivos arrastados devem ter 50 MB ou menos.",
     "lib.errors.fileDropFolder": 'Não foi possível ler "{name}". Não é possível anexar pastas.',
     "lib.errors.fileDropThisItem": "este item",
-    "lib.errors.imagePromptRequired": "Digite um prompt para gerar uma imagem.",
-    "lib.errors.imageUndisplayable": "O Clovy retornou uma imagem que não consegue exibir.",
-    "lib.errors.imageEditInstructionRequired": "Digite uma instrução de edição.",
-    "lib.errors.imageSourceUnreadable": "O Clovy não conseguiu ler a imagem de origem.",
-    "lib.errors.videoPromptRequired": "Digite um prompt para gerar um vídeo.",
-    "lib.errors.videoStillRunning":
-      "A geração do vídeo ainda está em andamento. Tente de novo mais tarde.",
     "lib.errors.slashFileParse":
       "Não foi possível interpretar os caminhos do /file. Feche as aspas e tente de novo.",
 
@@ -525,10 +495,6 @@ export default defineMessages({
     "lib.slash.model.description": "Trocar o modelo de texto.",
     "lib.slash.file.label": "Arquivo",
     "lib.slash.file.description": "Anexar arquivos a esta mensagem.",
-    "lib.slash.image.label": "Imagem",
-    "lib.slash.image.description": "Gerar uma imagem a partir de um prompt.",
-    "lib.slash.video.label": "Vídeo",
-    "lib.slash.video.description": "Gerar um vídeo a partir de um prompt.",
 
     "lib.agentNotify.ready": "O Clovy está pronto",
     "lib.agentNotify.needsInput": "O Clovy precisa da sua resposta",
@@ -708,21 +674,6 @@ export default defineMessages({
       "Escolha padrão: Whisper multilíngue e rápido na Groq, com o menor preço por hora de áudio.",
     "lib.suggested.whisper":
       "A maior precisão do Whisper na Groq para áudio multilíngue sensível a erros, por um preço maior.",
-    "lib.suggested.fluxDev":
-      "Escolha padrão: FLUX.1 [dev], qualidade equilibrada para imagens do dia a dia.",
-    "lib.suggested.fluxSchnell": "Escolha mais rápida: gerações FLUX rápidas e de baixo custo.",
-    "lib.suggested.qwenImage":
-      "Escolha de qualidade: ótima renderização de texto e fidelidade ao prompt para imagens detalhadas.",
-    "lib.suggested.wan22":
-      "Escolha padrão: clipes rápidos de 5 segundos em 720p, a opção de menor custo.",
-    "lib.suggested.wan30": "Escolha de qualidade: clipes de até 1080p e 30 segundos, com áudio.",
-
-    "lib.imageModels.fluxDev": "Modelo FLUX equilibrado para imagens do dia a dia.",
-    "lib.imageModels.fluxSchnell": "O modelo FLUX mais rápido e de menor custo.",
-    "lib.imageModels.qwenImage": "Ótima renderização de texto e fidelidade ao prompt.",
-    "lib.videoModels.wan22":
-      "Modelo padrão de texto para vídeo para clipes rápidos de 5 segundos em 720p.",
-    "lib.videoModels.wan30": "Texto para vídeo de até 1080p e 30 segundos, com áudio.",
 
     "lib.notePdf.defaultTitle": "Notas da reunião",
   },

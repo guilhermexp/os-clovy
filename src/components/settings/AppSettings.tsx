@@ -38,7 +38,6 @@ import {
   setDictationMicrophone,
   setDictationShortcut,
   setDictationStyle,
-  setImageSafeMode,
   setLiveTranscription,
   setProviderApiKey,
   setProviderModel,
@@ -104,16 +103,13 @@ import {
   ModelPickerPopover,
   type ModelPickerFlyout,
 } from "./ModelPickerPopover";
-import { DEFAULT_IMAGE_MODEL, imageModelCatalog } from "../../lib/image-models";
-import { IMAGE_GENERATION_ENABLED, VIDEO_GENERATION_ENABLED } from "../../lib/feature-flags";
 import {
   INITIAL_EXPERIMENTAL_UNLOCK_CLICK_STATE,
   registerExperimentalUnlockClick,
   setExperimentalFlags,
   useExperimentalFlags,
 } from "../../lib/experimental-flags";
-import { DEFAULT_VIDEO_MODEL, videoModelCatalog } from "../../lib/video-models";
-import { AgentSettingsSection } from "./AgentSettingsSection";
+import { SkillsSettingsSection } from "./SkillsSettingsSection";
 import { McpServerSection } from "./McpServerSection";
 import { AgentMcpServersSection } from "./AgentMcpServersSection";
 import { ConnectorsSection } from "./ConnectorsSection";
@@ -123,8 +119,19 @@ import { MicTestControl, type MicTestState } from "./MicTestControl";
 import { DictationCleanupRow, StyleSettingsSection } from "./StyleSettingsSection";
 import { ActivitySettingsSection } from "./ActivitySettingsSection";
 import { activityStatus } from "../../lib/activity-capture";
-import { SETTINGS_TABS, settingsTabsForPlatform, type SettingsTab } from "./settings-config";
+import {
+  normalizeSettingsTab,
+  SETTINGS_TABS,
+  settingsTabsForPlatform,
+  type SettingsTab,
+} from "./settings-config";
 import { DEFAULT_DATA_PARTITION, useCurrentDataPartitionName } from "../../lib/data-partition";
+import {
+  AGENT_SOUNDS_CHANGED_EVENT,
+  getAgentSoundsEnabled,
+  setAgentSoundsEnabled,
+  type AgentSoundsChangedDetail,
+} from "../../lib/agent-sound-settings";
 function themeOptions(t: TFunction): readonly {
   value: ThemePreference;
   label: ReactNode;
@@ -248,21 +255,15 @@ const DEFAULT_PROVIDER_MODELS: ProviderModelSettingsDto = {
   // providers module, mirrored by the leading Suggested pick.
   generationModel: DEFAULT_GENERATION_SUGGESTION_ID,
   remoteGenerationModel: DEFAULT_GENERATION_SUGGESTION_ID,
-  imageModel: DEFAULT_IMAGE_MODEL,
-  videoModel: DEFAULT_VIDEO_MODEL,
   providerApiKeysConfigured: {
     groq: false,
     openrouter: false,
-    fal: false,
     tavily: false,
   },
   localGeneration: {
     baseUrl: "",
     modelId: "",
   },
-  // On by default, matching the Rust providers default.
-  imageSafeMode: true,
-  imageSafeModePromptDismissed: false,
   liveTranscription: true,
 };
 
@@ -321,7 +322,6 @@ export function SettingsPageHeader({
 
 type AppSettingsProps = {
   folders?: FolderDto[];
-  onFoldersImported?: (folders: FolderDto[]) => void;
   /** When Memory is opened from a project, the manager pre-filters to it. */
   memoryFolderFilter?: string;
   /** Drill from a memory's project tag into that project. */
@@ -355,7 +355,6 @@ type AppSettingsProps = {
 
 export function AppSettings({
   folders = [],
-  onFoldersImported,
   memoryFolderFilter,
   onOpenProject,
   sourceMode,
@@ -396,8 +395,6 @@ export function AppSettings({
   >({
     transcription: [],
     generation: [],
-    image: [],
-    video: [],
   });
   const [microphones, setMicrophones] = useState<DictationMicrophoneDeviceDto[]>([]);
   const [defaultMicrophone, setDefaultMicrophone] = useState<DictationMicrophoneDeviceDto>();
@@ -426,7 +423,7 @@ export function AppSettings({
   const experimentalUnlockingRef = useRef(false);
   const [experimentalOperation, setExperimentalOperation] = useState<"flags">();
   const [experimentalError, setExperimentalError] = useState<string>();
-  const [pickerMode, setPickerMode] = useState<ProviderModelMode>();
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [modelPickerFlyout, setModelPickerFlyout] = useState<ModelPickerFlyout>(null);
   const [modelSearch, setModelSearch] = useState("");
   const modelPickerTriggerRef = useRef<HTMLButtonElement>(null);
@@ -436,7 +433,6 @@ export function AppSettings({
     {
       groq: "",
       openrouter: "",
-      fal: "",
       tavily: "",
     },
   );
@@ -445,14 +441,12 @@ export function AppSettings({
   >({
     groq: undefined,
     openrouter: undefined,
-    fal: undefined,
     tavily: undefined,
   });
   const [notesProviders, setNotesProviders] = useState<LlmProvidersDto | null>(null);
   const [generationCatalogFailed, setGenerationCatalogFailed] = useState(false);
   const [showMoreVoiceOptions, setShowMoreVoiceOptions] = useState(false);
   const [showMoreTextOptions, setShowMoreTextOptions] = useState(false);
-  const [showMoreImageOptions, setShowMoreImageOptions] = useState(false);
   const [internalTab, setInternalTab] = useState<SettingsTab>("general");
   const [micPopoverPlacement, setMicPopoverPlacement] =
     useState<SelectPopoverPlacement>("align-selected");
@@ -467,7 +461,7 @@ export function AppSettings({
   const [micTestError, setMicTestError] = useState<string>();
   const [micTestPlaying, setMicTestPlaying] = useState(false);
   const controlled = controlledTab !== undefined && onTabChange !== undefined;
-  const activeTab = controlled ? controlledTab : internalTab;
+  const activeTab = controlled ? normalizeSettingsTab(controlledTab) : internalTab;
   // The skill opened from Installed skills. While set (and the skills tab is
   // active) the whole settings page swaps for the notes-style detail shell:
   // pinned breadcrumb bar on top, its own scroll region beneath.
@@ -573,8 +567,7 @@ export function AppSettings({
         handleHelperEvent(hotkeyStatus);
         const modelResponse = await providerModelSettings();
         if (cancelled) return;
-        // Merge over defaults so a settings payload that predates a field
-        // (e.g. imageModel from an older backend) still has every model set.
+        // Older settings payloads may omit newer fields.
         const modelSnapshot = providerModelSettingsSnapshot(modelResponse);
         setProviderSettings(modelSnapshot.settings);
         setEffectiveProviderSettings(modelSnapshot.effectiveSettings);
@@ -583,8 +576,6 @@ export function AppSettings({
         await Promise.all([
           requestProviderModels("transcription"),
           requestProviderModels("generation"),
-          requestProviderModels("image"),
-          requestProviderModels("video"),
         ]);
       } catch (error) {
         if (!cancelled) setStatus(messageFromError(error));
@@ -756,8 +747,6 @@ export function AppSettings({
   const providerCatalogRequests = useRef<Record<ProviderModelMode, number>>({
     transcription: 0,
     generation: 0,
-    image: 0,
-    video: 0,
   });
 
   async function requestProviderModels(mode: ProviderModelMode) {
@@ -1051,18 +1040,16 @@ export function AppSettings({
   }
 
   // Persists the model without changing any engine selection.
-  async function selectProviderModel(mode: ProviderModelMode, modelId: string): Promise<boolean> {
-    if (showingPartitionModels) return false;
+  async function selectGenerationModel(modelId: string) {
+    if (showingPartitionModels) return;
     try {
-      const next = await setProviderModel(mode, modelId);
+      const next = await setProviderModel("generation", modelId);
       setProviderSettings(next);
       setEffectiveProviderSettings(next);
-      dispatchProviderModelSettingsChanged({ mode, modelId });
-      setStatus(translate(`settings.models.updated.${mode}`));
-      return true;
+      dispatchProviderModelSettingsChanged({ mode: "generation", modelId });
+      setStatus(translate("settings.models.updated.generation"));
     } catch (error) {
       setStatus(messageFromError(error));
-      return false;
     }
   }
 
@@ -1120,13 +1107,13 @@ export function AppSettings({
   }, [refreshTranscriptionSelection]);
 
   function closeModelPicker() {
-    setPickerMode(undefined);
+    setModelPickerOpen(false);
     setModelPickerFlyout(null);
     setModelSearch("");
   }
 
-  function selectModelFromPicker(mode: ProviderModelMode, modelId: string) {
-    if (!showingPartitionModels) void selectProviderModel(mode, modelId);
+  function selectModelFromPicker(modelId: string) {
+    void selectGenerationModel(modelId);
     closeModelPicker();
   }
 
@@ -1144,8 +1131,6 @@ export function AppSettings({
         providerApiKeysConfigured: next.providerApiKeysConfigured,
       }));
       if (provider === "openrouter") void requestProviderModels("generation");
-      void requestProviderModels("image");
-      void requestProviderModels("video");
       setProviderApiKeyDrafts((drafts) => ({ ...drafts, [provider]: "" }));
       setProviderApiKeyRejectedErrors((errors) => ({ ...errors, [provider]: undefined }));
       const providerName = translate(`settings.providerKeys.${provider}.name`);
@@ -1170,8 +1155,6 @@ export function AppSettings({
         providerApiKeysConfigured: next.providerApiKeysConfigured,
       }));
       if (provider === "openrouter") void requestProviderModels("generation");
-      void requestProviderModels("image");
-      void requestProviderModels("video");
       setProviderApiKeyDrafts((drafts) => ({ ...drafts, [provider]: "" }));
       setProviderApiKeyRejectedErrors((errors) => ({ ...errors, [provider]: undefined }));
       const providerName = translate(`settings.providerKeys.${provider}.name`);
@@ -1191,16 +1174,6 @@ export function AppSettings({
           ? translate("settings.liveTranscription.on")
           : translate("settings.liveTranscription.off"),
       );
-    } catch (error) {
-      setStatus(messageFromError(error));
-    }
-  }
-
-  async function toggleImageSafeMode(enabled: boolean) {
-    try {
-      const next = await setImageSafeMode(enabled);
-      setProviderSettings(next);
-      setStatus(enabled ? translate("settings.safeMode.on") : translate("settings.safeMode.off"));
     } catch (error) {
       setStatus(messageFromError(error));
     }
@@ -1254,10 +1227,10 @@ export function AppSettings({
   const displayProviderSettings = showingPartitionModels
     ? effectiveProviderSettings
     : providerSettings;
-  const generationOptions = modelOptions(
-    providerModels.generation,
-    modelValueForMode("generation"),
-  );
+  const generationModel = showingPartitionModels
+    ? (partitionGenerationModel ?? providerSettings.generationModel)
+    : providerSettings.generationModel;
+  const generationOptions = modelOptions(providerModels.generation, generationModel);
   const notesProvider = notesProviders?.usage.notes;
   const cliNames: Record<string, string> = {
     claude: "Claude Code",
@@ -1277,19 +1250,12 @@ export function AppSettings({
   const textModelDescription = notesEngineName
     ? t("settings.models.textOtherEngineDescription", { engine: notesEngineName })
     : t("settings.models.textDescription");
-  const imageOptions = IMAGE_GENERATION_ENABLED
-    ? modelOptions(imageModelCatalog(), displayProviderSettings.imageModel)
-    : [];
-  const videoOptions = VIDEO_GENERATION_ENABLED
-    ? modelOptions(videoModelCatalog(), displayProviderSettings.videoModel)
-    : [];
-
   useEffect(() => {
     if (showingPartitionModels) closeModelPicker();
   }, [showingPartitionModels]);
 
   useEffect(() => {
-    if (!pickerMode) return;
+    if (!modelPickerOpen) return;
     function onPointer(event: MouseEvent) {
       const target = event.target as Node;
       if (modelPickerPopoverRef.current?.contains(target)) return;
@@ -1315,13 +1281,13 @@ export function AppSettings({
       window.removeEventListener("mousedown", onPointer);
       window.removeEventListener("keydown", onKey);
     };
-  }, [pickerMode, modelPickerFlyout]);
+  }, [modelPickerOpen, modelPickerFlyout]);
 
   useEffect(() => {
-    if (pickerMode === "image" || modelPickerFlyout?.kind === "all") {
+    if (modelPickerFlyout?.kind === "all") {
       modelPickerSearchRef.current?.focus();
     }
-  }, [pickerMode, modelPickerFlyout]);
+  }, [modelPickerFlyout]);
 
   useEffect(() => {
     if (micOpen) updateMicrophonePopoverPlacement();
@@ -1347,35 +1313,12 @@ export function AppSettings({
     );
   }
 
-  function modelOptionsForMode(mode: ProviderModelMode) {
-    if (mode === "image") return IMAGE_GENERATION_ENABLED ? imageOptions : [];
-    if (mode === "video") return VIDEO_GENERATION_ENABLED ? videoOptions : [];
-    return generationOptions;
-  }
-
-  function modelValueForMode(mode: ProviderModelMode) {
-    if (mode === "transcription") return displayProviderSettings.transcriptionModel;
-    if (mode === "image") return displayProviderSettings.imageModel;
-    if (mode === "video") return displayProviderSettings.videoModel;
-    if (showingPartitionModels) {
-      return partitionGenerationModel ?? globalGenerationModelValue();
-    }
-    return globalGenerationModelValue();
-  }
-
-  function globalGenerationModelValue() {
-    return providerSettings.generationModel;
-  }
-
-  function openModelPicker(mode: ProviderModelMode) {
+  function openModelPicker() {
     if (showingPartitionModels) return;
-    if (mode === "image" && !IMAGE_GENERATION_ENABLED) return;
-    if (mode === "video" && !VIDEO_GENERATION_ENABLED) return;
-    setPickerMode(mode);
+    setModelPickerOpen(true);
     setModelPickerFlyout(null);
     setModelSearch("");
-    // Image and video models are curated local lists, not fetched catalogs.
-    void requestProviderModels(mode);
+    void requestProviderModels("generation");
   }
 
   function microphonePopoverStyle(): CSSProperties {
@@ -1476,6 +1419,8 @@ export function AppSettings({
             />
 
             <StartupSettingsSection />
+
+            <RoutineSoundsSettingsSection />
 
             {onCheckForUpdates ? (
               <UpdatesSettingsSection onCheck={onCheckForUpdates} checking={checkingForUpdates} />
@@ -1981,32 +1926,26 @@ export function AppSettings({
               <div className="settings-card settings-models-card">
                 <div className="settings-rows">
                   <ModelRow
-                    mode="generation"
                     title={t("settings.models.text")}
                     description={textModelDescription}
                     catalogError={generationCatalogFailed}
                     onRetry={() =>
                       showingPartitionModels
                         ? void requestProviderModels("generation")
-                        : openModelPicker("generation")
+                        : openModelPicker()
                     }
-                    value={modelValueForMode("generation")}
+                    value={generationModel}
                     options={generationOptions}
-                    open={pickerMode === "generation"}
-                    summarySuppressed={pickerMode !== undefined}
+                    open={modelPickerOpen}
                     flyout={modelPickerFlyout}
                     search={modelSearch}
                     triggerRef={modelPickerTriggerRef}
                     popoverRef={modelPickerPopoverRef}
                     searchRef={modelPickerSearchRef}
-                    onToggle={() =>
-                      pickerMode === "generation"
-                        ? closeModelPicker()
-                        : openModelPicker("generation")
-                    }
+                    onToggle={modelPickerOpen ? closeModelPicker : openModelPicker}
                     onFlyoutChange={setModelPickerFlyout}
                     onSearchChange={setModelSearch}
-                    onSelect={(modelId) => selectModelFromPicker("generation", modelId)}
+                    onSelect={selectModelFromPicker}
                     readOnly={showingPartitionModels}
                   />
                   <div className="settings-row-divider" aria-hidden />
@@ -2040,7 +1979,7 @@ export function AppSettings({
                           </p>
                         </div>
                       </div>
-                      {(["groq", "openrouter", "fal"] as const).map((provider) => (
+                      {(["groq", "openrouter"] as const).map((provider) => (
                         <ProviderApiKeyRow
                           key={provider}
                           provider={provider}
@@ -2060,137 +1999,7 @@ export function AppSettings({
               </div>
             </section>
 
-            <LlmProvidersSection
-              onProvidersChanged={setNotesProviders}
-              onChatProviderChanged={async () => {
-                try {
-                  const modelResponse = await providerModelSettings();
-                  const modelSnapshot = providerModelSettingsSnapshot(modelResponse);
-                  setProviderSettings(modelSnapshot.settings);
-                  setEffectiveProviderSettings(modelSnapshot.effectiveSettings);
-                  dispatchProviderModelSettingsChanged({
-                    mode: "generation",
-                    modelId: modelSnapshot.settings.generationModel,
-                  });
-                } catch {
-                  // Provider settings refresh failed
-                }
-              }}
-            />
-
-            {IMAGE_GENERATION_ENABLED || VIDEO_GENERATION_ENABLED ? (
-              <section
-                className="settings-group settings-models-group"
-                aria-labelledby="media-generation-heading"
-              >
-                <h2 id="media-generation-heading" className="settings-group-heading">
-                  {t("settings.models.imageAndVideo")}
-                </h2>
-                <p className="settings-group-description">
-                  {t("settings.models.mediaDescription")}
-                </p>
-                {showingPartitionModels ? (
-                  <p className="settings-models-profile-note">
-                    Showing models for the current data set: {currentDataPartitionLabel}. Switch to
-                    the default data set to edit global models.
-                  </p>
-                ) : null}
-                <div className="settings-card settings-models-card">
-                  <div className="settings-rows">
-                    {IMAGE_GENERATION_ENABLED ? (
-                      <ModelRow
-                        mode="image"
-                        beforeDivider={!VIDEO_GENERATION_ENABLED}
-                        title={t("settings.models.image")}
-                        description={t("settings.models.imageDescription")}
-                        value={modelValueForMode("image")}
-                        options={imageOptions}
-                        open={pickerMode === "image"}
-                        summarySuppressed={pickerMode !== undefined}
-                        flyout={modelPickerFlyout}
-                        search={modelSearch}
-                        triggerRef={modelPickerTriggerRef}
-                        popoverRef={modelPickerPopoverRef}
-                        searchRef={modelPickerSearchRef}
-                        onToggle={() =>
-                          pickerMode === "image" ? closeModelPicker() : openModelPicker("image")
-                        }
-                        onFlyoutChange={setModelPickerFlyout}
-                        onSearchChange={setModelSearch}
-                        onSelect={(modelId) => selectModelFromPicker("image", modelId)}
-                        readOnly={showingPartitionModels}
-                      />
-                    ) : null}
-                    {VIDEO_GENERATION_ENABLED ? (
-                      <ModelRow
-                        mode="video"
-                        beforeDivider
-                        title={t("settings.models.video")}
-                        description={t("settings.models.videoDescription")}
-                        value={modelValueForMode("video")}
-                        options={videoOptions}
-                        open={pickerMode === "video"}
-                        summarySuppressed={pickerMode !== undefined}
-                        flyout={modelPickerFlyout}
-                        search={modelSearch}
-                        triggerRef={modelPickerTriggerRef}
-                        popoverRef={modelPickerPopoverRef}
-                        searchRef={modelPickerSearchRef}
-                        onToggle={() =>
-                          pickerMode === "video" ? closeModelPicker() : openModelPicker("video")
-                        }
-                        onFlyoutChange={setModelPickerFlyout}
-                        onSearchChange={setModelSearch}
-                        onSelect={(modelId) => selectModelFromPicker("video", modelId)}
-                        readOnly={showingPartitionModels}
-                      />
-                    ) : null}
-                    <div className="settings-row-divider" aria-hidden />
-                    <button
-                      type="button"
-                      className="settings-more-options-trigger settings-more-options-row"
-                      aria-label={t("settings.models.moreMediaAria")}
-                      aria-expanded={showMoreImageOptions}
-                      aria-controls="image-more-options-panel"
-                      onClick={() => setShowMoreImageOptions((open) => !open)}
-                    >
-                      <span className="settings-row-info">
-                        <span className="settings-row-title">{t("common.moreOptions")}</span>
-                        <span className="settings-row-description">
-                          {t("settings.models.moreMediaDescription")}
-                        </span>
-                      </span>
-                      <IconChevronDownSmall
-                        className="settings-more-options-chevron"
-                        size={14}
-                        aria-hidden
-                      />
-                    </button>
-                    {showMoreImageOptions ? (
-                      <div id="image-more-options-panel" className="settings-more-options-panel">
-                        <div className="settings-row">
-                          <div className="settings-row-info">
-                            <h3 className="settings-row-title">{t("settings.safeMode.title")}</h3>
-                            <p className="settings-row-description">
-                              {VIDEO_GENERATION_ENABLED
-                                ? t("settings.safeMode.descriptionWithVideo")
-                                : t("settings.safeMode.description")}
-                            </p>
-                          </div>
-                          <div className="settings-row-control">
-                            <Switch
-                              checked={providerSettings.imageSafeMode}
-                              aria-label={t("settings.safeMode.aria")}
-                              onCheckedChange={toggleImageSafeMode}
-                            />
-                          </div>
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              </section>
-            ) : null}
+            <LlmProvidersSection onProvidersChanged={setNotesProviders} />
 
             {status ? (
               <p className="settings-status" role="status">
@@ -2198,10 +2007,6 @@ export function AppSettings({
               </p>
             ) : null}
           </>
-        ) : null}
-
-        {activeTab === "agent" ? (
-          <AgentSettingsSection folders={folders} onFoldersImported={onFoldersImported} />
         ) : null}
 
         {activeTab === "mcp" ? (
@@ -2223,6 +2028,7 @@ export function AppSettings({
           <>
             <ConnectorsSection />
             <AgentMcpServersSection />
+            <SkillsSettingsSection />
           </>
         ) : null}
 
@@ -2381,6 +2187,43 @@ function UpdatesSettingsSection({ onCheck, checking }: { onCheck: () => void; ch
               >
                 {checking ? t("settings.updates.checking") : t("settings.updates.check")}
               </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function RoutineSoundsSettingsSection() {
+  const t = useT();
+  const [soundsEnabled, setSoundsEnabledState] = useState(getAgentSoundsEnabled);
+  useEffect(() => {
+    const handleSounds = (event: Event) => {
+      const detail = (event as CustomEvent<AgentSoundsChangedDetail>).detail;
+      if (detail) setSoundsEnabledState(detail.enabled);
+    };
+    window.addEventListener(AGENT_SOUNDS_CHANGED_EVENT, handleSounds);
+    return () => window.removeEventListener(AGENT_SOUNDS_CHANGED_EVENT, handleSounds);
+  }, []);
+
+  return (
+    <section className="settings-group" aria-labelledby="routine-sounds-heading">
+      <div className="settings-card">
+        <div className="settings-rows">
+          <div className="settings-row">
+            <div className="settings-row-info">
+              <h3 id="routine-sounds-heading" className="settings-row-title">
+                {t("settings.routineSounds.title")}
+              </h3>
+              <p className="settings-row-description">{t("settings.routineSounds.description")}</p>
+            </div>
+            <div className="settings-row-control">
+              <Switch
+                checked={soundsEnabled}
+                onCheckedChange={setAgentSoundsEnabled}
+                aria-label={t("settings.routineSounds.aria")}
+              />
             </div>
           </div>
         </div>
@@ -2708,8 +2551,6 @@ function numericPayload(value: unknown) {
 }
 
 function ModelRow({
-  mode,
-  beforeDivider = false,
   title,
   description,
   value,
@@ -2725,12 +2566,9 @@ function ModelRow({
   onSearchChange,
   onSelect,
   readOnly = false,
-  summarySuppressed,
   catalogError,
   onRetry,
 }: {
-  mode: ProviderModelMode;
-  beforeDivider?: boolean;
   title: string;
   description: string;
   value: string;
@@ -2746,19 +2584,14 @@ function ModelRow({
   onSearchChange: (value: string) => void;
   onSelect: (modelId: string) => void;
   readOnly?: boolean;
-  summarySuppressed?: boolean;
   catalogError?: boolean;
   onRetry?: () => void;
 }) {
   const t = useT();
   const model = selectedModel(options, value);
-  const modelLabel = t(`settings.models.modelLabel.${mode}`);
+  const modelLabel = t("settings.models.modelLabel.generation");
   return (
-    <div
-      className={`settings-row settings-model-row${
-        beforeDivider ? " settings-row-before-divider" : ""
-      }`}
-    >
+    <div className="settings-row settings-model-row">
       <div className="settings-row-info">
         <h3 className="settings-row-title">{title}</h3>
         <p className="settings-row-description">{description}</p>
@@ -2777,7 +2610,7 @@ function ModelRow({
           className="model-summary-tip-anchor"
           width={280}
           delay={280}
-          suppressed={summarySuppressed || open}
+          suppressed={open}
           interactive
         >
           <button
@@ -2799,7 +2632,7 @@ function ModelRow({
         </HoverTip>
         {open && !readOnly ? (
           <ModelPickerPopover
-            mode={mode}
+            mode="generation"
             flyout={flyout}
             model={model}
             options={options}
@@ -2807,7 +2640,6 @@ function ModelRow({
             popoverRef={popoverRef}
             searchRef={searchRef}
             className="settings-model-popover"
-            title={mode === "generation" ? undefined : t(`settings.models.popoverTitle.${mode}`)}
             ariaLabel={t("settings.models.chooseAria", { model: modelLabel })}
             onFlyoutChange={onFlyoutChange}
             onSearchChange={onSearchChange}

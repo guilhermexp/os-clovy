@@ -1,17 +1,16 @@
 //! Model-picker state. The Tauri side persists which transcription /
-//! generation / image / video models the user selected. Groq, OpenRouter and
-//! fal requests use the user's provider keys directly.
+//! text generation models the user selected. Groq and OpenRouter
+//! requests use the user's provider keys directly.
 //! The user's own providers (named OpenAI-compatible endpoints, agent CLIs, and
 //! the provider chosen per use) are the `llm` registry, also persisted here.
 //! Keys never live in `provider-settings.json`: endpoint keys and a user's own
-//! Groq / OpenRouter / fal / Tavily keys live in the Keychain store
+//! Groq / OpenRouter / Tavily keys live in the Keychain store
 //! (`crate::llm::secrets`), and settings only record that one is saved.
 
 mod catalog;
 mod direct;
 #[cfg(test)]
 pub(crate) use direct::TEST_ORIGIN;
-pub(crate) mod fal;
 pub mod groq;
 pub mod local_transcriber;
 pub mod notes;
@@ -25,6 +24,7 @@ use crate::llm::{
     StructuredOutputLevel,
 };
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::{Map, Value};
 use std::{
     collections::BTreeMap,
     fs,
@@ -59,30 +59,6 @@ const LEGACY_TEXT_MODEL_EQUIVALENTS: &[(&str, &str)] = &[
         "nvidia/nemotron-3-nano-30b-a3b",
     ),
 ];
-/// fal FLUX.1 [dev]: the default image model.
-pub const DEFAULT_IMAGE_MODEL: &str = "fal-ai/flux/dev";
-/// Curated fal image-generation endpoint ids (mirrors `IMAGE_MODELS` in
-/// `src/lib/image-models.ts`). A
-/// persisted `image_model` outside this set, such as an id saved before the fal
-/// cutover, loads as `DEFAULT_IMAGE_MODEL`. Keep in sync when the list changes.
-pub const KNOWN_IMAGE_MODELS: &[&str] = &[
-    DEFAULT_IMAGE_MODEL,
-    "fal-ai/flux/schnell",
-    "fal-ai/qwen-image",
-];
-/// fal Wan 2.2 A14B text-to-video: the default video model.
-pub const DEFAULT_VIDEO_MODEL: &str = "fal-ai/wan/v2.2-a14b/text-to-video";
-/// Curated fal text-to-video endpoint ids (mirrors `VIDEO_MODELS` in
-/// `src/lib/video-models.ts`). A
-/// persisted `video_model` outside this set, such as a delisted model or an id
-/// saved before the fal cutover, loads as `DEFAULT_VIDEO_MODEL` so generation
-/// keeps working after an update. Keep in sync when the curated list changes.
-pub const KNOWN_VIDEO_MODELS: &[&str] = &[DEFAULT_VIDEO_MODEL, "alibaba/wan-3.0/text-to-video"];
-/// The fast path's 5s / 720p / 16:9 shape is accepted by every curated video
-/// model; the direct fal adapter validates its supported ranges.
-pub const DEFAULT_VIDEO_DURATION: &str = "5s";
-pub const DEFAULT_VIDEO_RESOLUTION: &str = "720p";
-pub const DEFAULT_VIDEO_ASPECT_RATIO: &str = "16:9";
 const PROVIDER_API_KEY_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PROVIDER_API_KEY_CHARS: usize = 4_096;
 
@@ -97,15 +73,14 @@ static PROVIDER_KEY_CHECK_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new
 });
 
 /// Providers whose user-owned keys are stored locally. Groq transcribes,
-/// OpenRouter serves remote text, and fal generates media. Tavily credentials
-/// remain available for explicit connector configuration. Keys are sent only
-/// to their owning provider.
+/// OpenRouter serves audio and remote text, and Tavily credentials remain
+/// available for explicit connector configuration. Keys are sent only to
+/// their owning provider.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum BuiltinProvider {
     Groq,
     OpenRouter,
-    Fal,
     Tavily,
 }
 
@@ -114,7 +89,6 @@ impl BuiltinProvider {
         match self {
             Self::Groq => "groq",
             Self::OpenRouter => "openrouter",
-            Self::Fal => "fal",
             Self::Tavily => "tavily",
         }
     }
@@ -125,7 +99,6 @@ impl BuiltinProvider {
         match self {
             Self::Groq => "builtin:groq",
             Self::OpenRouter => "builtin:openrouter",
-            Self::Fal => "builtin:fal",
             Self::Tavily => "builtin:tavily",
         }
     }
@@ -134,35 +107,18 @@ impl BuiltinProvider {
         match self {
             Self::Groq => "Groq",
             Self::OpenRouter => "OpenRouter",
-            Self::Fal => "fal",
             Self::Tavily => "Tavily",
         }
     }
 
     /// A documented endpoint that needs a valid key and runs no inference, so
     /// saving a key costs nothing: Groq lists models, OpenRouter describes the
-    /// current key, fal prices the default image endpoint, and Tavily reports
-    /// the key's usage.
+    /// current key, and Tavily reports the key's usage.
     fn key_check_url(self) -> String {
         match self {
             Self::Groq => "https://api.groq.com/openai/v1/models".to_string(),
             Self::OpenRouter => "https://openrouter.ai/api/v1/key".to_string(),
-            Self::Fal => {
-                let mut url = reqwest::Url::parse("https://api.fal.ai/v1/models/pricing")
-                    .expect("static fal pricing URL");
-                url.query_pairs_mut()
-                    .append_pair("endpoint_id", DEFAULT_IMAGE_MODEL);
-                url.to_string()
-            }
             Self::Tavily => "https://api.tavily.com/usage".to_string(),
-        }
-    }
-
-    /// fal authenticates with `Key <key>`; the others take a bearer token.
-    fn authorize(self, request: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
-        match self {
-            Self::Fal => request.header(reqwest::header::AUTHORIZATION, format!("Key {api_key}")),
-            Self::Groq | Self::OpenRouter | Self::Tavily => request.bearer_auth(api_key),
         }
     }
 }
@@ -175,7 +131,6 @@ impl BuiltinProvider {
 pub struct ProviderApiKeysConfigured {
     pub groq: bool,
     pub openrouter: bool,
-    pub fal: bool,
     pub tavily: bool,
 }
 
@@ -184,7 +139,6 @@ impl ProviderApiKeysConfigured {
         match provider {
             BuiltinProvider::Groq => self.groq,
             BuiltinProvider::OpenRouter => self.openrouter,
-            BuiltinProvider::Fal => self.fal,
             BuiltinProvider::Tavily => self.tavily,
         }
     }
@@ -193,7 +147,6 @@ impl ProviderApiKeysConfigured {
         let slot = match provider {
             BuiltinProvider::Groq => &mut self.groq,
             BuiltinProvider::OpenRouter => &mut self.openrouter,
-            BuiltinProvider::Fal => &mut self.fal,
             BuiltinProvider::Tavily => &mut self.tavily,
         };
         *slot = configured;
@@ -204,6 +157,70 @@ pub struct ProviderSettingsState {
     path: PathBuf,
     settings: Mutex<ProviderModelSettings>,
     transcription_intent: Mutex<TranscriptionIntent>,
+    retired_media: RetiredMediaMetadata,
+}
+
+/// Historical preferences that are carried through settings saves and never
+/// included in the settings used by providers or returned over IPC.
+#[derive(Default)]
+struct RetiredMediaMetadata {
+    models_and_safety: Map<String, Value>,
+    fal_configured: Option<bool>,
+    profile_overrides: BTreeMap<String, Map<String, Value>>,
+}
+
+impl RetiredMediaMetadata {
+    fn from_document(document: &Value) -> Self {
+        let models_and_safety = Self::fields(
+            document,
+            &[
+                "imageModel",
+                "videoModel",
+                "imageSafeMode",
+                "imageSafeModePromptDismissed",
+                "imageSafeModeSetByUser",
+            ],
+        );
+        let fal_configured = document["providerApiKeysConfigured"]["fal"].as_bool();
+        let profile_overrides = document["profileOverrides"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(profile, overrides)| {
+                let fields = Self::fields(overrides, &["imageModel", "videoModel"]);
+                (!fields.is_empty()).then(|| (profile.clone(), fields))
+            })
+            .collect();
+        Self {
+            models_and_safety,
+            fal_configured,
+            profile_overrides,
+        }
+    }
+
+    fn fields(document: &Value, keys: &[&str]) -> Map<String, Value> {
+        keys.iter()
+            .filter_map(|&key| {
+                document
+                    .get(key)
+                    .map(|value| (key.to_string(), value.clone()))
+            })
+            .collect()
+    }
+
+    fn restore(&self, document: &mut Value) {
+        for (key, value) in &self.models_and_safety {
+            document[key] = value.clone();
+        }
+        if let Some(configured) = self.fal_configured {
+            document["providerApiKeysConfigured"]["fal"] = Value::Bool(configured);
+        }
+        for (profile, fields) in &self.profile_overrides {
+            for (key, value) in fields {
+                document["profileOverrides"][profile][key] = value.clone();
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -219,16 +236,10 @@ pub struct ProviderModelSettings {
     pub generation_model: String,
     #[serde(default = "default_generation_model")]
     pub remote_generation_model: String,
-    // Defaulted so provider-settings.json files written before image
-    // generation existed still deserialize (they predate this field).
-    #[serde(default = "default_image_model")]
-    pub image_model: String,
-    #[serde(default = "default_video_model")]
-    pub video_model: String,
     /// Which providers have a user key in the Keychain store (never the keys).
     #[serde(default)]
     pub provider_api_keys_configured: ProviderApiKeysConfigured,
-    /// False on files saved before the Groq / OpenRouter / fal cutover: their
+    /// False on files saved before the Groq and OpenRouter cutover: their
     /// text model ids are migrated once on load (see `migrate_legacy_text_model`)
     /// and the file is rewritten, which also drops the retired plaintext
     /// `veniceApiKey` field without copying it anywhere.
@@ -253,25 +264,6 @@ pub struct ProviderModelSettings {
     /// chat engine (`crate::llm::registry::apply_cli_default`).
     #[serde(default)]
     pub llm_cli_default_applied: bool,
-    /// When true, image generation and editing ask the image provider to
-    /// filter adult content. Clovy defaults it ON; the user opts out via
-    /// Settings or the generation-time consent dialog. Defaulted so settings
-    /// files predating this field still deserialize to the current default.
-    #[serde(default = "default_image_safe_mode")]
-    pub image_safe_mode: bool,
-    /// When true, the user chose "don't ask again" on the safe-mode consent
-    /// dialog: Clovy stops offering to turn safe mode off before
-    /// potentially-explicit generations. Reset to false whenever safe mode is
-    /// explicitly re-enabled, so re-opting into safety re-arms the prompt.
-    #[serde(default)]
-    pub image_safe_mode_prompt_dismissed: bool,
-    /// True once the user explicitly chose a safe-mode value (Settings toggle
-    /// or the consent dialog, both of which land in `set_image_safe_mode`).
-    /// Without it, a stored `image_safe_mode` is ignored on load and safe
-    /// mode reads its default (on) - files written by pre-JUN-209 builds
-    /// carry an incidental `false` the user never picked.
-    #[serde(default)]
-    pub image_safe_mode_set_by_user: bool,
     /// When true (the default), Clovy streams a live transcript preview while
     /// recording. On builds that carry this setting the preview is billed as
     /// extra usage (ADR-0002 addendum, JUN-375); turning it off stops the
@@ -321,10 +313,6 @@ pub struct ProfileModelOverrides {
     pub transcription_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcription_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub video_model: Option<String>,
 }
 
 /// The client-facing view of provider settings. API keys are never
@@ -338,12 +326,8 @@ pub struct ProviderModelSettingsDto {
     pub transcription_model: String,
     pub generation_model: String,
     pub remote_generation_model: String,
-    pub image_model: String,
-    pub video_model: String,
     pub provider_api_keys_configured: ProviderApiKeysConfigured,
     pub local_generation: ChatEndpointDto,
-    pub image_safe_mode: bool,
-    pub image_safe_mode_prompt_dismissed: bool,
     pub live_transcription: bool,
 }
 
@@ -356,12 +340,8 @@ impl From<&ProviderModelSettings> for ProviderModelSettingsDto {
             transcription_model: settings.transcription_model.clone(),
             generation_model: settings.generation_model.clone(),
             remote_generation_model: settings.remote_generation_model.clone(),
-            image_model: settings.image_model.clone(),
-            video_model: settings.video_model.clone(),
             provider_api_keys_configured: settings.provider_api_keys_configured,
             local_generation: chat_endpoint_dto(settings),
-            image_safe_mode: settings.image_safe_mode,
-            image_safe_mode_prompt_dismissed: settings.image_safe_mode_prompt_dismissed,
             live_transcription: settings.live_transcription,
         }
     }
@@ -394,10 +374,6 @@ pub struct ProfileModelOverridesDto {
     pub transcription_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcription_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub video_model: Option<String>,
 }
 
 impl From<&ProfileModelOverrides> for ProfileModelOverridesDto {
@@ -405,8 +381,6 @@ impl From<&ProfileModelOverrides> for ProfileModelOverridesDto {
         Self {
             transcription_provider: overrides.transcription_provider.clone(),
             transcription_model: overrides.transcription_model.clone(),
-            image_model: overrides.image_model.clone(),
-            video_model: overrides.video_model.clone(),
         }
     }
 }
@@ -418,8 +392,6 @@ impl From<ProfileModelOverridesDto> for ProfileModelOverrides {
                 overrides.transcription_provider,
             ),
             transcription_model: normalize_optional_model_field(overrides.transcription_model),
-            image_model: normalize_optional_model_field(overrides.image_model),
-            video_model: normalize_optional_model_field(overrides.video_model),
         }
     }
 }
@@ -562,19 +534,6 @@ pub fn llm_registry() -> LlmRegistry {
     LlmRegistry::from(&current_settings())
 }
 
-pub fn image_model() -> String {
-    effective_current_settings().image_model
-}
-
-pub fn video_model() -> String {
-    effective_current_settings().video_model
-}
-
-/// Discovery can check setup without reading or prompting for a credential.
-pub(crate) fn fal_configured() -> bool {
-    current_settings().provider_api_keys_configured.fal
-}
-
 /// The user's saved key for `provider`, or `None` when none is saved.
 /// The credential store is read only when settings record a saved key.
 /// A recorded key the store cannot return is an error; there is no fallback.
@@ -611,17 +570,6 @@ fn provider_api_key_unavailable(provider: BuiltinProvider) -> AppError {
             provider.display_name()
         ),
     )
-}
-
-/// Whether image generation/editing asks the provider to filter adult content.
-/// The default is `true` unless the user opts out via Settings or the
-/// generation-time consent dialog.
-pub fn image_safe_mode() -> bool {
-    current_settings().image_safe_mode
-}
-
-pub fn image_safe_mode_prompt_dismissed() -> bool {
-    current_settings().image_safe_mode_prompt_dismissed
 }
 
 pub fn live_transcription() -> bool {
@@ -752,31 +700,11 @@ fn set_provider_model_impl(
         intent.replace(None);
         return Ok(saved);
     }
-    let curated = match request.mode {
-        ModelMode::Transcription => unreachable!(),
-        ModelMode::Image => Some(KNOWN_IMAGE_MODELS),
-        ModelMode::Video => Some(KNOWN_VIDEO_MODELS),
-        ModelMode::Generation => None,
-    };
-    if curated.is_some_and(|known| !known.contains(&model_id.as_str())) {
-        return Err(AppError::new(
-            "provider_model_unavailable",
-            "This model is not available. Choose another model.",
-        ));
-    }
-    update_settings_result(state, |settings| {
-        match request.mode {
-            ModelMode::Transcription => unreachable!(),
-            ModelMode::Generation => {
-                // Text selection is independent from chat and note engine choices.
-                settings.generation_provider = PROVIDER_OPENROUTER.to_string();
-                settings.generation_model = model_id.clone();
-                settings.remote_generation_model = model_id;
-            }
-            ModelMode::Image => settings.image_model = model_id,
-            ModelMode::Video => settings.video_model = model_id,
-        }
-        Ok(())
+    update_settings(state, |settings| {
+        // Text selection is independent from the chosen CLI and Notes engine.
+        settings.generation_provider = PROVIDER_OPENROUTER.to_string();
+        settings.generation_model = model_id.clone();
+        settings.remote_generation_model = model_id;
     })
 }
 
@@ -980,12 +908,6 @@ fn local_model_for_override(
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct SetImageSafeModeRequest {
-    pub enabled: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub struct SetLiveTranscriptionRequest {
     pub enabled: bool,
 }
@@ -1005,294 +927,6 @@ fn set_live_transcription_impl(
     update_settings(state, |settings| {
         settings.live_transcription = request.enabled;
     })
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SetImageSafeModePromptDismissedRequest {
-    pub dismissed: bool,
-}
-
-/// Persists the image safe-mode toggle. On by default; the user can opt out
-/// via Settings or the generation-time consent dialog. The value flows into
-/// every image generation/edit request from the loopback proxy and the fast
-/// path.
-#[tauri::command]
-pub fn set_image_safe_mode(
-    state: State<'_, ProviderSettingsState>,
-    request: SetImageSafeModeRequest,
-) -> Result<ProviderModelSettingsDto, AppError> {
-    set_image_safe_mode_impl(&state, request)
-}
-
-fn set_image_safe_mode_impl(
-    state: &ProviderSettingsState,
-    request: SetImageSafeModeRequest,
-) -> Result<ProviderModelSettingsDto, AppError> {
-    update_settings(state, |settings| {
-        settings.image_safe_mode = request.enabled;
-        settings.image_safe_mode_set_by_user = true;
-        if request.enabled {
-            settings.image_safe_mode_prompt_dismissed = false;
-        }
-    })
-}
-
-#[tauri::command]
-pub fn set_image_safe_mode_prompt_dismissed(
-    state: State<'_, ProviderSettingsState>,
-    request: SetImageSafeModePromptDismissedRequest,
-) -> Result<ProviderModelSettingsDto, AppError> {
-    set_image_safe_mode_prompt_dismissed_impl(&state, request)
-}
-
-fn set_image_safe_mode_prompt_dismissed_impl(
-    state: &ProviderSettingsState,
-    request: SetImageSafeModePromptDismissedRequest,
-) -> Result<ProviderModelSettingsDto, AppError> {
-    update_settings(state, |settings| {
-        settings.image_safe_mode_prompt_dismissed = request.dismissed;
-    })
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct GenerateImageRequest {
-    pub prompt: String,
-    /// Optional model override; falls back to the saved default image model.
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Stable logical request id supplied by the chat orchestration layer.
-    #[serde(default)]
-    pub request_id: Option<String>,
-    /// Optional safe-mode override pinned at turn creation. Absent uses the
-    /// live saved setting; resuming a submitted fal job keeps its original input.
-    #[serde(default)]
-    pub safe_mode: Option<bool>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct GenerateVideoRequest {
-    pub prompt: String,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub request_id: Option<String>,
-    #[serde(default)]
-    pub duration: Option<String>,
-    #[serde(default)]
-    pub resolution: Option<String>,
-    #[serde(default)]
-    pub aspect_ratio: Option<String>,
-    #[serde(default)]
-    pub audio: Option<bool>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct VideoStatusRequest {
-    pub job_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct EditImageRequest {
-    pub image: String,
-    pub prompt: String,
-    /// Stable logical request id supplied by the caller.
-    #[serde(default)]
-    pub request_id: Option<String>,
-    #[serde(default)]
-    pub mime_type: Option<String>,
-    /// Optional edit-model override; absent uses the curated fal edit model.
-    #[serde(default)]
-    pub model: Option<String>,
-}
-
-/// Generates an image directly with the user's fal key and saved model.
-#[tauri::command]
-pub async fn generate_image(
-    request: GenerateImageRequest,
-) -> Result<crate::providers::fal::GeneratedImageDto, AppError> {
-    let prompt = request.prompt.trim().to_string();
-    if prompt.is_empty() {
-        return Err(AppError::new("image_prompt_required", "Enter a prompt."));
-    }
-    let model = request
-        .model
-        .map(|model| model.trim().to_string())
-        .filter(|model| !model.is_empty())
-        .unwrap_or_else(image_model);
-    let request_id = request
-        .request_id
-        .map(|request_id| request_id.trim().to_string())
-        .filter(|request_id| !request_id.is_empty());
-    let safe_mode = request.safe_mode.unwrap_or_else(image_safe_mode);
-    crate::providers::fal::generate_image(prompt, model, Some(safe_mode), request_id).await
-}
-
-/// Edits a source image directly with the user's fal key.
-#[tauri::command]
-pub async fn edit_image(
-    request: EditImageRequest,
-) -> Result<crate::providers::fal::GeneratedImageDto, AppError> {
-    edit_image_with_safe_mode(request, None).await
-}
-
-pub(crate) async fn edit_image_with_safe_mode(
-    request: EditImageRequest,
-    safe_mode: Option<bool>,
-) -> Result<crate::providers::fal::GeneratedImageDto, AppError> {
-    let image = request.image.trim().to_string();
-    if image.is_empty() {
-        return Err(AppError::new(
-            "image_source_required",
-            "Choose an image to edit.",
-        ));
-    }
-    let prompt = request.prompt.trim().to_string();
-    if prompt.is_empty() {
-        return Err(AppError::new(
-            "image_prompt_required",
-            "Enter an edit instruction.",
-        ));
-    }
-    let model = request
-        .model
-        .map(|model| model.trim().to_string())
-        .filter(|model| !model.is_empty());
-    let request_id = request
-        .request_id
-        .map(|request_id| request_id.trim().to_string())
-        .filter(|request_id| !request_id.is_empty());
-    let mime_type = request
-        .mime_type
-        .map(|mime_type| mime_type.trim().to_string())
-        .filter(|mime_type| !mime_type.is_empty());
-    crate::providers::fal::edit_image(
-        image,
-        prompt,
-        mime_type,
-        model,
-        Some(safe_mode.unwrap_or_else(image_safe_mode)),
-        request_id,
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn video_generate(
-    request: GenerateVideoRequest,
-) -> Result<crate::providers::fal::VideoJobDto, AppError> {
-    video_generate_with_enabled(request, crate::feature_flags::VIDEO_GENERATION_ENABLED).await
-}
-
-async fn video_generate_with_enabled(
-    request: GenerateVideoRequest,
-    enabled: bool,
-) -> Result<crate::providers::fal::VideoJobDto, AppError> {
-    ensure_video_generation_enabled(enabled)?;
-    let prompt = request.prompt.trim().to_string();
-    if prompt.is_empty() {
-        return Err(AppError::new("video_prompt_required", "Enter a prompt."));
-    }
-    let model = request
-        .model
-        .map(|model| model.trim().to_string())
-        .filter(|model| !model.is_empty())
-        .unwrap_or_else(video_model);
-    let request_id = request
-        .request_id
-        .map(|request_id| request_id.trim().to_string())
-        .filter(|request_id| !request_id.is_empty());
-    let duration = request
-        .duration
-        .map(|duration| duration.trim().to_string())
-        .filter(|duration| !duration.is_empty())
-        .unwrap_or_else(|| DEFAULT_VIDEO_DURATION.to_string());
-    let resolution = request
-        .resolution
-        .map(|resolution| resolution.trim().to_string())
-        .filter(|resolution| !resolution.is_empty())
-        .or_else(|| Some(DEFAULT_VIDEO_RESOLUTION.to_string()));
-    let aspect_ratio = request
-        .aspect_ratio
-        .map(|aspect_ratio| aspect_ratio.trim().to_string())
-        .filter(|aspect_ratio| !aspect_ratio.is_empty())
-        .or_else(|| Some(DEFAULT_VIDEO_ASPECT_RATIO.to_string()));
-    crate::providers::fal::video_generate(crate::providers::fal::VideoGenerateParams {
-        prompt,
-        model,
-        request_id,
-        duration,
-        resolution,
-        aspect_ratio,
-        audio: request.audio,
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn video_status(
-    app: AppHandle,
-    request: VideoStatusRequest,
-) -> Result<crate::providers::fal::VideoStatusDto, AppError> {
-    video_status_with_enabled(app, request, crate::feature_flags::VIDEO_GENERATION_ENABLED).await
-}
-
-/// Absolute path of the generated-videos directory. Lets the frontend resolve a
-/// bare `generated-video-*.mp4` filename (the agent frequently names a finished
-/// video by filename only when asked to show it again) to an asset-scoped path
-/// the webview can load. Mirrors the directory `providers::fal::video_status`
-/// and the agent video tool write into.
-#[tauri::command]
-pub fn generated_video_dir(app: AppHandle) -> Result<String, AppError> {
-    let dir = crate::app_paths::app_data_dir(&app)
-        .map_err(|error| AppError::new("video_dir_failed", error.to_string()))?
-        .join("agent-workspaces")
-        .join("generated-media")
-        .join("videos");
-    Ok(dir.to_string_lossy().into_owned())
-}
-
-async fn video_status_with_enabled(
-    app: AppHandle,
-    request: VideoStatusRequest,
-    enabled: bool,
-) -> Result<crate::providers::fal::VideoStatusDto, AppError> {
-    let job_id = video_status_job_id_with_enabled(request, enabled)?;
-    crate::providers::fal::video_status(&app, job_id).await
-}
-
-fn video_status_job_id_with_enabled(
-    request: VideoStatusRequest,
-    enabled: bool,
-) -> Result<String, AppError> {
-    ensure_video_generation_enabled(enabled)?;
-    let job_id = request.job_id.trim().to_string();
-    if job_id.is_empty() {
-        return Err(AppError::new(
-            "video_job_required",
-            "Video job id is required.",
-        ));
-    }
-    Ok(job_id)
-}
-
-fn ensure_video_generation_enabled(enabled: bool) -> Result<(), AppError> {
-    if enabled {
-        Ok(())
-    } else {
-        Err(video_generation_disabled_error())
-    }
-}
-
-fn video_generation_disabled_error() -> AppError {
-    AppError::new(
-        "video_generation_disabled",
-        "Video generation is not available.",
-    )
 }
 
 /// Saves the user's own key for one provider. The key is checked against the
@@ -1519,12 +1153,13 @@ pub fn setup(app: &mut tauri::App) {
     }
     let path = provider_settings_path(app.handle())
         .unwrap_or_else(|| PathBuf::from("provider-settings.json"));
-    let (settings, migrated_now) = load_settings_from_disk(app.handle());
+    let (settings, migrated_now, retired_media) = load_settings_from_disk(app.handle());
     replace_current_settings(settings.clone());
     let state = ProviderSettingsState {
         transcription_intent: Default::default(),
         path,
         settings: Mutex::new(settings.clone()),
+        retired_media,
     };
     if migrated_now {
         // Rewrite the file so a migrated endpoint key, the pre-cutover model
@@ -1639,7 +1274,7 @@ pub(crate) fn settings_from_json_for_tests(
     raw: &str,
     store: &dyn crate::llm::secrets::SecretStore,
 ) -> Option<ProviderModelSettings> {
-    settings_from_json(raw, store).map(|(settings, _)| settings)
+    settings_from_json(raw, store).map(|(settings, _, _)| settings)
 }
 
 fn default_settings() -> ProviderModelSettings {
@@ -1649,8 +1284,6 @@ fn default_settings() -> ProviderModelSettings {
         transcription_model: DEFAULT_TRANSCRIPTION_MODEL.to_string(),
         generation_model: default_generation_model(),
         remote_generation_model: default_generation_model(),
-        image_model: DEFAULT_IMAGE_MODEL.to_string(),
-        video_model: DEFAULT_VIDEO_MODEL.to_string(),
         provider_api_keys_configured: ProviderApiKeysConfigured::default(),
         remote_models_migrated: true,
         local_generation: LocalGenerationSettings::default(),
@@ -1659,9 +1292,6 @@ fn default_settings() -> ProviderModelSettings {
         llm_cli_levels: BTreeMap::new(),
         llm_registry_migrated: true,
         llm_cli_default_applied: false,
-        image_safe_mode: true,
-        image_safe_mode_prompt_dismissed: false,
-        image_safe_mode_set_by_user: false,
         live_transcription: true,
         profile_overrides: BTreeMap::new(),
     }
@@ -1687,18 +1317,6 @@ fn default_generation_model() -> String {
     DEFAULT_GENERATION_MODEL.to_string()
 }
 
-fn default_image_model() -> String {
-    DEFAULT_IMAGE_MODEL.to_string()
-}
-
-fn default_video_model() -> String {
-    DEFAULT_VIDEO_MODEL.to_string()
-}
-
-fn default_image_safe_mode() -> bool {
-    true
-}
-
 fn provider_settings_path(app: &AppHandle) -> Option<PathBuf> {
     crate::app_paths::app_config_dir(app)
         .ok()
@@ -1711,17 +1329,17 @@ fn provider_settings_path_from_config_dir(directory: PathBuf) -> PathBuf {
 
 /// Loads the saved settings; the flag is true when this load migrated the
 /// legacy endpoint or pre-cutover model ids and the file should be rewritten.
-fn load_settings_from_disk(app: &AppHandle) -> (ProviderModelSettings, bool) {
+fn load_settings_from_disk(app: &AppHandle) -> (ProviderModelSettings, bool, RetiredMediaMetadata) {
     provider_settings_path(app)
         .and_then(|path| fs::read_to_string(path).ok())
         .and_then(|raw| settings_from_json(&raw, crate::llm::secrets::store()))
-        .unwrap_or_else(|| (default_settings(), false))
+        .unwrap_or_else(|| (default_settings(), false, RetiredMediaMetadata::default()))
 }
 
 fn settings_from_json(
     raw: &str,
     store: &dyn crate::llm::secrets::SecretStore,
-) -> Option<(ProviderModelSettings, bool)> {
+) -> Option<(ProviderModelSettings, bool, RetiredMediaMetadata)> {
     let document: serde_json::Value = serde_json::from_str(raw).ok()?;
     let retired_usage = document["llmUsage"]["notes"]["kind"] == "clovy"
         || document["llmUsage"].get("dictationCleanup").is_some();
@@ -1729,6 +1347,7 @@ fn settings_from_json(
     let retired_auto = document["generationModel"] == LEGACY_AUTO_GENERATION_MODEL
         || document["remoteGenerationModel"] == LEGACY_AUTO_GENERATION_MODEL;
     let missing_chat = document["llmUsage"].get("chat").is_none();
+    let retired_media = RetiredMediaMetadata::from_document(&document);
     let parsed = serde_json::from_value::<ProviderModelSettings>(document).ok()?;
     let retired_chat = missing_chat || !matches!(parsed.llm_usage.chat, ProviderRef::Cli { .. });
     let was_migrated = parsed.llm_registry_migrated;
@@ -1743,6 +1362,7 @@ fn settings_from_json(
     Some((
         sanitize_settings(migrated, &default_settings()),
         migrated_now,
+        retired_media,
     ))
 }
 
@@ -1777,8 +1397,8 @@ fn sanitize_settings(
     defaults: &ProviderModelSettings,
 ) -> ProviderModelSettings {
     // Text ids are migrated once (the OpenRouter catalog is live, so there is
-    // no fixed allowlist); transcription, image, and video ids are checked
-    // against their curated sets on every load.
+    // no fixed allowlist); transcription ids are checked against the curated
+    // sets on every load.
     let migrate_text = !settings.remote_models_migrated;
     let migrate = |model: String| {
         if model == LEGACY_AUTO_GENERATION_MODEL {
@@ -1822,28 +1442,12 @@ fn sanitize_settings(
         })
         .collect();
 
-    let image_safe_mode = if settings.image_safe_mode_set_by_user {
-        settings.image_safe_mode
-    } else {
-        true
-    };
-
     let mut sanitized = ProviderModelSettings {
         transcription_provider,
         generation_provider: PROVIDER_OPENROUTER.to_string(),
         transcription_model,
         generation_model,
         remote_generation_model,
-        image_model: curated_or_default(
-            settings.image_model,
-            KNOWN_IMAGE_MODELS,
-            &defaults.image_model,
-        ),
-        video_model: curated_or_default(
-            settings.video_model,
-            KNOWN_VIDEO_MODELS,
-            &defaults.video_model,
-        ),
         provider_api_keys_configured: settings.provider_api_keys_configured,
         remote_models_migrated: true,
         local_generation,
@@ -1852,9 +1456,6 @@ fn sanitize_settings(
         llm_cli_levels: settings.llm_cli_levels,
         llm_registry_migrated: settings.llm_registry_migrated,
         llm_cli_default_applied: settings.llm_cli_default_applied,
-        image_safe_mode,
-        image_safe_mode_prompt_dismissed: settings.image_safe_mode_prompt_dismissed,
-        image_safe_mode_set_by_user: settings.image_safe_mode_set_by_user,
         live_transcription: settings.live_transcription,
         profile_overrides: sanitize_profile_overrides(settings.profile_overrides),
     };
@@ -1890,16 +1491,6 @@ fn sanitize_profile_overrides(
             let overrides = ProfileModelOverrides {
                 transcription_provider,
                 transcription_model,
-                image_model: curated_override(
-                    overrides.image_model,
-                    KNOWN_IMAGE_MODELS,
-                    DEFAULT_IMAGE_MODEL,
-                ),
-                video_model: curated_override(
-                    overrides.video_model,
-                    KNOWN_VIDEO_MODELS,
-                    DEFAULT_VIDEO_MODEL,
-                ),
             };
             (!profile_overrides_empty(&overrides)).then_some((profile, overrides))
         })
@@ -1915,12 +1506,6 @@ fn curated_or_default(persisted: String, curated: &[&str], default: &str) -> Str
     } else {
         default.to_string()
     }
-}
-
-/// [`curated_or_default`] for a profile override; an absent override stays
-/// absent so the profile keeps following the global choice.
-fn curated_override(value: Option<String>, curated: &[&str], default: &str) -> Option<String> {
-    normalize_optional_model_field(value).map(|model| curated_or_default(model, curated, default))
 }
 
 /// The OpenRouter id for a text model id saved before the
@@ -1989,8 +1574,9 @@ async fn verify_provider_api_key(
     url: &str,
 ) -> Result<(), AppError> {
     let name = provider.display_name();
-    let response = provider
-        .authorize(PROVIDER_KEY_CHECK_HTTP_CLIENT.get(url), api_key)
+    let response = PROVIDER_KEY_CHECK_HTTP_CLIENT
+        .get(url)
+        .bearer_auth(api_key)
         .send()
         .await
         .map_err(|_| {
@@ -2034,10 +1620,7 @@ fn normalize_optional_model_field(value: Option<String>) -> Option<String> {
 }
 
 fn profile_overrides_empty(overrides: &ProfileModelOverrides) -> bool {
-    overrides.transcription_provider.is_none()
-        && overrides.transcription_model.is_none()
-        && overrides.image_model.is_none()
-        && overrides.video_model.is_none()
+    overrides.transcription_provider.is_none() && overrides.transcription_model.is_none()
 }
 
 fn effective_settings_for_profile(
@@ -2057,12 +1640,6 @@ fn effective_settings_for_profile(
     }
     if let Some(model) = overrides.transcription_model.as_deref() {
         effective.transcription_model = model.to_string();
-    }
-    if let Some(model) = overrides.image_model.as_deref() {
-        effective.image_model = model.to_string();
-    }
-    if let Some(model) = overrides.video_model.as_deref() {
-        effective.video_model = model.to_string();
     }
     (
         effective.transcription_provider,
@@ -2172,8 +1749,12 @@ fn save_settings(
         fs::create_dir_all(parent)
             .map_err(|error| AppError::new("provider_settings_save_failed", error.to_string()))?;
     }
-    let serialized = serde_json::to_string_pretty(settings)
-        .map_err(|error| AppError::new("provider_settings_save_failed", error.to_string()))?;
+    let serialization_error = |error: serde_json::Error| {
+        AppError::new("provider_settings_save_failed", error.to_string())
+    };
+    let mut document = serde_json::to_value(settings).map_err(serialization_error)?;
+    state.retired_media.restore(&mut document);
+    let serialized = serde_json::to_string_pretty(&document).map_err(serialization_error)?;
     // A failed write must not truncate the saved settings. Stage on the same
     // filesystem, then atomically replace; tempfile cleans up on any error.
     use std::io::Write;
@@ -2252,8 +1833,6 @@ fn selected_model_for_mode(
     Ok(match mode {
         ModelMode::Transcription => settings.transcription_model.clone(),
         ModelMode::Generation => settings.generation_model.clone(),
-        ModelMode::Image => settings.image_model.clone(),
-        ModelMode::Video => settings.video_model.clone(),
     })
 }
 
@@ -2262,8 +1841,6 @@ fn selected_model_for_mode(
 pub enum ModelMode {
     Transcription,
     Generation,
-    Image,
-    Video,
 }
 
 impl<'de> Deserialize<'de> for ModelMode {
@@ -2281,8 +1858,6 @@ impl ModelMode {
         match self {
             Self::Transcription => "asr",
             Self::Generation => "text",
-            Self::Image => "image",
-            Self::Video => "video",
         }
     }
 
@@ -2290,8 +1865,6 @@ impl ModelMode {
         match value.trim() {
             "transcription" | "dictation" | "asr" => Some(Self::Transcription),
             "generation" | "notes" | "text" => Some(Self::Generation),
-            "image" | "images" => Some(Self::Image),
-            "video" | "videos" => Some(Self::Video),
             _ => None,
         }
     }
@@ -2347,55 +1920,24 @@ mod tests {
     }
 
     #[test]
-    fn model_mode_deserializes_image() {
-        assert_eq!(
-            serde_json::from_value::<ModelMode>(serde_json::json!("image")).unwrap(),
-            ModelMode::Image
-        );
-    }
+    fn provider_commands_reject_retired_model_modes_and_credentials_at_decode() {
+        use serde_json::{from_value, json};
 
-    #[test]
-    fn model_mode_deserializes_video() {
-        assert_eq!(
-            serde_json::from_value::<ModelMode>(serde_json::json!("video")).unwrap(),
-            ModelMode::Video
-        );
-    }
-
-    #[test]
-    fn video_generation_guard_returns_disabled_error() {
-        let error = ensure_video_generation_enabled(false).unwrap_err();
-
-        assert_eq!(error.code, "video_generation_disabled");
-        assert_eq!(error.message, "Video generation is not available.");
-        assert!(ensure_video_generation_enabled(true).is_ok());
-    }
-
-    #[test]
-    fn video_status_returns_disabled_error_before_job_validation() {
-        let error = video_status_job_id_with_enabled(
-            VideoStatusRequest {
-                job_id: "job-123".to_string(),
-            },
-            false,
-        )
-        .unwrap_err();
-
-        assert_eq!(error.code, "video_generation_disabled");
-        assert_eq!(error.message, "Video generation is not available.");
-    }
-
-    #[test]
-    fn provider_settings_deserialize_defaults_missing_image_model() {
-        // A provider-settings.json written before image generation existed has
-        // no `imageModel` field; it must still load with the default.
-        let settings: ProviderModelSettings = serde_json::from_value(serde_json::json!({
-            "transcriptionProvider": "venice",
-            "transcriptionModel": "nvidia/parakeet-tdt-0.6b-v3",
-            "generationModel": "zai-org-glm-5-2"
+        for mode in ["image", "images", "video", "videos"] {
+            assert!(
+                from_value::<ProviderModelsRequest>(json!({"mode": mode})).is_err(),
+                "provider catalog accepted retired mode {mode}"
+            );
+            assert!(from_value::<SetProviderModelRequest>(json!({
+                "mode": mode, "modelId": "historical-model"
+            }))
+            .is_err());
+        }
+        assert!(from_value::<SetProviderApiKeyRequest>(json!({
+            "provider": "fal", "apiKey": "synthetic-input"
         }))
-        .unwrap();
-        assert_eq!(settings.image_model, DEFAULT_IMAGE_MODEL);
+        .is_err());
+        assert!(from_value::<ClearProviderApiKeyRequest>(json!({"provider": "fal"})).is_err());
     }
 
     #[test]
@@ -2424,64 +1966,6 @@ mod tests {
         let reparsed: ProviderModelSettings = serde_json::from_str(&round_tripped).unwrap();
         assert_eq!(reparsed, settings);
         assert!(!round_tripped.contains("profileOverrides"));
-    }
-
-    #[test]
-    fn default_settings_enable_image_safe_mode_without_prompt_dismissal() {
-        let settings = default_settings();
-
-        assert!(settings.image_safe_mode);
-        assert!(!settings.image_safe_mode_prompt_dismissed);
-        assert!(!settings.image_safe_mode_set_by_user);
-    }
-
-    #[test]
-    fn provider_settings_deserialize_defaults_missing_image_safe_mode_fields() {
-        let settings = serde_json::from_value::<ProviderModelSettings>(serde_json::json!({
-            "transcriptionProvider": "venice",
-            "transcriptionModel": "nvidia/parakeet-tdt-0.6b-v3",
-            "generationModel": "zai-org-glm-5-2",
-            "imageModel": "venice-sd35"
-        }))
-        .unwrap();
-        let settings = sanitize_settings(settings, &default_settings());
-
-        assert!(settings.image_safe_mode);
-        assert!(!settings.image_safe_mode_prompt_dismissed);
-        assert!(!settings.image_safe_mode_set_by_user);
-    }
-
-    #[test]
-    fn provider_settings_coerces_legacy_image_safe_mode_false_without_user_marker() {
-        let settings = serde_json::from_value::<ProviderModelSettings>(serde_json::json!({
-            "transcriptionProvider": "venice",
-            "transcriptionModel": "nvidia/parakeet-tdt-0.6b-v3",
-            "generationModel": "zai-org-glm-5-2",
-            "imageModel": "venice-sd35",
-            "imageSafeMode": false
-        }))
-        .unwrap();
-        let settings = sanitize_settings(settings, &default_settings());
-
-        assert!(settings.image_safe_mode);
-        assert!(!settings.image_safe_mode_set_by_user);
-    }
-
-    #[test]
-    fn provider_settings_preserves_image_safe_mode_false_with_user_marker() {
-        let settings = serde_json::from_value::<ProviderModelSettings>(serde_json::json!({
-            "transcriptionProvider": "venice",
-            "transcriptionModel": "nvidia/parakeet-tdt-0.6b-v3",
-            "generationModel": "zai-org-glm-5-2",
-            "imageModel": "venice-sd35",
-            "imageSafeMode": false,
-            "imageSafeModeSetByUser": true
-        }))
-        .unwrap();
-        let settings = sanitize_settings(settings, &default_settings());
-
-        assert!(!settings.image_safe_mode);
-        assert!(settings.image_safe_mode_set_by_user);
     }
 
     #[test]
@@ -2581,7 +2065,8 @@ mod tests {
     #[test]
     fn legacy_settings_migrate_to_the_new_providers_and_keep_every_other_choice() {
         let store = crate::llm::secrets::MemorySecretStore::default();
-        let (migrated, migrated_now) = settings_from_json(LEGACY_VENICE_SETTINGS, &store).unwrap();
+        let (migrated, migrated_now, retired_media) =
+            settings_from_json(LEGACY_VENICE_SETTINGS, &store).unwrap();
 
         assert!(migrated_now, "a pre-cutover file must be rewritten");
         assert_eq!(migrated.transcription_provider, PROVIDER_GROQ);
@@ -2589,8 +2074,6 @@ mod tests {
         assert_eq!(migrated.generation_provider, PROVIDER_OPENROUTER);
         assert_eq!(migrated.generation_model, "z-ai/glm-5.2");
         assert_eq!(migrated.remote_generation_model, "z-ai/glm-5.2");
-        assert_eq!(migrated.image_model, DEFAULT_IMAGE_MODEL);
-        assert_eq!(migrated.video_model, DEFAULT_VIDEO_MODEL);
         assert_eq!(
             migrated.provider_api_keys_configured,
             ProviderApiKeysConfigured::default(),
@@ -2622,8 +2105,6 @@ mod tests {
             migrated.llm_cli_levels.get(&CliKind::Claude),
             Some(&StructuredOutputLevel::JsonSchema)
         );
-        assert!(!migrated.image_safe_mode);
-        assert!(migrated.image_safe_mode_set_by_user);
         assert!(!migrated.live_transcription);
         let work = migrated
             .profile_overrides
@@ -2634,28 +2115,119 @@ mod tests {
             work.transcription_model.as_deref(),
             Some(DEFAULT_TRANSCRIPTION_MODEL)
         );
-        assert_eq!(work.image_model.as_deref(), Some(DEFAULT_IMAGE_MODEL));
-        assert_eq!(work.video_model, None);
 
         // No secret moved into the Keychain store, and the rewritten file no
         // longer carries the plaintext Venice key.
         for provider in [
             BuiltinProvider::Groq,
             BuiltinProvider::OpenRouter,
-            BuiltinProvider::Fal,
             BuiltinProvider::Tavily,
         ] {
             assert_eq!(store.get(provider.secret_account()).unwrap(), None);
         }
-        let rewritten = serde_json::to_string_pretty(&migrated).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let state = ProviderSettingsState {
+            path: directory.path().join("provider-settings.json"),
+            settings: Mutex::new(migrated.clone()),
+            transcription_intent: Default::default(),
+            retired_media,
+        };
+        save_settings(&state, &migrated).unwrap();
+        let rewritten = fs::read_to_string(&state.path).unwrap();
         assert!(!rewritten.contains("veniceApiKey"));
         assert!(!rewritten.contains("legacy-venice-secret"));
 
         // Restart: the rewritten file loads to the same settings and is not
         // migrated again.
-        let (reloaded, migrated_again) = settings_from_json(&rewritten, &store).unwrap();
+        let (reloaded, migrated_again, _) = settings_from_json(&rewritten, &store).unwrap();
         assert!(!migrated_again);
         assert_eq!(reloaded, migrated);
+    }
+
+    #[test]
+    fn retired_media_metadata_stays_on_disk_across_a_settings_save() {
+        use serde_json::{json, to_value};
+
+        let mut legacy = to_value(default_settings()).unwrap();
+        legacy["transcriptionProvider"] = json!("openrouter");
+        legacy["transcriptionModel"] = json!("openai/whisper-large-v3");
+        legacy["llmUsage"] = json!({
+            "chat": { "kind": "cli", "id": "codex" },
+            "notes": { "kind": "cli", "id": "claude" },
+            "activity": { "kind": "cli", "id": "claude" }
+        });
+        legacy["llmCliLevels"] = json!({"claude": "json_schema"});
+        legacy["providerApiKeysConfigured"] = json!({"openrouter": true, "fal": true});
+        legacy["imageModel"] = json!("historical-image");
+        legacy["videoModel"] = json!("historical-video");
+        legacy["imageSafeMode"] = json!(false);
+        legacy["imageSafeModePromptDismissed"] = json!(true);
+        legacy["imageSafeModeSetByUser"] = json!(true);
+        legacy["profileOverrides"] = json!({
+            "work": {
+                "transcriptionProvider": "groq",
+                "transcriptionModel": "whisper-large-v3",
+                "imageModel": "historical-work-image"
+            },
+            "media-only": { "videoModel": "historical-profile-video" }
+        });
+        let raw = legacy.to_string();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("provider-settings.json");
+        fs::write(&path, &raw).unwrap();
+        let store = crate::llm::secrets::MemorySecretStore::default();
+        let (settings, migrated, retired_media) = settings_from_json(&raw, &store).unwrap();
+        assert!(
+            !migrated,
+            "retired media alone must not rewrite settings at startup"
+        );
+        assert!(!settings.profile_overrides.contains_key("media-only"));
+        assert_eq!(settings.transcription_model, "openai/whisper-large-v3");
+        assert_eq!(
+            effective_settings_for_profile(&settings, "work").transcription_model,
+            "whisper-large-v3"
+        );
+        assert!(settings.provider_api_keys_configured.openrouter);
+        let work = ProfileModelOverridesDto::from(&settings.profile_overrides["work"]);
+        assert!(to_value(work).unwrap().get("imageModel").is_none());
+
+        let state = ProviderSettingsState {
+            path,
+            settings: Mutex::new(settings.clone()),
+            transcription_intent: Default::default(),
+            retired_media,
+        };
+        let _guard = GLOBAL_SETTINGS_TEST_LOCK.blocking_lock();
+        let _restore = RestoreGlobals;
+        let updated =
+            set_live_transcription_impl(&state, SetLiveTranscriptionRequest { enabled: false })
+                .unwrap();
+        let dto = to_value(updated).unwrap();
+        assert!(dto["providerApiKeysConfigured"].get("fal").is_none());
+        let written = fs::read_to_string(&state.path).unwrap();
+        let saved: Value = serde_json::from_str(&written).unwrap();
+        for key in [
+            "imageModel",
+            "videoModel",
+            "imageSafeMode",
+            "imageSafeModePromptDismissed",
+            "imageSafeModeSetByUser",
+        ] {
+            assert!(dto.get(key).is_none());
+            assert_eq!(saved[key], legacy[key]);
+        }
+        assert_eq!(saved["providerApiKeysConfigured"]["fal"], true);
+        assert_eq!(saved["profileOverrides"], legacy["profileOverrides"]);
+
+        let (reloaded, migrated, _) = settings_from_json(&written, &store).unwrap();
+        assert!(!migrated);
+        assert_eq!(
+            reloaded,
+            ProviderModelSettings {
+                live_transcription: false,
+                ..settings
+            }
+        );
     }
 
     #[test]
@@ -2672,7 +2244,7 @@ mod tests {
                 "remoteGenerationModel": legacy
             })
             .to_string();
-            let (migrated, _) = settings_from_json(&raw, &store).unwrap();
+            let (migrated, _, _) = settings_from_json(&raw, &store).unwrap();
             assert_eq!(migrated.generation_model, expected, "{legacy}");
             assert_eq!(migrated.remote_generation_model, expected, "{legacy}");
         }
@@ -2699,12 +2271,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("provider-settings.json");
         fs::write(&path, raw).unwrap();
-        let (settings, migrated) =
+        let (settings, migrated, retired_media) =
             settings_from_json(&fs::read_to_string(&path).unwrap(), &store).unwrap();
         let state = ProviderSettingsState {
             transcription_intent: Default::default(),
             path: path.clone(),
             settings: Mutex::new(settings.clone()),
+            retired_media,
         };
         save_settings(&state, &settings).unwrap();
         let rewritten = fs::read_to_string(&path).unwrap();
@@ -2721,7 +2294,7 @@ mod tests {
         );
         assert_eq!(settings.llm_usage.activity, ProviderRef::None);
         assert!(migrated);
-        let (reloaded, migrated_again) = settings_from_json(&rewritten, &store).unwrap();
+        let (reloaded, migrated_again, _) = settings_from_json(&rewritten, &store).unwrap();
         assert!(!migrated_again);
         assert_eq!(reloaded, settings);
     }
@@ -2739,7 +2312,7 @@ mod tests {
             }
         })
         .to_string();
-        let (settings, migrated) = settings_from_json(&raw, &store).unwrap();
+        let (settings, migrated, _) = settings_from_json(&raw, &store).unwrap();
         assert_eq!(
             settings
                 .llm_usage
@@ -2772,12 +2345,12 @@ mod tests {
         })
         .to_string();
 
-        let (loaded, migrated_now) = settings_from_json(&raw, &store).unwrap();
+        let (loaded, migrated_now, _) = settings_from_json(&raw, &store).unwrap();
 
         // The pre-cut file still needs its missing/native chat choice retired.
         assert!(migrated_now);
         let rewritten = serde_json::to_string(&loaded).unwrap();
-        let (reloaded, migrated_again) = settings_from_json(&rewritten, &store).unwrap();
+        let (reloaded, migrated_again, _) = settings_from_json(&rewritten, &store).unwrap();
         assert!(!migrated_again);
         assert_eq!(reloaded, loaded);
         assert_eq!(loaded.transcription_model, "whisper-large-v3");
@@ -2796,6 +2369,7 @@ mod tests {
             transcription_intent: Default::default(),
             path: directory.path().join("provider-settings.json"),
             settings: Mutex::new(default_settings()),
+            retired_media: RetiredMediaMetadata::default(),
         };
         {
             let mut settings = state.settings.lock().unwrap();
@@ -2825,7 +2399,7 @@ mod tests {
         );
         assert_eq!(settings.remote_generation_model, "example/text-only");
         let saved = fs::read_to_string(&state.path).unwrap();
-        let (reloaded, _) =
+        let (reloaded, _, _) =
             settings_from_json(&saved, &crate::llm::secrets::MemorySecretStore::default()).unwrap();
         assert_eq!(reloaded.remote_generation_model, "example/text-only");
         assert_eq!(reloaded.llm_usage.chat, settings.llm_usage.chat);
@@ -2869,7 +2443,6 @@ mod tests {
             ProfileModelOverrides {
                 transcription_provider: Some("local".into()),
                 transcription_model: Some("old-model".into()),
-                ..Default::default()
             },
         );
         let settings = sanitize_settings(settings, &default_settings());
@@ -2905,7 +2478,7 @@ mod tests {
         )
         .unwrap();
         let persisted = fs::read_to_string(&state.path).unwrap();
-        let (reloaded, _) = settings_from_json(
+        let (reloaded, _, _) = settings_from_json(
             &persisted,
             &crate::llm::secrets::MemorySecretStore::default(),
         )
@@ -2926,7 +2499,6 @@ mod tests {
             ProfileModelOverrides {
                 transcription_provider: Some("local".into()),
                 transcription_model: Some("fluid-speech-pro".into()),
-                ..Default::default()
             },
         );
         let settings = sanitize_settings(settings, &default_settings());
@@ -3038,7 +2610,6 @@ mod tests {
             ProfileModelOverrides {
                 transcription_provider: Some(PROVIDER_LOCAL.into()),
                 transcription_model: Some("parakeet-ultra".into()),
-                ..Default::default()
             },
         );
         let profile = effective_settings_for_profile(&settings, "work");
@@ -3072,7 +2643,6 @@ mod tests {
                 ProfileModelOverrides {
                     transcription_provider: Some(PROVIDER_LOCAL.into()),
                     transcription_model: Some("parakeet-ultra".into()),
-                    ..Default::default()
                 },
             );
         }
@@ -3151,7 +2721,7 @@ mod tests {
             );
         }
         assert_eq!(
-            validate_provider_api_key(BuiltinProvider::Fal, "   ")
+            validate_provider_api_key(BuiltinProvider::OpenRouter, "   ")
                 .unwrap_err()
                 .code,
             "provider_api_key_required"
@@ -3198,27 +2768,27 @@ mod tests {
             &state,
             &store,
             SetProviderApiKeyRequest {
-                provider: BuiltinProvider::Fal,
-                api_key: "fal-user-key".to_string(),
+                provider: BuiltinProvider::Tavily,
+                api_key: "fixture-tavily-value".to_string(),
             },
-            &format!("{}/models/pricing", server.base_url),
+            &format!("{}/usage", server.base_url),
         )
         .await
         .unwrap();
 
-        // Each provider's own auth scheme reached its check.
+        // Each verification request carried only its provider's own key.
         assert_eq!(
             server.authorizations.lock().unwrap().as_slice(),
             [
                 Some("Bearer sk-or-user-key".to_string()),
-                Some("Key fal-user-key".to_string()),
+                Some("Bearer fixture-tavily-value".to_string()),
             ]
         );
         assert_eq!(
             dto.provider_api_keys_configured,
             ProviderApiKeysConfigured {
                 openrouter: true,
-                fal: true,
+                tavily: true,
                 ..ProviderApiKeysConfigured::default()
             }
         );
@@ -3227,16 +2797,15 @@ mod tests {
             Some("sk-or-user-key")
         );
         assert_eq!(
-            store.get("builtin:fal").unwrap().as_deref(),
-            Some("fal-user-key")
+            store.get("builtin:tavily").unwrap().as_deref(),
+            Some("fixture-tavily-value")
         );
         assert_eq!(store.get("builtin:groq").unwrap(), None);
-        assert_eq!(store.get("builtin:tavily").unwrap(), None);
 
         // The settings file records only that keys exist.
         let on_disk = fs::read_to_string(&state.path).unwrap();
         assert!(!on_disk.contains("sk-or-user-key"));
-        assert!(!on_disk.contains("fal-user-key"));
+        assert!(!on_disk.contains("fixture-tavily-value"));
         let reloaded: ProviderModelSettings = serde_json::from_str(&on_disk).unwrap();
         assert_eq!(
             reloaded.provider_api_keys_configured,
@@ -3244,11 +2813,11 @@ mod tests {
         );
         let settings = state.settings.lock().unwrap().clone();
         assert_eq!(
-            saved_provider_api_key(&settings, &store, BuiltinProvider::Fal).unwrap(),
-            Some("fal-user-key".to_string())
+            saved_provider_api_key(&settings, &store, BuiltinProvider::Tavily).unwrap(),
+            Some("fixture-tavily-value".to_string())
         );
         assert_eq!(
-            saved_provider_api_key(&settings, &store, BuiltinProvider::Tavily).unwrap(),
+            saved_provider_api_key(&settings, &store, BuiltinProvider::Groq).unwrap(),
             None
         );
     }
@@ -3336,19 +2905,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_settings_migrates_delisted_video_model_to_default() {
-        // Older installs persisted the Seedance default while the video UI was
-        // flag-hidden; after it was delisted the stale id must not survive load.
-        let settings = ProviderModelSettings {
-            video_model: "seedance-2-0-fast-text-to-video".to_string(),
-            ..default_settings()
-        };
-        let sanitized = sanitize_settings(settings, &default_settings());
-        assert_eq!(sanitized.video_model, DEFAULT_VIDEO_MODEL);
-    }
-
-    #[test]
-    fn sanitize_settings_keeps_every_curated_model() {
+    fn sanitize_settings_keeps_every_curated_groq_model() {
         // A curated non-default id must survive load unchanged; otherwise an
         // allowlist would silently collapse every pick to the default.
         for &model in KNOWN_TRANSCRIPTION_MODELS {
@@ -3358,22 +2915,6 @@ mod tests {
             };
             let sanitized = sanitize_settings(settings, &default_settings());
             assert_eq!(sanitized.transcription_model, model);
-        }
-        for &model in KNOWN_IMAGE_MODELS {
-            let settings = ProviderModelSettings {
-                image_model: model.to_string(),
-                ..default_settings()
-            };
-            let sanitized = sanitize_settings(settings, &default_settings());
-            assert_eq!(sanitized.image_model, model);
-        }
-        for &model in KNOWN_VIDEO_MODELS {
-            let settings = ProviderModelSettings {
-                video_model: model.to_string(),
-                ..default_settings()
-            };
-            let sanitized = sanitize_settings(settings, &default_settings());
-            assert_eq!(sanitized.video_model, model);
         }
     }
 
@@ -3518,6 +3059,7 @@ mod tests {
             transcription_intent: Default::default(),
             path: dir.join("provider-settings.json"),
             settings: Mutex::new(default_settings()),
+            retired_media: RetiredMediaMetadata::default(),
         }
     }
 
@@ -3528,29 +3070,21 @@ mod tests {
         let mut settings = default_settings();
         settings.transcription_provider = PROVIDER_GROQ.to_string();
         settings.transcription_model = "global-asr".to_string();
-        settings.image_model = "global-image".to_string();
-        settings.video_model = "global-video".to_string();
         settings.profile_overrides.insert(
             "writing".to_string(),
             ProfileModelOverrides {
                 transcription_provider: Some(PROVIDER_GROQ.to_string()),
                 transcription_model: Some("whisper-large-v3".to_string()),
-                image_model: None,
-                video_model: Some("profile-video".to_string()),
             },
         );
 
         let effective = effective_settings_for_profile(&settings, "writing");
         assert_eq!(effective.transcription_provider, PROVIDER_GROQ);
         assert_eq!(effective.transcription_model, "whisper-large-v3");
-        assert_eq!(effective.image_model, "global-image");
-        assert_eq!(effective.video_model, "profile-video");
 
         let effective = effective_settings_for_profile(&settings, "unknown");
         assert_eq!(effective.transcription_provider, PROVIDER_GROQ);
         assert_eq!(effective.transcription_model, "global-asr");
-        assert_eq!(effective.image_model, "global-image");
-        assert_eq!(effective.video_model, "global-video");
 
         let effective = effective_settings_for_profile(&settings, "default");
         assert_eq!(effective.transcription_model, "global-asr");
@@ -3565,15 +3099,12 @@ mod tests {
             ProfileModelOverrides {
                 transcription_provider: Some(PROVIDER_GROQ.to_string()),
                 transcription_model: Some("profile-asr".to_string()),
-                image_model: Some("profile-image".to_string()),
-                video_model: Some("profile-video".to_string()),
             },
         );
 
         let effective = effective_settings_for_profile(&settings, "default");
         assert_eq!(effective.transcription_provider, PROVIDER_GROQ);
         assert_eq!(effective.transcription_model, "global-asr");
-        assert_eq!(effective.image_model, DEFAULT_IMAGE_MODEL);
     }
 
     #[test]
@@ -3586,8 +3117,6 @@ mod tests {
             ProfileModelOverridesDto {
                 transcription_provider: Some(format!(" {PROVIDER_GROQ} ")),
                 transcription_model: Some(" whisper-large-v3 ".to_string()),
-                image_model: Some(" profile-image ".to_string()),
-                video_model: Some(" profile-video ".to_string()),
             },
         )
         .unwrap();
@@ -3608,13 +3137,6 @@ mod tests {
                 .and_then(|overrides| overrides.transcription_model.as_deref()),
             Some("whisper-large-v3")
         );
-        assert_eq!(
-            saved
-                .profile_overrides
-                .get("research")
-                .and_then(|overrides| overrides.video_model.as_deref()),
-            Some("profile-video")
-        );
 
         set_profile_model_overrides_impl(
             &state,
@@ -3622,8 +3144,6 @@ mod tests {
             ProfileModelOverridesDto {
                 transcription_provider: None,
                 transcription_model: Some(DEFAULT_TRANSCRIPTION_MODEL.to_string()),
-                image_model: None,
-                video_model: None,
             },
         )
         .unwrap();
@@ -3672,73 +3192,11 @@ mod tests {
             ProfileModelOverridesDto {
                 transcription_provider: Some(PROVIDER_GROQ.to_string()),
                 transcription_model: None,
-                image_model: None,
-                video_model: None,
             },
         )
         .unwrap_err();
 
         assert_eq!(error.code, "profile_model_overrides_default_profile");
-    }
-
-    #[test]
-    fn set_image_safe_mode_true_resets_dismissed_prompt() {
-        let state = test_state();
-        {
-            let mut settings = state.settings.lock().unwrap();
-            settings.image_safe_mode = false;
-            settings.image_safe_mode_prompt_dismissed = true;
-        }
-
-        let updated =
-            set_image_safe_mode_impl(&state, SetImageSafeModeRequest { enabled: true }).unwrap();
-
-        assert!(updated.image_safe_mode);
-        assert!(!updated.image_safe_mode_prompt_dismissed);
-        let saved: ProviderModelSettings =
-            serde_json::from_str(&fs::read_to_string(&state.path).unwrap()).unwrap();
-        assert!(saved.image_safe_mode);
-        assert!(!saved.image_safe_mode_prompt_dismissed);
-        assert!(saved.image_safe_mode_set_by_user);
-    }
-
-    #[test]
-    fn set_image_safe_mode_false_persists_user_marker_and_reloads_false() {
-        let state = test_state();
-
-        let updated =
-            set_image_safe_mode_impl(&state, SetImageSafeModeRequest { enabled: false }).unwrap();
-
-        assert!(!updated.image_safe_mode);
-        let saved: ProviderModelSettings =
-            serde_json::from_str(&fs::read_to_string(&state.path).unwrap()).unwrap();
-        assert!(!saved.image_safe_mode);
-        assert!(saved.image_safe_mode_set_by_user);
-
-        let reloaded = sanitize_settings(saved, &default_settings());
-        assert!(!reloaded.image_safe_mode);
-        assert!(reloaded.image_safe_mode_set_by_user);
-    }
-
-    #[test]
-    fn set_image_safe_mode_prompt_dismissed_persists_flag_without_touching_user_marker() {
-        let state = test_state();
-        {
-            let mut settings = state.settings.lock().unwrap();
-            settings.image_safe_mode_set_by_user = true;
-        }
-
-        let updated = set_image_safe_mode_prompt_dismissed_impl(
-            &state,
-            SetImageSafeModePromptDismissedRequest { dismissed: true },
-        )
-        .unwrap();
-
-        assert!(updated.image_safe_mode_prompt_dismissed);
-        let saved: ProviderModelSettings =
-            serde_json::from_str(&fs::read_to_string(&state.path).unwrap()).unwrap();
-        assert!(saved.image_safe_mode_prompt_dismissed);
-        assert!(saved.image_safe_mode_set_by_user);
     }
 
     #[test]

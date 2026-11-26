@@ -1,11 +1,11 @@
 # LLM providers (own providers)
 
 Notes can use OpenRouter directly with the user's key, an installed CLI, or
-an explicit OpenAI-compatible endpoint. Chat uses CLI engines only. The
-one-shot API remains in `src-tauri/src/llm/`; direct provider transports and
-note orchestration live under `src-tauri/src/providers/`. Settings are in
-`src/components/settings/LlmProvidersSection.tsx`. Transcription uses Groq
-with the user's own key; CLIs and endpoints do not transcribe audio.
+an explicit OpenAI-compatible endpoint. Routines use installed CLI engines.
+The one-shot API lives in `src-tauri/src/llm/`. Direct provider transports and
+note orchestration live under `src-tauri/src/providers/`. Notes and Activity
+engine settings are in `src/components/settings/LlmProvidersSection.tsx`.
+Transcription uses Groq, OpenRouter or an installed local transcription model.
 
 ## Pieces
 
@@ -225,17 +225,14 @@ The registry is part of `provider-settings.json`: `llmEndpoints` (id, name,
   working, and the move is retried on the next launch. Saving a new key for
   `local` ends a pending migration and drops the legacy key, so the retry can
   never overwrite the new key.
-- **Default chat engine** ([ADR-0072](adr/0072-cli-chat-replaces-the-native-agent.md)).
+- **Retained chat engine setting** ([ADR-0072](adr/0072-cli-chat-replaces-the-native-agent.md)).
   Claude Code is the default, with Codex as the existing installed fallback.
   A one-time settings migration moves old Clovy or endpoint chat selections
-  to that default. No native or endpoint engine remains in chat. If no eligible
-  CLI is installed, chat reports the installation/connection requirement.
-- **Chat.** New sessions use the chosen CLI engine. Changing the generation
-  model affects notes, never `llmUsage.chat`. Old session messages, runs,
-  interruptions, and artifacts remain readable. Sending or retrying an old
-  native session uses the CLI default; stale native runs waiting for a user
-  are cancelled by migration rather than resumed. Legacy endpoint settings
-  remain available to notes and activity through `llm::generate`.
+  to that default. The desktop chat interface and its settings selector
+  have been retired. The field stays in the registry for compatibility.
+  Old session messages, runs, interruptions and artifacts remain readable.
+  Legacy endpoint settings remain available to notes and activity through
+  `llm::generate`.
 - **Notes.** The selected Notes engine generates and cleans the transcript:
   OpenRouter directly with the user's key and saved model, or the existing
   endpoint/CLI route through `llm::generate`. Prompts live in
@@ -304,9 +301,9 @@ The text picker reads OpenRouter's `/models` catalog and includes all
 text-output models, without a tools requirement. The cache lasts ten minutes;
 requests have a ten-second total deadline. Key changes invalidate the cache
 and reload the picker; load failures provide retry. Selecting a model updates
-only the remote generation model, never `llmUsage` or the chat engine. The
-picker description names the active Notes engine. Audio and media lists are
-curated locally; missing keys are checked when an operation is requested.
+the remote generation model, which is independent of `llmUsage`. The picker
+description names the active Notes engine. Transcription model lists are curated
+locally. Requests using direct providers check for their keys before dispatch.
 
 ## CLI chat engine
 
@@ -317,16 +314,13 @@ curated locally; missing keys are checked when an operation is requested.
 A chat session's **chat engine** is an installed CLI, encoded as
 `__clovy_cli_engine__:<cli>` (`crate::chat_engine`). `chat_default_engine`
 resolves the default locally: Claude Code, otherwise the existing Codex
-fallback. New sessions, Home turns
-([home-assistant.md](home-assistant.md), ADR-0064), and note chat use it.
-The composer's engine picker lists CLI engines only; endpoints remain in the
-note/activity provider settings. Picking a text model never changes chat.
+fallback. The former Home and note chat used this engine. Endpoints remain
+in the note and activity provider settings.
 
 Session and run persistence lives in `src-tauri/src/agent_sessions/`, separate
-from process orchestration. Historical native or endpoint sessions open with
-their existing records; their next message or retry runs on the CLI default.
-Clovy does not ship a second model-and-tool loop or fall back to a remote
-chat route. No installed eligible CLI produces a clear setup requirement.
+from process orchestration. Historical native or endpoint sessions retain
+their existing records. Routines require an eligible installed CLI and
+report a setup error when their configured engine is unavailable.
 
 One message on a CLI engine is one CLI process in the session workspace:
 
@@ -660,7 +654,7 @@ argument: its installer ships `agy.exe`.
   server is on ([mcp-server.md](mcp-server.md)); `chat_engine_catalog` reports
   `clovyTools` (`available`, `server_off`, `unsupported`) and the session says
   when it has none. A bound turn gets the read tools plus the turn-bound
-  tools (notes, memory, routines, vault and skills, media, recorder,
+  tools (notes, memory, routines, vault and skills, recorder,
   connectors, the MCP gateway, interaction, and, in attended turns, Browser
   use and Computer use); every Clovy write asks the approval broker first and
   an unattended turn's writes are refused (`unattended_requires_approval`),
@@ -676,8 +670,8 @@ visualização de leitura com o estado e o resultado ou erro da execução. Ela 
 os itens persistidos da execução, incluindo sessões importadas de versões anteriores.
 
 Routines run on an installed Claude Code or Codex engine selected by
-`providers::default_unattended_cli`; an unavailable engine produces a clear
-setup error without fallback. The claim snapshots `__clovy_cli_engine__:<cli>`.
+`llm::registry::resolve_unattended_cli`. An unavailable explicitly configured
+engine produces a setup error. The claim snapshots `__clovy_cli_engine__:<cli>`.
 `routines::start_claim` persists the session, run, prompt and claim mapping,
 then calls `chat_engine::start_cli_turn` unattended with the routine's safety
 mode. Events use the same session persistence as chat turns and project the

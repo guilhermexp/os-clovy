@@ -99,7 +99,6 @@ export function renderAppWorkspace(dependencies: RenderAppWorkspaceDependencies)
       onEnableAccessibility={handleEnableAccessibility}
       onEnableSystemAudio={handleEnableSystemAudio}
       folders={state.folders}
-      onFoldersImported={handleFoldersImported}
       memoryFolderFilter={memoryFolderFilter}
       onOpenProject={(folderId) => {
         handleSelectFolder(folderId);

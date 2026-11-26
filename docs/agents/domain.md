@@ -25,9 +25,8 @@ This is a **single-context** repo: one glossary covers the React frontend
 | Releases (the in-app updater and channels were removed in this fork) | 0001 (public releases repo), 0003 (rc channel + promotion); both carry a supersession note |
 | Live transcript preview | 0002 (ephemeral, never source of truth) |
 | Audio capture, sources, turns | 0004 (out-of-process system audio helper), 0005 (one WAV per source) |
-| CLI chat, sandboxing, sessions, tools | 0072 (CLI-only chat and neutral session persistence), 0063 (approval broker), 0058 (MCP relay); 0038/0039 are historical runtime decisions |
+| CLI execution, sandboxing, sessions, tools | 0075 (Today and external MCP approvals), 0072 (CLI engine and neutral session persistence), 0063 (approval broker), 0058 (MCP relay) |
 | Model picker, capabilities, pricing | 0007 (provider catalog, never `traits`; read the 2026-10-08 OpenRouter addendum) |
-| Image generation / editing | 0008 (`/image` fast path + LLM tools) |
 | Clovy companion relay and crates (the desktop companion was removed in this fork) | 0041-0048, 0051-0053 (each carries a supersession note) |
 
 ## Don't conflate the three doc families

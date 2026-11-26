@@ -16,6 +16,7 @@ impl Fixture {
             transcription_intent: Default::default(),
             path: directory.path().join("settings.json"),
             settings: Mutex::new(settings.clone()),
+            retired_media: RetiredMediaMetadata::default(),
         };
         let store = MemorySecretStore::default();
         store
@@ -105,7 +106,6 @@ async fn f2_credential_and_settings_transaction() {
     for provider in [
         BuiltinProvider::Groq,
         BuiltinProvider::OpenRouter,
-        BuiltinProvider::Fal,
         BuiltinProvider::Tavily,
     ] {
         for replace in [false, true] {
@@ -174,7 +174,6 @@ async fn f2_keychain_refusal_and_first_save_keep_settings_intact() {
     for provider in [
         BuiltinProvider::Groq,
         BuiltinProvider::OpenRouter,
-        BuiltinProvider::Fal,
         BuiltinProvider::Tavily,
     ] {
         let fixture = Fixture::new(provider);
@@ -245,43 +244,22 @@ fn f2_rejected_settings_candidate_is_never_published_or_saved() {
     if isolated_test("f2_rejected_settings_candidate_is_never_published_or_saved") {
         return;
     }
-    let fixture = Fixture::new(BuiltinProvider::Fal);
+    let fixture = Fixture::new(BuiltinProvider::OpenRouter);
     let before = fs::read_to_string(&fixture.state.path).unwrap();
     let result = update_settings_result(&fixture.state, |candidate| {
-        candidate.image_model = "invalid".into();
+        candidate.generation_model = "invalid".into();
         Err(AppError::new("rejected", "rejected"))
     });
     assert!(result.is_err());
     assert_eq!(
-        fixture.state.settings.lock().unwrap().image_model,
-        DEFAULT_IMAGE_MODEL
+        fixture.state.settings.lock().unwrap().generation_model,
+        DEFAULT_GENERATION_MODEL
+    );
+    assert_eq!(
+        current_settings().generation_model,
+        DEFAULT_GENERATION_MODEL
     );
     assert_eq!(fs::read_to_string(&fixture.state.path).unwrap(), before);
-}
-
-#[tokio::test]
-async fn f3_native_media_catalog_uses_curated_models_without_a_server() {
-    let directory = tempfile::tempdir().unwrap();
-    let state = ProviderSettingsState {
-        transcription_intent: Default::default(),
-        path: directory.path().join("settings.json"),
-        settings: Mutex::new(default_settings()),
-    };
-    for (mode, expected) in [
-        (ModelMode::Image, KNOWN_IMAGE_MODELS),
-        (ModelMode::Video, KNOWN_VIDEO_MODELS),
-    ] {
-        let response = list_provider_models_impl(&state, ProviderModelsRequest { mode })
-            .await
-            .unwrap();
-        assert_eq!(response.models.len(), expected.len());
-        assert_eq!(response.model_type, mode.api_type());
-        assert!(response
-            .models
-            .iter()
-            .all(|model| { model.provider == "fal" && expected.contains(&model.id.as_str()) }));
-        assert!(expected.contains(&response.selected_model.as_str()));
-    }
 }
 
 fn isolated_test(name: &str) -> bool {
@@ -325,13 +303,13 @@ fn f2_failed_compensation_is_explicit_and_never_changes_settings_flags() {
     if isolated_test("f2_failed_compensation_is_explicit_and_never_changes_settings_flags") {
         return;
     }
-    let fixture = Fixture::new(BuiltinProvider::Fal);
+    let fixture = Fixture::new(BuiltinProvider::Tavily);
     let before = fs::read_to_string(&fixture.state.path).unwrap();
     fixture.reject_persistence();
     let result = clear_provider_api_key_impl(
         &fixture.state,
         &RestoreFails(&fixture.store),
-        BuiltinProvider::Fal,
+        BuiltinProvider::Tavily,
     );
     assert_eq!(result.unwrap_err().code, "provider_api_key_rollback_failed");
     assert_eq!(fs::read_to_string(&fixture.state.path).unwrap(), before);
@@ -342,7 +320,7 @@ fn f2_failed_compensation_is_explicit_and_never_changes_settings_flags() {
             .lock()
             .unwrap()
             .provider_api_keys_configured
-            .fal
+            .tavily
     );
-    assert!(current_settings().provider_api_keys_configured.fal);
+    assert!(current_settings().provider_api_keys_configured.tavily);
 }

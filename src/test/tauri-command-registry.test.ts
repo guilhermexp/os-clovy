@@ -55,4 +55,25 @@ describe("Tauri command registry", () => {
       .map(([command, files]) => `${command} (${[...new Set(files)].join(", ")})`);
     expect(missing).toEqual([]);
   });
+
+  it("exposes no retired media commands and still registers recording and provider controls", () => {
+    const registered = registeredCommands();
+    const invoked = invokedCommands();
+    const retired = [
+      "set_image_safe_mode",
+      "set_image_safe_mode_prompt_dismissed",
+      "image_prompt_may_be_explicit",
+      "generate_image",
+      "edit_image",
+      "video_generate",
+      "video_status",
+      "generated_video_dir",
+    ];
+
+    expect(retired.filter((command) => registered.has(command))).toEqual([]);
+    expect(retired.filter((command) => invoked.has(command))).toEqual([]);
+    for (const command of ["list_provider_models", "set_provider_api_key", "start_recording"]) {
+      expect(registered.has(command), command).toBe(true);
+    }
+  });
 });

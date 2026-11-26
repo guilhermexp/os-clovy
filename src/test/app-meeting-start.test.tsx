@@ -136,7 +136,6 @@ vi.mock("../lib/tauri", () => ({
       systemAudio: true,
     },
   }),
-  primeGeneratedVideoDir: vi.fn().mockResolvedValue(undefined),
   computerUseBeginRun: vi.fn().mockResolvedValue(undefined),
   computerUseEndRun: vi.fn().mockResolvedValue(undefined),
   computerUseStop: vi.fn().mockResolvedValue(undefined),

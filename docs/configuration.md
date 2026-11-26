@@ -32,17 +32,16 @@ continues running. Other platforms do not expose this setting.
 
 | Capability | Provider and credential |
 |---|---|
-| Dictation, saved-note transcription, live preview | Groq, with the user's Groq key |
+| Dictation, saved-note transcription, live preview | Local, or Groq or OpenRouter with the corresponding user key |
 | Remote note generation and transcript cleanup | OpenRouter, with the user's OpenRouter key |
 | Optional dictation cleanup | OpenRouter only, with the user's OpenRouter key |
-| Image generation/editing and video generation | fal, with the user's fal key |
-| Chat and routine turns | Installed CLI and its own login |
+| Routines | Installed CLI and its own login |
 | CLI/endpoint note generation | Selected engine through `llm::generate` |
 
 The desktop checks saved provider keys against the provider's own key-check
 endpoint. Keys are held by `llm::secrets` under `builtin:<provider>`;
 `provider-settings.json` and DTOs contain configured flags, never keys.
-A missing Groq/OpenRouter/fal key fails before a request. Unreadable saved
+A missing Groq or OpenRouter key fails before a request. Unreadable saved
 credentials report a credential-store error. There is no switch to another
 provider or shared account. The CLI supplies its own web search; the desktop
 has no separate web-search service.
@@ -67,54 +66,17 @@ wait, an 8 MiB response cap, and a 10-minute memory cache. Saving/removing the
 key invalidates that cache and reloads the picker. Failed loads show an error
 and retry action. Catalog access is discovery, not permission to run inference.
 
-Changing the selected text model updates only the remote generation model.
-It does not change the Notes engine or chat engine. The picker description
-names the current Notes engine. Chat is CLI-only, Claude Code by default with
-the existing Codex fallback; notes support OpenRouter, CLI, or an explicit
-OpenAI-compatible endpoint. Auto and the cost/quality control are removed.
-Transcription, image and video pickers use local curated lists, even without
-keys; attempting the operation still requires its provider key.
+Changing the selected text model updates the model for remote note generation.
+The picker description names the independently selected Notes engine. Notes
+support OpenRouter, CLI or an explicit OpenAI-compatible endpoint.
+Transcription pickers use local curated lists. Remote transcription requires
+the selected provider's key.
 
 A one-time persisted migration changes old server-based note selections to
 OpenRouter and the old Auto model to the generation default. CLI/endpoint
 note choices, endpoint keys and saved history are preserved. Old native or
 endpoint chat selections become the CLI default (ADR-0072). SQL migrations
 remain append-only.
-
-## fal media
-
-`providers/fal/` owns the queue client and operation state. An image request
-has a two-minute deadline; a video job has a 15-minute deadline that is not
-reset by polls. Submit uses the full allowed model endpoint; status/result
-requests use its app alias and a validated provider request ID. The caller's
-`requestId` identifies a replay of the same operation shape. Replays and
-recoverable polls never automatically submit a second paid job.
-
-Each video poll reads the current fal key. Missing/rejected/inaccessible keys
-leave the job available for `generate_video` with `jobId` after the user saves
-a key for the same account. Expired, evicted or restart-lost jobs produce
-`video_job_unavailable`; the app does not recreate them. Completed video
-artifacts use a stable local filename for the opaque job UUID.
-
-Queue calls carry only the fal key. Media downloads carry no credentials,
-disable redirects, require an allowed HTTPS fal CDN host, reject private
-addresses, and pin validated DNS results. Image output is bounded to 50 MiB
-and video output to 100 MiB, including chunked responses. Inline image base64
-has both encoded and exact decoded-size limits. MIME comes from magic bytes.
-
-Image editing preserves oriented source proportions. The request is at most
-1024x1024 pixels, with each side between 512 and 2048. A source that needs no
-resize/orientation/padding is sent unchanged. Larger sources are scaled as a
-whole frame, never cropped or stretched; extreme ratios receive neutral
-padding that is removed after the result is validated. Decoding retains the
-512 MiB allocation bound and runs off the async executor; cancellation does
-not interrupt a decode already executing.
-
-The result must match the requested geometry. For `fal-ai/flux-2/edit` only,
-the previously observed exception accepts both dimensions rounded up to the
-next multiple of 32 and scales the whole frame back before removing padding.
-Any other output geometry is rejected. Pure local word screening informs
-safe mode; no model-based image classifier makes a second request.
 
 ## Transcription context
 

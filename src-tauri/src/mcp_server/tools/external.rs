@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use super::{
     activity_management, argument_validation, browser, computer_use, connectors, dictation,
-    gateway, media, memory, notes, projects, recorder, routines, vault_skills, ToolCtx, ToolGroup,
+    gateway, memory, notes, projects, recorder, routines, vault_skills, ToolCtx, ToolGroup,
     TURN_REQUIRED,
 };
 use crate::approval_broker::external::ExternalCall;
@@ -130,7 +130,6 @@ pub(crate) async fn external_descriptors(
     tools.extend(gateway::GATEWAY.external_catalog(ctx, access).await);
     tools.extend(browser::BROWSER.external_descriptors(ctx));
     tools.extend(computer_use::COMPUTER_USE.external_descriptors(ctx).await);
-    tools.extend(media::external_descriptors(ctx, access));
     tools.extend(recorder::external_descriptors(ctx));
     tools
 }
@@ -184,9 +183,6 @@ pub(crate) async fn call_external(
         return computer_use::COMPUTER_USE
             .call_external(ctx, access, arguments)
             .await;
-    }
-    if media::MediaTools.owns(name) {
-        return media::call_external(ctx, access, name, arguments).await;
     }
     if recorder::RecorderTools.owns(name) {
         return recorder::call_external(ctx, access, name, arguments).await;

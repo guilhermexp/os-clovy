@@ -27,10 +27,11 @@ agent with that reach is a remote company's window into your work.
 
 Clovy runs on your Mac and exposes its tools to your chosen agents through MCP.
 Notes, recordings, transcripts, files, sessions, and agent memory stay on your
-machine by default. Audio uses Groq or the optional local transcription engine; remote note text goes to
-OpenRouter, and images/video to fal, each with your own key. Routines and CLI
-note generation use your installed CLI and its account. A configured endpoint
-can also generate notes. What a provider retains depends on that provider and route.
+machine by default. Audio uses Groq, OpenRouter or an optional local model.
+Remote note text and optional dictation cleanup use OpenRouter. Direct
+provider requests use your own keys. Routines and CLI note generation use your
+installed CLI and its account. A configured endpoint can also generate notes.
+What a provider retains depends on that provider and route.
 You do not have to take any of this on faith: Clovy is MIT licensed; bundled dependencies and optional models retain their own licenses.
 
 ## Local transcription
@@ -41,7 +42,7 @@ The download is 632 MB, shows byte progress, and can be cancelled and resumed.
 The model remains installed across restarts. Local handles dictation, recordings,
 turn packs and live preview without a Groq key or transcription network requests.
 A local failure stays local; it never sends your recording to Groq as a fallback.
-Windows and Intel Macs keep Groq only.
+Windows and Intel Macs use Groq or OpenRouter.
 
 Switching to Groq releases the local helper's memory. Removing the active model
 switches transcription to Groq and shows a warning. Optional text cleanup and
@@ -61,13 +62,10 @@ licenses, resource use, and the development self-test.
   recording again.
 - **MCP tools.** Connect external agents to your notes, activity, skills and
   routines. Protected actions request approval in Settings > MCP.
-- **Image generation.** Generate and edit images, and create videos, directly
-  through fal with your own key. Clovy's MCP media tools retain their local
-  approval and artifact handling.
 - **Your choice of models.** The text picker lists OpenRouter's text-output
-  catalog, including models without tools. It reloads when the key changes,
-  identifies the current Notes engine.
-  Audio and media use curated model lists. Add provider keys in
+  catalog, including models without tools. It reloads when the key changes
+  and identifies the current Notes engine.
+  Transcription uses a curated model list. Add provider keys in
   Settings > Models > More options > Provider API keys.
 
 ![A meeting note with a live transcription preview](.github/assets/clovy-meeting-notes.jpg)
@@ -77,15 +75,15 @@ licenses, resource use, and the development self-test.
 1. **Local by default.** App state, recordings, transcripts, and agent memory
    live on your machine. CLI processes run locally with the selected execution
    policy; their model requests follow the CLI's own account and provider.
-2. **Provider-dependent model privacy.** Audio, text, and media leave the
-   device for the provider you selected. CLI model calls follow the CLI's
+2. **Provider-dependent model privacy.** Remote audio and text requests go to
+   the provider you selected. CLI model calls follow the CLI's
    account. There is no claim of zero retention without provider evidence.
 3. **No Clovy account or billing.** There is no sign-in, local server token,
    credit balance, or shared service key. Provider usage belongs to your
    account. A missing key produces a setup message before a request.
 4. **Inspectable boundaries.** The desktop and its local tools are built from
    this repository. Keys stay in the credential store and are sent only to
-   their own provider; media downloads carry no credentials.
+   their own provider.
 
 ## Platforms
 
@@ -136,10 +134,9 @@ pnpm tauri:dev
 ```
 
 Install and sign in to a supported CLI for routines and CLI note generation.
-Save your Groq key for transcription and dictation, an OpenRouter
-key for remote note generation and optional dictation cleanup, and a fal key
-for media. No local inference server needs to be started. Sharing links and
-the About verification action have been removed.
+Save the key for your chosen remote transcription provider, Groq or
+OpenRouter. OpenRouter also serves remote note generation and optional
+dictation cleanup. The desktop calls those providers directly.
 
 See [docs/development.md](docs/development.md) for the day-to-day development
 guide (ports, onboarding replay, local data, permissions, agent skills, and
