@@ -1923,6 +1923,26 @@ fn cron_field(field: &str, value: i32, min: i32, max: i32) -> bool {
 }
 
 #[cfg(test)]
+pub(crate) async fn claim_for_test(
+    pool: &SqlitePool,
+    routine_id: &str,
+    trigger_kind: &str,
+    require_due: bool,
+) -> Result<Option<Claim>, AppError> {
+    let (_directory, env) = selection_tests::environment(&[crate::llm::cli::CliKind::Claude]);
+    claim_with_connector_guard_authorized(
+        pool,
+        routine_id,
+        trigger_kind,
+        require_due,
+        None,
+        None,
+        &env,
+    )
+    .await
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use sqlx_sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
@@ -1934,9 +1954,7 @@ mod tests {
         trigger: &str,
         due: bool,
     ) -> Result<Option<Claim>, AppError> {
-        let (_directory, env) =
-            super::selection_tests::environment(&[crate::llm::cli::CliKind::Claude]);
-        super::claim_with_connector_guard_authorized(pool, id, trigger, due, None, None, &env).await
+        claim_for_test(pool, id, trigger, due).await
     }
 
     async fn claim_due(pool: &SqlitePool) -> Result<Vec<Claim>, AppError> {

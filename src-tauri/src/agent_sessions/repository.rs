@@ -1540,10 +1540,11 @@ mod tests {
         )
         .await
         .expect("routine");
-        let claim = crate::routines::claim(&repository.pool, "routine-atomic", "manual", false)
-            .await
-            .expect("claim")
-            .expect("available claim");
+        let claim =
+            crate::routines::claim_for_test(&repository.pool, "routine-atomic", "manual", false)
+                .await
+                .expect("claim")
+                .expect("available claim");
         let session = repository
             .create_session(
                 "Atomic cancellation",

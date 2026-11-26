@@ -162,12 +162,12 @@ async fn routine_history_pages_and_claim_reports_busy_or_blocked() {
     let broker = TestBroker::new([]).await;
     let binding = broker.turn(CliKind::Claude, true).await;
     let routine = crate::routines::create(broker.pool(), serde_json::from_value(json!({"prompt":"Read notes","schedule":"every 1d","timezone":"America/Sao_Paulo","enabledToolsets":["skills"]})).unwrap()).await.unwrap();
-    let claim = crate::routines::claim(broker.pool(), &routine.id, "manual", false)
+    let claim = crate::routines::claim_for_test(broker.pool(), &routine.id, "manual", false)
         .await
         .unwrap()
         .unwrap();
     assert!(
-        crate::routines::claim(broker.pool(), &routine.id, "manual", false)
+        crate::routines::claim_for_test(broker.pool(), &routine.id, "manual", false)
             .await
             .unwrap()
             .is_none()
