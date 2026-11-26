@@ -250,10 +250,12 @@ fn note_transcription_span_id(
     format!("{session_id}:{source}:{}:{start_ms}:{end_ms}", kind.as_db())
 }
 
-/// What a job's transcript depends on beyond its audio: the language, the
-/// title, the dictionary and the transcription model. The default model adds
-/// nothing, so turns transcribed before the model was part of the identity
-/// keep it and are reused; any other model is another transcription.
+// The original v1 fingerprint omitted the model. Keep that encoding tied to
+// Turbo so its job keys survive changes to the current default.
+const LEGACY_NOTE_TRANSCRIPTION_FINGERPRINT_MODEL: &str = "whisper-large-v3-turbo";
+
+/// What a job's transcript depends on beyond its audio: the language,
+/// title, dictionary and transcription model.
 fn note_transcription_configuration_fingerprint(
     title: &str,
     dictionary_context: Option<&str>,
@@ -261,7 +263,7 @@ fn note_transcription_configuration_fingerprint(
 ) -> String {
     let mut digest = Sha256::new();
     digest.update(b"june-note-transcription-configuration-v1\0");
-    let model = (model != crate::providers::DEFAULT_TRANSCRIPTION_MODEL).then_some(model);
+    let model = (model != LEGACY_NOTE_TRANSCRIPTION_FINGERPRINT_MODEL).then_some(model);
     for value in [
         crate::dictation::configured_transcription_language().as_deref(),
         Some(title),
@@ -8416,28 +8418,178 @@ mod tests {
         );
     }
 
+    // The v1 hashes for Meeting with the June dictionary and automatic language.
+    const HISTORICAL_TURBO_FINGERPRINT: &str =
+        "afe5ed88fc712a2454bbb35a912fb57f97507c86f29886c5091b027ac4ab6579";
+    const HISTORICAL_LARGE_FINGERPRINT: &str =
+        "f56cafa3fff83b6a7d5db044732fc25366167201653bc69b24a199597a54ce70";
+
     #[test]
     fn the_transcription_model_is_part_of_a_jobs_durable_identity() {
-        let default = note_transcription_configuration_fingerprint(
+        let turbo = note_transcription_configuration_fingerprint(
             "Meeting",
             Some("- June"),
-            crate::providers::DEFAULT_TRANSCRIPTION_MODEL,
+            "whisper-large-v3-turbo",
         );
-        // Turns already transcribed with the default model keep the identity
-        // they had before the model was part of it, so they are reused.
-        assert_eq!(
-            default,
-            "afe5ed88fc712a2454bbb35a912fb57f97507c86f29886c5091b027ac4ab6579"
+        // Turbo turns keep the identity they had before the model was hashed.
+        assert_eq!(turbo, HISTORICAL_TURBO_FINGERPRINT);
+        let large = note_transcription_configuration_fingerprint(
+            "Meeting",
+            Some("- June"),
+            "whisper-large-v3",
         );
-        // Another model is another transcription: no finished turn is reused.
-        assert_ne!(
-            default,
-            note_transcription_configuration_fingerprint(
+        assert_eq!(large, HISTORICAL_LARGE_FINGERPRINT);
+        assert_ne!(large, turbo);
+    }
+
+    #[tokio::test]
+    async fn persisted_transcription_jobs_reuse_only_the_certified_model() {
+        for (model, replacement_model, historical_fingerprint) in [
+            (
+                "whisper-large-v3-turbo",
+                "whisper-large-v3",
+                HISTORICAL_TURBO_FINGERPRINT,
+            ),
+            (
+                "whisper-large-v3",
+                "whisper-large-v3-turbo",
+                HISTORICAL_LARGE_FINGERPRINT,
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let options = sqlx_sqlite::SqliteConnectOptions::new()
+                .filename(directory.path().join("notes.sqlite3"));
+            let pool_options = sqlx_sqlite::SqlitePoolOptions::new().max_connections(1);
+            let pool = pool_options
+                .clone()
+                .connect_with(options.clone().create_if_missing(true))
+                .await
+                .unwrap();
+            crate::db::migrations::run_migrations(&pool).await.unwrap();
+            let repos = Repositories::new(pool);
+            let note_id = repos.create_note("default", None).await.unwrap().id;
+            let session_id = "session-model-fingerprint";
+            let mode = RecordingSourceMode::MicrophoneOnly;
+            repos
+                .create_recording_session(
+                    &note_id,
+                    session_id,
+                    mode,
+                    "microphone.partial.wav",
+                    "microphone.wav",
+                    None,
+                )
+                .await
+                .unwrap();
+            let artifact = repos
+                .create_audio_artifact(
+                    &note_id,
+                    session_id,
+                    "microphone.wav",
+                    1_200,
+                    1,
+                    "fixture-checksum",
+                )
+                .await
+                .unwrap();
+            let mut plan = NoteTranscriptionJobPlan {
+                span_id: note_transcription_span_id(
+                    session_id,
+                    "microphone",
+                    NoteTranscriptionJobKind::Turn,
+                    0,
+                    1_200,
+                ),
+                audio_artifact_id: artifact.id,
+                source: "microphone".into(),
+                job_kind: NoteTranscriptionJobKind::Turn,
+                start_ms: 0,
+                end_ms: 1_200,
+                turn_index: 0,
+                provider: crate::providers::PROVIDER_GROQ.into(),
+                max_chunk_ms: None,
+                pipeline_version: NOTE_TRANSCRIPTION_PIPELINE_VERSION.into(),
+                configuration_fingerprint: historical_fingerprint.into(),
+            };
+            let seeded = repos
+                .reconcile_note_transcription_jobs(
+                    &note_id,
+                    session_id,
+                    mode,
+                    std::slice::from_ref(&plan),
+                )
+                .await
+                .unwrap();
+            assert_eq!(seeded[0].status, NoteTranscriptionJobStatus::Pending);
+            assert!(repos
+                .claim_note_transcription_job(&plan.span_id)
+                .await
+                .unwrap());
+            let text = "Previously transcribed text";
+            let transcript = repos
+                .complete_note_transcription_job_success(&plan.span_id, text, Some("en".into()))
+                .await
+                .unwrap();
+            repos.pool.close().await;
+            let repos = Repositories::new(pool_options.connect_with(options).await.unwrap());
+
+            plan.configuration_fingerprint =
+                note_transcription_configuration_fingerprint("Meeting", Some("- June"), model);
+            let reused = repos
+                .reconcile_note_transcription_jobs(
+                    &note_id,
+                    session_id,
+                    mode,
+                    std::slice::from_ref(&plan),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                reused[0].status,
+                NoteTranscriptionJobStatus::Succeeded,
+                "{model}"
+            );
+            assert_eq!(reused[0].input_fingerprint, seeded[0].input_fingerprint);
+            assert_eq!(reused[0].operation_id, seeded[0].operation_id);
+            assert_eq!(
+                reused[0].transcript_id.as_deref(),
+                Some(transcript.id.as_str())
+            );
+            let certified = repos
+                .certified_source_turn_transcripts_for_session(session_id)
+                .await
+                .unwrap();
+            assert_eq!(certified.len(), 1);
+            assert_eq!(certified[0].id, transcript.id);
+            assert_eq!(certified[0].text, text);
+
+            plan.configuration_fingerprint = note_transcription_configuration_fingerprint(
                 "Meeting",
                 Some("- June"),
-                "whisper-large-v3"
-            )
-        );
+                replacement_model,
+            );
+            let replaced = repos
+                .reconcile_note_transcription_jobs(&note_id, session_id, mode, &[plan])
+                .await
+                .unwrap();
+            assert_eq!(replaced[0].status, NoteTranscriptionJobStatus::Pending);
+            assert_ne!(replaced[0].input_fingerprint, seeded[0].input_fingerprint);
+            assert_ne!(replaced[0].operation_id, seeded[0].operation_id);
+            assert!(replaced[0].transcript_id.is_none());
+            assert!(repos
+                .certified_source_turn_transcripts_for_session(session_id)
+                .await
+                .unwrap()
+                .is_empty());
+            let retained = repos
+                .successful_source_turn_transcripts_for_session(session_id)
+                .await
+                .unwrap();
+            assert_eq!(retained.len(), 1);
+            assert_eq!(retained[0].id, transcript.id);
+            assert_eq!(retained[0].text, text);
+            repos.pool.close().await;
+        }
     }
 
     #[tokio::test]
