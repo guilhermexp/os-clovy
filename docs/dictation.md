@@ -42,10 +42,21 @@ takes never deliver), and
    [Audio pipeline](audio-pipeline.md#audio-transcription-engines)
 5. **No speech.** A take under 0.5 s of audio (`audioDurationSeconds` in
    `recording_ready`) is not uploaded. On the direct Groq route the request
-   asks for `verbose_json` and segments with `no_speech_prob` of 0.6 or more
-   are dropped, since Whisper invents text over silence. A transcript with no
-   letters or digits left (empty or only punctuation) ends the take with
-   `no_speech` and nothing is pasted. The meter level is only logged.
+   asks for `verbose_json`. A successful response must contain a text string
+   or a segment list. Clovy drops a segment only if its valid
+   `no_speech_prob` is above 0.6 and its finite `avg_logprob` is at or below
+   -1.0. Missing or invalid scores leave the text eligible. With no nonblank
+   segment dropped, Clovy uses Groq's complete text when present and trims
+   only its outer whitespace. If the complete text is blank or a nonblank
+   segment was dropped, Clovy joins the surviving segments. If all original
+   segments exactly reproduce the complete text after outer trim, Clovy
+   concatenates originally adjacent survivors as supplied. A discarded
+   segment creates a new boundary where a separator may be needed.
+   Otherwise, it adds separators at word boundaries as needed. Both paths preserve line breaks carried
+   by segments made up of whitespace. If every nonblank segment was dropped,
+   the result is empty. A transcript with no letters or digits left
+   (empty or only punctuation) ends the take with `no_speech` and nothing is
+   pasted. The meter level is only logged.
 6. **Cleanup** (optional, off by default). Off, the pasted text is the
    model's transcript with its outer whitespace trimmed. Clovy makes no
    cleanup request and applies no output style. With **Clean up dictation text**

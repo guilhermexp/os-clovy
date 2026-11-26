@@ -68,8 +68,7 @@ pub(crate) const AUDIO_TOO_LARGE_MESSAGE: &str =
 /// Groq's 25 MB upload cap.
 pub(super) const GROQ_MAX_AUDIO_BYTES: usize = 26_214_400;
 
-/// Segments at or above this `no_speech_prob` are Whisper's guesses over
-/// silence (its classic "Thank you."), not words the user said.
+/// The timed note route uses this cutoff on its own. Dictation also checks log probability.
 pub(super) const GROQ_NO_SPEECH_PROB_LIMIT: f64 = 0.6;
 
 #[derive(Deserialize)]
@@ -91,6 +90,42 @@ pub(super) struct GroqSegment {
     start: Option<f64>,
     #[serde(default)]
     end: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct GroqDictationTranscription {
+    text: Option<String>,
+    language: Option<String>,
+    segments: Option<Vec<GroqDictationSegment>>,
+}
+
+#[derive(Deserialize)]
+struct GroqDictationSegment {
+    text: String,
+    #[serde(default, deserialize_with = "deserialize_dictation_metric")]
+    no_speech_prob: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_dictation_metric")]
+    avg_logprob: Option<f64>,
+}
+
+/// Missing or nonnumeric metadata cannot justify removing dictated text.
+fn deserialize_dictation_metric<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(serde_json::Value::deserialize(deserializer)?.as_f64())
+}
+
+impl GroqDictationSegment {
+    fn indicates_silence(&self) -> bool {
+        // As in Whisper, a sufficiently confident decode overrides a high no-speech score.
+        matches!(
+            (self.no_speech_prob, self.avg_logprob),
+            (Some(probability), Some(logprob))
+                if probability > GROQ_NO_SPEECH_PROB_LIMIT && probability <= 1.0
+                    && logprob.is_finite() && logprob <= -1.0
+        )
+    }
 }
 
 /// Final turns, full-source transcription and live preview use the user's Groq key.
@@ -408,10 +443,16 @@ pub(crate) async fn dictate_transcribe_via(
         tracing::warn!(status = status.as_u16(), "groq transcription failed");
         return Err(direct_provider_error(BuiltinProvider::Groq, status));
     }
-    let body: GroqTranscription = response
+    let body: GroqDictationTranscription = response
         .json()
         .await
         .map_err(|_| AppError::new("provider_response_invalid", INVALID_DIRECT_RESPONSE))?;
+    if body.text.is_none() && body.segments.is_none() {
+        return Err(AppError::new(
+            "provider_response_invalid",
+            INVALID_DIRECT_RESPONSE,
+        ));
+    }
     Ok(TranscriptionProviderResult {
         text: groq_speech_text(&body),
         language: body.language,
@@ -419,23 +460,111 @@ pub(crate) async fn dictate_transcribe_via(
     })
 }
 
-/// The transcript without no-speech segments; the plain text when Groq sent
-/// no segments. Empty when every segment was no speech.
-pub(super) fn groq_speech_text(body: &GroqTranscription) -> String {
-    let Some(segments) = body.segments.as_ref() else {
-        return body.text.trim().to_string();
+/// Prefer the provider's complete text until a nonblank segment needs removal.
+fn groq_speech_text(body: &GroqDictationTranscription) -> String {
+    let text = body.text.as_deref().unwrap_or_default().trim();
+    let segments = body.segments.as_deref().unwrap_or_default();
+    if !text.is_empty()
+        && !segments
+            .iter()
+            .any(|segment| !segment.text.trim().is_empty() && segment.indicates_silence())
+    {
+        return text.to_string();
+    }
+
+    // Check the complete response before removing any fragments.
+    let fragments_match_full_text = !text.is_empty()
+        && segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>()
+            .trim()
+            == text;
+
+    const HYPHENS: [char; 3] = ['-', '\u{2010}', '\u{2011}'];
+    let mut joined = String::new();
+    let mut discarded_boundary = false;
+    for segment in segments {
+        let fragment = segment.text.as_str();
+        // Whitespace-only fragments can carry paragraph breaks.
+        if fragment.is_empty() {
+            continue;
+        }
+        if segment.indicates_silence() && !fragment.trim().is_empty() {
+            discarded_boundary = true;
+            continue;
+        }
+        // Matching adjacent fragments carry their own spacing. A discarded
+        // fragment can create a new boundary that still needs a separator.
+        if (!fragments_match_full_text || discarded_boundary)
+            && !joined.is_empty()
+            && !joined.ends_with(char::is_whitespace)
+            && !fragment.starts_with(char::is_whitespace)
+            && !joined.ends_with(['(', '[', '{', '«', '“', '‘'])
+            && !joined.ends_with(HYPHENS)
+            && !fragment.starts_with(HYPHENS)
+            && !fragment.starts_with([
+                ',', '.', '!', '?', ':', ';', '%', '…', ')', ']', '}', '»', '”', '’', '\'',
+            ])
+        {
+            joined.push(' ');
+        }
+        joined.push_str(fragment);
+        discarded_boundary = false;
+    }
+    joined.trim().to_string()
+}
+
+#[cfg(test)]
+#[test]
+fn groq_speech_text_keeps_whitespace_only_segments_between_survivors() {
+    let segment = |text: &str| GroqDictationSegment {
+        text: text.to_string(),
+        no_speech_prob: None,
+        avg_logprob: None,
     };
-    segments
-        .iter()
-        .filter(|segment| {
-            !segment
-                .no_speech_prob
-                .is_some_and(|probability| probability >= GROQ_NO_SPEECH_PROB_LIMIT)
-        })
-        .map(|segment| segment.text.trim())
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+    let body = GroqDictationTranscription {
+        text: Some("Um.\n\nObrigado. Legendas.".to_string()),
+        language: None,
+        segments: Some(vec![
+            segment("Um."),
+            GroqDictationSegment {
+                no_speech_prob: Some(0.9),
+                avg_logprob: Some(-1.3),
+                ..segment("\n\n")
+            },
+            segment("Obrigado."),
+            GroqDictationSegment {
+                no_speech_prob: Some(0.9),
+                avg_logprob: Some(-1.3),
+                ..segment(" Legendas.")
+            },
+        ]),
+    };
+    assert_eq!(groq_speech_text(&body), "Um.\n\nObrigado.");
+}
+
+#[cfg(test)]
+#[test]
+fn nonfinite_groq_dictation_metrics_do_not_remove_text() {
+    for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for (probability, logprob) in [(invalid, -1.3), (0.9, invalid)] {
+            let body = GroqDictationTranscription {
+                text: Some("Obrigado.".to_string()),
+                language: None,
+                segments: Some(vec![GroqDictationSegment {
+                    text: "Obrigado.".to_string(),
+                    no_speech_prob: Some(probability),
+                    avg_logprob: Some(logprob),
+                }]),
+            };
+            assert_eq!(
+                groq_speech_text(&body),
+                "Obrigado.",
+                "{probability}, {logprob}"
+            );
+        }
+    }
 }
 
 pub(super) const DICTATION_WARM_TIMEOUT: Duration = Duration::from_secs(10);
