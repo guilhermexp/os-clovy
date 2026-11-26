@@ -229,39 +229,43 @@ enum Engine {
     }
 }
 
-var loaded: (id: ModelID, directory: String, engine: Engine)?
-while let line = readLine() {
-    var decoded: Request?
-    do {
-        let request = try JSONDecoder().decode(Request.self, from: Data(line.utf8))
-        decoded = request
-        switch request.op {
-        case "load":
-            guard let directory = request.model_dir else { throw HelperError("Expected a model directory.") }
-            let reused = loaded?.id == request.model_id && loaded?.directory == directory
-            let start = ContinuousClock.now
-            if !reused {
+nonisolated func runServer() async {
+    var loaded: (id: ModelID, directory: String, engine: Engine)?
+    while let line = readLine() {
+        var decoded: Request?
+        do {
+            let request = try JSONDecoder().decode(Request.self, from: Data(line.utf8))
+            decoded = request
+            switch request.op {
+            case "load":
+                guard let directory = request.model_dir else { throw HelperError("Expected a model directory.") }
+                let reused = loaded?.id == request.model_id && loaded?.directory == directory
+                let start = ContinuousClock.now
+                if !reused {
+                    loaded = nil
+                    let engine = try await Engine.load(request.model_id, from: URL(fileURLWithPath: directory))
+                    loaded = (request.model_id, directory, engine)
+                }
+                let elapsed = start.duration(to: .now).components
+                respond(["ok": true, "reused": reused, "load_ms": Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15], to: request)
+            case "transcribe":
+                guard let loaded, loaded.id == request.model_id, let path = request.audio_path else {
+                    throw HelperError("Load the requested model before transcribing.")
+                }
+                var result = try await loaded.engine.transcribe(path: path, language: request.language)
+                result["ok"] = true
+                respond(result, to: request)
+            case "unload":
+                guard loaded?.id == request.model_id else { throw HelperError("The requested model is not loaded.") }
                 loaded = nil
-                let engine = try await Engine.load(request.model_id, from: URL(fileURLWithPath: directory))
-                loaded = (request.model_id, directory, engine)
+                respond(["ok": true], to: request)
+            default:
+                throw HelperError("Unknown operation.")
             }
-            let elapsed = start.duration(to: .now).components
-            respond(["ok": true, "reused": reused, "load_ms": Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15], to: request)
-        case "transcribe":
-            guard let loaded, loaded.id == request.model_id, let path = request.audio_path else {
-                throw HelperError("Load the requested model before transcribing.")
-            }
-            var result = try await loaded.engine.transcribe(path: path, language: request.language)
-            result["ok"] = true
-            respond(result, to: request)
-        case "unload":
-            guard loaded?.id == request.model_id else { throw HelperError("The requested model is not loaded.") }
-            loaded = nil
-            respond(["ok": true], to: request)
-        default:
-            throw HelperError("Unknown operation.")
+        } catch {
+            respond(["ok": false, "error": error.localizedDescription], to: decoded)
         }
-    } catch {
-        respond(["ok": false, "error": error.localizedDescription], to: decoded)
     }
 }
+
+await runServer()

@@ -189,6 +189,7 @@ build scripts in `pnpm-workspace.yaml` — live in
   `localStorage`); run `NODE_OPTIONS=--no-experimental-webstorage pnpm test`
   and do not "fix" the tests.
 - **Rust tests:** `pnpm test:rust` (src-tauri).
+- macOS CI builds the ARM64 Local transcription helper in release mode and smoke-tests its JSON protocol without models before the Rust checks.
 - **Windows native activity tests:** clipboard fixtures must run in a child
   process with a private window station/desktop, never the console clipboard.
   The installed-package icon test is ignored by default and requires Calculator
