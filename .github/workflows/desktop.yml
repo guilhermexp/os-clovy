@@ -357,7 +357,7 @@ jobs:
             echo "::error::The dictation helper must be executable and newer than its Swift source."
             exit 1
           fi
-          lipo -verify_arch arm64 x86_64 "$helper"
+          lipo "$helper" -verify_arch arm64 x86_64
           "$helper" --self-test-audio-conversion
 
       - name: Cargo test
