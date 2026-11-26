@@ -1831,7 +1831,7 @@ mod tests {
             let peer = tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = [0_u8; 4096];
-                stream.read(&mut request).await.unwrap();
+                assert!(stream.read(&mut request).await.unwrap() > 0);
                 let response = format!(
                     "HTTP/1.1 {status} Rejected\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort"
                 );

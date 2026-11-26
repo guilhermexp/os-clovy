@@ -2107,7 +2107,7 @@ async fn connected_linear_account(
         .find(|account| {
             account.provider == crate::connectors::ConnectorProvider::Linear
                 && account.status == crate::connectors::ConnectorAccountStatus::Connected
-                && account_id.is_none_or(|id| account.account_id == id)
+                && account_id.map_or(true, |id| account.account_id == id)
         }))
 }
 

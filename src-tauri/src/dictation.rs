@@ -13045,7 +13045,7 @@ mod tests {
     }
 
     #[test]
-    fn hey_clovy_transcription_maps_to_agent_session_event() {
+    fn hey_clovy_transcription_maps_to_literal_paste_command() {
         let outcome = outcome_from_transcription_result(
             Ok(TranscriptionProviderResult {
                 text: "Hey, Clovy, summarize the open document.".to_string(),
@@ -13058,15 +13058,12 @@ mod tests {
 
         assert_eq!(
             outcome.helper_command,
-            serde_json::json!({ "type": "discard_recording" })
+            serde_json::json!({
+                "type": "paste_text",
+                "text": "Hey, Clovy, summarize the open document.",
+            })
         );
-        assert_eq!(
-            outcome.event,
-            Some(serde_json::json!({
-                "type": "agent_session_prompt",
-                "payload": { "prompt": "summarize the open document." },
-            }))
-        );
+        assert!(outcome.event.is_none());
         assert_eq!(
             outcome.transcript.as_ref().map(|item| item.text.as_str()),
             Some("Hey, Clovy, summarize the open document.")

@@ -4258,7 +4258,7 @@ async fn list_apps(
             },
             "is_on_screen": window.is_on_screen,
             "on_current_space": window.on_current_space,
-            "needs_restore": window_needs_restore(&window),
+            "needs_restore": window_needs_restore(window),
         }));
     }
     if let Some(epoch) =

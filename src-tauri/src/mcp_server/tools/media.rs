@@ -592,7 +592,7 @@ async fn external_video(
             (job, native_id, directory, permit)
         }
         VideoCall::Resume { job_id } => {
-            if arguments.as_object().is_none_or(|args| args.len() != 1) {
+            if arguments.as_object().map_or(true, |args| args.len() != 1) {
                 return Err(AppError::new(
                     "agent_tool_arguments_invalid",
                     "Resume a video with only its jobId.",

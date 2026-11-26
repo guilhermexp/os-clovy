@@ -485,5 +485,5 @@ fn required<'a>(args: &'a Value, key: &str) -> Result<&'a str, AppError> {
     args.get(key)
         .and_then(Value::as_str)
         .filter(|v| !v.trim().is_empty() && v.len() <= 128)
-        .ok_or_else(|| invalid(&format!("{key} is required.")))
+        .ok_or_else(|| invalid(format!("{key} is required.")))
 }
